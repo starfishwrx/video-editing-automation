@@ -1,0 +1,526 @@
+{
+  "excluded": [
+    "media",
+    "credentials",
+    "production logs",
+    "machine-specific paths",
+    "knowledge-base bodies"
+  ],
+  "file_count": 127,
+  "files": [
+    {
+      "path": "ENVIRONMENT.md",
+      "sha256": "99fe7640dacbafc274bd6b4588af585b779f50adc3fbca2d77d333cbf27a524e"
+    },
+    {
+      "path": "README.md",
+      "sha256": "4a7c34bfe4dadbcf0b6d420f36eef6bfb696caa2130c048541cc158afc6b23d0"
+    },
+    {
+      "path": "RULES.md",
+      "sha256": "bbaddf4f0142162870ef41132def1ecd1363b5a4e76ef502d0f67e402274a84b"
+    },
+    {
+      "path": "SKILL_PACKAGE.json",
+      "sha256": "65db4ecb64b7193650fa12afbb7cf52560f608b81ebf134a79f525aa7c885cb1"
+    },
+    {
+      "path": "VERSION",
+      "sha256": "dfe7d71b3f428eb73ed853f8fded65e2986896e21d69f45ebf06bb623b450e14"
+    },
+    {
+      "path": "WINDOWS_VIDEO_CLOSED_LOOP_RULES_20260930.json",
+      "sha256": "9efcac855f61e0c5c0c3f384e2fda72741c002edceded4c475ed8a4d33782a59"
+    },
+    {
+      "path": "batch_worker.py",
+      "sha256": "beab93a8541f31923a9f846fb58e31944ac7d09726aa581f0ef98fba1eb635d2"
+    },
+    {
+      "path": "closed_loop.py",
+      "sha256": "bc66e0ae7bcc6ac62a5b678a79cf636cd4d3665d2b675be75652ebb3b54b2e5f"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/CHANGELOG.md",
+      "sha256": "1c76d1ac5092d276f3defb63ca6d14df3ab6c9221c076a0d09bcd8f209e6ee08"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/SKILL.md",
+      "sha256": "7a7ab037cf2f72cb6c8b68f5ad4f10e7d21cb27c0e836ad733169fa7ca8a004b"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/VERSION",
+      "sha256": "dfe7d71b3f428eb73ed853f8fded65e2986896e21d69f45ebf06bb623b450e14"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/VERSION",
+      "sha256": "dfe7d71b3f428eb73ed853f8fded65e2986896e21d69f45ebf06bb623b450e14"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/__init__.py",
+      "sha256": "0e71ace49428e4bdafb5abd62cfcf69747147f1e0429746a87b6ab6dba6489d6"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/audio_loudness.py",
+      "sha256": "42798c12c5137b7e7f0134447af67aa11fb0f693348bfcb8225ec8b8d1416d85"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/bgm_selector.py",
+      "sha256": "67fb79e2f27bda779f67b683ca48f0c8ac958f3d062ff241d4cef2b4fa972eb4"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/capacity.py",
+      "sha256": "96836a88d86ef6f8566c55cdf9596376c0ca2db6127e30f6ba000b80bdd2c161"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/cli.py",
+      "sha256": "6427d31daaf70bd356e808e041acc6779a1da4376f1605a46691813979048f6b"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/demo_actions.py",
+      "sha256": "f4bc08b4dea4b56cdd27c1d8dbdc2525b80ce803b7b0e295487850b4eccb84e1"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/diagnostics.py",
+      "sha256": "02349119c409f3e550df3e653e8c88fc4d0ff40cd3482eca9d39241bb897604c"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/draft_safety.py",
+      "sha256": "7e6603fb21802fb5b43439a869de4c8b8688d86441b7f2224048e1608626d96b"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/draft_visual_qc.py",
+      "sha256": "48b406971ebc2d84c601b71973b60f9f0760ff8b86631d142e5e83c3eb3ff705"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/engine.py",
+      "sha256": "712b65b94ec1e67566e358899f71c43cb67dab1a279ba5181a30ed7f04c90f0c"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/feedback_policy.py",
+      "sha256": "7d1617e3e8e4e851f16899190a3e05418dd4b8cff6635d74bcbe946bb8e82d28"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/ffmpeg_bootstrap.py",
+      "sha256": "135fd72d96bd3a9b6292acfae752aae74c912b17aa2c37524ba1bbd84734a4f9"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/migration.py",
+      "sha256": "6582898181b07c277657228470ad14babd49a8e2dbb10a397f3c9ac0f9b83bdb"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/platform_env.py",
+      "sha256": "9140de96a4b276c27964130104a36c8261fc1439a797c595b6e12367a8888105"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/resource_profile.py",
+      "sha256": "34837cf84ca8280ba7ce6578a18302a793c05e8802df53635ee0020b14bf815a"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/script_polish.py",
+      "sha256": "bd2e98bff7c0152f3e31da34654abd8bb102d17c382484bdf6ab7e45a11b61c1"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/semantic_gate.py",
+      "sha256": "cfea99ec0404fa58116ed3995409541b863e0869cf7ce20e9bb11f88bd6a1f82"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/ship_distribute.py",
+      "sha256": "ff193a83689636850954194f0cd1e1c5bf51c02e176a49526cb7ca351af44427"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/shot_analyzer.py",
+      "sha256": "e6b864bfadac690e480212a0f0f43770ef12f09e5debd323a5ad4fde0be7bc87"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/stability.py",
+      "sha256": "42813dbc5b0fbb8b5d35ebe5aaac0673c5552da1fb7b1b0132c1da1d6198f000"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/task_log.py",
+      "sha256": "551fe3d253b5b258773c1d3e5484bcbddd3e5955847ef65f6cb1e987d14412eb"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/timing_contract.py",
+      "sha256": "718ed3a30f2df566766e9a1a97887e1ccf030c2baf7cb4b2ed7fc72497d72e3f"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/video_decode.py",
+      "sha256": "e52ec2b6ab5d0aa8473e22c78f898d42e3654fd5e61950879140cdaddea23df0"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/video_encode.py",
+      "sha256": "4bec47bbbe0c922bfaf007786a85781c7fbf5580d34edbafb34877a2bee87b16"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/vision_analyzer.py",
+      "sha256": "dbd54aaff29fc1ba8eb7d25925e6531c139ecc12953157be2b87119d8f40a091"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/visual_match.py",
+      "sha256": "316fb2df617fa07a4dca66e5fc8c05c1469c7b2b1ad35fb753384c5e930d4fd1"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/voice_catalog.py",
+      "sha256": "0a311bf73c28a3d9fb8302f2c418738d3ef6ee90ae18ff09999bd06a1947cabb"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/voice_library.py",
+      "sha256": "18b786ce9bf4f98232549b41097636c8016d05790c4347fd8e6e837d15cee62c"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/voice_tts.py",
+      "sha256": "6d936614874a6f5647fe50c762754b00d596e3a14a0c57e0b6bb8ab53ad145dc"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/prompts/semantic_analysis.md",
+      "sha256": "8b262870f1dd359047658d5039275122764ec763b24bb0848254b0101ac7a547"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/references/preview_gap_and_pitfalls.md",
+      "sha256": "b6d60194bb6c0be41ed0fdcfb218968ef754eb0ec7c12d10417e5f6c744135e8"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/references/runtime_contract.md",
+      "sha256": "7f62848d0849157aeb00a5ed92aea2510cc4c00f6e102cc85b9b0537a889dc84"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/run.py",
+      "sha256": "b5292ff5a7b0bda2ec639d1d2217115f7e90d877f27a3c8708aef6ce4f1c3daa"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/tests/test_capacity_and_sync.py",
+      "sha256": "6441e43a26d10df39a40b165134fbcb6f9c99762e3081416193814c152367f93"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/tests/test_task_control.py",
+      "sha256": "8e089824efd79f014988d8538efbbdf385ed27e2792579274a7527fadfd0e077"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/tests/test_timing_contract.py",
+      "sha256": "94dc1e5619717de69f7acea4e7c962751e2dc839724a6eb03ae18e3c053ee4ed"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/tests/test_video_decode.py",
+      "sha256": "82153c6ce15f36adde65945caafac7a0b83ef0b18a5465338f4caea714d23a52"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/tests/test_video_encode.py",
+      "sha256": "49c68f4c50cecde80ca64930c2f16bbe93d9dea49f9d19b3d06f162dd87d7488"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/tests/test_visual_matching_governance.py",
+      "sha256": "e2c30f2cb1571bee16d8a5e35b5cde0d2a07a49bbb3514ccc5f7d8cde3509af7"
+    },
+    {
+      "path": "gold-reference.json",
+      "sha256": "1df399238798c8c440ff461322ddb9fcbf160543534572955f7ca9cae4998525"
+    },
+    {
+      "path": "jianying-editor/SKILL.md",
+      "sha256": "18fcef436e6d2f5a7089cecf398bd5775946e1a108b88bf57f8e8c5884353040"
+    },
+    {
+      "path": "jianying-editor/VERSION",
+      "sha256": "dfe7d71b3f428eb73ed853f8fded65e2986896e21d69f45ebf06bb623b450e14"
+    },
+    {
+      "path": "jianying-editor/scripts/cloud_manager.py",
+      "sha256": "fe126fbc69f0365534af9c9532822e162cf36f3fbb20703303e3962acf38a96e"
+    },
+    {
+      "path": "jianying-editor/scripts/core/media_ops.py",
+      "sha256": "a07e838ead4aab7bb3f26c95e6ee46ef5fcf7f334fbc52decac22eae2d521632"
+    },
+    {
+      "path": "jianying-editor/scripts/core/mocking_ops.py",
+      "sha256": "533d36595fee28e3a229321e934ffac398dda7c621447eda872ac0af8257ae33"
+    },
+    {
+      "path": "jianying-editor/scripts/core/project_base.py",
+      "sha256": "5943e72b034d0bea44529324c0579738bf61ed4c0b5300bf6bf3dec39b1776cd"
+    },
+    {
+      "path": "jianying-editor/scripts/core/text_ops.py",
+      "sha256": "37c6e8fcbefbe2cda54116d80dd19393f6ed79112fdc001ef7cb061e3489df04"
+    },
+    {
+      "path": "jianying-editor/scripts/core/vfx_ops.py",
+      "sha256": "b1d8e6751f3d8bdcf38d095f1d6754cd2003379ced17fc53febc1978a78bd285"
+    },
+    {
+      "path": "jianying-editor/scripts/draft_inspector.py",
+      "sha256": "3278ba3a3e4afa4e8ccaac511a5c0098280daa242767b97a6218a0e133fd1145"
+    },
+    {
+      "path": "jianying-editor/scripts/jy_wrapper.py",
+      "sha256": "9588506642fbbfeecc1b8c0b48547fdebe6403fa20fdef8dc526bec94432d4ec"
+    },
+    {
+      "path": "jianying-editor/scripts/universal_tts.py",
+      "sha256": "7bf34f31e24038c153218874f9c5821a7ae1f94833e2d47ce14246ede3b1bea2"
+    },
+    {
+      "path": "jianying-editor/scripts/utils/cli_protocol.py",
+      "sha256": "e9c902e627cd7ab674d8634e3ffc6fae0efc36db68b46f2f4b3cfaf8db45ef4d"
+    },
+    {
+      "path": "jianying-editor/scripts/utils/config.py",
+      "sha256": "25683ac340393accd405a86c6f1737c27c326d68e2c218ec2ef28ac23e56a3d8"
+    },
+    {
+      "path": "jianying-editor/scripts/utils/constants.py",
+      "sha256": "55c06fdd161dac457024e1becbb4d7236052517dac791df0e47d317970a3366b"
+    },
+    {
+      "path": "jianying-editor/scripts/utils/env_setup.py",
+      "sha256": "59847253ffc28ea84387bc8070957547b74eac01654e169a271338fed74a4f8b"
+    },
+    {
+      "path": "jianying-editor/scripts/utils/errors.py",
+      "sha256": "45db80466ab58f96ccd6325c9702e6021f49ec7f90936ba6b0dee048240dea21"
+    },
+    {
+      "path": "jianying-editor/scripts/utils/formatters.py",
+      "sha256": "577f5cdf8d56d6cdd6285924b0763925007dcc15e215d50966b16a423d16071f"
+    },
+    {
+      "path": "jianying-editor/scripts/utils/logging_utils.py",
+      "sha256": "ae58bd2743bb14ec4cd774ca77ba5873d1db69de283deae1ccfa654a0ac651d7"
+    },
+    {
+      "path": "jianying-editor/scripts/utils/media_normalizer.py",
+      "sha256": "df58943dffab8a547db2dd274d8f25180a5a6c60f78ef7abe9c4a0245531d5e2"
+    },
+    {
+      "path": "jianying-editor/scripts/utils/skill_path.py",
+      "sha256": "b2eb9f4ed61b5bc173f98943299df13969f5ab6b9af8fd7d4c53de56c4701e60"
+    },
+    {
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/__init__.py",
+      "sha256": "0106851579156515a3e115d50aa019451c848bc5278ef1825a27a416eabf93b8"
+    },
+    {
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/animation.py",
+      "sha256": "041029bd253f70a2fea541a726c974b31adfa64b7e4ef67f17a4a39b81d6a9f0"
+    },
+    {
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/assets/__init__.py",
+      "sha256": "e2e471cfdf719f856d0af608a0aa7489ef57a75ce8d4401320e35b27e5e15d05"
+    },
+    {
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/assets/draft_info_template.json",
+      "sha256": "62be9be70c89d0aa67a50ead121d30ee856ad7f9f44337dd3b532f3d772e6094"
+    },
+    {
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/assets/draft_meta_info.json",
+      "sha256": "f2a776ef7017fbec4b505ad4ecf43380c21ad776b6c2092d1e75316ffa9715d4"
+    },
+    {
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/assets/draft_settings_template",
+      "sha256": "31b58933c3aad5bb0c658500037880a868645b282b6d975607d2a2123abc70bc"
+    },
+    {
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/assets/key_value_template.json",
+      "sha256": "e3566b3a06430868d71e9287dfd6c6c520a3da027aabea01951d407ee131dc2f"
+    },
+    {
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/audio_segment.py",
+      "sha256": "9a9cb7268a1c19b4cae63c62c0a4bfaa501ce3c331eb73c7ad47ff65d2cae22c"
+    },
+    {
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/draft_folder.py",
+      "sha256": "54eafce1710a91cef40acd04229b6903fae51376490efc3f94355935f9cffe3a"
+    },
+    {
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/effect_segment.py",
+      "sha256": "ac888b3ef77858ef099df9c1e8e78323d915f18092b5591584a708ac54dbe84d"
+    },
+    {
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/exceptions.py",
+      "sha256": "079f80425cafcf694a7d24218e3facf655b092e6975feb69ae0e881d8b59afd8"
+    },
+    {
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/jianying_controller.py",
+      "sha256": "f9900a3e3728614d92b13e9d48bb6e159dfb46b528b5d0a65eda563214812511"
+    },
+    {
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/keyframe.py",
+      "sha256": "8db87356992314f7c4c321ff6578e0c0733360afe9b5748ee3e21491e2d9e0c1"
+    },
+    {
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/local_materials.py",
+      "sha256": "80fe053c8c03d05a0b8699882fb5c090e5888b6e01c3191036fd3f49757ffbd0"
+    },
+    {
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/metadata/__init__.py",
+      "sha256": "565506df4bb5dd3899d251f464011ff72b841eee603841e4d8b296f5fe6bcca7"
+    },
+    {
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/metadata/audio_scene_effect.py",
+      "sha256": "b996033e9585df665ba6711bcd2adec6eebe1b624ea46ad81935aa36c76ca83c"
+    },
+    {
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/metadata/effect_meta.py",
+      "sha256": "f205b47fd2cfe7ea338c315c8d18eef6fef9ffd25e4112ee1248cad483592da6"
+    },
+    {
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/metadata/filter_meta.py",
+      "sha256": "1db6efb3fdd82ff6d66c61fd3525b3d897bb473b8e9bb07d7e62b780ed658b97"
+    },
+    {
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/metadata/font_meta.py",
+      "sha256": "b903e88be7630888f9bd6f0a3413189d9ef003609d86aca1f81c96024591ebde"
+    },
+    {
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/metadata/mask_meta.py",
+      "sha256": "e2e4892773c8d02353587c49f1568ad9a036b8a70655c5c475ddb60b64a685b4"
+    },
+    {
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/metadata/speech_to_song.py",
+      "sha256": "eaa64a0d583ad89e42aee118d71a61ac64edd9c264643bb8b7a6962406c6e4b8"
+    },
+    {
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/metadata/text_intro.py",
+      "sha256": "d7355191ea7433bd6c25f0e44cab40d07bb40be55ba17cd3551037ded761996f"
+    },
+    {
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/metadata/text_loop.py",
+      "sha256": "1455477bec2fd1729b43b978dd45b05bbfb0a62eb308b30a273dd5e8d21badc5"
+    },
+    {
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/metadata/text_outro.py",
+      "sha256": "bc0b6a2c0c3a1572ae61a112e04d44c3ec37ff3e543bc98f6fcca1a98771ea80"
+    },
+    {
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/metadata/tone_effect.py",
+      "sha256": "aa88bb81d3eb36f0f4203a80975ddcd9d81d9af84ce378c9fe851b125af1c2ef"
+    },
+    {
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/metadata/transition_meta.py",
+      "sha256": "5808e1528e58c87afa6999b054cb6c05b83867fb5ee874c453a98ea1a4bac7b1"
+    },
+    {
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/metadata/video_character_effect.py",
+      "sha256": "9392be10b1ed07e2050f7faa20d3153201d7f08fb9d7fb9b5f8e570b3eba23f2"
+    },
+    {
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/metadata/video_group_animation.py",
+      "sha256": "26cb6a7db624aaa38994e8cdec84825c6e96b181100b19b86329db27f87625d9"
+    },
+    {
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/metadata/video_intro.py",
+      "sha256": "ff916dd9f2069cc4dbcb031b52bdb3cc2eefe3d2d2e4d800cc8100a41f8983a9"
+    },
+    {
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/metadata/video_outro.py",
+      "sha256": "d53de30bc1dd7df25fe7757ea6c17a4f410951b98b5754d4da51948994113e07"
+    },
+    {
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/metadata/video_scene_effect.py",
+      "sha256": "e9fbfc501ac1fd192f69f8942bf7be4db81553045155fd73be9b51b86262e401"
+    },
+    {
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/script_file.py",
+      "sha256": "13c87ac78a0cfd2eb2b0992784daad74bf9d948e0621dd8f553cf571035e4534"
+    },
+    {
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/segment.py",
+      "sha256": "7efa7a27c91699d6168bbf1fdf66e67ff5c96c0c6d6b0326ccada93bb6d4e609"
+    },
+    {
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/template_mode.py",
+      "sha256": "998cd91a4e4c6b7ccf5cfbfb7c75bb3d4b88e8e7f88b4f69cb59976fe068e85e"
+    },
+    {
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/text_segment.py",
+      "sha256": "479f9b3fb643b3bd6297e8100d7d21b04f8414bb8fefeedfd24c545d169a3bea"
+    },
+    {
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/time_util.py",
+      "sha256": "793b7ab2e57f025844da8e02bb3bdc7aae46c3a7413ee2737aba41d3ff82df17"
+    },
+    {
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/track.py",
+      "sha256": "8cfcbe0c8f77d35afad5c1bf96e6c28a11900427692dfc253fd9c26c01137647"
+    },
+    {
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/util.py",
+      "sha256": "00b97dad9b060f752dd113d2fd0ce91860650b44d09f0ce96b6529856b178054"
+    },
+    {
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/video_segment.py",
+      "sha256": "21d58df381260fa3ee1294fcf63ea598d3d3cd9988a63167f0b733141dfce5e8"
+    },
+    {
+      "path": "jy_poll.ps1",
+      "sha256": "16e77cf0996a38ec6306b9d1a58292f2bf58c03aa22be5c523d0d4f4ecb9f9f4"
+    },
+    {
+      "path": "run_task.template.ps1",
+      "sha256": "2227fc34b97bb251cda0423a611d394456e868569728429da76555c79eb60cec"
+    },
+    {
+      "path": "tests/test_eval_bootstrap.py",
+      "sha256": "eba8bd3e4d0c1fafd59b6c2437397a82d0c0c9bb85bba65cf26d5b7129061889"
+    },
+    {
+      "path": "tests/test_mac_review_handoff.py",
+      "sha256": "1cfe08378e656945e5f21d7e2777483e94eadd1ac1272980b943271f9ae1f6f2"
+    },
+    {
+      "path": "tests/test_queue_guardrails.py",
+      "sha256": "cd06baba18d35a54a327fe45c532622f9ec3086345b92bc2390769124a0bcf79"
+    },
+    {
+      "path": "tests/test_release_1_4_0.py",
+      "sha256": "344824f6ea60f669b2b64bb6a3d068b22e5ee1f57967402b1aae982712c1b854"
+    },
+    {
+      "path": "tests/test_visual_governance_rules.py",
+      "sha256": "431fc0531637e2fb8a08754b8201858e32d40a10c47d31ed6414bb3f8fb56d2e"
+    },
+    {
+      "path": "tools/classify_feedback.py",
+      "sha256": "4898c6d3976aa2dd1c6742284996a6bc16e8511839d1854e7121f7b6de5ef004"
+    },
+    {
+      "path": "tools/closed_loop.py",
+      "sha256": "1e84beace5cdcb72cbc733e27597c921473d833fc8e9c767e00b9dbbc21577b6"
+    },
+    {
+      "path": "tools/delivery_identity.py",
+      "sha256": "18caac13589b38d999f0dfd9efb0f1cc0f4e4082412f29605ec3c31770ed1f55"
+    },
+    {
+      "path": "tools/eval_bootstrap.py",
+      "sha256": "3afac9e5502b8c9fda4dc974aca2c4edcee17542067b7f792d42c40d4ef38e30"
+    },
+    {
+      "path": "tools/eval_stage.py",
+      "sha256": "37d39f07c4c15117aea7d58535031ee4ff236d24ba6bc6dbc411d81a5c1d0ebc"
+    },
+    {
+      "path": "tools/mac_review_handoff.py",
+      "sha256": "73e79c550e83f4d08ad13565a16e8ac5c047c085bae365319843301277b7692f"
+    },
+    {
+      "path": "tools/material_index.py",
+      "sha256": "d8cd8ed210bcedab2c548d652316c6e1a6d1632d106ad240bc4a3ae00af7f8bf"
+    },
+    {
+      "path": "tools/material_library.py",
+      "sha256": "fc30215ae9cfb06dadf227757041399bf02e12c5c9f28a756f8f27da5acccd85"
+    },
+    {
+      "path": "tools/production_eval.py",
+      "sha256": "94cecba22bedbf081503a15e9c3e0c62b308d040ed0e37710c12112cd5d178ce"
+    }
+  ],
+  "release_id": "video-v1.5.1",
+  "schema_version": 1,
+  "source_sha256": "dca6ebda8c6cb5c2294b1bc55f6e490c452813ad2ab69a2868e96ae26ddcf296",
+  "tree_hash_algorithm": "video-release-tree-v1",
+  "version": "1.5.1",
+  "visual_policy_version": "1.4.1"
+}
