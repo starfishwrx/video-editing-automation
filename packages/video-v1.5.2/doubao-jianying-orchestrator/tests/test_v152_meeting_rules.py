@@ -1,0 +1,503 @@
+"""v1.5.2：2026-10-12 会议纪要 + 卫品AI智能混剪通行指令。"""
+from __future__ import annotations
+
+import json
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from orchestrator import (  # noqa: E402
+    phase_timing,
+    rulepack,
+    scene_rules,
+    shot_notes,
+    timing_contract as tc,
+    usage_ledger,
+    visual_match,
+    voice_tts,
+)
+from orchestrator.engine import OrchestrationEngine, _parent_id  # noqa: E402
+
+US = tc.US
+
+
+class TransitionDefaultTests(unittest.TestCase):
+    def _engine(self, manifest):
+        eng = OrchestrationEngine.__new__(OrchestrationEngine)
+        eng.m = manifest
+        eng._transition_for = mock.Mock()
+        eng._same_span = mock.Mock(return_value=False)
+        return eng
+
+    def test_no_transition_unless_enabled(self):
+        clips = [object(), object(), object()]
+        eng = self._engine({})
+        eng.plan_transitions(clips)
+        eng._transition_for.assert_not_called()
+
+    def test_explicit_enable_still_works(self):
+        clips = [object(), object()]
+        eng = self._engine({"auto_transition": True})
+        eng.plan_transitions(clips)
+        self.assertEqual(eng._transition_for.call_count, 1)
+
+
+class RulepackTests(unittest.TestCase):
+    def test_detect_category(self):
+        self.assertEqual(rulepack.detect_category({"product": "萌睡裤安睡裤"})[0], "weipin")
+        self.assertEqual(rulepack.detect_category({"draft_name": "纯水湿厕纸-rev-1"})[0], "zhipin")
+        self.assertEqual(rulepack.detect_category({"product": "湿厕纸", "category": "卫品"})[0],
+                         "weipin")
+        self.assertEqual(rulepack.detect_category({"product": "保温杯"})[0], "general")
+        self.assertEqual(rulepack.detect_category(
+            {"material_sources": [r"D:\素材\日用卫生巾\a.mp4"]})[0], "weipin")
+
+    def test_detect_category_from_script(self):
+        self.assertEqual(rulepack.detect_category(
+            {"product": "优雅", "segments": [{"text": "现在谁来大姨妈还在囤卫生巾啊"}]}),
+            ("weipin", "full_script:卫生巾"))
+        self.assertEqual(rulepack.detect_category(
+            {"product": "优雅", "full_script": "卫生巾和纸巾一起囤"})[0], "general")
+        self.assertEqual(rulepack.detect_category({"product": "优雅"})[0], "general")
+
+    def test_manifest_defaults(self):
+        weipin = rulepack.apply_manifest_defaults({"product": "夜用卫生巾"})
+        self.assertEqual(weipin["voice_tempo"], 1.2)
+        self.assertFalse(weipin["auto_transition"])
+        self.assertAlmostEqual(weipin["tail_pad_s"], 0.083, places=3)
+        self.assertEqual(weipin["rulepack"]["rulepacks"], ["global", "weipin"])
+        preset_speed = rulepack.apply_manifest_defaults({"product": "夜用卫生巾", "voice": "紫薇1.2倍速"})
+        self.assertEqual(preset_speed["voice_tempo"], 1.0)
+        explicit = rulepack.apply_manifest_defaults(
+            {"product": "夜用卫生巾", "voice": "紫薇1.2倍速", "voice_tempo": 1.1})
+        self.assertEqual(explicit["voice_tempo"], 1.1)
+        zhipin = rulepack.apply_manifest_defaults({"product": "湿厕纸", "tail_pad_s": 0.1,
+                                                  "auto_transition": True})
+        self.assertEqual(zhipin["voice_tempo"], 1.0)
+        self.assertEqual(zhipin["tail_pad_s"], 0.1)
+        self.assertTrue(zhipin["auto_transition"])
+
+    def test_gap_budget_stays_within_five_frames(self):
+        pad = rulepack.gap_tail_pad_s(5, fps=30)
+        heard_gap = pad + 2 * rulepack.DEFAULT_EDGE_KEEP_S
+        self.assertLessEqual(heard_gap, 5 / 30.0)
+
+    def test_scene_needs_text_and_shot(self):
+        rules = rulepack.load("weipin")
+        pour = {"action": "倾倒", "object": "蓝色液体+巾体", "description": "往卫生巾上倒水"}
+        self.assertEqual(rulepack.scene_for(rules, "吸水实验看看瞬吸效果", pour)["id"], "absorb_test")
+        self.assertIsNone(rulepack.scene_for(rules, "吸水实验看看瞬吸效果", {"action": "举起"}))
+        self.assertEqual(rulepack.scene_for(rules, "面层很柔软", {"action": "举起"})["id"],
+                         "surface_layer")
+        self.assertEqual(rulepack.scene_for(rules, "这款很好用",
+                                            {"pointing_to_text": True})["id"], "point_front")
+        self.assertEqual(rulepack.load("zhipin")["scenes"], [])
+
+
+class WasteTrimTests(unittest.TestCase):
+    def _req(self, **kw):
+        base = dict(source_in_us=0, source_out_us=10 * US, audio_duration_us=3 * US,
+                    tail_pad_us=0, head_guard_us=300_000, tail_guard_us=200_000,
+                    speed_min=1.0, speed_max=1.0)
+        base.update(kw)
+        return tc.WindowRequest(**base)
+
+    def test_guards_follow_waste_with_cap(self):
+        self.assertEqual(tc.waste_guards_us(0, 10 * US, 0.3, 0.2, 300_000, 200_000),
+                         (3 * US, 2 * US))
+        self.assertEqual(tc.waste_guards_us(0, 10 * US, 0.0, 0.0, 300_000, 200_000),
+                         (300_000, 200_000))
+        head, tail = tc.waste_guards_us(0, 10 * US, 0.9, 0.9, 300_000, 200_000)
+        self.assertLessEqual(head + tail, 8 * US + 1)
+        self.assertGreaterEqual(head, 300_000)
+
+    def test_waste_applied_moves_window(self):
+        sol = tc.solve_window_waste_aware(self._req(), 0.4, 0.0)
+        self.assertTrue(sol.ok)
+        self.assertGreaterEqual(sol.source_start_us, 4 * US)
+        self.assertEqual(sol.detail["waste_trim"]["status"], tc.WASTE_TRIM_APPLIED)
+
+    def test_waste_relaxed_when_infeasible(self):
+        sol = tc.solve_window_waste_aware(self._req(audio_duration_us=8 * US), 0.4, 0.2)
+        self.assertTrue(sol.ok)
+        self.assertEqual(sol.detail["waste_trim"]["status"], tc.WASTE_TRIM_RELAXED)
+
+    def test_speed_override(self):
+        self.assertEqual(tc.effective_speed_range("direct_evidence", time_sensitive=True),
+                         (1.0, 1.0))
+        self.assertEqual(tc.effective_speed_range("direct_evidence", time_sensitive=True,
+                                                  override=[1.6, 1.0]), (1.0, 1.6))
+        self.assertEqual(tc.effective_speed_range("usage_demo", override=None), (0.92, 1.15))
+
+
+class ShotNotesTests(unittest.TestCase):
+    SENTENCES = ["姐妹们看过来", "这款安睡裤吸水超快", "背面信息写得清清楚楚"]
+
+    def test_parse(self):
+        notes = "吸水超快：要有倒水的完整过程\n第3句：用背标特写\n整体节奏要快\n不存在的句子：x"
+        parsed = shot_notes.parse(notes, self.SENTENCES)
+        self.assertEqual(parsed["by_index"][2], "要有倒水的完整过程")
+        self.assertEqual(parsed["by_index"][3], "用背标特写")
+        self.assertEqual(parsed["general"], ["整体节奏要快"])
+        self.assertEqual(parsed["unmatched"], ["不存在的句子：x"])
+
+    def test_apply_to_segments(self):
+        manifest = {"segments": [{"text": t} for t in self.SENTENCES],
+                    "shot_notes": [{"text": "姐妹们", "note": "开场要有人"}]}
+        out = shot_notes.apply(manifest)
+        self.assertEqual(out["segments"][0]["shot_note"], "开场要有人")
+        self.assertNotIn("shot_note", out["segments"][1])
+        self.assertNotIn("visual_requirements", out["segments"][0])
+
+    def test_remark_field_env(self):
+        with mock.patch.dict("os.environ", {"JY_REMARK_FIELD": "画面要求"}):
+            out = shot_notes.apply({"segments": [{"text": "你好世界"}], "画面要求": "你好：手拿产品"})
+        self.assertEqual(out["segments"][0]["shot_note"], "手拿产品")
+
+
+class UsageLedgerTests(unittest.TestCase):
+    def test_record_and_penalties(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "ledger.json")
+            seg = [{"video": r"D:\m\a.mp4", "source_start": 1.0},
+                   {"video": r"D:\m\b.mp4", "source_start": 2.0, "multi_shot": True,
+                    "span_parts": [{"video": r"D:\m\b.mp4", "scene_source_start": 2.0},
+                                   {"video": r"D:\m\c.mp4", "scene_source_start": 0.0}]},
+                   {"visual_missing": True}]
+            v1 = {"usage_ledger_path": path, "record_id": "rec1", "draft_name": "任务-rev-1"}
+            first = usage_ledger.record(v1, seg)
+            self.assertEqual(first["recorded"], 3)
+            v2 = {**v1, "draft_name": "任务-rev-2"}
+            usage = usage_ledger.load_usage(v2)
+            self.assertEqual(usage[usage_ledger.shot_key(r"D:\m\a.mp4", 1.0)], usage_ledger.SAME_TASK)
+            other = {"usage_ledger_path": path, "record_id": "rec9", "draft_name": "别的任务"}
+            self.assertEqual(set(usage_ledger.load_usage(other).values()), {usage_ledger.OTHER_TASK})
+            self.assertEqual(usage_ledger.load_usage(v1), {})
+            second = usage_ledger.record(v2, seg[:1])
+            self.assertEqual(second["overlap"][0]["draft"], "任务-rev-1")
+            self.assertEqual(second["overlap"][0]["ratio"], 1.0)
+            usage_ledger.record(v1, seg[:1])
+            data = json.loads(Path(path).read_text(encoding="utf-8"))
+            self.assertEqual(len(data["shots"][usage_ledger.shot_key(r"D:\m\a.mp4", 1.0)]), 2)
+            self.assertNotIn(usage_ledger.shot_key(r"D:\m\c.mp4", 0.0), data["shots"])
+
+    def test_ledger_path(self):
+        manifest = {"material_sources": [r"D:\m\B.mp4", r"D:\m\a.mp4"]}
+        path = usage_ledger.ledger_path(manifest, Path(r"D:\work\task\report"))
+        self.assertEqual(path.parent, Path(r"D:\work\.cache"))
+        self.assertTrue(path.name.startswith("shot_usage_"))
+        self.assertIsNone(usage_ledger.ledger_path({}, Path(r"D:\work\task\report")))
+
+
+class PhaseTimingTests(unittest.TestCase):
+    SCENE = rulepack.load("weipin")["scenes"][0]
+
+    def test_sample_times(self):
+        times = phase_timing.sample_times(10.0, 20.0)
+        self.assertEqual(len(times), phase_timing.MAX_FRAMES)
+        self.assertGreater(times[0], 10.0)
+        self.assertLess(times[-1], 20.0)
+        self.assertEqual(len(phase_timing.sample_times(0.0, 1.0)), 3)
+
+    def test_validate(self):
+        times = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0]
+        payload = {"complete": True, "phases": [
+            {"name": "pour", "start": 0.0, "end": 1.0},
+            {"name": "absorb", "start": 2.0, "end": 3.0},
+            {"name": "wipe", "start": 4.0, "end": 5.0}]}
+        result = phase_timing.validate(payload, self.SCENE, times)
+        self.assertTrue(result["ok"] and result["complete"])
+        self.assertEqual(result["phases"]["pour"], [-0.5, 1.5])
+        self.assertEqual(result["phases"]["wipe"], [3.5, 5.5])
+        bounded = phase_timing.validate(payload, self.SCENE, times, bounds=(0.0, 5.2))
+        self.assertEqual(bounded["phases"]["pour"], [0.0, 1.5])
+        self.assertEqual(bounded["phases"]["wipe"], [3.5, 5.2])
+        partial = phase_timing.validate({"complete": True, "phases": payload["phases"][:2]},
+                                        self.SCENE, times)
+        self.assertFalse(partial["complete"])
+        bad = phase_timing.validate({"phases": [{"name": "pour", "start": 0, "end": 9}]},
+                                    self.SCENE, times)
+        self.assertEqual(bad["reason"], "PHASE_TIME_OUT_OF_RANGE")
+        order = phase_timing.validate({"phases": [{"name": "pour", "start": 3, "end": 4},
+                                                  {"name": "absorb", "start": 1, "end": 2}]},
+                                      self.SCENE, times)
+        self.assertEqual(order["reason"], "PHASE_ORDER_INVALID")
+
+    def test_disabled(self):
+        with mock.patch.dict("os.environ", {"JY_PHASE_TIMING": "0"}):
+            self.assertEqual(phase_timing.locate({}, self.SCENE, Path("."))["reason"],
+                             "PHASE_TIMING_DISABLED")
+
+
+SHOT = {"shot_id": "s1", "video": "D:/m/absorb.mp4", "source_start": 10.0, "source_end": 30.0,
+        "material_duration_us": 40 * US, "status": "ready_for_matching",
+        "action": "倾倒", "object": "蓝色液体+巾体", "description": "往安睡裤上倒蓝色液体，再用纸巾按压",
+        "role": "direct_evidence", "evidence_strength": "A", "action_complete": True}
+PHASES = {"pour": [11.0, 14.0], "absorb": [14.0, 20.0], "wipe": [20.0, 23.0]}
+MANIFEST = {"tail_pad_s": 0.08, "fps": 30, "head_trim_s": 0.3, "tail_trim_s": 0.2}
+
+
+class SplitSpeedTests(unittest.TestCase):
+    SCENE = rulepack.load("weipin")["scenes"][0]
+
+    def _check(self, plan, audio_us):
+        self.assertTrue(plan["ok"], plan)
+        parts = plan["parts"]
+        timeline = audio_us + 80_000
+        self.assertEqual(sum(p["segment_us"] for p in parts), timeline)
+        for a, b in zip(parts, parts[1:]):
+            self.assertEqual(a["source_end_us"], b["source_start_us"])
+        for p in parts:
+            lo, hi = p["speed_range"]
+            self.assertTrue(lo - 1e-6 <= p["speed"] <= hi + 1e-6, p)
+            material = p["source_end_us"] - p["source_start_us"]
+            self.assertLessEqual(abs(material / p["speed"] - p["segment_us"]), 33_334)
+        absorb = next(p for p in parts if p["phase"] == "absorb")
+        self.assertLessEqual(absorb["segment_us"], 3 * US + 33_334)
+        return parts
+
+    def test_fits_with_absorb_fast_forward(self):
+        parts = self._check(scene_rules.plan_split(SHOT, PHASES, self.SCENE, audio_us=8_920_000,
+                                                   manifest=MANIFEST), 8_920_000)
+        self.assertAlmostEqual(parts[0]["speed"], 1.0, places=3)
+        self.assertAlmostEqual(parts[2]["speed"], 1.0, places=3)
+        self.assertEqual(parts[0]["source_start_us"], 11 * US)
+
+    def test_short_sentence_speeds_up(self):
+        parts = self._check(scene_rules.plan_split(SHOT, PHASES, self.SCENE, audio_us=5_000_000,
+                                                   manifest=MANIFEST), 5_000_000)
+        self.assertGreater(parts[0]["speed"], 1.0)
+        self.assertLessEqual(parts[0]["speed"], 1.6 + 1e-6)
+
+    def test_too_short_sentence_fails(self):
+        plan = scene_rules.plan_split(SHOT, PHASES, self.SCENE, audio_us=2 * US, manifest=MANIFEST)
+        self.assertEqual(plan["reason"], scene_rules.SCENE_ACTION_TOO_LONG)
+
+    def test_long_sentence_extends_material(self):
+        parts = self._check(scene_rules.plan_split(SHOT, PHASES, self.SCENE, audio_us=12 * US,
+                                                   manifest=MANIFEST), 12 * US)
+        self.assertGreater(parts[-1]["source_end_us"], 23 * US)
+
+    def test_sentence_longer_than_scene(self):
+        plan = scene_rules.plan_split(SHOT, PHASES, self.SCENE, audio_us=40 * US, manifest=MANIFEST)
+        self.assertEqual(plan["reason"], scene_rules.SCENE_SENTENCE_TOO_LONG)
+
+
+class SceneApplyTests(unittest.TestCase):
+    def _matched(self, text, audio_us, shot=SHOT, top3=None):
+        seg = {"text": text, "video": shot["video"], "source_start": shot["source_start"],
+               "source_end": shot["source_end"], "temporary_shot_id": shot["shot_id"],
+               "audio_duration_us": audio_us, "video_speed": 1.0, "head_waste": 0.2,
+               "evidence_intervals": [{"start": 19.0, "end": 21.0}]}
+        return {"ok": True, "manifest": {"segments": [seg]},
+                "recommendations": [{"index": 1, "top3": top3 or []}]}
+
+    def test_absorb_split_applied(self):
+        manifest = {**MANIFEST, "product": "萌睡裤", "delivery_mode": "preview"}
+        matched = self._matched("吸水实验，倒下去瞬吸", 8 * US)
+        locate = mock.Mock(return_value={"ok": True, "complete": True, "phases": PHASES})
+        with tempfile.TemporaryDirectory() as tmp:
+            report = scene_rules.apply(manifest, matched, {"shots": [SHOT]}, Path(tmp), locate=locate)
+            self.assertTrue((Path(tmp) / "scene_rules_report.json").is_file())
+        seg = matched["manifest"]["segments"][0]
+        self.assertEqual(report["applied"], 1)
+        self.assertTrue(seg["multi_shot"])
+        self.assertEqual([p["detail"]["scene_phase"] for p in seg["span_parts"]],
+                         ["pour", "absorb", "wipe"])
+        self.assertEqual(seg["scene_rule"]["status"], "applied")
+        self.assertEqual(seg["head_waste"], 0.0)
+
+    def test_slice_plan_follows_sentence_bounds(self):
+        plan = scene_rules.plan_split(SHOT, PHASES, SplitSpeedTests.SCENE, audio_us=8_920_000,
+                                      manifest=MANIFEST)
+        total = plan["timeline_us"]
+        members = scene_rules.slice_plan(plan, [3 * US, total - 3 * US], fps=30)
+        self.assertEqual([sum(c["segment_us"] for c in m) for m in members], [3 * US, total - 3 * US])
+        chunks = [c for m in members for c in m]
+        for a, b in zip(chunks, chunks[1:]):
+            self.assertEqual(a["source_end_us"], b["source_start_us"])
+        self.assertEqual(chunks[0]["source_start_us"], plan["parts"][0]["source_start_us"])
+        near = plan["parts"][0]["segment_us"] + 10_000
+        snapped = scene_rules.slice_plan(plan, [near, total - near], fps=30)
+        self.assertEqual([c["phase"] for c in snapped[0]], ["pour"])
+        self.assertIsNone(scene_rules.slice_plan(plan, [US, US], fps=30))
+
+    def test_consecutive_absorb_sentences_share_one_experiment(self):
+        manifest = {**MANIFEST, "product": "萌睡裤", "delivery_mode": "preview"}
+        matched = self._matched("吸水实验，倒下去", 3 * US)
+        second = dict(matched["manifest"]["segments"][0], text="瞬吸不回渗",
+                      audio_duration_us=4 * US)
+        matched["manifest"]["segments"].append(second)
+        matched["manifest"]["segments"].append(dict(second, text="趁现在赶紧囤"))
+        locate = mock.Mock(return_value={"ok": True, "complete": True, "phases": PHASES})
+        with tempfile.TemporaryDirectory() as tmp:
+            report = scene_rules.apply(manifest, matched, {"shots": [SHOT]}, Path(tmp), locate=locate)
+        first, second, third = matched["manifest"]["segments"]
+        self.assertEqual(report["rows"][0]["indices"], [1, 2])
+        self.assertEqual(locate.call_count, 1)
+        self.assertEqual(first["scene_rule"]["group"], [1, 2])
+        phases = []
+        for seg in (first, second):
+            if seg.get("multi_shot"):
+                phases += [p["detail"]["scene_phase"] for p in seg["span_parts"]]
+            else:
+                phases.append(seg["evidence_intervals"][0]["scene_phase"])
+        self.assertEqual(phases[0], "pour")
+        self.assertEqual(phases[-1], "wipe")
+        self.assertIn("absorb", phases)
+        self.assertNotIn("scene_rule", third)
+
+    def test_too_long_becomes_visual_missing_in_preview(self):
+        manifest = {**MANIFEST, "product": "萌睡裤", "delivery_mode": "preview"}
+        matched = self._matched("吸水实验，倒下去瞬吸", 2 * US)
+        locate = mock.Mock(return_value={"ok": True, "complete": True, "phases": PHASES})
+        with tempfile.TemporaryDirectory() as tmp:
+            scene_rules.apply(manifest, matched, {"shots": [SHOT]}, Path(tmp), locate=locate)
+        seg = matched["manifest"]["segments"][0]
+        self.assertTrue(seg["visual_missing"])
+        self.assertEqual(seg["visual_missing_reason_code"], scene_rules.SCENE_ACTION_TOO_LONG)
+        self.assertEqual(matched["visual_missing_count"], 1)
+        self.assertEqual(matched["visual_missing_matches"][0]["source"], "scene_rules")
+
+    def test_formal_keeps_shot_when_unmet(self):
+        manifest = {**MANIFEST, "product": "萌睡裤", "delivery_mode": "formal"}
+        matched = self._matched("吸水实验，倒下去瞬吸", 2 * US)
+        locate = mock.Mock(return_value={"ok": True, "complete": True, "phases": PHASES})
+        with tempfile.TemporaryDirectory() as tmp:
+            scene_rules.apply(manifest, matched, {"shots": [SHOT]}, Path(tmp), locate=locate)
+        seg = matched["manifest"]["segments"][0]
+        self.assertFalse(seg.get("visual_missing"))
+        self.assertEqual(seg["scene_rule"]["status"], "unmet")
+
+    def test_phase_unverified_keeps_original(self):
+        manifest = {**MANIFEST, "product": "萌睡裤", "delivery_mode": "preview"}
+        matched = self._matched("吸水实验，倒下去瞬吸", 8 * US)
+        locate = mock.Mock(return_value={"ok": False, "reason": "PHASE_VISION_FAILED"})
+        with tempfile.TemporaryDirectory() as tmp:
+            scene_rules.apply(manifest, matched, {"shots": [SHOT]}, Path(tmp), locate=locate)
+        seg = matched["manifest"]["segments"][0]
+        self.assertFalse(seg.get("visual_missing"))
+        self.assertEqual(seg["scene_rule"]["reason"], scene_rules.SCENE_PHASE_UNVERIFIED)
+
+    def test_full_window_covers_action_with_hold(self):
+        shot = {**SHOT, "shot_id": "p1", "action": "指向", "description": "手指着产品正面",
+                "pointing_to_text": True}
+        manifest = {**MANIFEST, "product": "日用卫生巾", "delivery_mode": "preview"}
+        matched = self._matched("这款真的很好用", 3 * US, shot=shot)
+        locate = mock.Mock(return_value={"ok": True, "complete": True,
+                                         "phases": {"action": [12.0, 13.5]}})
+        with tempfile.TemporaryDirectory() as tmp:
+            scene_rules.apply(manifest, matched, {"shots": [shot]}, Path(tmp), locate=locate)
+        seg = matched["manifest"]["segments"][0]
+        self.assertEqual(seg["scene_rule"]["id"], "point_front")
+        window = seg["window_solution"]
+        self.assertLessEqual(window["source_start"], 12.0)
+        self.assertGreaterEqual(window["source_end"], 14.5 - 1e-6)
+        self.assertEqual(seg["evidence_intervals"][0]["end"], 14.5)
+
+    def test_surface_swaps_to_candidate_with_surface(self):
+        plain = {**SHOT, "shot_id": "x1", "action": "举起", "object": "包装",
+                 "description": "手举包装", "role": "product_display"}
+        surface = {**SHOT, "shot_id": "x2", "video": "D:/m/surface.mp4", "action": "抚摸",
+                   "object": "面层", "description": "面层纹理特写", "role": "product_display",
+                   "frame_time": 20.0}
+        manifest = {**MANIFEST, "product": "日用卫生巾", "delivery_mode": "preview"}
+        matched = self._matched("面层软软的", 2 * US, shot=plain,
+                                top3=[{"shot_id": "x2", "eligible": True}])
+        with tempfile.TemporaryDirectory() as tmp:
+            scene_rules.apply(manifest, matched, {"shots": [plain, surface]}, Path(tmp),
+                              locate=mock.Mock())
+        seg = matched["manifest"]["segments"][0]
+        self.assertEqual(seg["temporary_shot_id"], "x2")
+        self.assertTrue(seg["scene_rule"]["swapped"])
+
+    def test_long_pointing_swaps_to_shot_without_pointing(self):
+        pointing = {**SHOT, "shot_id": "p1", "action": "指向", "description": "手指着产品正面",
+                    "pointing_to_text": True, "role": "product_display"}
+        plain = {**SHOT, "shot_id": "p2", "video": "D:/m/plain.mp4", "action": "举起",
+                 "object": "包装", "description": "手举包装", "role": "product_display",
+                 "frame_time": 20.0, "head_waste": 0.1, "tail_waste": 0.0}
+        manifest = {**MANIFEST, "product": "日用卫生巾", "delivery_mode": "preview"}
+        matched = self._matched("我是真没想到", 1 * US, shot=pointing,
+                                top3=[{"shot_id": "p2", "eligible": True}])
+        locate = mock.Mock(return_value={"ok": True, "complete": True,
+                                         "phases": {"action": [11.0, 19.0]}})
+        with tempfile.TemporaryDirectory() as tmp:
+            scene_rules.apply(manifest, matched, {"shots": [pointing, plain]}, Path(tmp),
+                              locate=locate)
+        seg = matched["manifest"]["segments"][0]
+        self.assertFalse(seg.get("visual_missing"))
+        self.assertEqual(seg["temporary_shot_id"], "p2")
+        self.assertEqual(seg["head_waste"], 0.1)
+        self.assertEqual(locate.call_count, 1)
+
+    def test_evidence_frame_time_follows_interval(self):
+        from orchestrator.shot_analyzer import candidate_evidence_interval
+        shot = {"source_start": 0.0, "source_end": 7.2, "frame_time": 3.6,
+                "evidence_intervals": [{"start": 6.8, "end": 7.2}]}
+        self.assertEqual(candidate_evidence_interval(shot), (6.8, 7.2, 7.0))
+        shot["evidence_intervals"][0]["frame_time"] = 7.05
+        self.assertEqual(candidate_evidence_interval(shot)[2], 7.05)
+
+    def test_zhipin_has_no_scene_rules(self):
+        manifest = {**MANIFEST, "product": "湿厕纸"}
+        matched = self._matched("吸水实验，倒下去瞬吸", 8 * US)
+        locate = mock.Mock()
+        report = scene_rules.apply(manifest, matched, {"shots": [SHOT]}, Path("."), locate=locate)
+        locate.assert_not_called()
+        self.assertEqual(report["rows"], [])
+
+
+class EngineHelpersTests(unittest.TestCase):
+    def test_parent_zero_is_a_parent(self):
+        self.assertEqual(_parent_id(SimpleNamespace(parent_index=0)), 0)
+        self.assertEqual(_parent_id(SimpleNamespace(parent_index=None)), -1)
+        self.assertEqual(_parent_id(SimpleNamespace(), -2), -2)
+
+    def test_final_window_uses_source_end(self):
+        records = [{"index": 1, "evidence_intervals": [{"start": 10.0, "end": 14.0}]}]
+        sped = [{"video": "a.mp4", "source_start": 10.0, "source_end": 14.0, "duration": 2.5}]
+        self.assertFalse(visual_match.validate_final_windows(sped, records).get("issues"))
+        legacy = [{"video": "a.mp4", "source_start": 10.0, "duration": 2.5}]
+        self.assertTrue(visual_match.validate_final_windows(legacy, records).get("issues"))
+
+
+class VoicePostTests(unittest.TestCase):
+    def test_tempo_normalize(self):
+        self.assertEqual(voice_tts.normalize_tempo(None), 1.0)
+        self.assertEqual(voice_tts.normalize_tempo("1.2"), 1.2)
+        self.assertEqual(voice_tts.normalize_tempo(9), 2.0)
+        name = voice_tts._post_name(Path("tts_abc.ogg"), 1.2, 25, True)
+        self.assertEqual(name.name, "tts_abc.p1_k25_t120.ogg")
+
+    def test_postprocess_trims_and_speeds_up(self):
+        ffmpeg, ffprobe = voice_tts.find_ffmpeg()[:2]
+        if not ffmpeg or not ffprobe:
+            self.skipTest("ffmpeg/ffprobe not available")
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "tts_test.ogg"
+            subprocess.run([str(ffmpeg), "-y", "-hide_banner", "-loglevel", "error",
+                            "-f", "lavfi", "-i", "anullsrc=r=48000:cl=mono:d=0.3",
+                            "-f", "lavfi", "-i", "sine=frequency=440:duration=1.2:sample_rate=48000",
+                            "-f", "lavfi", "-i", "anullsrc=r=48000:cl=mono:d=0.3",
+                            "-filter_complex", "[0:a][1:a][2:a]concat=n=3:v=0:a=1[a]",
+                            "-map", "[a]", "-c:a", "opus", "-strict", "-2", "-b:a", "64k", str(src)],
+                           check=True, capture_output=True)
+            out = Path(voice_tts.postprocess_voice(src, tempo=1.2))
+            self.assertNotEqual(out, src)
+            duration = voice_tts._probe_seconds(out)
+            self.assertLess(duration, 1.2)
+            self.assertGreater(duration, 0.9)
+            self.assertEqual(voice_tts.postprocess_voice(src, tempo=1.2), str(out))
+            self.assertEqual(voice_tts.postprocess_voice(src, tempo=1.0, edge_trim=False), str(src))
+
+
+if __name__ == "__main__":
+    unittest.main()

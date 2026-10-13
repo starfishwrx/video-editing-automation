@@ -1,0 +1,9 @@
+{
+  "rulepack": "zhipin",
+  "label": "纸品",
+  "version": "1.5.2-1",
+  "product_keywords": ["湿厕纸", "湿巾", "纸巾", "抽纸", "卷纸", "棉柔巾", "洗脸巾", "厨房纸", "手帕纸", "面巾纸"],
+  "voice": {},
+  "match_prompt_rules": [],
+  "scenes": []
+}
