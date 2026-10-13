@@ -690,6 +690,15 @@ def _variant_tiebreak(rows: list[dict[str, Any]], priority: Callable[[dict[str, 
     return pool[int(variant_index) % len(pool)]
 
 
+def _look_key(shot: dict[str, Any] | None) -> str:
+    """同机位 + 同动作视为同一类画面；缺机位标识时不判相似。"""
+    shot = shot if isinstance(shot, dict) else {}
+    setup = str(shot.get("setup_id") or "").strip()
+    if not setup:
+        return ""
+    return f"{setup}|{str(shot.get('action') or '').strip()}"
+
+
 def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: int = 3,
                    auto_accept_top1: bool = True,
                    narration_timing: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -788,6 +797,9 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
     # 上一段采用的镜头本体（反重复新判据要读它的 setup_id / action_phase，
     # 光有 source 名不够 —— 同一条素材里不同机位属于不同 setup）。
     previous_shot: dict[str, Any] | None = None
+    # 纸品规则：整条片子里同机位、同动作的展示画面只用一次，再次出现时排到同级候选后面。
+    avoid_similar = bool(manifest.get("avoid_similar_shots"))
+    used_looks: set[str] = set()
 
     def _audit_ready_row(row: dict[str, Any]) -> bool:
         """只把已经写完描述、证据标签和动作确认的镜头当成可交付画面。"""
@@ -1038,8 +1050,10 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
                 row["shot"].get("video"), row["shot"].get("source_start")))
             fresh = 0 if used == usage_ledger.SAME_TASK else 1
             penalty = usage_ledger.OTHER_TASK_PENALTY if used == usage_ledger.OTHER_TASK else 0
+            # 本片里相似画面比跨版本复用更显眼，所以排在台账之前。
+            novel = int(not (avoid_similar and _look_key(row["shot"]) in used_looks))
             return (int(usable), int(semantic_ok and window_ok), int(window_ok and tier > 0),
-                    int(semantic_ok), int(tier > 0), int(role_fit), int(phase_fit), fresh,
+                    int(semantic_ok), int(tier > 0), int(role_fit), int(phase_fit), novel, fresh,
                     int(diversity_fit), row["score"] - penalty)
 
         eligible_good = _variant_tiebreak(
@@ -1657,6 +1671,8 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
                            "镜头出占位画面，未认证、不得用于正式交付。"})
         previous_source = selected_source
         previous_shot = selected
+        if isinstance(selected, dict) and _look_key(selected):
+            used_looks.add(_look_key(selected))
     preview_delivery = str(manifest.get("delivery_mode") or "").lower() in (
         "preview", "preview_only", "预览")
     if preview_delivery:
@@ -1734,6 +1750,8 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
             source_use_counts[selected_source] = source_use_counts.get(selected_source, 0) + 1
             used_shot_ids.add(selected_id)
             assigned_extra[selected_id] = assigned_extra.get(selected_id, 0) + 1
+            if _look_key(shot):
+                used_looks.add(_look_key(shot))
             seg.update({
                 "video": shot.get("video"),
                 "source_start": shot.get("source_start"),
@@ -1791,7 +1809,9 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
                     continue
                 audio_us = int(seg.get("audio_duration_us") or 0)
                 chosen: tuple[dict[str, Any], Any] | None = None
-                for shot in sorted(shots, key=_fresh, reverse=True):
+                carry_order = sorted(shots, reverse=True, key=lambda s: (
+                    int(not (avoid_similar and _look_key(s) in used_looks)), _fresh(s)))
+                for shot in carry_order:
                     if not _ready_shot(shot):
                         continue
                     shot_id = str(shot.get("shot_id") or "")
@@ -1831,6 +1851,7 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
                 source_free = source_use_counts.get(source_video, 0) < 1
                 extra = assigned_extra.get(shot_id, 0)
                 fresh = _fresh(shot)
+                novel = int(not (avoid_similar and _look_key(shot) in used_looks))
                 if matched:
                     related_reuse_key = (fresh, score, -extra, shot_id)
                     if best_related_reuse is None or related_reuse_key > best_related_reuse[0]:
@@ -1842,11 +1863,11 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
                 if used_exact:
                     continue
                 if matched:
-                    related_key = (fresh, score, 1 if source_free else 0, shot_id)
+                    related_key = (novel, fresh, score, 1 if source_free else 0, shot_id)
                     if best_related is None or related_key > best_related[0]:
                         best_related = (related_key, shot, window)
                 if demo_actions.visual_role(shot) == "product_display" and source_free:
-                    display_key = (fresh, score, shot_id)
+                    display_key = (novel, fresh, score, shot_id)
                     if best_display is None or display_key > best_display[0]:
                         best_display = (display_key, shot, window)
             if best_related is not None:

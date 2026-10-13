@@ -397,7 +397,7 @@ def main() -> int:
             for claim, rows in claim_rows]
         for claim in active_claims:
             rule = claim["scene_rule"]
-            if rule.get("status") != "unmet":
+            if rule.get("status") not in ("unmet", "partial"):
                 continue
             code = str(rule.get("reason") or "")
             line = f"SCENE_RULE_UNMET:S{claim['index']:02d}:{rule.get('id') or ''}:{code}"

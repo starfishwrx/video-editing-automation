@@ -42,7 +42,7 @@
     },
     {
       "path": "doubao-jianying-orchestrator/CHANGELOG.md",
-      "sha256": "a999a20bb457ba426d3697fde3833077bdfe8ad2704d70f4098d58c768857d5b"
+      "sha256": "d63ac3c973defefc216fb5786a6983c5989086f51246b14c16c5a3841db741a7"
     },
     {
       "path": "doubao-jianying-orchestrator/SKILL.md",
@@ -74,7 +74,7 @@
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/cli.py",
-      "sha256": "099b43f81429f8fe9beeaa29abf3c612e4a399aab86b738e8e403c47bf271267"
+      "sha256": "b8093aa9f653b7dcc134c26e7342104ac39c1116a5cc90e2f282dddcf2332427"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/demo_actions.py",
@@ -90,11 +90,11 @@
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/draft_visual_qc.py",
-      "sha256": "3f26c24f2fe964f84c50893a705d9377976a5387d1c2fb6b0374f8fb7ac2a11f"
+      "sha256": "0f755048fd436f23d1912ce14401e236aa450b41fe6b50a2ae3c6457c7a67108"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/engine.py",
-      "sha256": "ea48cf33ee2bc099320f209232b6b6f91efdcbbf529a33f6575f844336064d78"
+      "sha256": "7981cdf7eb800dc3dfc861ed795efdff1d232f691653da694a4d06bcad0bad42"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/feedback_policy.py",
@@ -138,7 +138,7 @@
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/rulepack.py",
-      "sha256": "a2e9e368d6177d6357f7a1f62a89d9149afcf62f06459ad1079ea3bc3100e626"
+      "sha256": "a48d83876e9d0f8a74ca9fb91f5398113736531d064ed3ea2df83c8e4128f4b9"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/rules/global.json",
@@ -146,15 +146,15 @@
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/rules/weipin.json",
-      "sha256": "4b399896cd6111151c5cb0454a26cc389392b45788647de584672ed20249d387"
+      "sha256": "b873bd9aefeb70f723eb52b395f801f99d9dbe3478c1c226688ab7d8dc302647"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/rules/zhipin.json",
-      "sha256": "1396d05e871a282f436f63aa27b86e2a46d33b5c3dbb268f5baeec53e9a17bb9"
+      "sha256": "91c6fd41cf4cebce9d4f9789ca4ff8e7ac928613fb0b38affbd6cbe44236b22b"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/scene_rules.py",
-      "sha256": "49aeec764c91ecaec574172a1f42a340570164890ba2f9ef051f94f78954ad14"
+      "sha256": "a95a81f092e735892625f22dd4c8475cb6122a2b48ef5c664a8f8417f7ace503"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/script_polish.py",
@@ -170,7 +170,7 @@
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/shot_analyzer.py",
-      "sha256": "f21ab3495a6a1dce9e1ae56085bca5c9c4b2fad38005ef23cb54a6a68fbebbba"
+      "sha256": "517e5903d12c57ac4e71467dcfa12469d3b24276a23d5281888bd7001e21e909"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/shot_notes.py",
@@ -270,7 +270,7 @@
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_v152_meeting_rules.py",
-      "sha256": "102d826d4fb701b61cbaf7994e5811807763390a45d5fbf164821cbfc5f84174"
+      "sha256": "35780b2bbd54e77bb85129c7e4d51919f4c9cc7de9fa7a92a560216428e9411e"
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_video_decode.py",
@@ -647,7 +647,7 @@
   ],
   "release_id": "video-v1.5.2",
   "schema_version": 1,
-  "source_sha256": "8cce8009df9aded29f9748e02078c54ff2079014475b8c1ff09c0d4bfd878230",
+  "source_sha256": "7cefc93076f079e1b4b4e32bc94ea725bf6ee7d9d7460bba9e18d3568e4812e5",
   "tree_hash_algorithm": "video-release-tree-v1",
   "version": "1.5.2",
   "visual_policy_version": "1.4.1"

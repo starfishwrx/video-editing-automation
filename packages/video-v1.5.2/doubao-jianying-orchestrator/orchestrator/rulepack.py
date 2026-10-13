@@ -88,6 +88,8 @@ def load(category: str) -> dict[str, Any]:
         "rulepacks": [r for r in (base.get("rulepack"), extra.get("rulepack")) if r],
         "versions": {r.get("rulepack"): r.get("version") for r in (base, extra) if r.get("rulepack")},
         "auto_transition": bool(base.get("auto_transition", False)),
+        "avoid_similar_shots": bool(extra.get("avoid_similar_shots",
+                                              base.get("avoid_similar_shots", False))),
         "voice": {**(base.get("voice") or {}), **(extra.get("voice") or {})},
         "analysis_prompt_rules": [*(base.get("analysis_prompt_rules") or []),
                                   *(extra.get("analysis_prompt_rules") or [])],
@@ -147,6 +149,7 @@ def apply_manifest_defaults(manifest: dict[str, Any]) -> dict[str, Any]:
     voice = rules.get("voice") or {}
     out["category"] = category
     out.setdefault("auto_transition", rules.get("auto_transition", False))
+    out.setdefault("avoid_similar_shots", rules.get("avoid_similar_shots", False))
     out.setdefault("voice_tempo", default_voice_tempo(rules, out.get("voice")))
     out.setdefault("voice_edge_trim", bool(voice.get("edge_trim", True)))
     max_gap = os.environ.get("JY_VOICE_MAX_GAP_FRAMES") or voice.get("max_gap_frames", 5)
@@ -163,8 +166,11 @@ def apply_manifest_defaults(manifest: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def _haystack(shot: dict[str, Any] | None) -> str:
+def _haystack(shot: dict[str, Any] | None, fields: Any = None) -> str:
+    """镜头里用来匹配场景画面关键词的文字；场景给了 ``shot_fields`` 时只看这些字段。"""
     shot = shot if isinstance(shot, dict) else {}
+    if fields:
+        return " ".join(str(shot.get(key) or "") for key in fields)
     parts = []
     for key in ("description", "visual_description", "action", "object", "result",
                 "pointing_action", "gesture"):
@@ -191,15 +197,20 @@ def scene_for(rules: dict[str, Any], text: str, shot: Optional[dict[str, Any]] =
     sentence = re.sub(r"\s+", "", str(text or ""))
     looks = _haystack(shot)
     pointing = bool((shot or {}).get("pointing_to_text") or (shot or {}).get("explicit_pointing"))
+    phase = str((shot or {}).get("action_phase") or "").strip().lower()
     for scene in rules.get("scenes") or []:
         text_kw = scene.get("text_keywords") or []
         shot_kw = scene.get("shot_keywords") or []
+        # 只管动作正在进行的镜头：静态陈列不存在「切在动作中途」的问题。
+        if scene.get("action_phases") and phase not in scene["action_phases"]:
+            continue
         if scene.get("kind") == "require_visual":
             if _hits(sentence, text_kw):
                 return scene
             continue
         text_ok = _hits(sentence, text_kw) if text_kw else True
-        shot_ok = _hits(looks, shot_kw) or (scene.get("id") == "point_front" and pointing)
+        scene_looks = _haystack(shot, scene["shot_fields"]) if scene.get("shot_fields") else looks
+        shot_ok = _hits(scene_looks, shot_kw) or (scene.get("id") == "point_front" and pointing)
         if text_ok and shot_ok:
             return scene
     return None
@@ -210,7 +221,12 @@ def text_hits_scene(scene: dict[str, Any], text: str) -> bool:
 
 
 def shot_has_visual(scene: dict[str, Any], shot: dict[str, Any] | None) -> bool:
-    return _hits(_haystack(shot), scene.get("shot_keywords") or [])
+    return _hits(_haystack(shot, scene.get("shot_fields")), scene.get("shot_keywords") or [])
+
+
+def shot_keyword_hits(scene: dict[str, Any], shot: dict[str, Any] | None) -> int:
+    looks = _haystack(shot, scene.get("shot_fields"))
+    return sum(1 for k in scene.get("shot_keywords") or [] if k and k in looks)
 
 
 def prompt_rules(manifest: dict[str, Any] | None, kind: str = "match") -> list[str]:

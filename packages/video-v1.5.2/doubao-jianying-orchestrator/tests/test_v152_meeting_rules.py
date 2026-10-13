@@ -98,7 +98,8 @@ class RulepackTests(unittest.TestCase):
                          "surface_layer")
         self.assertEqual(rulepack.scene_for(rules, "这款很好用",
                                             {"pointing_to_text": True})["id"], "point_front")
-        self.assertEqual(rulepack.load("zhipin")["scenes"], [])
+        self.assertEqual([s["id"] for s in rulepack.load("zhipin")["scenes"]],
+                         ["stack_product", "show_product", "usage_action"])
 
 
 class WasteTrimTests(unittest.TestCase):
@@ -468,9 +469,183 @@ class SceneApplyTests(unittest.TestCase):
         manifest = {**MANIFEST, "product": "湿厕纸"}
         matched = self._matched("吸水实验，倒下去瞬吸", 8 * US)
         locate = mock.Mock()
-        report = scene_rules.apply(manifest, matched, {"shots": [SHOT]}, Path("."), locate=locate)
+        with tempfile.TemporaryDirectory() as tmp:
+            report = scene_rules.apply(manifest, matched, {"shots": [SHOT]}, Path(tmp), locate=locate)
         locate.assert_not_called()
         self.assertEqual(report["rows"], [])
+
+
+HOLD = {**SHOT, "shot_id": "h1", "video": "D:/m/hold.mp4", "action": "举起", "object": "湿厕纸包装",
+        "description": "手拿一包湿厕纸入画举到镜头前", "action_phase": "perform",
+        "role": "product_display", "source_start": 0.0, "source_end": 12.0,
+        "material_duration_us": 12 * US}
+
+
+class ZhipinRuleTests(unittest.TestCase):
+    MANIFEST = {**MANIFEST, "product": "纯水湿厕纸", "delivery_mode": "preview"}
+
+    def _apply(self, seg_shot, audio_us, pool, phases, top3=None):
+        matched = SceneApplyTests()._matched("这款湿厕纸真的很好用", audio_us, shot=seg_shot, top3=top3)
+        locate = mock.Mock(side_effect=lambda shot, _scene, _dir: {
+            "ok": True, "complete": shot["shot_id"] in phases,
+            "phases": {"action": phases.get(shot["shot_id"], [9.0, 12.0])}})
+        with tempfile.TemporaryDirectory() as tmp:
+            report = scene_rules.apply(self.MANIFEST, matched, {"shots": pool}, Path(tmp), locate=locate)
+        return report, matched["manifest"]["segments"][0]
+
+    def test_only_moving_shots_trigger(self):
+        rules = rulepack.load("zhipin")
+        self.assertEqual(rulepack.scene_for(rules, "随便一句", HOLD)["id"], "show_product")
+        stacking = {**HOLD, "action": "堆叠", "description": "多包湿巾一包包落入篮中堆成一堆"}
+        self.assertEqual(rulepack.scene_for(rules, "随便一句", stacking)["id"], "stack_product")
+        self.assertIsNone(rulepack.scene_for(rules, "随便一句", {**stacking, "action_phase": "static"}))
+        self.assertIsNone(rulepack.scene_for(rulepack.load("weipin"), "随便一句", HOLD))
+        wring = {**HOLD, "action": "拧挤", "description": "手持湿巾拧挤，可见水滴挤出"}
+        self.assertIsNone(rulepack.scene_for(rules, "随便一句", wring))
+
+    def test_cta_sentence_swaps_to_quantity_shot_from_pool(self):
+        stack = {**HOLD, "shot_id": "st", "action": "投入", "description": "多包湿巾投入收纳篮",
+                 "source_end": 4.0, "material_duration_us": 4 * US}
+        basket = {**HOLD, "shot_id": "bk", "video": "D:/m/bk.mp4", "action": "无动作",
+                  "action_phase": "static", "role": "context", "setup_id": "basket",
+                  "description": "金色购物篮内平铺着大量蓝色包装湿巾", "visual_tags": ["多包", "湿巾"],
+                  "evidence_tags": ["大量包装"], "frame_time": 4.0}
+        single = {**basket, "shot_id": "sg", "video": "D:/m/sg.mp4", "setup_id": "single",
+                  "description": "木桌上一包湿巾", "visual_tags": ["湿巾"], "evidence_tags": []}
+        matched = SceneApplyTests()._matched("想要囤货的", int(1.2 * US), shot=stack)
+        matched["manifest"]["segments"][0]["selection_mode"] = "auto_top1_with_reuse_guard"
+        locate = mock.Mock(return_value={"ok": True, "complete": True, "phases": {"action": [0.3, 3.9]}})
+        with tempfile.TemporaryDirectory() as tmp:
+            report = scene_rules.apply(self.MANIFEST, matched, {"shots": [stack, single, basket]},
+                                       Path(tmp), locate=locate)
+        row = report["rows"][0]
+        self.assertEqual((row["scene"], row["status"], row["shot_id"]), ("stack_product", "applied", "bk"))
+        self.assertEqual([a["shot_id"] for a in row["attempts"] if a.get("source") == "pool_fill"], ["bk"])
+
+    def test_window_covers_entry_to_hold(self):
+        report, seg = self._apply(HOLD, 3 * US, [HOLD], {"h1": [1.0, 3.5]})
+        self.assertEqual(report["rows"][0]["scene"], "show_product")
+        self.assertEqual(report["rows"][0]["mode"], "full")
+        window = seg["window_solution"]
+        self.assertLessEqual(window["source_start"], 1.0)
+        self.assertGreaterEqual(window["source_end"], 3.8 - 1e-6)
+
+    def test_complete_action_on_other_candidate_beats_settled(self):
+        other = {**HOLD, "shot_id": "h2", "video": "D:/m/hold2.mp4", "setup_id": "other"}
+        report, seg = self._apply(HOLD, 2 * US, [HOLD, other], {"h1": [1.0, 9.0], "h2": [2.0, 3.5]},
+                                  top3=[{"shot_id": "h2", "eligible": True}])
+        row = report["rows"][0]
+        self.assertEqual((row["shot_id"], row["mode"]), ("h2", "full"))
+
+    def test_too_long_action_falls_back_to_settled_frames(self):
+        report, seg = self._apply(HOLD, 2 * US, [HOLD], {"h1": [1.0, 9.0]})
+        row = report["rows"][0]
+        self.assertEqual((row["status"], row["mode"]), ("applied", "settled"))
+        self.assertGreaterEqual(seg["window_solution"]["source_start"], 9.0)
+        self.assertFalse(seg.get("visual_missing"))
+
+    def _filler(self, mode):
+        short = {**HOLD, "source_end": 9.5, "material_duration_us": int(9.5 * US)}
+        static_same = {**HOLD, "shot_id": "s1", "video": "D:/m/s1.mp4", "action": "无动作",
+                       "action_phase": "static", "description": "木桌上静置一包湿厕纸",
+                       "setup_id": "front", "frame_time": 4.0}
+        static_new = {**static_same, "shot_id": "s2", "video": "D:/m/s2.mp4", "setup_id": "top"}
+        used_one = {**static_same, "shot_id": "u1", "video": "D:/m/u1.mp4", "setup_id": "front"}
+        matched = SceneApplyTests()._matched("真的绝", int(0.8 * US), shot=short)
+        matched["manifest"]["segments"][0]["selection_mode"] = mode
+        matched["manifest"]["segments"].append({"text": "数量有限", "video": "D:/m/u1.mp4",
+                                                "temporary_shot_id": "u1"})
+        locate = mock.Mock(return_value={"ok": True, "complete": True, "phases": {"action": [1.0, 9.0]}})
+        with tempfile.TemporaryDirectory() as tmp:
+            report = scene_rules.apply(self.MANIFEST, matched,
+                                       {"shots": [short, static_same, static_new, used_one]},
+                                       Path(tmp), locate=locate)
+        return report["rows"][0], matched["manifest"]["segments"][0]
+
+    def test_filler_sentence_swaps_to_unused_static_shot(self):
+        row, seg = self._filler("auto_top1_degraded_substitute")
+        self.assertEqual((row["status"], row["shot_id"]), ("applied", "s2"))
+        self.assertEqual(row["attempts"][-1]["source"], "pool_fill")
+        self.assertFalse(seg.get("visual_missing"))
+
+    def test_matched_sentence_still_goes_black(self):
+        row, seg = self._filler("auto_top1_with_reuse_guard")
+        self.assertEqual(row["status"], "visual_missing")
+        self.assertTrue(seg["visual_missing"])
+
+    def test_brand_sentence_takes_product_display_from_pool(self):
+        static = {**HOLD, "shot_id": "pd", "video": "D:/m/pd.mp4", "action": "无动作",
+                  "action_phase": "static", "setup_id": "desk", "frame_time": 4.0,
+                  "description": "木桌上静置一包蓝色包装", "visual_tags": [], "evidence_tags": []}
+        matched = SceneApplyTests()._matched("心相印这款悬挂式纯水湿厕纸", int(2.5 * US), shot=HOLD)
+        matched["manifest"]["segments"][0]["selection_mode"] = "auto_top1_with_reuse_guard"
+        locate = mock.Mock(return_value={"ok": True, "complete": True, "phases": {"action": [0.0, 12.0]}})
+        with tempfile.TemporaryDirectory() as tmp:
+            report = scene_rules.apply(self.MANIFEST, matched, {"shots": [HOLD, static]},
+                                       Path(tmp), locate=locate)
+        row = report["rows"][0]
+        self.assertEqual((row["status"], row["shot_id"]), ("applied", "pd"))
+        self.assertEqual(row["attempts"][-1]["source"], "pool_fill")
+
+    def test_swap_to_repeated_look_comes_after_pool(self):
+        repeat = {**HOLD, "shot_id": "rp", "video": "D:/m/rp.mp4", "setup_id": "front"}
+        earlier = {**repeat, "shot_id": "e1", "video": "D:/m/e1.mp4", "action_phase": "static"}
+        static = {**HOLD, "shot_id": "s2", "video": "D:/m/s2.mp4", "action": "无动作",
+                  "action_phase": "static", "setup_id": "top", "frame_time": 4.0,
+                  "description": "木桌上静置一包湿厕纸"}
+        matched = SceneApplyTests()._matched("真的绝", int(2 * US), shot=HOLD,
+                                             top3=[{"shot_id": "rp", "eligible": True}])
+        matched["manifest"]["segments"][0]["selection_mode"] = "auto_top1_degraded_substitute"
+        matched["manifest"]["segments"].append({"text": "数量有限", "video": "D:/m/e1.mp4",
+                                                "temporary_shot_id": "e1"})
+        locate = mock.Mock(side_effect=lambda shot, _s, _d: {
+            "ok": True, "complete": True,
+            "phases": {"action": [1.0, 12.0] if shot["shot_id"] == "h1" else [1.0, 2.5]}})
+        with tempfile.TemporaryDirectory() as tmp:
+            report = scene_rules.apply(self.MANIFEST, matched, {"shots": [HOLD, repeat, earlier, static]},
+                                       Path(tmp), locate=locate)
+        row = report["rows"][0]
+        self.assertEqual((row["status"], row["shot_id"]), ("applied", "s2"))
+        self.assertNotIn("rp", [a["shot_id"] for a in row["attempts"]])
+
+    def test_similar_looks_are_used_once(self):
+        from orchestrator import shot_analyzer as sa
+
+        def shot(name, setup):
+            return {**HOLD, "shot_id": name, "video": f"D:/m/{name}.MOV", "source_start": 0.0,
+                    "source_end": 8.0, "duration": 8.0, "frame_time": 4.0, "setup_id": setup,
+                    "action_phase": "static", "status": "ready_for_matching",
+                    "action_complete": True, "has_subject": True, "evidence_strength": "B",
+                    "result": "包装完整", "visual_tags": ["湿厕纸"], "evidence_tags": ["湿厕纸包装"]}
+        shots = [shot("A1", "front"), shot("A2", "front"), shot("B1", "side"), shot("C1", "top")]
+        picks = {1: [("A1", 90)], 2: [("B1", 90)], 3: [("A2", 90), ("C1", 85)]}
+        analysis = {"shots": shots, "semantic_matches": [
+            {"index": i, "top3": [{"shot_id": s, "score": sc, "matched_claims": ["湿厕纸包装"]}
+                                  for s, sc in rows]} for i, rows in picks.items()]}
+        segments = [{"text": t, "audio_duration_us": int(1.5 * US)}
+                    for t in ("这款湿厕纸", "包装很好看", "这款湿厕纸")]
+        base = {"segments": segments, "head_trim_s": 0.3, "tail_trim_s": 0.2, "fps": 30,
+                "max_source_reuse": 2, "delivery_mode": "formal"}
+
+        def third(flag):
+            res = sa.match_manifest({**base, "avoid_similar_shots": flag}, json.loads(json.dumps(analysis)))
+            return [s["temporary_shot_id"] for s in res["segments"]]
+        self.assertEqual(third(False)[2], "A2")
+        self.assertEqual(third(True), ["A1", "B1", "C1"])
+
+        carry_shots = [shot("A1", "front"), shot("A2", "front"), shot("B1", "side")]
+        res = sa.match_manifest(
+            {**base, "delivery_mode": "preview", "avoid_similar_shots": True,
+             "segments": [{"text": t, "audio_duration_us": int(1.5 * US)}
+                          for t in ("真的绝", "太香了", "冲就完了", "爱了爱了", "闭眼入")]},
+            {"shots": carry_shots, "semantic_matches": []})
+        carried = [s["temporary_shot_id"] for s in res["segments"]
+                   if s.get("substitute_reason") == "UNUSED_READY_CARRY"]
+        self.assertEqual(len(carried), 2)
+        self.assertEqual(len({sa._look_key(next(x for x in carry_shots if x["shot_id"] == c))
+                              for c in carried}), 2)
+        self.assertTrue(rulepack.load("zhipin")["avoid_similar_shots"])
+        self.assertFalse(rulepack.load("weipin")["avoid_similar_shots"])
 
 
 class EngineHelpersTests(unittest.TestCase):
@@ -560,6 +735,151 @@ class ExperimentGroupChainTests(unittest.TestCase):
         phases = [(c.evidence_intervals or [{}])[0].get("scene_phase") for c in clips]
         self.assertEqual((phases[0], phases[-1]), ("pour", "wipe"))
         self.assertIsNone(gate)
+
+    def test_complete_experiment_found_outside_top3(self):
+        partial = {**SHOT, "shot_id": "s1", "description": "卫生巾吸满蓝色液体"}
+        full = {**SHOT, "shot_id": "pool1", "video": "D:/m/full.mp4", "duration": 20.0,
+                "description": "往卫生巾上倒蓝色液体，再用纸巾按压"}
+        unrelated = {**SHOT, "shot_id": "pack", "video": "D:/m/pack.mp4", "description": "手举包装",
+                     "action": "举起", "object": "包装"}
+        taken = {**full, "shot_id": "taken", "video": "D:/m/taken.mp4"}
+        matched = SceneApplyTests()._matched("吸水实验，倒下去", 3 * US, shot=partial)
+        matched["manifest"]["segments"].append(
+            dict(matched["manifest"]["segments"][0], text="瞬吸不回渗", audio_duration_us=4 * US))
+        matched["manifest"]["segments"].append({"text": "包装好看", "video": "D:/m/taken.mp4",
+                                                "temporary_shot_id": "taken"})
+
+        def locate(shot, _scene, _dir):
+            if shot["shot_id"] == "pool1":
+                return {"ok": True, "complete": True, "phases": PHASES}
+            return {"ok": True, "complete": False, "phases": {"absorb": [14.0, 20.0]}}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report = scene_rules.apply(self.MANIFEST, matched,
+                                       {"shots": [partial, full, unrelated, taken]}, Path(tmp),
+                                       locate=mock.Mock(side_effect=locate))
+        row = report["rows"][0]
+        self.assertEqual(row["status"], "applied")
+        self.assertEqual(row["shot_id"], "pool1")
+        self.assertEqual([(a["shot_id"], a["source"]) for a in row["attempts"]],
+                         [("s1", "selected"), ("pool1", "pool_search")])
+        first, second = matched["manifest"]["segments"][:2]
+        self.assertEqual({first["video"], second["video"]}, {"D:/m/full.mp4"})
+
+    def _selling_point_script(self, pool):
+        chip = {**SHOT, "shot_id": "chip", "video": "D:/m/chip.mp4", "action": "举起",
+                "object": "卫生巾芯片", "description": "手拿卫生巾展示本草芯片"}
+        matched = SceneApplyTests()._matched("它家用的是这种本草芯片", 3 * US, shot=chip)
+        seg = matched["manifest"]["segments"][0]
+        for text, audio in (("内含高分子吸水因子吸收更快更干净", 3 * US),
+                            ("吸完还不反渗不回流", 4 * US), ("量大的姐妹真的闭眼冲", 2 * US)):
+            matched["manifest"]["segments"].append(dict(seg, text=text, audio_duration_us=audio))
+        return chip, matched, {"shots": [chip, *pool]}
+
+    def test_selling_point_sentences_get_the_experiment(self):
+        full = {**SHOT, "shot_id": "pool1", "video": "D:/m/full.mp4", "duration": 20.0,
+                "description": "往卫生巾上倒蓝色液体，再用纸巾按压"}
+        _chip, matched, analysis = self._selling_point_script([full])
+        locate = mock.Mock(return_value={"ok": True, "complete": True, "phases": PHASES})
+        with tempfile.TemporaryDirectory() as tmp:
+            report = scene_rules.apply(self.MANIFEST, matched, analysis, Path(tmp), locate=locate)
+        row = report["rows"][0]
+        self.assertEqual((row["indices"], row["trigger"], row["status"]), ([2, 3], "text", "applied"))
+        self.assertEqual([(a["shot_id"], a["source"]) for a in row["attempts"]],
+                         [("pool1", "pool_search")])
+        segments = matched["manifest"]["segments"]
+        self.assertEqual([s["video"] for s in segments],
+                         ["D:/m/chip.mp4", "D:/m/full.mp4", "D:/m/full.mp4", "D:/m/chip.mp4"])
+
+    def test_selling_point_without_experiment_footage_goes_black(self):
+        _chip, matched, analysis = self._selling_point_script([])
+        locate = mock.Mock()
+        with tempfile.TemporaryDirectory() as tmp:
+            report = scene_rules.apply(self.MANIFEST, matched, analysis, Path(tmp), locate=locate)
+        locate.assert_not_called()
+        row = report["rows"][0]
+        self.assertEqual((row["status"], row["reason"]),
+                         ("visual_missing", scene_rules.SCENE_NO_FOOTAGE))
+        segments = matched["manifest"]["segments"]
+        self.assertEqual([bool(s.get("visual_missing")) for s in segments],
+                         [False, True, True, False])
+
+    def test_selling_point_without_footage_keeps_shots_in_formal(self):
+        _chip, matched, analysis = self._selling_point_script([])
+        with tempfile.TemporaryDirectory() as tmp:
+            report = scene_rules.apply({**self.MANIFEST, "delivery_mode": "formal"}, matched,
+                                       analysis, Path(tmp), locate=mock.Mock())
+        self.assertEqual(report["rows"][0]["status"], "unmet")
+        self.assertFalse(any(s.get("visual_missing") for s in matched["manifest"]["segments"]))
+
+    def test_experiment_without_wipe_plays_pour_and_absorb(self):
+        pour_absorb = {**SHOT, "shot_id": "pa", "video": "D:/m/pa.mp4", "source_start": 0.0,
+                       "source_end": 48.5, "material_duration_us": int(48.5 * US),
+                       "description": "木托盘上卫生巾平铺并倒入蓝色液体显示吸收"}
+        full = {**SHOT, "shot_id": "full", "video": "D:/m/full.mp4", "duration": 5.0,
+                "description": "往卫生巾上倒蓝色液体，再用纸巾按压"}
+        partial = {"ok": True, "complete": False,
+                   "phases": {"pour": [1.2, 5.8], "absorb": [5.8, 43.5]}}
+
+        def run(pool, full_ok):
+            _chip, matched, analysis = self._selling_point_script(pool)
+
+            def locate(shot, _scene, _dir):
+                if shot["shot_id"] == "full" and full_ok:
+                    return {"ok": True, "complete": True, "phases": PHASES}
+                return partial
+            with tempfile.TemporaryDirectory() as tmp:
+                report = scene_rules.apply(self.MANIFEST, matched, analysis, Path(tmp),
+                                           locate=mock.Mock(side_effect=locate))
+            return report["rows"][0], matched["manifest"]["segments"]
+
+        row, segments = run([pour_absorb], False)
+        self.assertEqual((row["status"], row["shot_id"]), ("partial", "pa"))
+        self.assertEqual(row["reason"], "SCENE_PHASE_MISSING:wipe")
+        self.assertIn("纸巾擦拭", row["operator_note"])
+        phases = []
+        for seg in segments[1:3]:
+            self.assertEqual(seg["scene_rule"]["status"], "partial")
+            phases += ([p["detail"]["scene_phase"] for p in seg["span_parts"]] if seg.get("multi_shot")
+                       else [seg["evidence_intervals"][0]["scene_phase"]])
+        self.assertEqual(phases[0], "pour")
+        self.assertIn("absorb", phases)
+        self.assertNotIn("wipe", phases)
+        row, _segments = run([pour_absorb, full], True)
+        self.assertEqual((row["status"], row["shot_id"]), ("applied", "full"))
+
+    def test_long_absorb_fast_forwards_up_to_twenty_times(self):
+        shot = {**SHOT, "source_start": 0.0, "source_end": 48.5, "material_duration_us": int(48.5 * US)}
+        plan = scene_rules.plan_split(shot, {"pour": [1.2, 5.8], "absorb": [5.8, 43.5]},
+                                      SplitSpeedTests.SCENE, audio_us=7 * US, manifest=MANIFEST)
+        self.assertTrue(plan["ok"], plan)
+        self.assertEqual(plan["missing_phases"], ["wipe"])
+        absorb = next(p for p in plan["parts"] if p["phase"] == "absorb")
+        self.assertGreater(absorb["speed"], 6.0)
+        self.assertLessEqual(absorb["segment_us"], 3 * US + 33_334)
+        self.assertEqual(sum(p["segment_us"] for p in plan["parts"]), 7 * US + 80_000)
+
+    def test_absorb_ending_at_material_end_never_overruns(self):
+        shot = {**SHOT, "source_start": 0.0, "source_end": 43.537, "material_duration_us": 43_537_000}
+        phases = {"pour": [1.197, 5.763], "absorb": [5.767, 43.537]}
+        for audio_us in range(5_000_000, 8_000_000, 37_000):
+            plan = scene_rules.plan_split(shot, phases, SplitSpeedTests.SCENE, audio_us=audio_us,
+                                          manifest=MANIFEST)
+            self.assertTrue(plan["ok"], (audio_us, plan))
+            parts = plan["parts"]
+            self.assertLessEqual(parts[-1]["source_end_us"], 43_537_000)
+            for a, b in zip(parts, parts[1:]):
+                self.assertEqual(a["source_end_us"], b["source_start_us"])
+            for p in parts:
+                material = p["source_end_us"] - p["source_start_us"]
+                self.assertLessEqual(abs(material / p["speed"] - p["segment_us"]), 33_334)
+
+    def test_dry_result_sentence_follows_but_never_starts_a_group(self):
+        rules = rulepack.load("weipin")
+        seg = {"video": "D:/m/a.mp4", "temporary_shot_id": "s1"}
+        texts = ["穿着干爽透气", "吸收力老强了", "瞬间吸收不带反渗的", "就特别的干爽", "趁划算多囤"]
+        groups = scene_rules._split_groups([dict(seg, text=t) for t in texts], rules, {"s1": SHOT})
+        self.assertEqual([g["positions"] for g in groups], [[1, 2, 3]])
 
     def test_replayed_interval_is_still_a_duplicate(self):
         segments = self._planned()
@@ -663,6 +983,11 @@ class PostDraftQcMappingTests(unittest.TestCase):
         unverified = {**unmet, "scene_rule": {**unmet["scene_rule"], "reason": "SCENE_PHASE_UNVERIFIED"}}
         data, _ = self._run([unverified], ["A"])
         self.assertEqual(data["status"], "UNCERTIFIED")
+        partial = {**unmet, "scene_rule": {**unmet["scene_rule"], "status": "partial",
+                                           "reason": "SCENE_PHASE_MISSING:wipe"}}
+        data, _ = self._run([partial], ["A"])
+        self.assertEqual(data["status"], "UNCERTIFIED")
+        self.assertIn("SCENE_RULE_UNMET:S01:absorb_test:SCENE_PHASE_MISSING:wipe", data["warnings"])
 
 
 if __name__ == "__main__":

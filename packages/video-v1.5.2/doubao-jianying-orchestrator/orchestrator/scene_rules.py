@@ -11,7 +11,9 @@
 * ``require_visual``（面层）：口播提到面层时，镜头必须看得到面层。
 
 选中的镜头满足不了，就按推荐顺序换候选；都不行时，动作确实放不进这句话的在预览稿留黑屏
-（SCENE_ACTION_TOO_LONG），正式稿保留原镜头并记录；相位标不出来的保留原镜头并记录。
+（SCENE_ACTION_TOO_LONG），素材池里根本没有该场景画面的（SCENE_NO_FOOTAGE）同样留黑；正式稿保留
+原镜头并记录；相位标不出来的保留原镜头并记录。吸水实验只缺纸巾擦拭时演「倒水 → 吸收」，
+状态记 ``partial``（SCENE_PHASE_MISSING），提示补拍。
 所有处理结果写进 ``scene_rules_report.json``。
 """
 from __future__ import annotations
@@ -29,6 +31,8 @@ SCENE_PHASE_UNVERIFIED = "SCENE_PHASE_UNVERIFIED"
 SCENE_VISUAL_MISSING = "SCENE_VISUAL_MISSING"
 SCENE_SINGLE_SHOT_INFEASIBLE = "SCENE_SINGLE_SHOT_INFEASIBLE"
 SCENE_SENTENCE_TOO_LONG = "SCENE_SENTENCE_LONGER_THAN_ACTION"
+SCENE_NO_FOOTAGE = "SCENE_NO_FOOTAGE"
+SCENE_PHASE_MISSING = "SCENE_PHASE_MISSING"
 _TOO_LONG = {timing_contract.REASON_EVIDENCE_SPAN_TOO_LONG, SCENE_ACTION_TOO_LONG}
 MIN_PART_US = 100_000
 
@@ -99,6 +103,9 @@ def plan_split(shot: dict[str, Any], phases: dict[str, list[float]], scene: dict
     时间线总长 = 配音 + 尾留白。默认倒水、擦拭 1.0 倍，吸收段快进到不超过
     ``absorb_max_output_s``；总长超了先提吸收段倍速，再把倒水、擦拭一起提速（≤1.6）；
     总长不够先放慢吸收段（不低于 1.0 倍、输出不超过上限），再向擦拭之后、倒水之前延伸素材。
+
+    擦拭在 ``optional_phases`` 里且素材没拍到时，只演「倒水 → 吸收」；时长不够就接吸收完的
+    结果画面（``result`` 段），返回 ``missing_phases`` 供报告提示补拍。
     """
     speed = scene.get("speed") or {}
     pour_rng = _range(speed.get("pour"), (1.0, 1.6))
@@ -108,16 +115,23 @@ def plan_split(shot: dict[str, Any], phases: dict[str, list[float]], scene: dict
     fps = _fps(manifest)
     frame = timing_contract.frame_us(fps)
     names = [p["name"] for p in scene.get("phases") or []]
-    if any(n not in phases for n in names) or len(names) != 3:
+    optional = set(scene.get("optional_phases") or [])
+    if len(names) != 3 or any(n not in phases for n in names if n not in optional):
         return {"ok": False, "reason": SCENE_ACTION_INCOMPLETE}
+    missing = [n for n in names if n not in phases]
+    has_wipe = names[2] in phases
+    tail_name = names[2] if has_wipe else "result"
     scene_in, scene_out = _us(shot.get("source_start")), _us(shot.get("source_end"))
     scene_out = min(scene_out, _material_us(shot))
     b0 = max(scene_in, _us(phases[names[0]][0]))
     b1 = max(b0, _us(phases[names[0]][1]))
-    b2 = max(b1, _us(phases[names[2]][0]))
-    b3 = min(scene_out, max(b2, _us(phases[names[2]][1])))
+    if has_wipe:
+        b2 = max(b1, _us(phases[names[2]][0]))
+        b3 = min(scene_out, max(b2, _us(phases[names[2]][1])))
+    else:
+        b2 = b3 = min(scene_out, max(b1, _us(phases[names[1]][1])))
     pour_m, absorb_m, wipe_m = b1 - b0, b2 - b1, b3 - b2
-    if min(pour_m, wipe_m) < MIN_PART_US:
+    if pour_m < MIN_PART_US or (has_wipe and wipe_m < MIN_PART_US):
         return {"ok": False, "reason": SCENE_ACTION_INCOMPLETE,
                 "detail": {"pour_us": pour_m, "wipe_us": wipe_m}}
     timeline = int(audio_us) + _tail_pad_us(manifest)
@@ -163,7 +177,8 @@ def plan_split(shot: dict[str, Any], phases: dict[str, list[float]], scene: dict
     parts_spec = [(names[0], pour_m, s_pour, pour_rng)]
     if absorb_m:
         parts_spec.append((names[1], absorb_m, s_absorb, (1.0, absorb_hi)))
-    parts_spec.append((names[2], wipe_m, s_wipe, wipe_rng))
+    if wipe_m > 0:
+        parts_spec.append((tail_name, wipe_m, s_wipe, wipe_rng))
     snapped = [timing_contract.frame_speed(s, rng[0], rng[1], fps=fps)
                for _n, _m, s, rng in parts_spec]
     outs = [int(round(m / s)) for (_n, m, _s, _r), s in zip(parts_spec, snapped)]
@@ -178,11 +193,27 @@ def plan_split(shot: dict[str, Any], phases: dict[str, list[float]], scene: dict
         parts.append({"phase": name, "speed": s, "speed_range": [rng[0], rng[1]],
                       "source_start_us": start, "source_end_us": end, "segment_us": out})
         cursor = end
+    # 倍速吸附到整帧后素材用量会有出入（20 倍时最多差半帧 × 20），动作收在素材末尾时会越界：
+    # 先整体前移（倒水前还有余量），不够再把最后一段收短、按原输出时长重算倍速。
+    over = cursor - min(scene_out, _material_us(shot))
+    if over > 0:
+        shift = min(over, max(0, parts[0]["source_start_us"] - scene_in))
+        for part in parts:
+            part["source_start_us"] -= shift
+            part["source_end_us"] -= shift
+        cursor, over = cursor - shift, over - shift
+    if over > 0:
+        last = parts[-1]
+        span = last["source_end_us"] - over - last["source_start_us"]
+        if span > 0 and span / last["segment_us"] >= last["speed_range"][0] - 1e-9:
+            last["source_end_us"] -= over
+            last["speed"] = span / last["segment_us"]
+            cursor -= over
     if cursor > scene_out + frame or cursor > _material_us(shot):
         return {"ok": False, "reason": SCENE_ACTION_TOO_LONG,
                 "detail": {"end_us": cursor, "scene_out_us": scene_out}}
     return {"ok": True, "parts": parts, "timeline_us": timeline,
-            "action_us": b3 - b0}
+            "action_us": b3 - b0, "missing_phases": missing}
 
 
 def slice_plan(plan: dict[str, Any], member_us: list[int], *, fps: float,
@@ -348,12 +379,67 @@ def _candidates(seg: dict[str, Any], rec: dict[str, Any], shots_by_id: dict[str,
     return out
 
 
+def _pool_fill(seg: dict[str, Any], rules: dict[str, Any], shots_by_id: dict[str, dict],
+               used: set[str], segments: list, limit: int = 8) -> list[tuple[dict[str, Any], bool]]:
+    """带动作的镜头放不完整、候选也用完时，从素材池找没用过、不带待完成动作的镜头。
+
+    补位句（``degraded``，本来就没有直证镜头）任何镜头都可以；有明确意思的句子只取画面和
+    文案对得上的（报品牌的句子算产品展示镜头对得上）。跳过已经进成片的镜头和素材文件；开了相似画面去重时，同机位同动作的排后面，
+    产品展示优先。
+    """
+    from . import demo_actions
+    from .shot_analyzer import _candidate_score, _look_key
+    text = str(seg.get("text") or "")
+    claim = str(seg.get("claim_text") or text)
+    related_only = "degraded" not in str(seg.get("selection_mode") or "")
+    intents = set(demo_actions.infer_intents(text, claim))
+    wants_quantity = bool({"cta", "quantity"} & intents)
+    taken = [shots_by_id.get(str(s.get("temporary_shot_id") or "")) or {}
+             for s in segments if isinstance(s, dict)]
+    videos = {str(s.get("video") or "") for s in segments if isinstance(s, dict) and s.get("video")}
+    looks = {_look_key(s) for s in taken if _look_key(s)}
+    rows = []
+    for shot_id, shot in shots_by_id.items():
+        if (shot_id in used or str(shot.get("video") or "") in videos
+                or shot.get("status") != "ready_for_matching" or shot.get("action_complete") is not True
+                or demo_actions.is_empty_shot(shot) or rulepack.scene_for(rules, text, shot) is not None):
+            continue
+        matched = len(_candidate_score(claim, shot)[1])
+        if wants_quantity and demo_actions.cta_quantity_eligible(shot, text)[0]:
+            matched += 1
+        if "brand" in intents and demo_actions.visual_role(shot) == "product_display":
+            matched += 1
+        if related_only and not matched:
+            continue
+        similar = bool(rules.get("avoid_similar_shots")) and _look_key(shot) in looks
+        rows.append((similar, -matched, demo_actions.visual_role(shot) != "product_display",
+                     shot_id, shot))
+    rows.sort(key=lambda row: row[:4])
+    return [(row[4], True) for row in rows[:limit]]
+
+
 def _plain_swap(seg: dict[str, Any], shot: dict[str, Any], *, manifest: dict[str, Any],
-                audio_us: int) -> dict[str, Any]:
-    """换成候选镜头，窗口按常规选镜口径求解（不加场景倍速和保护区覆盖）。"""
-    from .shot_analyzer import candidate_window
-    solution = candidate_window(shot, audio_duration_us=audio_us, manifest=manifest,
-                                time_sensitive=bool(seg.get("time_sensitive")))
+                audio_us: int, fill: bool = False) -> dict[str, Any]:
+    """换成候选镜头，窗口按常规选镜口径求解（不加场景倍速和保护区覆盖）。
+
+    ``fill``：补位镜不当卖点证据，跟预览补镜一样只罩住审核帧，罩不住再按画面长度摆。
+    """
+    from .shot_analyzer import candidate_evidence_interval, candidate_window
+    probes: list[tuple[dict[str, Any], Optional[dict[str, Any]]]] = [(shot, None)]
+    if fill:
+        _start, _end, frame_ts = candidate_evidence_interval(shot)
+        focus = {"start": max(_number(shot.get("source_start")), frame_ts - 0.034),
+                 "end": min(_number(shot.get("source_end"), frame_ts), frame_ts + 0.034),
+                 "frame_time": frame_ts}
+        probes = [({**shot, "evidence_intervals": [focus]}, focus), (shot, None)]
+    solution, focused = None, None
+    for index, (probe, focus) in enumerate(probes):
+        solution = candidate_window(probe, audio_duration_us=audio_us, manifest=manifest,
+                                    time_sensitive=bool(seg.get("time_sensitive")),
+                                    **({"cover_evidence": index == 0} if fill else {}))
+        if solution.ok:
+            focused = focus
+            break
     if not solution.ok:
         return {"ok": False, "reason": solution.reason}
     lo, hi = timing_contract.speed_range_for_role(
@@ -364,12 +450,35 @@ def _plain_swap(seg: dict[str, Any], shot: dict[str, Any], *, manifest: dict[str
     for key in ("guard_override", "speed_range_override"):
         update.pop(key, None)
     update["head_waste"], update["tail_waste"] = shot.get("head_waste"), shot.get("tail_waste")
+    if focused is not None:
+        update["evidence_intervals"][0].update(
+            {"start": round(focused["start"], 3), "end": round(focused["end"], 3)})
+    if fill:
+        update.update({"degraded_no_match": True, "action_complete": True})
     return {"ok": True, "update": update}
+
+
+def _settled_plan(seg: dict[str, Any], shot: dict[str, Any], action_end: float, *, audio_us: int,
+                  manifest: dict[str, Any], speed_range: tuple[float, float],
+                  swapped: bool) -> Optional[dict[str, Any]]:
+    """整段动作塞不进这句时，只用动作做完、产品已经定住之后的画面，不切在动作中途。"""
+    start = max(_number(shot.get("source_start")), action_end)
+    if _number(shot.get("source_end")) - start <= 0:
+        return None
+    solution, guards = solve_single({**shot, "source_start": start}, audio_us=audio_us,
+                                    manifest=manifest, speed_range=speed_range)
+    if not solution.ok:
+        return None
+    window = (solution.source_start_us / US, solution.source_end_us / US)
+    update = _single_update(seg, shot, solution, guards, speed_range=speed_range,
+                            evidence=window, swapped=swapped)
+    update["evidence_intervals"][0]["scene_phase"] = "settled"
+    return {"ok": True, "update": update, "mode": "settled"}
 
 
 def _plan_for(scene: dict[str, Any], seg: dict[str, Any], shot: dict[str, Any], *,
               swapped: bool, manifest: dict[str, Any], report_dir: Path,
-              locate: Callable[..., dict]) -> dict[str, Any]:
+              locate: Callable[..., dict], settled_ok: bool = False) -> dict[str, Any]:
     kind = scene.get("kind")
     audio_us = int(seg.get("audio_duration_us") or 0)
     if audio_us <= 0:
@@ -401,9 +510,17 @@ def _plan_for(scene: dict[str, Any], seg: dict[str, Any], shot: dict[str, Any], 
     if not located.get("ok"):
         return {"ok": False, "reason": SCENE_PHASE_UNVERIFIED, "soft": True,
                 "detail": {"phase": located.get("reason")}}
-    if not located.get("complete"):
-        return {"ok": False, "reason": SCENE_ACTION_INCOMPLETE, "phases": located.get("phases")}
     phases = located.get("phases") or {}
+    if not located.get("complete"):
+        name = (scene.get("phases") or [{}])[0].get("name")
+        if settled_ok and kind == "full_window" and phases.get(name):
+            # 动作开头没拍全，但做完之后定住的画面还在。
+            settled = _settled_plan(seg, shot, phases[name][1], audio_us=audio_us,
+                                    manifest=manifest, speed_range=_range(speed.get("range"), (1.0, 1.6)),
+                                    swapped=swapped)
+            if settled is not None:
+                return {**settled, "phases": phases}
+        return {"ok": False, "reason": SCENE_ACTION_INCOMPLETE, "phases": phases}
     if kind == "full_window":
         name = (scene.get("phases") or [{}])[0].get("name")
         span = phases.get(name)
@@ -418,6 +535,11 @@ def _plan_for(scene: dict[str, Any], seg: dict[str, Any], shot: dict[str, Any], 
         if not solution.ok:
             reason = (SCENE_ACTION_TOO_LONG if solution.reason in _TOO_LONG
                       else solution.reason)
+            if reason == SCENE_ACTION_TOO_LONG and settled_ok:
+                settled = _settled_plan(seg, shot, span[1], audio_us=audio_us, manifest=manifest,
+                                        speed_range=rng, swapped=swapped)
+                if settled is not None:
+                    return {**settled, "phases": phases}
             return {"ok": False, "reason": reason, "detail": solution.detail, "phases": phases}
         return {"ok": True, "phases": phases, "update": _single_update(
             seg, shot, solution, guards, speed_range=rng, evidence=evidence, swapped=swapped)}
@@ -429,12 +551,15 @@ def _split_groups(segments: list, rules: dict[str, Any],
                   shots_by_id: dict[str, dict]) -> list[dict[str, Any]]:
     """连续几句都在讲吸水时，它们合起来演一遍完整实验，而不是每句各演一遍。
 
-    组内至少一句的选中镜头本身就是实验画面才处理；有画面缺失的句子把组切断。
+    文案提到吸水类卖点（「吸收更快」「不反渗」）就要用实验画面，不管 AI 给这句挑的是什么；
+    ``trigger`` 记录组内是否已有选中镜头本身就是实验画面。紧跟在组后、讲吸完效果的句子
+    （``follow_keywords``，如「就特别的干爽」）续进组里，它们自己不开组。有画面缺失的句子把组切断。
     """
     groups: list[dict[str, Any]] = []
     for scene in rules.get("scenes") or []:
         if scene.get("kind") != "split_speed":
             continue
+        follow = scene.get("follow_keywords") or []
         run: list[tuple[int, bool]] = []
         for position, seg in enumerate([*segments, None]):
             usable = isinstance(seg, dict) and not seg.get("visual_missing") and seg.get("video")
@@ -442,31 +567,54 @@ def _split_groups(segments: list, rules: dict[str, Any],
                 shot = shots_by_id.get(str(seg.get("temporary_shot_id") or "")) or {}
                 run.append((position, rulepack.scene_for(rules, str(seg.get("text") or ""), shot) is scene))
                 continue
-            if any(hit for _p, hit in run):
-                groups.append({"scene": scene, "positions": [p for p, _hit in run]})
+            if usable and run and rulepack.text_hits_scene({"text_keywords": follow}, seg.get("text")):
+                run.append((position, False))
+                continue
+            if run:
+                groups.append({"scene": scene, "positions": [p for p, _hit in run],
+                               "trigger": "shot" if any(hit for _p, hit in run) else "text"})
             run = []
     return groups
 
 
-def _group_candidates(members: list[dict[str, Any]], positions: list[int], recs: dict[int, dict],
-                      shots_by_id: dict[str, dict], used: set[str]) -> list[dict[str, Any]]:
+def _group_candidates(scene: dict[str, Any], members: list[dict[str, Any]], positions: list[int],
+                      recs: dict[int, dict], shots_by_id: dict[str, dict],
+                      used: set[str]) -> list[tuple[dict[str, Any], str]]:
+    """``[(镜头, 来源)]``：组内各句选中的 → 各句 AI 前三 → 素材池里画面像实验的。
+
+    AI 给吸水句挑的是「吸收效果」或卖点画面，完整拍了倒水→吸收→擦拭的素材常不在前三，
+    所以再按场景画面关键词从整池补几条（`pool_search_limit`，默认 8，按命中词数、时长排）。
+    画面描述里没有任何实验关键词的镜头不送去相位打点。
+    """
     own = {str(m.get("temporary_shot_id") or "") for m in members}
     seen: set[str] = set()
-    out: list[dict[str, Any]] = []
+    out: list[tuple[dict[str, Any], str]] = []
     for member in members:
         shot = shots_by_id.get(str(member.get("temporary_shot_id") or ""))
-        if shot and shot["shot_id"] not in seen:
+        if shot and shot["shot_id"] not in seen and rulepack.shot_has_visual(scene, shot):
             seen.add(shot["shot_id"])
-            out.append(shot)
+            out.append((shot, "selected"))
     for position in positions:
         for row in (recs.get(position + 1) or {}).get("top3") or []:
             shot_id = str(row.get("shot_id") or "")
             shot = shots_by_id.get(shot_id)
             if (not shot or shot_id in seen or (shot_id in used and shot_id not in own)
-                    or shot.get("status") != "ready_for_matching" or not row.get("eligible", True)):
+                    or shot.get("status") != "ready_for_matching" or not row.get("eligible", True)
+                    or not rulepack.shot_has_visual(scene, shot)):
                 continue
             seen.add(shot_id)
-            out.append(shot)
+            out.append((shot, "top3"))
+    pool = []
+    for shot_id, shot in shots_by_id.items():
+        if (shot_id in seen or (shot_id in used and shot_id not in own)
+                or shot.get("status") != "ready_for_matching"):
+            continue
+        hits = rulepack.shot_keyword_hits(scene, shot)
+        if hits:
+            pool.append((-hits, -_number(shot.get("duration")), shot_id, shot))
+    pool.sort(key=lambda row: row[:3])
+    limit = max(0, int(scene.get("pool_search_limit", 8) or 0))
+    out.extend((row[3], "pool_search") for row in pool[:limit])
     return out
 
 
@@ -480,9 +628,11 @@ def _plan_group(scene: dict[str, Any], members: list[dict[str, Any]], shot: dict
     if not located.get("ok"):
         return {"ok": False, "reason": SCENE_PHASE_UNVERIFIED, "soft": True,
                 "detail": {"phase": located.get("reason")}}
-    if not located.get("complete"):
-        return {"ok": False, "reason": SCENE_ACTION_INCOMPLETE, "phases": located.get("phases")}
     phases = located.get("phases") or {}
+    optional = set(scene.get("optional_phases") or [])
+    required = [p.get("name") for p in scene.get("phases") or [] if p.get("name") not in optional]
+    if not located.get("complete") and any(name not in phases for name in required):
+        return {"ok": False, "reason": SCENE_ACTION_INCOMPLETE, "phases": phases}
     pad = _tail_pad_us(manifest)
     plan = plan_split(shot, phases, scene, audio_us=sum(audio) + pad * (len(audio) - 1),
                       manifest=manifest)
@@ -512,6 +662,7 @@ def _plan_group(scene: dict[str, Any], members: list[dict[str, Any]], shot: dict
         update["evidence_intervals"][0]["scene_phase"] = chunk["phase"]
         updates.append(update)
     return {"ok": True, "updates": updates, "phases": phases,
+            "missing_phases": plan.get("missing_phases") or [],
             "plan": [{"phase": p["phase"], "speed": p["speed"],
                       "segment_s": round(p["segment_us"] / US, 3)} for p in plan["parts"]]}
 
@@ -523,44 +674,57 @@ def _apply_group(group: dict[str, Any], segments: list, *, recs: dict[int, dict]
     members = [segments[p] for p in positions]
     indices = [p + 1 for p in positions]
     attempts, applied = [], None
-    for shot in _group_candidates(members, positions, recs, shots_by_id, used):
+    for shot, origin in _group_candidates(scene, members, positions, recs, shots_by_id, used):
         try:
             result = _plan_group(scene, members, shot, manifest=manifest, report_dir=report_dir,
                                  locate=locate)
         except Exception as exc:  # noqa: BLE001 —— 规则失败不拦整稿，如实记录
             result = {"ok": False, "reason": f"SCENE_RULE_ERROR:{type(exc).__name__}",
                       "detail": {"error": str(exc)[:300]}}
-        attempts.append({"shot_id": shot.get("shot_id"),
+        attempts.append({"shot_id": shot.get("shot_id"), "source": origin,
                          "swapped": shot.get("shot_id") != members[0].get("temporary_shot_id"),
                          "ok": bool(result.get("ok")), "reason": result.get("reason", ""),
-                         "detail": result.get("detail"), "phases": result.get("phases")})
-        if result.get("ok"):
+                         "detail": result.get("detail"), "phases": result.get("phases"),
+                         "missing_phases": result.get("missing_phases") or None})
+        if result.get("ok") and not applied:
+            applied = (shot, result)
+        if result.get("ok") and not result.get("missing_phases"):
             applied = (shot, result)
             break
     row = {"index": indices[0], "indices": indices,
            "text": " / ".join(str(m.get("text") or "") for m in members),
            "scene": scene.get("id"), "scene_label": scene.get("label"),
+           "trigger": group.get("trigger", "shot"),
            "requirement": scene.get("requirement"), "attempts": attempts}
     if applied:
         shot, result = applied
+        missing = result.get("missing_phases") or []
+        labels = {p.get("name"): p.get("label") for p in scene.get("phases") or []}
+        status = "partial" if missing else "applied"
+        extra = ({"reason": f"{SCENE_PHASE_MISSING}:{','.join(missing)}",
+                  "operator_note": f"素材里没有{'、'.join(labels.get(n) or n for n in missing)}画面，"
+                                   "只演了前面几段，请补拍后重跑"} if missing else {})
         for order, (position, member, update) in enumerate(zip(positions, members, result["updates"])):
             swapped = str(member.get("temporary_shot_id") or "") != str(shot.get("shot_id"))
             member.update(update)
             member["scene_rule"] = {"id": scene.get("id"), "label": scene.get("label"),
-                                    "status": "applied", "swapped": swapped,
+                                    "status": status, "swapped": swapped,
                                     "shot_id": shot.get("shot_id"), "phases": result.get("phases"),
-                                    "group": indices, "group_order": order}
+                                    "group": indices, "group_order": order, **extra}
             if swapped:
                 member["selection_mode"] = f"{member.get('selection_mode') or 'auto'}+scene_swap"
         used.add(str(shot.get("shot_id")))
-        row.update({"status": "applied", "shot_id": shot.get("shot_id"), "plan": result.get("plan")})
+        row.update({"status": status, "shot_id": shot.get("shot_id"), "plan": result.get("plan"),
+                    **extra})
         return row
     reasons = [a["reason"] for a in attempts]
-    hard_codes = (SCENE_ACTION_TOO_LONG, SCENE_ACTION_INCOMPLETE)
+    hard_codes = (SCENE_ACTION_TOO_LONG, SCENE_ACTION_INCOMPLETE, SCENE_NO_FOOTAGE)
     code = next((r for r in reasons if r in hard_codes),
-                reasons[0] if reasons else SCENE_PHASE_UNVERIFIED)
+                reasons[0] if reasons else SCENE_NO_FOOTAGE)
     if preview and code in hard_codes:
-        message = f"{scene.get('label')}：{scene.get('requirement')}，候选素材都演不完整"
+        message = (f"{scene.get('label')}：素材池里没有{scene.get('label')}画面"
+                   if code == SCENE_NO_FOOTAGE else
+                   f"{scene.get('label')}：{scene.get('requirement')}，候选素材都演不完整")
         for position in positions:
             segments[position] = _visual_missing(segments[position], message, code)
         row.update({"status": "visual_missing", "reason": code})
@@ -612,6 +776,28 @@ def _sync_visual_missing(matched: dict[str, Any], out_manifest: dict[str, Any],
     out_manifest["visual_missing_matches"] = items
 
 
+def _prefetch_phases(segments: list, rules: dict[str, Any], shots_by_id: dict[str, dict],
+                     report_dir: Path, locate: Callable[..., dict]) -> None:
+    """选中镜头里需要相位打点的先并发打一遍，结果进缓存；后面逐句处理时直接命中。"""
+    from concurrent.futures import ThreadPoolExecutor
+    jobs: dict[tuple[str, str], tuple[dict, dict]] = {}
+    for seg in segments:
+        if not isinstance(seg, dict) or seg.get("visual_missing") or not seg.get("video"):
+            continue
+        shot = shots_by_id.get(str(seg.get("temporary_shot_id") or ""))
+        scene = rulepack.scene_for(rules, str(seg.get("text") or ""), shot) if shot else None
+        if scene and scene.get("phases") and scene.get("kind") in ("full_window", "split_speed"):
+            jobs.setdefault((str(shot.get("shot_id")), str(scene.get("id"))), (shot, scene))
+    if len(jobs) < 2:
+        return
+    with ThreadPoolExecutor(max_workers=min(4, len(jobs))) as pool:
+        for future in [pool.submit(locate, shot, scene, report_dir) for shot, scene in jobs.values()]:
+            try:
+                future.result()
+            except Exception:  # noqa: BLE001 —— 预热失败不影响逐句处理
+                pass
+
+
 def apply(manifest: dict[str, Any], matched: dict[str, Any], analysis: dict[str, Any],
           report_dir: Path, *, locate: Optional[Callable[..., dict]] = None) -> dict[str, Any]:
     rules = rulepack.for_manifest(manifest)
@@ -621,7 +807,11 @@ def apply(manifest: dict[str, Any], matched: dict[str, Any], analysis: dict[str,
     segments = (out_manifest or {}).get("segments")
     if not rules.get("scenes") or not isinstance(segments, list):
         return report
-    locate = locate or (lambda shot, scene, rdir: phase_timing.locate(shot, scene, rdir))
+    if locate is None:
+        locate = lambda shot, scene, rdir: phase_timing.locate(shot, scene, rdir)  # noqa: E731
+        prefetch = True
+    else:
+        prefetch = False
     preview = str(manifest.get("delivery_mode") or "").lower() in ("preview", "preview_only", "预览")
     shots_by_id = {str(s.get("shot_id")): s for s in analysis.get("shots") or []
                    if isinstance(s, dict) and s.get("shot_id")}
@@ -631,6 +821,8 @@ def apply(manifest: dict[str, Any], matched: dict[str, Any], analysis: dict[str,
     for seg in segments:
         if isinstance(seg, dict) and seg.get("temporary_shot_id"):
             used.add(str(seg["temporary_shot_id"]))
+    if prefetch:
+        _prefetch_phases(segments, rules, shots_by_id, report_dir, locate)
     handled: set[int] = set()
     for group in _split_groups(segments, rules, shots_by_id):
         handled.update(group["positions"])
@@ -648,18 +840,47 @@ def apply(manifest: dict[str, Any], matched: dict[str, Any], analysis: dict[str,
             continue
         attempts = []
         applied = None
-        for candidate, swapped in _candidates(seg, recs.get(index, {}), shots_by_id, used):
-            try:
-                result = _plan_for(scene, seg, candidate, swapped=swapped, manifest=manifest,
-                                   report_dir=report_dir, locate=locate)
-            except Exception as exc:  # noqa: BLE001 —— 单句规则失败不拦整稿，如实记录
-                result = {"ok": False, "reason": f"SCENE_RULE_ERROR:{type(exc).__name__}",
-                          "detail": {"error": str(exc)[:300]}}
-            attempts.append({"shot_id": candidate.get("shot_id"), "swapped": swapped,
-                             "ok": bool(result.get("ok")), "reason": result.get("reason", ""),
-                             "detail": result.get("detail"), "phases": result.get("phases")})
-            if result.get("ok"):
-                applied = (candidate, swapped, result)
+        candidates = _candidates(seg, recs.get(index, {}), shots_by_id, used)
+        # 先在所有候选里找能演完整动作的；都不行再退到「动作做完后定住的画面」；
+        # 最后换素材池里没用过的静态镜头（只由画面触发的规则才换，文案要求的场景不能换走）。
+        # 开了相似画面去重时，和成片里已有画面同机位同动作的换镜候选挪到素材池之后再试。
+        repeats: list[tuple[dict[str, Any], bool]] = []
+        if rules.get("avoid_similar_shots"):
+            from .shot_analyzer import _look_key
+            looks = {_look_key(shots_by_id.get(str(s.get("temporary_shot_id") or "")) or {})
+                     for i, s in enumerate(segments) if i != position and isinstance(s, dict)} - {""}
+            repeats = [c for c in candidates if c[1] and _look_key(c[0]) in looks]
+            candidates = [c for c in candidates if c not in repeats]
+        stages = [(False, candidates, "")]
+        if scene.get("settled_fallback"):
+            stages.append((True, candidates, ""))
+        if not scene.get("text_keywords") and scene.get("settled_fallback"):
+            stages.append((False, _pool_fill(seg, rules, shots_by_id, used, segments), "pool_fill"))
+        if repeats:
+            stages.append((False, repeats, ""))
+            if scene.get("settled_fallback"):
+                stages.append((True, repeats, ""))
+        for settled_ok, stage, origin in stages:
+            for candidate, swapped in stage:
+                try:
+                    if origin == "pool_fill":
+                        result = _plain_swap(seg, candidate, manifest=manifest, fill=True,
+                                             audio_us=int(seg.get("audio_duration_us") or 0))
+                    else:
+                        result = _plan_for(scene, seg, candidate, swapped=swapped, manifest=manifest,
+                                           report_dir=report_dir, locate=locate, settled_ok=settled_ok)
+                except Exception as exc:  # noqa: BLE001 —— 单句规则失败不拦整稿，如实记录
+                    result = {"ok": False, "reason": f"SCENE_RULE_ERROR:{type(exc).__name__}",
+                              "detail": {"error": str(exc)[:300]}}
+                attempts.append({"shot_id": candidate.get("shot_id"), "swapped": swapped,
+                                 "ok": bool(result.get("ok")), "reason": result.get("reason", ""),
+                                 "detail": result.get("detail"), "phases": result.get("phases"),
+                                 **({"pass": "settled"} if settled_ok else {}),
+                                 **({"source": origin} if origin else {})})
+                if result.get("ok"):
+                    applied = (candidate, swapped, result)
+                    break
+            if applied:
                 break
         row = {"index": index, "text": seg.get("text"), "scene": scene.get("id"),
                "scene_label": scene.get("label"), "requirement": scene.get("requirement"),
@@ -670,12 +891,13 @@ def apply(manifest: dict[str, Any], matched: dict[str, Any], analysis: dict[str,
             seg["scene_rule"] = {"id": scene.get("id"), "label": scene.get("label"),
                                  "status": "applied", "swapped": swapped,
                                  "shot_id": candidate.get("shot_id"),
-                                 "phases": result.get("phases")}
+                                 "phases": result.get("phases"),
+                                 "mode": result.get("mode", "full")}
             if swapped:
                 used.add(str(candidate.get("shot_id")))
                 seg["selection_mode"] = f"{seg.get('selection_mode') or 'auto'}+scene_swap"
             row.update({"status": "applied", "shot_id": candidate.get("shot_id"),
-                        "swapped": swapped})
+                        "swapped": swapped, "mode": result.get("mode", "full")})
         else:
             reasons = [a["reason"] for a in attempts]
             hard = any(r in (SCENE_ACTION_TOO_LONG, SCENE_ACTION_INCOMPLETE,
@@ -695,7 +917,8 @@ def apply(manifest: dict[str, Any], matched: dict[str, Any], analysis: dict[str,
         report["rows"].append(row)
     _sync_visual_missing(matched, out_manifest, segments)
     report["applied"] = sum(1 for r in report["rows"] if r.get("status") == "applied")
-    report["unmet"] = sum(1 for r in report["rows"] if r.get("status") != "applied")
+    report["partial"] = sum(1 for r in report["rows"] if r.get("status") == "partial")
+    report["unmet"] = sum(1 for r in report["rows"] if r.get("status") not in ("applied", "partial"))
     Path(report_dir).mkdir(parents=True, exist_ok=True)
     (Path(report_dir) / "scene_rules_report.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")

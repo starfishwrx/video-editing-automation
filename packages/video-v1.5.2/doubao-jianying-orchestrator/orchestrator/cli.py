@@ -411,7 +411,7 @@ def _temporary_match(manifest: dict, input_path: Path, report_dir: Path,
     if matched.get("ok"):
         scene_report = scene_rules.apply(manifest, matched, analysis, report_dir)
         matched["scene_rules"] = {k: scene_report.get(k) for k in
-                                  ("category", "rulepacks", "versions", "applied", "unmet")}
+                                  ("category", "rulepacks", "versions", "applied", "partial", "unmet")}
     (report_dir / "shot_match_report.json").write_text(
         json.dumps(matched, ensure_ascii=False, indent=2), encoding="utf-8")
     # DEMO_ACTIONS V0.2 §7（用户定案）：素材缺口单独落盘，交付前必须可见 ——

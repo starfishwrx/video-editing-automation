@@ -739,7 +739,8 @@ class OrchestrationEngine:
 
         def experiment_key(raw: dict) -> Optional[tuple]:
             rule = raw.get("scene_rule") or {}
-            if rule.get("status") != "applied" or not rule.get("group") or rule.get("group_order") is None:
+            if (rule.get("status") not in ("applied", "partial") or not rule.get("group")
+                    or rule.get("group_order") is None):
                 return None
             return (str(rule.get("id") or ""), str(rule.get("shot_id") or ""),
                     tuple(int(x) for x in rule["group"]))
@@ -2765,7 +2766,7 @@ class OrchestrationEngine:
         """场景规则没满足（动作演不完整、相位没核实）时保留原镜能出返工稿，但不能算正式认证。"""
         for index, raw in enumerate(getattr(self, "_raw_segments", None) or [], 1):
             rule = raw.get("scene_rule") if isinstance(raw, dict) else None
-            if not isinstance(rule, dict) or rule.get("status") != "unmet":
+            if not isinstance(rule, dict) or rule.get("status") not in ("unmet", "partial"):
                 continue
             marker = (f"SCENE_RULE_UNMET@S{index:02d}: "
                       f"{rule.get('label') or rule.get('id')} {rule.get('reason') or ''}").strip()

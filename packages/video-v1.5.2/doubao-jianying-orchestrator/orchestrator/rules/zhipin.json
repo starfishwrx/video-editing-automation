@@ -1,9 +1,63 @@
 {
   "rulepack": "zhipin",
   "label": "纸品",
-  "version": "1.5.2-1",
+  "version": "1.5.2-2",
+  "source": "2026-10-13 纸品通用规则：动作完整、堆叠完整、相似画面去重",
   "product_keywords": ["湿厕纸", "湿巾", "纸巾", "抽纸", "卷纸", "棉柔巾", "洗脸巾", "厨房纸", "手帕纸", "面巾纸"],
   "voice": {},
-  "match_prompt_rules": [],
-  "scenes": []
+  "avoid_similar_shots": true,
+  "match_prompt_rules": [
+    "画面动作要连贯完整：手拿产品展示的镜头，要从手拿产品入画一直用到展示动作定住，不要截在中途。",
+    "产品堆叠的镜头，要从产品入画一直用到堆成一堆、整堆产品完整展示出来。",
+    "画面相似的展示镜头（同机位、同构图、同动作）整条视频里尽量只用一次，换不同机位或不同动作的镜头，避免同质化。"
+  ],
+  "scenes": [
+    {
+      "id": "stack_product",
+      "label": "产品堆叠",
+      "kind": "full_window",
+      "text_keywords": [],
+      "shot_keywords": ["堆叠", "堆放", "叠放", "码放", "摞", "投入", "投放", "落入", "倒入"],
+      "shot_fields": ["action"],
+      "action_phases": ["perform", "prep"],
+      "phases": [
+        {"name": "action", "label": "堆叠", "describe": "产品从进入画面开始，到堆叠完成、整堆产品完整展示出来为止"}
+      ],
+      "speed": {"range": [1.0, 1.5]},
+      "hold_after_s": 0.5,
+      "settled_fallback": true,
+      "requirement": "从产品入画到堆成一堆完整展示完"
+    },
+    {
+      "id": "show_product",
+      "label": "手拿产品展示",
+      "kind": "full_window",
+      "text_keywords": [],
+      "shot_keywords": ["举起", "拿起", "拿取", "捏起", "捏取", "托举", "捧持", "抱持", "手持", "拿出", "取出", "递", "入画", "展示"],
+      "shot_fields": ["action"],
+      "action_phases": ["perform", "prep"],
+      "phases": [
+        {"name": "action", "label": "拿产品展示", "describe": "手拿着产品进入画面（或开始拿起产品）到展示动作定住、产品停稳为止"}
+      ],
+      "speed": {"range": [1.0, 1.5]},
+      "hold_after_s": 0.3,
+      "settled_fallback": true,
+      "requirement": "从手拿产品入画到展示动作定住"
+    },
+    {
+      "id": "usage_action",
+      "label": "完整动作",
+      "kind": "full_window",
+      "text_keywords": [],
+      "shot_keywords": ["抽出", "抽取", "拉伸", "展开", "撕开", "揭开"],
+      "shot_fields": ["action"],
+      "action_phases": ["perform", "prep"],
+      "phases": [
+        {"name": "action", "label": "动作", "describe": "动作从开始到做完为止（例如纸巾从开始抽到整张抽出、从开始拉到拉开定住）"}
+      ],
+      "speed": {"range": [1.0, 1.5]},
+      "settled_fallback": true,
+      "requirement": "动作从开始到做完，不截在中途"
+    }
+  ]
 }
