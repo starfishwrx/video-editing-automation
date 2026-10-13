@@ -42,7 +42,7 @@
     },
     {
       "path": "doubao-jianying-orchestrator/CHANGELOG.md",
-      "sha256": "223db686a729f28d883a0da6261e2111f009e099ee58142a3868b6b6e49cd5a2"
+      "sha256": "a999a20bb457ba426d3697fde3833077bdfe8ad2704d70f4098d58c768857d5b"
     },
     {
       "path": "doubao-jianying-orchestrator/SKILL.md",
@@ -74,7 +74,7 @@
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/cli.py",
-      "sha256": "1782065a22ccb7c2dcd1467fed709134f865cc9252f993ec1c3291ea4e5b8308"
+      "sha256": "099b43f81429f8fe9beeaa29abf3c612e4a399aab86b738e8e403c47bf271267"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/demo_actions.py",
@@ -90,11 +90,11 @@
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/draft_visual_qc.py",
-      "sha256": "e28118c22b4da3cb9fba5941108e3c9d183e566d83d7d383a090e97114e9fa6b"
+      "sha256": "3f26c24f2fe964f84c50893a705d9377976a5387d1c2fb6b0374f8fb7ac2a11f"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/engine.py",
-      "sha256": "6e510909b514a027be280e6080ef76cefa15649eeebecd392d679d7f6d1ae9c2"
+      "sha256": "ea48cf33ee2bc099320f209232b6b6f91efdcbbf529a33f6575f844336064d78"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/feedback_policy.py",
@@ -174,7 +174,7 @@
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/shot_notes.py",
-      "sha256": "32a70f79f401584078de60f296e4e5f3e5647717cf61570498472f5ec56e75e5"
+      "sha256": "7747b34cfad3324f566a221dac037148dfb288554346bb345e09ac2c02ee5277"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/stability.py",
@@ -190,7 +190,7 @@
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/usage_ledger.py",
-      "sha256": "c01d325e811eb2406d0fb02bcd58a9d4b39e4fcd8f48d28ad06d327655465fff"
+      "sha256": "84188e6ac74642bdbf823eb6a8be7f31582008f4175adcc67cb123a3d8b0501e"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/video_decode.py",
@@ -270,7 +270,7 @@
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_v152_meeting_rules.py",
-      "sha256": "dc076db19e531479052898b0dae2d93975f2c49c5ba7f3d7cbf00722cba0b61a"
+      "sha256": "102d826d4fb701b61cbaf7994e5811807763390a45d5fbf164821cbfc5f84174"
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_video_decode.py",
@@ -647,7 +647,7 @@
   ],
   "release_id": "video-v1.5.2",
   "schema_version": 1,
-  "source_sha256": "855fc7c4b2f8fa5cefeeef5220e87ba4b0d890f3a4a5e10a883798d7f282268a",
+  "source_sha256": "8cce8009df9aded29f9748e02078c54ff2079014475b8c1ff09c0d4bfd878230",
   "tree_hash_algorithm": "video-release-tree-v1",
   "version": "1.5.2",
   "visual_policy_version": "1.4.1"

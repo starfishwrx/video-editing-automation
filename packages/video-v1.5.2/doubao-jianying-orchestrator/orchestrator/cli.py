@@ -95,6 +95,9 @@ def _compact_build_result(result: dict) -> dict:
             payload["认证状态"] = cert or "UNCERTIFIED"
         if reasons:
             payload["未认证原因"] = reasons
+    # 画面备注没对上任何一句时不生效，运营要看得见；全部对上时这个键不出现。
+    if result.get("shot_notes_unmatched"):
+        payload["未绑定画面备注"] = result["shot_notes_unmatched"]
     return payload
 
 
@@ -475,6 +478,8 @@ def cmd_build(args) -> int:
     def finalize(result: dict) -> dict:
         if shot_match_report and shot_match_report.is_file():
             result.setdefault("shot_match_report", str(shot_match_report))
+        if manifest.get("shot_notes_unmatched"):
+            result.setdefault("shot_notes_unmatched", list(manifest["shot_notes_unmatched"]))
         return logger.finalize(result)
 
     # Do the cheap, deterministic checks before TTS or vision work.  A missing

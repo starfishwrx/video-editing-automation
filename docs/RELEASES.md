@@ -17,8 +17,8 @@
 - Scope: the 2026-10-12 editing review and the sanitary-product (卫品) editing instruction. Changes: no default transitions; head/tail waste trimming; category rule packs (global, 卫品, 纸品); 卫品 scene rules with phase timing and split-speed absorb tests; sentence gaps of at most 5 frames plus 1.2x 卫品 narration; per-sentence shot notes; a cross-draft shot-usage ledger. See the orchestrator CHANGELOG.
 - Visual policy stays 1.4.1. The vision analysis cache version moves to `product-visual-v2`, so material pools are analysed again on first use.
 - Source manifest: 159 entries.
-- Tests: 40 package tests and 338 orchestrator tests passed.
-- ZIP SHA-256: `be6973fc2aa09572891e58225366856b65f879e2f4caf3a5940cac8fec645510` (`video-tool-1.5.2-855fc7c4b2f8fa5c.zip`).
+- Tests: 40 package tests and 346 orchestrator tests passed, including scene-rule → engine → duplicate-gate → post-draft QC chain regressions for a shared absorb experiment.
+- ZIP SHA-256: `bc3a458f4efe27b76023cdf0a26a533cb0fe94a2f30c85018b64c827c888f186` (`video-tool-1.5.2-8cce8009df9aded2.zip`).
 - Status: candidate. Local preview builds (纸品 and 卫品, two versions each) were checked; formal delivery still needs human review.
 
 ## 1.5.1

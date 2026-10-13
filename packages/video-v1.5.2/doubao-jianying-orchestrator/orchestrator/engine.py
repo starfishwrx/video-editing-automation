@@ -163,6 +163,8 @@ class Clip:
     # 摊平后每个子段要知道自己「属于哪条原段落、是第几段」，以及**旁白是谁的、
     # 该取哪一段时间片** —— 旁白只有一份，不能每段都从头播一遍。
     parent_index: int = -1     # 所属原段落下标（子段为其父，单镜段为自己）
+    # 在 manifest `segments` 里的原句下标。同一实验镜头可分给连续几句，镜头号不能当句子身份。
+    raw_index: int = -1
     span_index: int = 0        # 在原段落里的第几段（单镜恒为 0）
     span_total: int = 1        # 原段落被拆成几段
     audio_clip_index: int = -1  # 旁白归属：哪条原段落的音频（决定 TTS 缓存归属）
@@ -545,6 +547,7 @@ class OrchestrationEngine:
                     time_sensitive=bool(it.get("time_sensitive")),
                     speed_range_override=it.get("speed_range_override"),
                     guard_override=it.get("guard_override"),
+                    raw_index=i - 1,
                 )
                 clips.append(clip)
         else:  # sequence 模式：每个视频一段，音频/字幕按下标对齐
@@ -557,7 +560,7 @@ class OrchestrationEngine:
                 clips.append(Clip(
                     video=v, source_start=0.0, duration=0.0,
                     text=caps[i] if i < len(caps) else "",
-                    audio=a, audio_mode="file" if a else "tts"))
+                    audio=a, audio_mode="file" if a else "tts", raw_index=i))
                 self._raw_segments.append({"video": v, "text": clips[-1].text})
         self._autofill_script_voiceover(clips)
         return self._expand_spans(clips)
@@ -721,15 +724,39 @@ class OrchestrationEngine:
                     return group
             return "generic"
 
-        raw_segments = list(getattr(self, "_raw_segments", []) or [])
+        fps = float(self._fps() or 30.0)
+
+        def planned_spans(raw: dict) -> list[tuple[float, float]]:
+            parts = raw.get("span_parts") if raw.get("multi_shot") else None
+            if parts:
+                return [(float(p.get("source_start") or 0.0), float(p.get("source_end") or 0.0))
+                        for p in parts if isinstance(p, dict)]
+            solution = raw.get("window_solution") or {}
+            if solution.get("ok"):
+                return [(float(solution.get("source_start") or 0.0),
+                         float(solution.get("source_end") or 0.0))]
+            return []
+
+        def experiment_key(raw: dict) -> Optional[tuple]:
+            rule = raw.get("scene_rule") or {}
+            if rule.get("status") != "applied" or not rule.get("group") or rule.get("group_order") is None:
+                return None
+            return (str(rule.get("id") or ""), str(rule.get("shot_id") or ""),
+                    tuple(int(x) for x in rule["group"]))
+
+        def same_experiment(current: dict, previous: dict) -> bool:
+            """同一实验组按顺序分给连续几句、源区间不重叠 —— 是一段实验被拆开讲，不是复用。"""
+            if not current["experiment"] or current["experiment"] != previous["experiment"]:
+                return False
+            if current["order"] == previous["order"] or not current["spans"] or not previous["spans"]:
+                return False
+            tolerance = 1.0 / fps
+            return all(a_end <= b_start + tolerance or b_end <= a_start + tolerance
+                       for a_start, a_end in current["spans"]
+                       for b_start, b_end in previous["spans"])
+
         for index, clip in enumerate(parents):
-            indexed = raw_segments[index] if index < len(raw_segments) and isinstance(raw_segments[index], dict) else {}
-            by_id = self._raw_segment_for(clip)
-            # 同一镜头补到后面的句子时，按镜头号会命中第一句。对得上这句文案就用下标那条。
-            if indexed and str(indexed.get("text") or "") == str(clip.text or ""):
-                raw = indexed
-            else:
-                raw = by_id or indexed
+            raw = self._raw_segment_for(clip)
             if getattr(clip, "visual_missing", False) or raw.get("visual_missing") or "placeholder" in Path(str(raw.get("video") or clip.video or "")).name.casefold():
                 continue
             # 预览里为补黑场明确再切一次的镜头，允许和已用画面重复，不因此整稿写不进去。
@@ -748,6 +775,9 @@ class OrchestrationEngine:
                 "group": role_group(role, ""),
                 "tokens": tokens(visual_tokens),
                 "text": str(raw.get("text") or clip.text or "").strip(),
+                "experiment": experiment_key(raw),
+                "order": (raw.get("scene_rule") or {}).get("group_order"),
+                "spans": planned_spans(raw),
             })
 
         duplicates = []
@@ -768,6 +798,8 @@ class OrchestrationEngine:
                 token_overlap = len(current["tokens"] & previous["tokens"]) >= 2
                 if not (same_signature or same_source_window or
                         (same_source_group and token_overlap and not distinct_audited_signatures)):
+                    continue
+                if same_experiment(current, previous):
                     continue
                 duplicates.append({
                     "current_index": current["index"], "previous_index": previous["index"],
@@ -859,6 +891,7 @@ class OrchestrationEngine:
                 time_sensitive=bool(raw.get("time_sensitive")),
                 speed_range_override=(part.get("speed_range_override")
                                       or raw.get("speed_range_override")),
+                raw_index=c.raw_index,
             )
             if sub.audio_mode == "file":
                 sub.audio = c.audio
@@ -1483,7 +1516,11 @@ class OrchestrationEngine:
         return str(raw.get("visual_role") or raw.get("role") or "").strip()
 
     def _raw_segment_for(self, clip: Clip) -> dict:
-        for item in (getattr(self, "_raw_segments", None) or []):
+        raws = getattr(self, "_raw_segments", None) or []
+        index = getattr(clip, "raw_index", -1)
+        if isinstance(index, int) and 0 <= index < len(raws) and isinstance(raws[index], dict):
+            return raws[index]
+        for item in raws:
             if str(item.get("temporary_shot_id") or "") and \
                     str(item.get("temporary_shot_id")) == str(clip.temporary_shot_id or ""):
                 return item
@@ -2724,6 +2761,19 @@ class OrchestrationEngine:
             except Exception:  # noqa: BLE001
                 pass
 
+    def _report_unmet_scene_rules(self) -> None:
+        """场景规则没满足（动作演不完整、相位没核实）时保留原镜能出返工稿，但不能算正式认证。"""
+        for index, raw in enumerate(getattr(self, "_raw_segments", None) or [], 1):
+            rule = raw.get("scene_rule") if isinstance(raw, dict) else None
+            if not isinstance(rule, dict) or rule.get("status") != "unmet":
+                continue
+            marker = (f"SCENE_RULE_UNMET@S{index:02d}: "
+                      f"{rule.get('label') or rule.get('id')} {rule.get('reason') or ''}").strip()
+            if marker not in self.preview_uncertified_reasons:
+                self.preview_uncertified_reasons.append(marker)
+            self._event("scene_rule_unmet_reported", index=index,
+                        scene=rule.get("id"), reason=rule.get("reason"))
+
     def _run_build(self) -> dict:
         self._event("profile_selected", profile=self.profile.__dict__, priority_applied=self.priority_applied)
         if self.m.get("trigger_phrase"):
@@ -2748,6 +2798,7 @@ class OrchestrationEngine:
                     self.preview_uncertified_reasons.append(marker)
                 self._event("visual_missing_reported", note=note,
                             text=c.text[:48])
+        self._report_unmet_scene_rules()
         # 交付模式归一化后写回 manifest 一次（定案第 9 条），让引擎内部到处
         # 读到的口径一致。注意**选镜层读不到这一句** —— `shot_analyzer` 在
         # 引擎构造之前就跑完了，它读的是输入 manifest；所以 CLI 必须在自己

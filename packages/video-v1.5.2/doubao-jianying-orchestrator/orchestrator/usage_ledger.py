@@ -22,12 +22,17 @@ SAME_TASK = "same_task"
 OTHER_TASK = "other_task"
 
 
+def _norm_path(value: Any) -> str:
+    return str(value or "").strip().replace("\\", "/").rstrip("/").casefold()
+
+
 def pool_hash(manifest: dict[str, Any]) -> str:
+    # 手机素材常同名（IMG_0001.MOV），只看文件名会让不同 SKU 的素材池串账。
     sources = manifest.get("material_sources") or []
-    names = sorted({Path(str(s)).name.casefold() for s in sources if str(s).strip()})
-    if not names:
+    paths = sorted({_norm_path(s) for s in sources if str(s).strip()})
+    if not paths:
         return ""
-    return hashlib.sha1("\n".join(names).encode("utf-8")).hexdigest()[:16]
+    return hashlib.sha1("\n".join(paths).encode("utf-8")).hexdigest()[:16]
 
 
 def ledger_path(manifest: dict[str, Any], report_dir: Optional[Path] = None) -> Optional[Path]:
@@ -41,7 +46,10 @@ def ledger_path(manifest: dict[str, Any], report_dir: Optional[Path] = None) -> 
     if base:
         root = Path(base)
     elif report_dir is not None:
-        root = Path(report_dir).resolve().parent.parent / ".cache"
+        # 固定落在 work/.cache：重试多套一层目录也是同一本账。
+        resolved = Path(report_dir).resolve()
+        work = next((p for p in resolved.parents if p.name.casefold() == "work"), None)
+        root = (work or resolved.parent.parent) / ".cache"
     else:
         return None
     return root / f"shot_usage_{digest}.json"
@@ -52,7 +60,10 @@ def shot_key(video: Any, source_start: Any) -> str:
         start = float(source_start or 0.0)
     except (TypeError, ValueError):
         start = 0.0
-    return f"{Path(str(video or '')).name.casefold()}@{start:.2f}"
+    path = _norm_path(video)
+    folder, _, name = path.rpartition("/")
+    tag = hashlib.sha1(folder.encode("utf-8")).hexdigest()[:8] if folder else "-"
+    return f"{tag}/{name}@{start:.2f}"
 
 
 def _identity(manifest: dict[str, Any]) -> tuple[str, str]:

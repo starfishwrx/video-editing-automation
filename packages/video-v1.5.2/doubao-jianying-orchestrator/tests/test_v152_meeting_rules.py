@@ -23,7 +23,7 @@ from orchestrator import (  # noqa: E402
     visual_match,
     voice_tts,
 )
-from orchestrator.engine import OrchestrationEngine, _parent_id  # noqa: E402
+from orchestrator.engine import OrchestrationEngine, _parent_id, to_us  # noqa: E402
 
 US = tc.US
 
@@ -156,6 +156,13 @@ class ShotNotesTests(unittest.TestCase):
         self.assertNotIn("shot_note", out["segments"][1])
         self.assertNotIn("visual_requirements", out["segments"][0])
 
+    def test_note_spanning_split_sentences_binds_to_each(self):
+        sentences = ["卫生巾包装撕开的过程当中", "要包含撕包装抽取产品展示产品", "下一句"]
+        parsed = shot_notes.parse(
+            "卫生巾包装撕开的过程当中要包含撕包装抽取产品展示产品：必须完整展示动作", sentences)
+        self.assertEqual(parsed["by_index"], {1: "必须完整展示动作", 2: "必须完整展示动作"})
+        self.assertEqual(parsed["unmatched"], [])
+
     def test_remark_field_env(self):
         with mock.patch.dict("os.environ", {"JY_REMARK_FIELD": "画面要求"}):
             out = shot_notes.apply({"segments": [{"text": "你好世界"}], "画面要求": "你好：手拿产品"})
@@ -194,6 +201,17 @@ class UsageLedgerTests(unittest.TestCase):
         self.assertEqual(path.parent, Path(r"D:\work\.cache"))
         self.assertTrue(path.name.startswith("shot_usage_"))
         self.assertIsNone(usage_ledger.ledger_path({}, Path(r"D:\work\task\report")))
+        retry = usage_ledger.ledger_path(manifest, Path(r"D:\work\task\retry1\report"))
+        self.assertEqual(retry, path)
+
+    def test_same_file_names_in_different_pools_do_not_share(self):
+        a = {"material_sources": [r"D:\sku_a\IMG_001.MOV"]}
+        b = {"material_sources": [r"D:\sku_b\IMG_001.MOV"]}
+        self.assertNotEqual(usage_ledger.pool_hash(a), usage_ledger.pool_hash(b))
+        self.assertNotEqual(usage_ledger.shot_key(r"D:\sku_a\IMG_001.MOV", 0),
+                            usage_ledger.shot_key(r"D:\sku_b\IMG_001.MOV", 0))
+        self.assertEqual(usage_ledger.shot_key(r"\\nas\pool\IMG_001.MOV", 0),
+                         usage_ledger.shot_key("//NAS/pool/img_001.mov", 0))
 
 
 class PhaseTimingTests(unittest.TestCase):
@@ -497,6 +515,154 @@ class VoicePostTests(unittest.TestCase):
             self.assertGreater(duration, 0.9)
             self.assertEqual(voice_tts.postprocess_voice(src, tempo=1.2), str(out))
             self.assertEqual(voice_tts.postprocess_voice(src, tempo=1.0, edge_trim=False), str(src))
+
+
+class ExperimentGroupChainTests(unittest.TestCase):
+    """场景规则 → 引擎装配 → 去重闸门：连续句共用一段实验的整条链路。"""
+
+    MANIFEST = {**MANIFEST, "product": "萌睡裤", "delivery_mode": "preview"}
+
+    def _planned(self):
+        matched = SceneApplyTests()._matched("吸水实验，倒下去", 3 * US)
+        first = matched["manifest"]["segments"][0]
+        first.update({"visual_tags": ["蓝色液体", "卫生巾"], "evidence_tags": ["倒水", "吸收"]})
+        matched["manifest"]["segments"].append(dict(first, text="瞬吸不回渗", audio_duration_us=4 * US))
+        locate = mock.Mock(return_value={"ok": True, "complete": True, "phases": PHASES})
+        with tempfile.TemporaryDirectory() as tmp:
+            scene_rules.apply(self.MANIFEST, matched, {"shots": [SHOT]}, Path(tmp), locate=locate)
+        return matched["manifest"]["segments"]
+
+    def _engine(self, segments, tmp):
+        eng = OrchestrationEngine.__new__(OrchestrationEngine)
+        eng.m = {**self.MANIFEST, "segments": segments}
+        eng.pending, eng.delivery_mode = [], "preview"
+        eng.resolve = lambda p: Path(p)
+        eng.report_dir = Path(tmp)
+        eng._autofill_script_voiceover = mock.Mock()
+        eng._event = mock.Mock()
+        return eng
+
+    def test_second_sentence_keeps_its_own_assignment(self):
+        segments = self._planned()
+        with tempfile.TemporaryDirectory() as tmp:
+            eng = self._engine(segments, tmp)
+            clips = eng.build_clips()
+            gate = eng._visual_duplicate_gate(clips)
+        for parent, seg in enumerate(segments):
+            mine = [c for c in clips if c.parent_index == parent]
+            parts = seg["span_parts"] if seg.get("multi_shot") else [seg["window_solution"]]
+            self.assertEqual({c.text for c in mine}, {seg["text"]})
+            self.assertEqual([round(c.source_start, 3) for c in mine],
+                             [round(p["source_start"], 3) for p in parts])
+            if seg.get("multi_shot"):
+                self.assertEqual(sum(to_us(c.duration) for c in mine),
+                                 sum(to_us(p["segment_s"]) for p in parts))
+        phases = [(c.evidence_intervals or [{}])[0].get("scene_phase") for c in clips]
+        self.assertEqual((phases[0], phases[-1]), ("pour", "wipe"))
+        self.assertIsNone(gate)
+
+    def test_replayed_interval_is_still_a_duplicate(self):
+        segments = self._planned()
+        second = segments[1]
+        first = segments[0]
+        replay = first["span_parts"] if first.get("multi_shot") else None
+        if replay:
+            second.update({"multi_shot": True, "span_parts": [dict(p) for p in replay]})
+        else:
+            second["window_solution"] = dict(first["window_solution"])
+        with tempfile.TemporaryDirectory() as tmp:
+            eng = self._engine(segments, tmp)
+            gate = eng._visual_duplicate_gate(eng.build_clips())
+        self.assertEqual(gate["status"], "DUPLICATE_VISUAL_SHOT")
+
+    def test_unmet_scene_rule_is_uncertified(self):
+        matched = SceneApplyTests()._matched("吸水实验，倒下去瞬吸", 2 * US)
+        locate = mock.Mock(return_value={"ok": True, "complete": True, "phases": PHASES})
+        with tempfile.TemporaryDirectory() as tmp:
+            scene_rules.apply({**self.MANIFEST, "delivery_mode": "formal"}, matched,
+                              {"shots": [SHOT]}, Path(tmp), locate=locate)
+            eng = self._engine(matched["manifest"]["segments"], tmp)
+            eng.preview_uncertified_reasons = []
+            eng.build_clips()
+            eng._report_unmet_scene_rules()
+        self.assertEqual(len(eng.preview_uncertified_reasons), 1)
+        self.assertIn("SCENE_ACTION_TOO_LONG", eng.preview_uncertified_reasons[0])
+
+
+class PostDraftQcMappingTests(unittest.TestCase):
+    """后验 QC：一句拆成多段物理画面时，按句子收齐它的全部片段再验。"""
+
+    def _run(self, claims, physical, *, verdict="DIRECT"):
+        from orchestrator import draft_visual_qc as qc, vision_analyzer
+        with tempfile.TemporaryDirectory() as tmp:
+            td = Path(tmp)
+            draft, report = td / "draft", td / "report"
+            draft.mkdir()
+            report.mkdir()
+            materials, segments, cursor = [], [], 0
+            for i, material in enumerate(physical):
+                media = td / f"{material}.mp4"
+                media.touch()
+                if material not in [m["id"] for m in materials]:
+                    materials.append({"id": material, "path": str(media)})
+                segments.append({"material_id": material,
+                                 "source_timerange": {"start": i * US, "duration": US},
+                                 "target_timerange": {"start": cursor, "duration": US}})
+                cursor += US
+            (draft / "draft_info.json").write_text(json.dumps({
+                "duration": cursor, "materials": {"videos": materials},
+                "tracks": [{"name": "video", "segments": segments}]}), encoding="utf-8")
+            (report / "shot_match_report.json").write_text(
+                json.dumps({"segments": claims}, ensure_ascii=False), encoding="utf-8")
+            prompts = []
+
+            def model(*args, **_kw):
+                prompts.append(args[2])
+                count = args[2].count("- S")
+                return True, json.dumps({"segments": [
+                    {"index": i + 1, "match_level": verdict, "visual_ok": True, "confidence": 1.0}
+                    for i in range(count)], "overall": "PASS"})
+
+            argv = ["qc", "--draft", str(draft), "--report-dir", str(report),
+                    "--output", str(td / "qc.json")]
+            with mock.patch.object(sys, "argv", argv), \
+                    mock.patch.object(qc, "_ffmpeg", return_value="fake"), \
+                    mock.patch.object(qc, "_extract", return_value=(True, "")), \
+                    mock.patch.object(vision_analyzer, "_write_sheet", return_value=True), \
+                    mock.patch.object(qc, "_call_qc_model", side_effect=model):
+                qc.main()
+            return json.loads((td / "qc.json").read_text(encoding="utf-8")), prompts
+
+    SPLIT = {"text": "吸水实验，倒下去瞬吸", "temporary_shot_id": "absorb", "multi_shot": True,
+             "span_parts": [{"shot_id": "absorb#pour"}, {"shot_id": "absorb#absorb"},
+                            {"shot_id": "absorb#wipe"}]}
+    PACK = {"text": "包装设计漂亮", "temporary_shot_id": "pack"}
+
+    def test_split_action_maps_every_part(self):
+        data, prompts = self._run([self.SPLIT, self.PACK], ["A", "A", "A", "B"])
+        self.assertEqual(data["status"], "PASS", data["issues"])
+        self.assertEqual(data["segment_map"], [{"claim_index": 1, "draft_segments": [1, 2, 3]},
+                                               {"claim_index": 2, "draft_segments": [4]}])
+        self.assertIn("parts=3", prompts[0])
+        self.assertEqual(data["checks"][1]["count"], 6)
+
+    def test_missing_part_is_still_a_count_mismatch(self):
+        data, _ = self._run([self.SPLIT, self.PACK], ["A", "A", "B"])
+        self.assertEqual(data["status"], "FAIL")
+        self.assertTrue(any(i.startswith("SEGMENT_COUNT_MISMATCH") for i in data["issues"]))
+        self.assertEqual(data["segment_map"], [])
+
+    def test_unmet_scene_rule_blocks_shipping(self):
+        unmet = {**self.PACK, "text": "吸水实验，倒下去瞬吸",
+                 "scene_rule": {"id": "absorb_test", "status": "unmet",
+                                "reason": "SCENE_ACTION_TOO_LONG"}}
+        data, _ = self._run([unmet], ["A"])
+        self.assertNotEqual(data["release_eligibility"], "SHIP_ALLOWED")
+        self.assertIn("SCENE_RULE_UNMET:S01:absorb_test:SCENE_ACTION_TOO_LONG",
+                      data["preview_only_reasons"])
+        unverified = {**unmet, "scene_rule": {**unmet["scene_rule"], "reason": "SCENE_PHASE_UNVERIFIED"}}
+        data, _ = self._run([unverified], ["A"])
+        self.assertEqual(data["status"], "UNCERTIFIED")
 
 
 if __name__ == "__main__":

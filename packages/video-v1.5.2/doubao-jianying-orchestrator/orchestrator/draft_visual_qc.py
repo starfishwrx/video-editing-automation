@@ -225,7 +225,11 @@ def _expected_claims(report_dir: pathlib.Path) -> list[dict[str, Any]]:
     for idx, row in enumerate(data.get("segments") or [], 1):
         if not isinstance(row, dict):
             continue
+        parts = row.get("span_parts") if row.get("multi_shot") else None
         result.append({
+            # 一句口播在时间线上占几个物理片段（场景分段变速、多镜段会拆成多段）。
+            "slots": len(parts) if isinstance(parts, list) and len(parts) >= 2 else 1,
+            "scene_rule": row.get("scene_rule") if isinstance(row.get("scene_rule"), dict) else {},
             "index": idx,
             "claim": str(row.get("claim_text") or row.get("text") or ""),
             "shot_id": str(row.get("temporary_shot_id") or ""),
@@ -242,12 +246,12 @@ def _expected_claims(report_dir: pathlib.Path) -> list[dict[str, Any]]:
 def _prompt(claims: list[dict[str, Any]], frame_count: int) -> str:
     mapping = "\n".join(
         f"- S{local_index:02d}: claim={c['claim']}; expected_shot={c['shot_id']}; "
-        f"selection={c['selection_mode']}; degraded={c['degraded']}; "
+        f"selection={c['selection_mode']}; degraded={c['degraded']}; parts={c.get('slots', 1)}; "
         f"gate={_claim_gate_summary(c)}" for local_index, c in enumerate(claims, 1)
     )
     return f"""你是成片生成后的独立视觉验收员。图片是刚从已生成的剪映草稿所引用的源素材区间抽出的新帧，不要相信上游匹配报告，只根据图片判断。
 
-每个脚本段有两帧：本批次的 S01 mid/end、S02 mid/end，依次排列；共 {len(claims)} 段、{frame_count} 张图。S 编号只在本批次内使用，汇总时必须按批次映射回真实语义段编号。
+每个脚本段的帧依次排列：parts=1 的段有 mid/end 两帧；parts>1 的段是一句话拆成几段连续动作画面，按顺序给每段中点 p1、p2…，再加最后一段的 end，要连起来当一个完整动作判断。共 {len(claims)} 段、{frame_count} 张图。S 编号只在本批次内使用，汇总时必须按批次映射回真实语义段编号。
 {mapping}
 
 对每个 S 判断画面与文案的匹配等级：
@@ -373,12 +377,35 @@ def main() -> int:
             "distinct_materials": len({r["material_id"] for r in active_rows}),
             "intentional_visual_gaps": intentional_gaps,
         }
+        expected_rows = sum(claim["slots"] for claim in active_claims)
+        result["timeline"]["expected_active_video_segments"] = expected_rows
         if not claims:
             issues.append("MATCH_REPORT_MISSING_OR_EMPTY")
-        elif len(active_rows) != len(active_claims):
-            issues.append(f"SEGMENT_COUNT_MISMATCH:draft_active={len(active_rows)},active_match={len(active_claims)},intentional_gaps={len(intentional_gaps)}")
-        if len(active_rows) > 1 and len({r["material_id"] for r in active_rows}) < 2:
+        elif len(active_rows) != expected_rows:
+            issues.append(f"SEGMENT_COUNT_MISMATCH:draft_active={len(active_rows)},expected_active={expected_rows},active_match={len(active_claims)},intentional_gaps={len(intentional_gaps)}")
+        if len(active_claims) > 1 and len({r["material_id"] for r in active_rows}) < 2:
             issues.append("SINGLE_SOURCE_FOR_MULTI_SEGMENT_DRAFT")
+        # 物理片段 → 原句：按时间线顺序，每句吃掉自己的 slots 个片段。数量对不上时不配对，免得错配。
+        claim_rows: list[tuple[dict[str, Any], list[dict[str, Any]]]] = []
+        if claims and len(active_rows) == expected_rows:
+            cursor = 0
+            for claim in active_claims:
+                claim_rows.append((claim, active_rows[cursor:cursor + claim["slots"]]))
+                cursor += claim["slots"]
+        result["segment_map"] = [
+            {"claim_index": claim["index"], "draft_segments": [row["index"] for row in rows]}
+            for claim, rows in claim_rows]
+        for claim in active_claims:
+            rule = claim["scene_rule"]
+            if rule.get("status") != "unmet":
+                continue
+            code = str(rule.get("reason") or "")
+            line = f"SCENE_RULE_UNMET:S{claim['index']:02d}:{rule.get('id') or ''}:{code}"
+            if code.startswith("SCENE_ACTION_"):
+                result["preview_only_reasons"].append(line)
+            else:
+                result["warnings"].append(line)
+                result["uncertified"] = True
         if len(placeholder_rows) != len(intentional_gaps):
             issues.append(f"PLACEHOLDER_COUNT_MISMATCH:draft={len(placeholder_rows)},match={len(intentional_gaps)}")
         result["issues"].extend(issues)
@@ -390,25 +417,36 @@ def main() -> int:
         frame_issues: list[str] = []
         if not ffmpeg:
             frame_issues.append("FFMPEG_MISSING")
-        for row, claim in zip(active_rows, active_claims):
-            if not ffmpeg or not _is_file(pathlib.Path(row["source"])):
-                continue
-            for suffix, fraction in (("mid", 0.5), ("end", 0.9)):
+        claim_frames: dict[int, list[dict[str, Any]]] = {}
+        expected_frames = 0
+        for claim, rows in claim_rows:
+            if len(rows) == 1:
+                plan = [(rows[0], "mid", 0.5), (rows[0], "end", 0.9)]
+            else:
+                plan = [(row, f"p{n}", 0.5) for n, row in enumerate(rows, 1)]
+                plan.append((rows[-1], "end", 0.9))
+            expected_frames += len(plan)
+            frames = claim_frames.setdefault(claim["index"], [])
+            for row, suffix, fraction in plan:
+                if not ffmpeg or not _is_file(pathlib.Path(row["source"])):
+                    continue
                 seconds = row["source_start"] + row["source_duration"] * fraction
                 frame = frame_dir / f"segment_{row['index']:03d}_{suffix}.jpg"
                 ok, error = _extract(ffmpeg, pathlib.Path(row["source"]), seconds, frame)
                 if not ok:
                     frame_issues.append(f"FRAME_EXTRACT_FAILED:S{row['index']:02d}:{suffix}:{error}")
                     continue
-                frame_items.append({
-                    "path": str(frame), "label": f"S{row['index']:02d} {suffix}",
+                item = {
+                    "path": str(frame), "label": f"S{claim['index']:02d} {suffix}",
                     "shot_id": claim["shot_id"], "source_start": row["source_start"],
                     "source_end": row["source_start"] + row["source_duration"],
-                    "suffix": suffix, "timestamp": seconds,
-                })
+                    "suffix": suffix, "timestamp": seconds, "draft_segment": row["index"],
+                }
+                frames.append(item)
+                frame_items.append(item)
         result["issues"].extend(frame_issues)
         result["checks"].append({"name": "fresh_source_frames", "status": "FAIL" if frame_issues else "PASS", "count": len(frame_items)})
-        if frame_issues or len(frame_items) < max(2, len(active_claims) * 2):
+        if frame_issues or not claim_rows or len(frame_items) < max(2, expected_frames):
             result["warnings"].append("FRESH_FRAME_EVIDENCE_INCOMPLETE")
             result["uncertified"] = True
         else:
@@ -433,11 +471,12 @@ def main() -> int:
                 batch_count = (len(active_claims) + batch_size - 1) // batch_size
                 for batch_no, start in enumerate(range(0, len(active_claims), batch_size), 1):
                     claims = active_claims[start:start + batch_size]
-                    items = [dict(item, label=f"S{local // 2 + 1:02d} {item['suffix']}")
-                             for local, item in enumerate(
-                                 frame_items[start * 2:(start + len(claims)) * 2])]
+                    items = [dict(item, label=f"S{local:02d} {item['suffix']}")
+                             for local, claim in enumerate(claims, 1)
+                             for item in claim_frames.get(claim["index"], [])]
                     chunk_sheet = report_dir / f"draft_visual_qc_contact_sheet_{batch_no:02d}.jpg"
-                    # Each claim contributes exactly two frames (mid/end).
+                    # Each claim contributes two frames (mid/end), or one
+                    # per action part plus the final end frame.
                     # With a one-claim batch, four columns would leave two
                     # black padding tiles; the vision reviewer can mistake
                     # those empty cells for a black end frame.  Keep the

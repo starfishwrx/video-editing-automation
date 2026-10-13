@@ -41,6 +41,25 @@ def _lines(notes: Any) -> list[str]:
     return [line.strip() for line in _SPLIT.split(str(notes or "")) if line.strip()]
 
 
+def _sentences_for(key: str, normalized: list[str]) -> list[int]:
+    """备注引用的文案落在哪几句（句号从 1 开始）。长句被拆成几段时，备注挂到它覆盖的每一段。"""
+    if not key:
+        return []
+    single = next((i for i, s in enumerate(normalized, 1) if key in s), None)
+    if single is not None:
+        return [single]
+    joined = "".join(normalized)
+    start = joined.find(key)
+    if start < 0:
+        return []
+    end, hits, cursor = start + len(key), [], 0
+    for i, sentence in enumerate(normalized, 1):
+        if sentence and cursor < end and cursor + len(sentence) > start:
+            hits.append(i)
+        cursor += len(sentence)
+    return hits
+
+
 def parse(notes: Any, sentences: list[str]) -> dict[str, Any]:
     """返回 ``{"by_index": {1: "..."}, "general": [...], "unmatched": [...]}``（句号从 1 开始）。"""
     normalized = [_norm(s) for s in sentences]
@@ -65,10 +84,10 @@ def parse(notes: Any, sentences: list[str]) -> dict[str, Any]:
             requirement = requirement.strip()
             if not requirement:
                 continue
-            hit = next((i for i, s in enumerate(normalized, 1) if key and key in s), None)
-            if hit is None:
+            hits = _sentences_for(key, normalized)
+            if not hits:
                 unmatched.append(line)
-            else:
+            for hit in hits:
                 by_index.setdefault(hit, []).append(requirement)
             continue
         general.append(body)
