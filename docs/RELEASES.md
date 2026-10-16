@@ -1,5 +1,17 @@
 # Release archive notes
 
+## 1.5.3 — draft delivery and validated-fix release workflow
+
+- Source: `packages/video-v1.5.3/`. This PR adds the complete versioned candidate while preserving existing main-branch agent documentation and historical packages.
+- Shared-path delivery verifies literal media references, bytes and project registration across current timelines, worker resume and enforce writeback audit. Generated-version recovery requires explicit confirmation and matching successful-run evidence; it creates a fresh project without changing the encrypted source.
+- The validated-fix release skill ships inside the orchestrator and is registered in `SKILL_PACKAGE.json`. `tools.release_package build/verify` performs manifest/inventory checks, ZIP creation, fresh unpack and scoped or full regression checks without deployment or external publication.
+- Manifest: 177 source entries. Visual policy remains independently versioned at 1.4.1.
+- Fresh-unpack validation: 54 package tests and 474 orchestrator tests passed. Related delivery/transport tests are selectable for local iterations. Test counts are reported as evidence, not as a visual-quality score.
+- ZIP: `releases/video-v1.5.3-draft-delivery-fix-20261016.zip`.
+- ZIP SHA-256: `7fddb7803da162263fdf192e397635a9313807b73b4c3db66a2d1546166cfac6`.
+- Source SHA-256: `6960d17c1595285605cdb0ce561fb4d8a1867dd5b647e3fb9ff85678b2389da8`.
+- Status: source-release candidate. No production files, queues, NAS business deliveries or Feishu rows are changed by this PR. Deployment, real-task playback and human acceptance remain separate.
+
 ## 1.4.0
 
 - Source: `packages/video-v1.4.0/`, extracted from the immutable
