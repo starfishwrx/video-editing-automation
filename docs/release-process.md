@@ -2,6 +2,25 @@
 
 适用范围：`packages/video-v1.5.x/` 候选包的“源代码包”发布与归档（不包含渲染机/生产验收）。
 
+## v1.5.3 可执行入口
+
+已验证修复的合包技能随包提供：
+[`validated_fix_to_release.md`](../packages/video-v1.5.3/doubao-jianying-orchestrator/references/validated_fix_to_release.md)。
+从 `packages/video-v1.5.3/` 运行：
+
+```powershell
+uv sync --frozen
+# 局部交付迭代：相关回归；输出必须是包外的新目录
+uv run --frozen python -X utf8 -m tools.release_package build --output $deliveryOutput --checks delivery
+# 发版 PR：全新解压副本运行两套完整测试
+uv run --frozen python -X utf8 -m tools.release_package build --output $releaseOutput --checks full
+```
+
+命令生成 ZIP、SHA256SUMS、逐文件校验、测试日志和发布收据，不部署、不推送、不开队列。
+`verify --package $unpackedPackage` 可只读核验已有包；清单漏项、损坏或版本不一致会失败。
+已有输出目录不覆盖；失败后先查日志，使用新的输出目录再验证。
+以下为各历史版本通用说明；当前包不再使用下述手工 PowerShell 清单命令。
+
 前置条件
 - 两套测试全绿：`pytest packages/video-v1.5.x/tests`、`pytest packages/video-v1.5.x/doubao-jianying-orchestrator/tests`
 - 规则版本与运行模式已复核：`RULES.md`（视觉规则 1.4.1）、preview 语义与未认证标注一致

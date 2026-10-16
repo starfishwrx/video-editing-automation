@@ -9,8 +9,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 EXCLUDED_NAMES = {"build_manifest.py", "release-manifest.json", "PACKAGE_CONTENTS.sha256"}
-EXCLUDED_PARTS = {"__pycache__", ".pytest_cache", ".venv", ".uv-cache"}
-EXCLUDED_SUFFIXES = {".pyc", ".pyo", ".mp4", ".mov", ".m4v", ".wav", ".mp3"}
+EXCLUDED_PARTS = {"__pycache__", ".pytest_cache", ".venv", ".uv-cache", ".git",
+                  "media", "config", "backups", "validation_runs", "report", "work"}
+EXCLUDED_SUFFIXES = {".pyc", ".pyo", ".mp4", ".mov", ".m4v", ".wav", ".mp3",
+                     ".ogg", ".m4a", ".aac", ".flac", ".zip"}
 
 
 def files() -> list[Path]:
@@ -19,6 +21,10 @@ def files() -> list[Path]:
         rel = path.relative_to(ROOT)
         if path.name in EXCLUDED_NAMES or any(part in EXCLUDED_PARTS for part in rel.parts):
             continue
+        if path.name == ".env" or path.name.startswith(".env."):
+            continue
+        if path.is_symlink():
+            raise ValueError("PACKAGE_SYMLINK_REJECTED: " + rel.as_posix())
         if path.is_file() and path.suffix.lower() not in EXCLUDED_SUFFIXES and ".bak" not in path.name:
             values.append(path)
     return sorted(values, key=lambda item: item.relative_to(ROOT).as_posix().encode("utf-8"))
@@ -44,7 +50,7 @@ def tree_hash(items: list[Path]) -> str:
 def main() -> int:
     items = files()
     lines = [f"{sha256(path)}  {path.relative_to(ROOT).as_posix()}" for path in items]
-    (ROOT / "PACKAGE_CONTENTS.sha256").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    (ROOT / "PACKAGE_CONTENTS.sha256").write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
     old = {}
     if (ROOT / "release-manifest.json").is_file():
         old = json.loads((ROOT / "release-manifest.json").read_text(encoding="utf-8"))
@@ -65,7 +71,7 @@ def main() -> int:
     }
     (ROOT / "release-manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8")
+        encoding="utf-8", newline="\n")
     print(manifest["source_sha256"])
     print(f"file_count={manifest['file_count']}")
     return 0

@@ -1,8 +1,8 @@
 # Local v1.5 runtime contract
 
-The local active tool, orchestrator, and editor version is 1.5.3. Tool v1.4 is deprecated. Visual policy stays at 1.4.1 for formal evidence gates. v1.5.1 adds preview-only black-frame fill and the production pitfalls in [preview_gap_and_pitfalls.md](preview_gap_and_pitfalls.md). It does not turn a degraded preview into a formal PASS. v1.5.2 adds category rulepacks (`orchestrator/rules/`), the 卫品 scene rules, no default transitions, waste trimming, ≤5-frame narration gaps and the cross-draft shot usage ledger. v1.5.3 tightens formal no-settled gates, derived label negation/pack-print/fluorescence, and absorb group continuity; see CHANGELOG 1.5.3 and [production_quality_and_lessons.md](production_quality_and_lessons.md).
+This source package's tool, orchestrator, and editor version is 1.5.3; read the active installed version from the deployment host. Visual policy stays at 1.4.1. v1.5.3 tightens formal no-settled gates, derived label negation/pack-print/fluorescence and absorb group continuity; see CHANGELOG and [production_quality_and_lessons.md](production_quality_and_lessons.md). Preview fills remain uncertified.
 
-Use the installed sibling skills for standalone operations. The full local pipeline package is `D:/jy_pipeline`. Do not select archived task runtimes or backup folders for new work. Read actual VERSION and release-manifest metadata before executing.
+Use the installed sibling skills for standalone operations. The deployed pipeline is selected by `JY_PIPE_ROOT`. Do not select archived task runtimes or backup folders for new work. Read actual VERSION and release-manifest metadata before executing.
 
 - `python -X utf8 run.py env` verifies the selected editor, wrapper, vendor, package metadata, FFmpeg, Python dependencies and draft directory.
 - `python -X utf8 run.py build --input <manifest.json> --report-dir <new-attempt-directory>` is the manifest-to-draft entrypoint. Build success means a draft was written; it is not final quality acceptance.

@@ -19,6 +19,15 @@
 
 ## 已有条目（从代码注释与 references 中回填的种子，hits 按已知次数）
 
+### L-20261016-01 副本哈希一致不代表媒体路径有效
+- status: OPEN
+- hits: 1
+- 模块: package-tools / runtime-and-recovery
+- 现象: ZIP 和 NAS 副本完整，接收方剪映仍显示媒体丢失；旧收据续跑也可能跳过修复。
+- 根因: 文字引用仍指向失效目录，或将相对运输包当成可直接打开的共享交付稿；旧明文 sidecar 也不代表当前加密时间轴。
+- 以后怎么做: 分发、续跑和 enforce 回填审核均检查实际时间轴的绝对路径与字节。恢复原生成版需要用户确认、成功任务证据、新 UUID 和编辑内容比较。维护入口为 `tools.draft_delivery`，合包验收入口为 `tools.release_package`。
+- 证据: `packages/video-v1.5.3/tests/test_draft_delivery.py` 与包内合包技能。
+
 ### L-SEED-01 版本闸门要用“下限”不能用“等值”
 - status: OPEN
 - hits: 1

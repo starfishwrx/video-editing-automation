@@ -22,6 +22,12 @@ formal 不得用 settled/lead_in/黑屏冒充完整动作；派生卖点标签�
 相对运输包需 import；共享交付必须检查实际绝对路径。加密时间轴不得自动换成旧明文，
 仅在用户确认恢复原始生成版后使用包内 `tools.draft_delivery restore-generated`。
 
+用户确认修复有效并要求合入包时，读
+[已验证修复合入发布包](references/validated_fix_to_release.md)，
+使用包内 `tools.release_package` 完成清单、ZIP 和全新解压验收。
+局部交付修复选 `--checks delivery`；发版 PR 选 `--checks full`，
+无需每次局部改动都运行全量测试。
+
 部署时由宿主环境提供：
 
 - `JY_SKILL_ROOT`、`JY_DRAFT_ROOT`、`JY_INSTALL_ROOT`

@@ -1,0 +1,4 @@
+# Package checksums must describe the bytes received from GitHub on every OS.
+packages/video-v1.5.3/** text eol=lf
+releases/SHA256SUMS-video-v1.5.3*.txt text eol=lf
+releases/video-v1.5.3*.zip binary

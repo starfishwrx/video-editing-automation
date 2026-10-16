@@ -1,10 +1,12 @@
-﻿# Changelog
+# Changelog
 
 ## 1.5.3 - 2026-10-16
 
+- 把已验证修复合包技能纳入编排器技能引用与 `SKILL_PACKAGE.json`；新增 `tools.release_package build/verify`，校验清单、生成 ZIP、异目录解压并运行交付相关或完整回归，输出独立发布收据。此命令不部署、不发布、不修改生产队列。
+
 - 修复草稿交付的媒体丢失复发：正式 UNC 分发在双目录哈希验证后检查全部实际时间轴的字面路径、素材字节和注册信息；不允许文件名兜底掩盖无效路径。新增 `tools.draft_delivery` 的共享稿核验、新名称重新交付与显式生成版恢复；加密编辑会话仍拒绝自动导出。恢复使用官方完整模板 API、新 UUID、源稿不变，保留原任务质量状态。详见 `references/draft_delivery_and_recovery.md`，回归见 `tests/test_draft_delivery.py`。
 
-依据 `contexts/thought_review`（v152 lessons / visual analysis / CURSOR_HANDOFF）收敛正式质量门禁与卫品识别假阳性。卫品规则包 **1.5.3-1**。
+收敛正式质量门禁与卫品识别假阳性。卫品规则包 **1.5.3-1**。
 
 - formal 禁止 settled / lead_in / pool_fill 冒充完整动作：仅 `delivery_mode=preview` 才挂这些降级阶段；正式稿动作放不下时记 `unmet`，保留原镜头。离线反例：2 秒口播、指产品动作 1–15 秒，formal 不得落到 15–17 秒 settled。
 - 派生卖点标签门控：否定句（未看到/没有…）与仅包装印字不再打腰腹/防侧漏等动作标签；删除「计时器+红字+巾体→荧光」规则，荧光须检测笔/紫光/荧光测试证据。标签带来源 `shot_label_sources`（`derived:<rule_id>`），再次标注可撤回旧派生。
@@ -15,7 +17,7 @@
 
 依据 2026-10-12 会议纪要（AI 自动剪辑视频相关问题讨论）和《卫品AI智能混剪通行指令》。
 
-运维踩坑（bench10 / r26–r30，含透光≠吸水、pour_burst、recheck、容量 23、预览初步交付不写「已完成」、卫品表 `tbl2glS3nYwM5i5m`）见包内 `docs/WEIPIN_1.5.2_PITFALLS.md`。
+历史运维踩坑（含透光≠吸水、pour_burst、recheck、预览初步交付不写「已完成」）见包内 `docs/WEIPIN_1.5.2_PITFALLS.md`；表格由部署环境配置。
 
 - 拆包完整动作可跨相邻句连续播放（卫品规则包 **1.5.2-13**）：拆包与吸水实验一样支持 `group_bridge` / `group_min_s` / `group_extend_max` / `group_max`。单句口播放不下完整撕开/取出时，联系上下句并组，优先同一条素材连续播完；单句配音已够 2.5 秒则不硬并邻居。荧光、面层、吸水等其它场景句不会被并进拆包组。`_split_groups` 对配置了 `group_*` 的 `full_window` 场景同样生效。
 - 产品展示连着外包装时优先拆包（规则包 **1.5.2-14**）：上一句已是袋面/外包装静态，这一句又选中袋面时改拆包动作镜，避免成片一直拍包装；文案讲包装时同理。荧光/面层/吸水等专属卖点句，以及品牌/促销/报数量句仍排除。

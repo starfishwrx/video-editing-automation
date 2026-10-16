@@ -3,11 +3,11 @@
 > 本文件只做“指路”，不展开细节。实现与边界条件放在 docs/ 下；每次改完代码，如有新坑，写进 `LESSONS.md`。
 
 ## 0. 先读这三条
-1. 当前唯一可改的代码目录是 `packages/video-v1.5.1/`（候选版）。`packages/video-v1.5.0/`、`packages/video-v1.4.0/` 是历史归档，禁止修改；它们与 `releases/SHA256SUMS-*.txt`、各包 `PACKAGE_CONTENTS.sha256` 绑定，改了会让校验失效。
+1. 当前可改的候选包是 `packages/video-v1.5.3/`。下表中 v1.5.1 的子系统文档仍可用于定位，但实际代码读取 v1.5.3 的同名路径。`packages/video-v1.5.1/`、`packages/video-v1.5.0/`、`packages/video-v1.4.0/` 是历史归档，禁止修改；它们与校验清单绑定。
 2. 凭据/机器路径只能来自环境变量：`JY_SKILL_ROOT` `JY_DRAFT_ROOT` `JY_INSTALL_ROOT` `JY_NAS_SHARE` `JY_NAS_USER` `NAS_PASSWORD` `JY_MAC_DRAFT_ROOT` `LARK_BASE_TOKEN`。不得写进代码、测试、日志或提交。
 3. 任何改动都不能让 `RULES.md` 的证据闸门变松：formal 模式只认 `PASS`；模型超时/证据缺失/版本漂移只能是 `UNCERTIFIED` 或 `FAIL`。
 
-## 1. 按任务找文档（v1.5.1）
+## 1. 按任务找文档（历史路由对应当前包的同名模块）
 | 你要改的东西 | 先读 | 代码位置 |
 |---|---|---|
 | 编排主流程 / 闸门顺序 / 草稿写入 | `docs/subsystems/orchestrator-engine.md` | `packages/video-v1.5.1/doubao-jianying-orchestrator/orchestrator/engine.py` |
@@ -23,14 +23,16 @@
 | 环境依赖 | `packages/video-v1.5.1/ENVIRONMENT.md` | — |
 | 运行时合同 / 已知坑 | `packages/video-v1.5.1/doubao-jianying-orchestrator/SKILL.md` 与 `references/*.md` | — |
 | 发版 | `docs/release-process.md`, `docs/RELEASES.md` | `packages/video-v1.5.1/release-manifest.json`, `VERSION`, `releases/` |
+| 已验证修复合包 / 素材丢失修复 | `packages/video-v1.5.3/doubao-jianying-orchestrator/references/validated_fix_to_release.md` | `packages/video-v1.5.3/tools/release_package.py`, `draft_delivery.py` |
 | 代码风格 | `docs/code-standards.md` | — |
 
 ## 2. 改完必须做（本地验证）
-```bash
-cd packages/video-v1.5.1
-python -m pytest tests -q
-python -m pytest doubao-jianying-orchestrator/tests -q
+```powershell
+cd packages/video-v1.5.3
+uv run --frozen python -X utf8 -m unittest discover -s tests -q
+uv run --frozen python -X utf8 -m unittest discover -s doubao-jianying-orchestrator/tests -q
 ```
+- 局部交付迭代可只运行 `test_draft_delivery.py`、`test_nas_portable.py`；准备发版 PR 时，用 `tools.release_package build --output <包外新目录> --checks full` 在解压副本跑两套测试一次。
 - 改了闸门/状态：补一个“该拦住的输入确实被拦住”的测试。
 - 改了文件：按 `docs/release-process.md` 重新生成 `PACKAGE_CONTENTS.sha256`（只在发版 PR 中做）。
 - 测试通过 ≠ 生产通过。不要在 PR/回复里声称“已上线/已验收”。

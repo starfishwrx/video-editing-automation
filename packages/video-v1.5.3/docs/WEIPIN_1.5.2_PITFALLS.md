@@ -15,20 +15,13 @@
 |---|---|
 | 本地 `local_only` 出完稿就当交付 | 初步交付必须：人工检查凭证 → NAS 分发（不覆盖）→ 回写工作台「草稿文件」+「问题反馈」 |
 | 预览稿回写「已完成」 | **禁止**。QC 未正式过门前任务状态保持「待完成」，反馈写明「初步交付/预览稿」 |
-| 用错飞书表 | 卫品生成工作台是 `tbl2glS3nYwM5i5m`，不是纸品/历史总表 `tblUSuZw9hw97gnn` |
+| 用错飞书表 | 从部署配置读取 `LARK_TABLE_ID`，核对品类工作台；不要复用其它工作台或历史总表的标识 |
 | NAS 目标已存在仍 robocopy | **停止**，换新 `-rev-N` 或人工确认后另路径；不得覆盖已有剪映编辑稿 |
 | 只改分析规则就全量重看素材 | 用 `recheck` 增量重看（见下），禁止再开一轮 r25 式全量 vision |
 
-本机收尾脚本参考：`D:\jy_pipeline\ship_weipin_bench10_preview_delivery.py`；凭证样例：`work/delivery_check_weipin_bench10_*.json`。
+交付与恢复使用包内维护入口 `tools.draft_delivery`；私有任务与凭证保留在部署宿主，不随源码包提供。
 
-成片 mp4 导出：流水线只出草稿，不出 mp4；本机剪映 11.5 的界面不对 UI 自动化暴露控件，`jianying_controller.export_draft`（只支持剪映 6 及以下）不可用，不要再去试。用 ffmpeg 按明文 `draft_info.json` 渲染：
-
-```
-cd D:\jy_pipeline\work\preview_exports_20261012
-python -X utf8 export_batch.py <plan.json> <输出子目录>
-```
-
-`plan.json` 格式 `[{"record_id": "...", "drafts": ["草稿名"]}]`；自带抽帧质检（时长、黑帧、字幕、音量）。抽到黑帧时先查是否落在 `visual_missing_placeholder`（预览稿本身留黑），不是渲染错误。草稿被剪映打开过后 `draft_content.json` 会加密，脚本只读 `draft_info.json`，不受影响。
+成片导出依赖目标剪映版本的官方能力；旧 controller 的 UI 支持范围不能推断为新版支持。按原始明文快照生成的渲染预览只代表原生成版。当前时间轴加密时，不得把旧 `draft_info.json` 的渲染视为当前编辑稿验收；恢复规则见包内交付与恢复说明。
 
 ---
 
@@ -86,7 +79,7 @@ python -X utf8 export_batch.py <plan.json> <输出子目录>
 - `FAIL`：常见是包装/静帧/擦拭缺失等后验；**功能镜头对了也可能 FAIL**——交付反馈必须带真实 QC，勿粉饰。
 - `UNCERTIFIED`：相位或场景未核实；给人审时标明「未认证」。
 
-bench10（2026-10-15）初步交付：10/10 NAS + 表格草稿链接；仅天山绒棉为 `PASS_WITH_DEGRADED`，其余 FAIL/UNCERTIFIED，状态均保持「待完成」。
+历史预览反馈中，交付链接成功不代表质量通过；FAIL/UNCERTIFIED 仍须保留待复核状态。
 
 ---
 

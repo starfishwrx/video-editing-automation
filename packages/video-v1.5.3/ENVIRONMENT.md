@@ -3,11 +3,11 @@
 ## Python dependencies
 
 Use **uv** only (`uv sync` / `uv add` / `uv run`). Do not use `pip install`
-against the system interpreter for this package or `D:\jy_pipeline`.
+against the system interpreter for this package or its deployment host.
 
 - Package project: `packages/video-v1.5.3/pyproject.toml`
-- Host project: `D:\jy_pipeline/pyproject.toml`
-- Helper: `scripts/uv_sync.ps1` (package) or `D:\jy_pipeline\uv_sync.ps1`
+- Host project: the `pyproject.toml` under the configured `JY_PIPE_ROOT`
+- Helper: `scripts/uv_sync.ps1` (package)
 
 The release has no embedded credentials or host paths. A deployment may set:
 

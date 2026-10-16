@@ -6,8 +6,8 @@
     python3 tests/test_timing_contract.py
 
 用例 ① 是 A 步的验收线（用户 2026-09-16 定案第 9 条）：
-    2026-09-16 的 recvvfR4QKW8Ky 里，段 2「心相印也太会了…」选中了全库最短的
-    波点挂抽_IMG_7950.MOV（3.945s），配音 4.16s，到 write_draft 阶段才炸
+    某次历史任务里，段 2 选中了全库最短的展示素材
+    （3.945s），配音 4.16s，到 write_draft 阶段才炸
     AUDIO_VIDEO_MISMATCH，一个草稿都出不来。现在要求：**在规划阶段**就得到
     合法解，或者明确报 SOURCE_TOO_SHORT —— 不允许拖到最后才炸。
 """
