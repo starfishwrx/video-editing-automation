@@ -15,10 +15,12 @@ from utils.formatters import safe_tim
 # 旧值 -1000.0 是误抄 `script_file.import_srt` 的形参默认值 —— 它把字幕推到画布
 # 外，成片里根本看不见。当前治理基线要求字幕统一画布内可见、加粗。
 # 字号按用户 2026-09-17 定案**统一 8 号**（此前曾按历史稿实测取 5.0，用户纠正）。
+# 2026-10-15 卫品反馈「字幕往上移」：-0.8 贴底太低，上移到 -0.55（仍在画布内）。
+# 运营口头说的「Y=-1000」是剪映界面像素口径，不能直接写进 transform_y。
 DEFAULT_SUBTITLE_FONT_SIZE = 8.0
 DEFAULT_SUBTITLE_BOLD = True
 DEFAULT_SUBTITLE_X = 0.0
-DEFAULT_SUBTITLE_Y = -0.8
+DEFAULT_SUBTITLE_Y = -0.55
 
 
 def _clean_subtitle_text(value: str) -> str:

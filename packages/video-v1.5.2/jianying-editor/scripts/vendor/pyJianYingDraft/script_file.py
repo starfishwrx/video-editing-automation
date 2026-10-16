@@ -511,7 +511,7 @@ class ScriptFile:
                    time_offset: Union[str, float] = 0.0,
                    style_reference: Optional[TextSegment] = None,
                    text_style: TextStyle = TextStyle(size=8, bold=True, align=1, auto_wrapping=True),
-                   clip_settings: Optional[ClipSettings] = ClipSettings(transform_x=0.0, transform_y=-0.8)) -> "ScriptFile":
+                   clip_settings: Optional[ClipSettings] = ClipSettings(transform_x=0.0, transform_y=-0.55)) -> "ScriptFile":
         """从SRT文件中导入字幕, 支持传入一个`TextSegment`作为样式参考
 
         注意: 默认不会使用参考片段的`clip_settings`属性, 若需要请显式为此函数传入`clip_settings=None`

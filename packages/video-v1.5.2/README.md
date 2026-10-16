@@ -15,3 +15,5 @@ must inject the environment variables documented in `ENVIRONMENT.md`.
 The visual governance policy is a separately deployable business layer. This
 package consumes its version and evidence contract; it does not copy business
 rules into Diaodu or RDM.
+
+卫品批跑与初步交付踩坑（1.5.2-r30 / bench10）：见 `docs/WEIPIN_1.5.2_PITFALLS.md`。

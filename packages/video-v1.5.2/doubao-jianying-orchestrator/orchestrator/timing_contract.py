@@ -1138,7 +1138,9 @@ def check_invariants(items: Iterable[dict], *, fps: float = DEFAULT_FPS,
         allowed = item.get("speed_range")
         if allowed:
             lo, hi = float(allowed[0]), float(allowed[1])
-            if speed < lo - 1e-6 or speed > hi + 1e-6:
+            # 变速吸附在 1µs 栅格上（frame_speed），区间收成一个点时吸附值最多偏半格。
+            grid = 1.0 / frame_us(fps)
+            if speed < lo - grid or speed > hi + grid:
                 issues.append({
                     "code": INV_SPEED_OUT_OF_RANGE, "index": index, "video": video,
                     "audio_mode": mode, "expected_us": None, "actual_us": None,

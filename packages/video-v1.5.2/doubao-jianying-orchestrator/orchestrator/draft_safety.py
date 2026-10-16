@@ -204,7 +204,7 @@ def _subtitle_style_issues(material: dict, segment: dict, index: int,
     expected_size = float(expected_tracks.get("subtitle_font_size", 8.0))
     expected_bold = bool(expected_tracks.get("subtitle_bold", True))
     expected_x = float(expected_tracks.get("subtitle_transform_x", 0.0))
-    expected_y = float(expected_tracks.get("subtitle_transform_y", -0.8))
+    expected_y = float(expected_tracks.get("subtitle_transform_y", -0.55))
     content = material.get("content")
     if isinstance(content, str):
         try:

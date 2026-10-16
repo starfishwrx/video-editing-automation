@@ -71,10 +71,12 @@ class RulepackTests(unittest.TestCase):
         weipin = rulepack.apply_manifest_defaults({"product": "夜用卫生巾"})
         self.assertEqual(weipin["voice_tempo"], 1.2)
         self.assertFalse(weipin["auto_transition"])
-        self.assertAlmostEqual(weipin["tail_pad_s"], 0.083, places=3)
+        self.assertEqual(weipin["tail_pad_s"], 0.0)
         self.assertEqual(weipin["rulepack"]["rulepacks"], ["global", "weipin"])
         preset_speed = rulepack.apply_manifest_defaults({"product": "夜用卫生巾", "voice": "紫薇1.2倍速"})
-        self.assertEqual(preset_speed["voice_tempo"], 1.0)
+        # 名称倍速走 ffmpeg atempo；SAMI 不认后缀，不能再误置 1.0
+        self.assertEqual(preset_speed["voice_tempo"], 1.2)
+        self.assertEqual(rulepack.voice_name_speed("憨熊1.1倍速"), 1.1)
         explicit = rulepack.apply_manifest_defaults(
             {"product": "夜用卫生巾", "voice": "紫薇1.2倍速", "voice_tempo": 1.1})
         self.assertEqual(explicit["voice_tempo"], 1.1)
@@ -94,6 +96,12 @@ class RulepackTests(unittest.TestCase):
         pour = {"action": "倾倒", "object": "蓝色液体+巾体", "description": "往卫生巾上倒水"}
         self.assertEqual(rulepack.scene_for(rules, "吸水实验看看瞬吸效果", pour)["id"], "absorb_test")
         self.assertIsNone(rulepack.scene_for(rules, "吸水实验看看瞬吸效果", {"action": "举起"}))
+        # 对光轻薄/透气：描述里写「吸水层」也不能当成倒液实验。
+        backlight = {"description": "将巾体举到灯光前，光线透过巾体，可见内部压纹与吸水层结构",
+                     "evidence_tags": ["对光展示光线透过巾体", "吸水层"]}
+        absorb = next(s for s in rules["scenes"] if s["id"] == "absorb_test")
+        self.assertFalse(rulepack.shot_has_visual(absorb, backlight))
+        self.assertIsNone(rulepack.scene_for(rules, "16倍的瞬吸技术", backlight))
         self.assertEqual(rulepack.scene_for(rules, "面层很柔软", {"action": "举起"})["id"],
                          "surface_layer")
         self.assertEqual(rulepack.scene_for(rules, "这款很好用",
@@ -295,8 +303,18 @@ class SplitSpeedTests(unittest.TestCase):
         self.assertGreater(parts[0]["speed"], 1.0)
         self.assertLessEqual(parts[0]["speed"], 1.6 + 1e-6)
 
+    def test_short_sentence_uses_pour_burst_instead_of_failing(self):
+        # 约 4.7s 口播 + 只有倒水/吸收（无擦拭）：常规倒水 1.6× 不够，提到 burst 4× 仍用真实验。
+        shot = {**SHOT, "source_start": 0.0, "source_end": 70.0, "material_duration_us": 70 * US}
+        phases = {"pour": [1.0, 8.0], "absorb": [8.0, 65.0]}
+        plan = scene_rules.plan_split(shot, phases, self.SCENE, audio_us=4_670_000, manifest=MANIFEST)
+        self.assertTrue(plan["ok"], plan)
+        pour = next(p for p in plan["parts"] if p["phase"] == "pour")
+        self.assertGreater(pour["speed"], 1.6)
+        self.assertLessEqual(pour["speed"], 4.0 + 1e-6)
+
     def test_too_short_sentence_fails(self):
-        plan = scene_rules.plan_split(SHOT, PHASES, self.SCENE, audio_us=2 * US, manifest=MANIFEST)
+        plan = scene_rules.plan_split(SHOT, PHASES, self.SCENE, audio_us=int(0.5 * US), manifest=MANIFEST)
         self.assertEqual(plan["reason"], scene_rules.SCENE_ACTION_TOO_LONG)
 
     def test_long_sentence_extends_material(self):
@@ -374,8 +392,9 @@ class SceneApplyTests(unittest.TestCase):
         self.assertNotIn("scene_rule", third)
 
     def test_too_long_becomes_visual_missing_in_preview(self):
+        # 0.5s 连 burst 4× 也装不下完整倒水+擦拭，才留黑。
         manifest = {**MANIFEST, "product": "萌睡裤", "delivery_mode": "preview"}
-        matched = self._matched("吸水实验，倒下去瞬吸", 2 * US)
+        matched = self._matched("吸水实验，倒下去瞬吸", int(0.5 * US))
         locate = mock.Mock(return_value={"ok": True, "complete": True, "phases": PHASES})
         with tempfile.TemporaryDirectory() as tmp:
             scene_rules.apply(manifest, matched, {"shots": [SHOT]}, Path(tmp), locate=locate)
@@ -387,7 +406,7 @@ class SceneApplyTests(unittest.TestCase):
 
     def test_formal_keeps_shot_when_unmet(self):
         manifest = {**MANIFEST, "product": "萌睡裤", "delivery_mode": "formal"}
-        matched = self._matched("吸水实验，倒下去瞬吸", 2 * US)
+        matched = self._matched("吸水实验，倒下去瞬吸", int(0.5 * US))
         locate = mock.Mock(return_value={"ok": True, "complete": True, "phases": PHASES})
         with tempfile.TemporaryDirectory() as tmp:
             scene_rules.apply(manifest, matched, {"shots": [SHOT]}, Path(tmp), locate=locate)
@@ -456,6 +475,115 @@ class SceneApplyTests(unittest.TestCase):
         self.assertEqual(seg["temporary_shot_id"], "p2")
         self.assertEqual(seg["head_waste"], 0.1)
         self.assertEqual(locate.call_count, 1)
+
+    def _long_pointing(self, action, pool=()):
+        pointing = {**SHOT, "shot_id": "p1", "action": "指向", "description": "手指着产品正面",
+                    "pointing_to_text": True, "role": "product_display"}
+        manifest = {**MANIFEST, "product": "日用卫生巾", "delivery_mode": "preview"}
+        matched = self._matched("我是真没想到", 1 * US, shot=pointing)
+        matched["manifest"]["segments"][0]["selection_mode"] = "degraded_fallback"
+        locate = mock.Mock(return_value={"ok": True, "complete": True, "phases": {"action": action}})
+        with tempfile.TemporaryDirectory() as tmp:
+            report = scene_rules.apply(manifest, matched, {"shots": [pointing, *pool]}, Path(tmp),
+                                       locate=locate)
+        return report["rows"][0], matched["manifest"]["segments"][0]
+
+    def test_long_pointing_uses_frames_after_pointing(self):
+        row, seg = self._long_pointing([11.0, 19.0])
+        self.assertEqual((row["status"], row["mode"]), ("applied", "settled"))
+        self.assertGreaterEqual(seg["window_solution"]["source_start"], 19.0)
+
+    def test_formal_rejects_settled_when_action_too_long(self):
+        """正式稿不得用动作结束后的定住画面冒充完整动作。"""
+        pointing = {**SHOT, "shot_id": "p1", "action": "指向", "description": "手指着产品正面",
+                    "pointing_to_text": True, "role": "product_display"}
+        manifest = {**MANIFEST, "product": "日用卫生巾", "delivery_mode": "formal"}
+        matched = self._matched("我是真没想到", 1 * US, shot=pointing)
+        locate = mock.Mock(return_value={
+            "ok": True, "complete": True, "phases": {"action": [1.0, 15.0]}})
+        with tempfile.TemporaryDirectory() as tmp:
+            report = scene_rules.apply(manifest, matched, {"shots": [pointing]}, Path(tmp),
+                                       locate=locate)
+        row = report["rows"][0]
+        seg = matched["manifest"]["segments"][0]
+        self.assertEqual(row["status"], "unmet")
+        self.assertNotEqual(row.get("mode"), "settled")
+        self.assertNotEqual(row.get("mode"), "lead_in")
+        self.assertFalse(seg.get("visual_missing"))
+        self.assertEqual(seg["scene_rule"]["status"], "unmet")
+
+    def test_long_pointing_uses_frames_before_pointing(self):
+        row, seg = self._long_pointing([13.0, 29.9])
+        self.assertEqual((row["status"], row["mode"]), ("applied", "lead_in"))
+        self.assertLessEqual(seg["window_solution"]["source_end"], 13.0 + 1e-6)
+
+    def test_pointing_over_whole_shot_takes_an_unused_pool_shot(self):
+        spare = {**SHOT, "shot_id": "p3", "video": "D:/m/spare.mp4", "action": "举起",
+                 "object": "包装", "description": "手举包装", "role": "product_display",
+                 "frame_time": 20.0}
+        row, seg = self._long_pointing([10.0, 30.0], pool=[spare])
+        self.assertEqual(row["status"], "applied")
+        self.assertFalse(seg.get("visual_missing"))
+        self.assertEqual(seg["temporary_shot_id"], "p3")
+
+    def test_absorb_group_skips_backlight_breathability_shots(self):
+        """瞬吸句不能把透光轻薄镜头当吸水实验演。"""
+        backlight = {**SHOT, "shot_id": "light1", "video": "D:/m/light.mp4",
+                     "action": "举起", "object": "巾体",
+                     "description": "手持巾体翻面后举到灯光前透光，可见内部吸水层",
+                     "evidence_tags": ["对光展示", "光线透过巾体", "吸水层结构"],
+                     "role": "usage_demo"}
+        pour = {**SHOT, "shot_id": "pour1", "video": "D:/m/pour.mp4",
+                "description": "手持玻璃杯向巾体倾倒蓝色液体后离开",
+                "evidence_tags": ["倾倒蓝色液体", "液体被吸收"]}
+        manifest = {**MANIFEST, "product": "日用卫生巾", "category": "weipin",
+                    "delivery_mode": "preview"}
+        matched = self._matched("16倍的瞬吸技术", 2 * US, shot=backlight,
+                                top3=[{"shot_id": "pour1", "eligible": True}])
+        matched["manifest"]["segments"].append({
+            **matched["manifest"]["segments"][0], "text": "吸的又多又快",
+            "temporary_shot_id": "light1", "audio_duration_us": 2 * US})
+        matched["recommendations"].append({"index": 2, "top3": [{"shot_id": "pour1", "eligible": True}]})
+        phases = {"pour": [1.0, 3.0], "absorb": [3.0, 8.0], "wipe": [8.0, 10.0]}
+        locate = mock.Mock(return_value={"ok": True, "complete": True, "phases": phases})
+        with tempfile.TemporaryDirectory() as tmp:
+            report = scene_rules.apply(manifest, matched, {"shots": [backlight, pour]},
+                                       Path(tmp), locate=locate)
+        row = next(r for r in report["rows"] if r.get("scene") == "absorb_test")
+        self.assertNotEqual(row.get("shot_id"), "light1")
+        attempted = {a["shot_id"] for a in row.get("attempts") or []}
+        self.assertNotIn("light1", attempted)
+
+    def _two_pointing(self, second_video, action, pool=(), budget=24):
+        first = {**SHOT, "shot_id": "p1", "video": "D:/a/IMG_1.MOV", "action": "指向",
+                 "description": "手指着产品正面", "pointing_to_text": True, "role": "product_display"}
+        second = {**first, "shot_id": "p2", "video": second_video}
+        manifest = {**MANIFEST, "product": "日用卫生巾", "delivery_mode": "preview"}
+        matched = self._matched("我是真没想到", 1 * US, shot=first)
+        seg = dict(matched["manifest"]["segments"][0], selection_mode="degraded_fallback")
+        matched["manifest"]["segments"] = [
+            seg, dict(seg, text="真的很好用", video=second["video"], temporary_shot_id="p2")]
+        matched["recommendations"].append({"index": 2, "top3": []})
+        locate = mock.Mock(return_value={"ok": True, "complete": True, "phases": {"action": action}})
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(scene_rules, "_source_budget", return_value=budget):
+            report = scene_rules.apply(manifest, matched, {"shots": [first, second, *pool]},
+                                       Path(tmp), locate=locate)
+        return report["rows"], matched["manifest"]["segments"]
+
+    def test_fallback_skips_a_copy_of_a_file_another_sentence_uses(self):
+        rows, segs = self._two_pointing("D:/b/img_1.mov", [11.0, 19.0])
+        names = [Path(s["video"]).name.casefold() for s in segs if not s.get("visual_missing")]
+        self.assertEqual(len(names), len(set(names)))
+        self.assertIn(scene_rules.SCENE_SOURCE_DUPLICATE, [a["reason"] for a in rows[0]["attempts"]])
+
+    def test_pool_fill_respects_the_source_budget(self):
+        spare = {**SHOT, "shot_id": "p3", "video": "D:/m/spare.mp4", "action": "举起",
+                 "object": "包装", "description": "手举包装", "role": "product_display",
+                 "frame_time": 20.0}
+        rows, segs = self._two_pointing("D:/b/IMG_2.MOV", [10.0, 30.0], pool=[spare], budget=1)
+        self.assertNotIn("D:/m/spare.mp4", [s.get("video") for s in segs])
+        self.assertIn(scene_rules.SCENE_SOURCE_BUDGET, [a["reason"] for a in rows[0]["attempts"]])
 
     def test_evidence_frame_time_follows_interval(self):
         from orchestrator.shot_analyzer import candidate_evidence_interval
@@ -648,6 +776,118 @@ class ZhipinRuleTests(unittest.TestCase):
         self.assertFalse(rulepack.load("weipin")["avoid_similar_shots"])
 
 
+class SentenceFitTests(unittest.TestCase):
+    def setUp(self):
+        from orchestrator import demo_actions
+        self.da = demo_actions
+        self.contract = demo_actions.sentence_contract(
+            "用完直接丢马桶可溶解不堵管", category="纸品", product="纯水湿厕纸")
+
+    def test_seen_dispersal_fits_flush_sentence(self):
+        shot = {"description": "巾体被提起时下垂呈碎絮状，之后盆底和排水口附近散落半透明碎片"}
+        self.assertEqual(self.da.shot_fit(shot, self.contract), 1)
+
+    def test_denied_dispersal_does_not_fit(self):
+        intact = {"description": "双手拉伸巾体，全程巾体未见破洞、散开或碎裂，形状保持完整",
+                  "action_segments": [], "evidence_tags": ["巾体完整"]}
+        drain = {"description": "排水口静置，排水口无可见碎片残留"}
+        self.assertEqual(self.da.shot_fit(intact, self.contract), 0)
+        self.assertEqual(self.da.shot_fit(drain, self.contract), 0)
+
+    def test_result_sentences_prefer_shots_that_show_the_result(self):
+        for text in ("用完直接丢马桶可溶解不堵管", "擦完清爽像水洗", "湿度刚刚好不滴水"):
+            self.assertIn("effect", self.da.infer_intents(text, text, "纸品"), text)
+
+    def test_printed_pull_claim_is_not_a_pull_shot(self):
+        contract = self.da.sentence_contract("单手一抽一张不连张", category="纸品", product="纯水湿厕纸")
+        package = {"description": "手持包装展示正面，手指指向包装文字", "readable_claims": ["不连抽"]}
+        pull = {"description": "包装挂在挂钩上，手从开口处拉出巾体"}
+        self.assertEqual(self.da.shot_fit(package, contract), 0)
+        self.assertEqual(self.da.shot_fit(pull, contract), 1)
+
+    def test_scene_window_uses_the_segment_the_sentence_talks_about(self):
+        scene = next(s for s in rulepack.load("zhipin")["scenes"] if s["id"] == "usage_action")
+        contract = self.da.sentence_contract("单手一抽一张不连张", category="纸品", product="纯水湿厕纸")
+        shot = {"source_start": 0.0, "source_end": 6.0, "action_segments": [
+            {"start": 0.7, "end": 1.5, "action": "翻开包装翻盖", "result": "翻盖打开"},
+            {"start": 2.2, "end": 3.7, "action": "单手抽出一张湿巾", "result": "抽出一张"},
+            {"start": 5.1, "end": 5.9, "action": "合上翻盖", "result": "翻盖合上"}]}
+        located = scene_rules._segment_phases(scene, shot, contract)
+        self.assertTrue(located["complete"])
+        self.assertEqual(located["phases"]["action"], [1.45, 4.45])
+        self.assertIsNone(scene_rules._segment_phases(scene, {"action_segments": []}, contract))
+        wipe = self.da.sentence_contract("擦完清爽像水洗", category="纸品", product="纯水湿厕纸")
+        self.assertIsNone(scene_rules._segment_phases(scene, shot, wipe))
+
+    def test_pull_sentence_moves_evidence_from_hook_to_pull_segment(self):
+        from orchestrator import shot_analyzer
+        contract = self.da.sentence_contract("单手一抽一张不连张", category="纸品", product="纯水湿厕纸")
+        shot = {"source_start": 0.0, "source_end": 9.4,
+                "evidence_intervals": [{"start": 2.0, "end": 4.0, "frame_time": 3.0}],
+                "action_segments": [{"start": 1.5, "end": 3.4, "action": "挂到挂钩上"},
+                                    {"start": 7.0, "end": 9.4, "action": "抽取"}]}
+        focused = shot_analyzer.focus_on_topic(shot, contract)
+        self.assertEqual(focused["evidence_intervals"][0]["start"], 7.0)
+        self.assertEqual(focused["evidence_intervals"][0]["end"], 9.4)
+        self.assertEqual(shot["evidence_intervals"][0]["start"], 2.0)
+        hang = self.da.sentence_contract("挂墙上不占卫生间台面", category="纸品", product="纯水湿厕纸")
+        self.assertIs(shot_analyzer.focus_on_topic(shot, hang), shot)
+
+    def test_scene_swap_narrows_long_evidence_for_short_sentence(self):
+        static = {**HOLD, "shot_id": "st", "video": "D:/m/st.mp4", "action": "无动作",
+                  "action_phase": "static", "source_start": 0.0, "source_end": 14.0,
+                  "material_duration_us": 14 * US,
+                  "evidence_intervals": [{"start": 6.0, "end": 8.5, "frame_time": 7.4}]}
+        seg = {"text": "一定要备上这款", "audio_duration_us": int(1.2 * US)}
+        result = scene_rules._plain_swap(seg, static, manifest=ZhipinRuleTests.MANIFEST,
+                                         audio_us=int(1.2 * US))
+        self.assertTrue(result["ok"], result)
+        interval = result["update"]["evidence_intervals"][0]
+        self.assertTrue(interval["start"] <= 7.4 <= interval["end"])
+
+    def test_long_evidence_narrows_around_the_audited_frame(self):
+        from orchestrator import shot_analyzer
+        shot = {"source_start": 0.0, "source_end": 16.9,
+                "evidence_intervals": [{"start": 9.5, "end": 12.0, "frame_time": 11.6}]}
+        narrowed = shot_analyzer.narrow_evidence(shot, 2_249_575)
+        interval = narrowed["evidence_intervals"][0]
+        self.assertLessEqual(interval["end"] - interval["start"], 2.25)
+        self.assertTrue(interval["start"] <= 11.6 <= interval["end"])
+        self.assertGreaterEqual(interval["start"], 9.5)
+        self.assertIsNone(shot_analyzer.narrow_evidence(shot, 3_000_000))
+
+    def test_printed_flush_claim_is_not_a_flush_shot(self):
+        back = {"description": "手持包装背面展示，背面可见可冲散字样",
+                "readable_claims": ["可冲散", "可生物降解"]}
+        self.assertEqual(self.da.shot_fit(back, self.contract), 0)
+        self.assertTrue(self.da.printed_only_match(["包装背面可见可冲散、可生物降解字样"], self.contract))
+        self.assertFalse(self.da.printed_only_match(["巾体在水中散成碎片"], self.contract))
+        label = self.da.sentence_contract("EDI纯水配方", category="纸品", product="纯水湿厕纸")
+        self.assertFalse(self.da.printed_only_match(["包装正面印有EDI纯水字样"], label))
+        self.assertEqual(self.da.shot_fit({"readable_claims": ["EDI纯水"]}, label), 2)
+
+    def test_rule_tag_hit_does_not_override_off_topic_shot(self):
+        from orchestrator import shot_analyzer
+        drain = {**HOLD, "shot_id": "dr", "video": "D:/m/dr.MOV", "source_start": 0.0,
+                 "source_end": 4.5, "duration": 4.5, "frame_time": 1.0, "action": "排水",
+                 "action_phase": "static", "status": "ready_for_matching", "action_complete": True,
+                 "has_subject": True, "evidence_strength": "B",
+                 "description": "水流经排水口流走，盆面干净", "result": "排水口无残留",
+                 "visual_tags": ["洗手盆"], "evidence_tags": ["干净"]}
+        manifest = {"segments": [{"text": "干纸总擦不干净", "audio_duration_us": int(1.5 * US)}],
+                    "category": "纸品", "product_name": "纯水湿厕纸", "head_trim_s": 0.3,
+                    "tail_trim_s": 0.2, "fps": 30, "max_source_reuse": 2, "delivery_mode": "formal"}
+        res = shot_analyzer.match_manifest(manifest, {"shots": [drain], "semantic_matches": []})
+        row = res["recommendations"][0]["top3"][0]
+        self.assertFalse(row["eligible"])
+        self.assertIn("OFF_TOPIC", row["reuse_block_reason"])
+
+    def test_negation_in_one_field_does_not_leak_into_the_next(self):
+        shot = {"description": "提起后巾体仍在手上，未见水龙头",
+                "evidence_tags": ["散成碎片"]}
+        self.assertEqual(self.da.shot_fit(shot, self.contract), 1)
+
+
 class EngineHelpersTests(unittest.TestCase):
     def test_parent_zero_is_a_parent(self):
         self.assertEqual(_parent_id(SimpleNamespace(parent_index=0)), 0)
@@ -784,12 +1024,14 @@ class ExperimentGroupChainTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             report = scene_rules.apply(self.MANIFEST, matched, analysis, Path(tmp), locate=locate)
         row = report["rows"][0]
-        self.assertEqual((row["indices"], row["trigger"], row["status"]), ([2, 3], "text", "applied"))
+        # 「量大」也是吸水命中句，与吸收/反渗同一实验组连续播。
+        self.assertEqual((row["indices"], row["trigger"], row["status"]),
+                         ([2, 3, 4], "text", "applied"))
         self.assertEqual([(a["shot_id"], a["source"]) for a in row["attempts"]],
                          [("pool1", "pool_search")])
         segments = matched["manifest"]["segments"]
         self.assertEqual([s["video"] for s in segments],
-                         ["D:/m/chip.mp4", "D:/m/full.mp4", "D:/m/full.mp4", "D:/m/chip.mp4"])
+                         ["D:/m/chip.mp4", "D:/m/full.mp4", "D:/m/full.mp4", "D:/m/full.mp4"])
 
     def test_selling_point_without_experiment_footage_goes_black(self):
         _chip, matched, analysis = self._selling_point_script([])
@@ -802,7 +1044,7 @@ class ExperimentGroupChainTests(unittest.TestCase):
                          ("visual_missing", scene_rules.SCENE_NO_FOOTAGE))
         segments = matched["manifest"]["segments"]
         self.assertEqual([bool(s.get("visual_missing")) for s in segments],
-                         [False, True, True, False])
+                         [False, True, True, True])
 
     def test_selling_point_without_footage_keeps_shots_in_formal(self):
         _chip, matched, analysis = self._selling_point_script([])
@@ -881,6 +1123,96 @@ class ExperimentGroupChainTests(unittest.TestCase):
         groups = scene_rules._split_groups([dict(seg, text=t) for t in texts], rules, {"s1": SHOT})
         self.assertEqual([g["positions"] for g in groups], [[1, 2, 3]])
 
+    @staticmethod
+    def _script(lines):
+        seg = {"video": "D:/m/a.mp4", "temporary_shot_id": "s1"}
+        return [dict(seg, text=t, audio_duration_us=int(s * US)) for t, s in lines]
+
+    def test_absorb_group_spans_follow_up_sentences(self):
+        rules = rulepack.load("weipin")
+        segments = self._script([("轻薄的同时", 1.18), ("吸收力还嘎嘎牛", 1.55), ("你就是姨妈量大的", 1.66),
+                                 ("也能快速兜住", 1.32), ("表面干干爽爽的", 1.56), ("一点也不反渗", 1.25),
+                                 ("而且这升级后的面层", 1.79)])
+        groups = scene_rules._split_groups(segments, rules, {"s1": SHOT}, category="weipin")
+        # 「量大」本身是吸水命中句；干爽/兜住续进组。面层句阻断。组最长 5 句。
+        absorb = [g["positions"] for g in groups if g["scene"]["id"] == "absorb_test"]
+        self.assertEqual(absorb, [[1, 2, 3, 4, 5]])
+
+    def test_absorb_related_sentences_stay_one_group_up_to_five(self):
+        rules = rulepack.load("weipin")
+        scene = next(s for s in rules["scenes"] if s["id"] == "absorb_test")
+        self.assertEqual(scene["group_max"], 5)
+        segments = self._script([
+            ("吸收速度很快", 1.0), ("锁在中央不扩散", 1.0), ("量大也不怕", 1.0),
+            ("表面干干爽爽", 1.0), ("一点也不反渗", 1.0),
+        ])
+        groups = scene_rules._split_groups(segments, rules, {"s1": SHOT}, category="weipin")
+        absorb = [g for g in groups if g["scene"]["id"] == "absorb_test"]
+        self.assertEqual(len(absorb), 1)
+        self.assertEqual(absorb[0]["positions"], [0, 1, 2, 3, 4])
+        # 透气主题不得吞进吸水组
+        blocked = self._script([("吸收速度很快", 1.0), ("超透气不闷热", 1.0), ("一点也不反渗", 1.0)])
+        groups = scene_rules._split_groups(blocked, rules, {"s1": SHOT}, category="weipin")
+        absorb = [g for g in groups if g["scene"]["id"] == "absorb_test"]
+        self.assertEqual([g["positions"] for g in absorb], [[0], [2]])
+
+    def test_absorb_group_takes_the_next_absorb_sentence(self):
+        rules = rulepack.load("weipin")
+        segments = self._script([("轻薄透气的同时", 1.48), ("吸收力也没落下", 1.75),
+                                 ("你看这肉眼可见的吸进去了", 2.72), ("来姨妈囤上几包", 1.45),
+                                 ("都会更安心", 1.16)])
+        groups = scene_rules._split_groups(segments, rules, {"s1": SHOT}, category="weipin")
+        self.assertEqual([g["positions"] for g in groups], [[1, 2]])
+
+    def test_absorb_group_bridges_one_unrelated_sentence(self):
+        rules = rulepack.load("weipin")
+        segments = self._script([("吸收力老强了", 2.0), ("姐妹们", 0.8), ("一点也不反渗", 1.5), ("赶紧下单", 1.0)])
+        groups = scene_rules._split_groups(segments, rules, {"s1": SHOT}, category="weipin")
+        self.assertEqual([g["positions"] for g in groups], [[0, 1, 2]])
+
+    def test_short_absorb_group_extends_into_free_neighbours_only(self):
+        rules = rulepack.load("weipin")
+        segments = self._script([("吸收力超强", 1.5), ("姐妹们冲", 1.2), ("真的好用", 1.0), ("再来一包", 1.0)])
+        groups = scene_rules._split_groups(segments, rules, {"s1": SHOT}, category="weipin")
+        self.assertEqual([g["positions"] for g in groups], [[0, 1]])
+        segments = self._script([("吸收力超强", 1.5), ("看这背面的说明", 1.2), ("真的好用", 1.0)])
+        groups = scene_rules._split_groups(segments, rules, {"s1": SHOT}, category="weipin")
+        self.assertEqual([g["positions"] for g in groups], [[0]])
+        segments = self._script([("吸收力超强", 1.5), ("姐妹们冲", 1.2)])
+        segments[1]["visual_missing"] = True
+        groups = scene_rules._split_groups(segments, rules, {"s1": SHOT})
+        self.assertEqual([g["positions"] for g in groups], [[0]])
+
+    def _borrow(self, first_s, second_s):
+        other = {**SHOT, "shot_id": "s2", "video": "D:/m/other.mp4", "action": "举起",
+                 "object": "包装", "description": "手拿包装"}
+        matched = SceneApplyTests()._matched("吸收力超强", int(first_s * US))
+        matched["manifest"]["segments"].append(
+            {"text": "姐妹们冲", "video": other["video"], "source_start": 10.0, "source_end": 30.0,
+             "temporary_shot_id": "s2", "audio_duration_us": int(second_s * US)})
+        # 倒水 17s：单句 3.6s 连 burst 4× 仍不够，借 1s 后够；借 0.2s 仍不够。
+        phases = {"pour": [11.0, 28.0], "absorb": [28.0, 30.0]}
+        locate = mock.Mock(side_effect=lambda shot, _scene, _dir: (
+            {"ok": True, "complete": False, "phases": phases} if shot["shot_id"] == "s1"
+            else {"ok": False, "reason": "NO_PHASES"}))
+        with tempfile.TemporaryDirectory() as tmp:
+            report = scene_rules.apply(self.MANIFEST, matched, {"shots": [SHOT, other]}, Path(tmp),
+                                       locate=locate)
+        return report["rows"][0], matched["manifest"]["segments"]
+
+    def test_too_short_group_borrows_the_next_sentence(self):
+        row, segments = self._borrow(3.6, 1.0)
+        self.assertEqual((row["indices"], row.get("borrowed"), row["status"]),
+                         ([1, 2], [2], "partial"))
+        self.assertEqual({s["video"] for s in segments}, {"D:/m/absorb.mp4"})
+
+    def test_borrowing_that_still_fails_keeps_the_neighbour(self):
+        row, segments = self._borrow(3.6, 0.2)
+        self.assertEqual((row["indices"], row["status"]), ([1], "visual_missing"))
+        self.assertNotIn("borrowed", row)
+        self.assertTrue(segments[0].get("visual_missing"))
+        self.assertEqual(segments[1]["video"], "D:/m/other.mp4")
+
     def test_replayed_interval_is_still_a_duplicate(self):
         segments = self._planned()
         second = segments[1]
@@ -896,7 +1228,7 @@ class ExperimentGroupChainTests(unittest.TestCase):
         self.assertEqual(gate["status"], "DUPLICATE_VISUAL_SHOT")
 
     def test_unmet_scene_rule_is_uncertified(self):
-        matched = SceneApplyTests()._matched("吸水实验，倒下去瞬吸", 2 * US)
+        matched = SceneApplyTests()._matched("吸水实验，倒下去瞬吸", int(0.5 * US))
         locate = mock.Mock(return_value={"ok": True, "complete": True, "phases": PHASES})
         with tempfile.TemporaryDirectory() as tmp:
             scene_rules.apply({**self.MANIFEST, "delivery_mode": "formal"}, matched,

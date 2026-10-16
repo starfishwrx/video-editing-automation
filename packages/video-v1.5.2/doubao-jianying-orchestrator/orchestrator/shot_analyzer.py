@@ -635,6 +635,83 @@ def _sentences(manifest: dict[str, Any]) -> list[dict[str, Any]]:
     return timing_contract.split_sentences(manifest)
 
 
+def annotate_sentence_fit(seg: dict[str, Any], contract: dict[str, Any],
+                          shot: dict[str, Any] | None) -> None:
+    """在段落上记这句画面和口播对不对得上，最终验收按它数「功能句配了无关画面」。
+
+    ``related`` 主题对得上；``display`` 展示句配展示画面；``off_topic`` 功能句配了无关画面
+    或画面和口播事实相反（``contradiction`` 记原因）；``missing`` 留黑。
+    """
+    contradicted = ""
+    if seg.get("visual_missing") or not shot:
+        fit = "missing"
+    elif contract.get("kind") != "functional":
+        fit = "display"
+    else:
+        contradicted = demo_actions.contradiction(shot, contract)
+        level = demo_actions.shot_fit(shot, contract)
+        accepted = not contradicted and (bool(level) or (
+            str(seg.get("selection_mode") or "").startswith("auto_top1_with_reuse_guard")
+            and not seg.get("degraded_no_match")))
+        fit = "related" if accepted else "off_topic"
+    seg["sentence_fit"] = {"kind": contract.get("kind"), "fit": fit,
+                           "topics": [t.get("id") for t in contract.get("topics") or []]}
+    if contradicted:
+        seg["sentence_fit"]["contradiction"] = contradicted
+
+
+def focus_on_topic(shot: dict[str, Any], contract: dict[str, Any] | None) -> dict[str, Any]:
+    """功能句的证据区间落在演这句主题的那段动作上。
+
+    视觉分析每个镜头只给一个主证据区间（例如先挂挂钩、后抽纸的镜头标在挂钩上）；
+    讲抽纸的句子用这个镜头时，切片要罩住的是抽纸那段，而不是挂钩那段。
+    主证据的审核帧落在主题分段里才原样返回；只和主题段擦边重叠时，
+    切片大半是前一个动作，改用主题段。做完了（写明结果）的主题段优先。
+    """
+    from .vision_analyzer import EVIDENCE_MAX_S, segment_completed
+    if (contract or {}).get("kind") != "functional":
+        return shot
+    rows = demo_actions.topic_segments(shot, contract)
+    if not rows:
+        return shot
+    rows = sorted(rows, key=lambda r: not segment_completed(r))
+    spans = [(_number(r.get("start")), _number(r.get("end"))) for r in rows]
+    for interval in shot.get("evidence_intervals") or []:
+        if not isinstance(interval, dict):
+            continue
+        left, right = _number(interval.get("start")), _number(interval.get("end"))
+        anchor = _number(interval.get("frame_time"), (left + right) / 2.0)
+        width = max(right - left, 1e-6)
+        if any(start <= anchor <= end and (min(right, end) - max(left, start)) * 2 >= width
+               for start, end in spans):
+            return shot
+    start, end = spans[0]
+    end = min(end, start + EVIDENCE_MAX_S)
+    if end <= start:
+        return shot
+    return {**shot, "evidence_intervals": [{
+        "start": round(start, 3), "end": round(end, 3),
+        "frame_time": round((start + end) / 2.0, 3), "evidence_source": "topic_segment"}]}
+
+
+def narrow_evidence(shot: dict[str, Any], max_window_us: Any) -> dict[str, Any] | None:
+    """证据区间比这句话能放下的切片还长时，收窄到能放下的长度，围绕审核帧居中。
+
+    只给非时间相关的句子用：报数量、讲外观的句子看到证据的一部分就够了；
+    时间相关的直接证据（吸收快慢之类）收窄等于剪掉过程，调用方不得使用。
+    """
+    width = _number(max_window_us) / timing_contract.US * 0.95
+    start, end, frame_ts = candidate_evidence_interval(shot)
+    if width <= 0.1 or end - start <= width:
+        return None
+    center = min(max(frame_ts, start + width / 2.0), end - width / 2.0)
+    left, right = center - width / 2.0, center + width / 2.0
+    return {**shot, "evidence_intervals": [{
+        "start": round(left, 3), "end": round(right, 3),
+        "frame_time": round(frame_ts if left <= frame_ts <= right else center, 3),
+        "evidence_source": "narrowed_to_sentence"}]}
+
+
 def _candidate_score(claim: str, shot: dict[str, Any], requirements: Any = None) -> tuple[int, list[str]]:
     required = semantic_gate.inferred_claim_tags(claim)
     for tag in semantic_gate.normalize_tags(requirements):
@@ -752,6 +829,11 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
     max_source_reuse = max(1, int(manifest.get("max_source_reuse", 2) or 2))
     avoid_adjacent_source_repeat = bool(manifest.get("avoid_adjacent_source_repeat", True))
     sentence_rows = _sentences(manifest)
+    category = str(manifest.get("category") or "")
+    product = str(manifest.get("product") or "")
+
+    def _contract(text: str, claim: str) -> dict[str, Any]:
+        return demo_actions.sentence_contract(text, claim, category=category, product=product)
     # Reserve direct candidates before the sequential allocator starts.  Without
     # this pre-pass, an earlier weak/degraded segment can consume the only direct
     # shot needed by a later segment; the later segment then gets a false gap.
@@ -762,10 +844,12 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
     variant_index = max(0, int(manifest.get("variant_index", 0) or 0))
     variant_tolerance = max(0, int(manifest.get("variant_score_tolerance", 8) or 0))
     ledger_usage = usage_ledger.load_usage(manifest)
+    ledger_others = usage_ledger.other_task_counts(manifest)
     for reserve_index, reserve_segment in enumerate(sentence_rows, 1):
         reserve_text = str(reserve_segment.get("text", reserve_segment.get("caption", "")) or "").strip()
         reserve_claim = str(reserve_segment.get("claim_text") or reserve_text).strip()
-        reserve_claims = demo_actions.requirements_for(reserve_text, reserve_claim)
+        reserve_claims = demo_actions.requirements_for(reserve_text, reserve_claim, category)
+        reserve_contract = _contract(reserve_text, reserve_claim)
         reserve_rows: set[str] = set()
         reserve_minimum = 70 if reserve_index in ai_matches else 100
         for reserve_shot in shots:
@@ -786,11 +870,12 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
                     reserve_matched = [*reserve_matched, "PACKAGING_CLAIM_DIRECT"]
             gate = demo_actions.judge(reserve_shot, reserve_claims)
             reserve_cta_ok, _reserve_cta_reason = demo_actions.cta_quantity_eligible(
-                reserve_shot, reserve_text)
+                reserve_shot, reserve_text, category)
             if packaging.get("ok") and not reserve_claims:
                 gate = {"status": "ok", "ok": True, "reason": "PACKAGING_CLAIM_DIRECT",
                         "packaging_claim": packaging}
-            if gate.get("ok") and reserve_cta_ok and reserve_score >= reserve_minimum:
+            if (gate.get("ok") and reserve_cta_ok and reserve_score >= reserve_minimum
+                    and demo_actions.shot_fit(reserve_shot, reserve_contract) > 0):
                 reserve_rows.add(reserve_id)
         direct_reservations[reserve_index] = reserve_rows
     previous_source = ""
@@ -809,13 +894,16 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
     for index, source_segment in enumerate(sentence_rows, 1):
         text = str(source_segment.get("text", source_segment.get("caption", "")) or "").strip()
         claim = str(source_segment.get("claim_text") or text).strip()
-        intents = demo_actions.infer_intents(text, claim)
+        intents = demo_actions.infer_intents(text, claim, category)
         primary_intent = intents[0] if intents else "unknown"
+        contract = _contract(text, claim)
+        functional = contract["kind"] == "functional"
+        demo_sentence = demo_actions.is_demo_contract(contract)
         # DEMO_ACTIONS V0.2 闸门：这句话要求哪些原子卖点、各自要求什么动作/对象/
         # 结果/角色。旧 CLAIM_SYNONYMS 做的是名词性描述匹配，参考片的匹配单位是
         # **动词**，两者并存：卖点表命中时以卖点表为准（它带动作与结果约束），
         # 没命中时退回旧词表，行为与 v1.3.25 一致。
-        required_claim_objs = demo_actions.requirements_for(text, claim)
+        required_claim_objs = demo_actions.requirements_for(text, claim, category)
         # 逐句配音时长**真值**：pre-TTS 真值表 → 段落自带 → 字符数估算（显式降级）。
         # 用户定案第 3 条：规划层与引擎读同一串字节，不再各估各的。
         audio_duration_us, timing_certainty = timing_contract.duration_for(
@@ -827,6 +915,7 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
         time_sensitive = any(c.evidence_required for c in required_claim_objs)
         ranked = []
         for shot in shots:
+            shot = focus_on_topic(shot, contract)
             score, matched = _candidate_score(
                 claim, shot,
                 source_segment.get("visual_requirements", source_segment.get("required_visuals")))
@@ -858,6 +947,24 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
                 reuse_reasons.append("exact_shot_already_used")
             if reuse_count >= max_source_reuse:
                 reuse_reasons.append("source_video_reuse_limit")
+            # 功能句（抽取、不破、湿度、擦拭、冲散……）只收画面主题对得上的镜头，
+            # 或 AI 逐句判过关的；纸箱、泛包装不能靠「没用过」「动作完整」混进来。
+            fit = demo_actions.shot_fit(shot, contract)
+            # 只有 AI 逐句看过并给分的候选能越过主题词；规则词表打分会把「擦不干净」
+            # 里的「干净」对到「盆面干净」上。
+            # 演示类主题（冲散、抽取……）不收「包装上印着可冲散字样」这种理由。
+            # 画面正面演着口播否定的事实（不滴水却在挤水）时，AI 给多高分都不收。
+            contradicted = demo_actions.contradiction(shot, contract)
+            if (functional and not fit and not contradicted and matched
+                    and ai_row is not None and score >= 70):
+                raw = ai_row.get("matched_claims")
+                raw = raw if isinstance(raw, list) else [raw]
+                if not demo_actions.printed_only_match([str(c) for c in raw if c], contract):
+                    fit = 1
+            if contradicted:
+                reuse_reasons.append("CONTRADICTED")
+            if not fit:
+                reuse_reasons.append("OFF_TOPIC")
             eligible = not reuse_reasons
             # 每个候选都跑一次可行窗口求解（用户定案第 5 条：删掉 2 秒占位短路）。
             # 求解口径与引擎最终执行完全一致：同一份音频真值、同一组保护区、同一
@@ -865,14 +972,22 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
             # write_draft 阶段才翻案 —— 那正是 AUDIO_VIDEO_MISMATCH 的来源。
             window = candidate_window(shot, audio_duration_us=audio_duration_us,
                                       manifest=manifest, time_sensitive=time_sensitive)
+            if (not window.ok and not time_sensitive
+                    and window.reason == timing_contract.REASON_EVIDENCE_SPAN_TOO_LONG):
+                narrowed = narrow_evidence(shot, (window.detail or {}).get("max_window_us"))
+                if narrowed is not None:
+                    retry = candidate_window(narrowed, audio_duration_us=audio_duration_us,
+                                             manifest=manifest, time_sensitive=time_sensitive)
+                    if retry.ok:
+                        shot, window = narrowed, retry
             claim_gate = demo_actions.judge(shot, required_claim_objs)
             if packaging_claim.get("ok") and not required_claim_objs:
                 claim_gate = {"status": "ok", "ok": True,
                               "reason": "PACKAGING_CLAIM_DIRECT",
                               "packaging_claim": packaging_claim}
-            cta_ok, cta_reason = demo_actions.cta_quantity_eligible(shot, text)
+            cta_ok, cta_reason = demo_actions.cta_quantity_eligible(shot, text, category)
             ranked.append({
-                "score": score, "shot_id": shot_id, "shot": shot, "matched": matched,
+                "score": score, "shot_id": shot_id, "shot": shot, "matched": matched, "fit": fit,
                 "source_video": source_video, "reuse_count_before": reuse_count,
                 "eligible": eligible, "reuse_block_reason": reuse_reasons,
                 "claim_gate": claim_gate,
@@ -1022,7 +1137,10 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
             evidence_ok = True
             if required_claims:
                 blob = semantic_gate.shot_evidence_text(row["shot"])
-                evidence_ok = all(semantic_gate.claim_supported(tag, blob) for tag in required_claims)
+                supported = [semantic_gate.claim_supported(tag, blob) for tag in required_claims]
+                # 一句讲两个卖点（「厚实」+「不容易破」）时，主题对得上的镜头证明其中一个也能用，
+                # 不要求一个镜头同时拍全；没拍到的那个照样走缺口报告。
+                evidence_ok = all(supported) or (functional and row.get("fit", 0) > 0 and any(supported))
             usable = claim_ok and cta_ok and window_ok and evidence_ok and (semantic_ok or tier > 0)
             role_fit = demo_actions.intent_role_score(row["shot"], intents)
             # 多样性只做同等匹配候选的最后一级 tie-break：优先换源、换机位/构图
@@ -1045,16 +1163,23 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
             if {"effect", "usage"} & set(intents):
                 phase_fit = {"perform": 2, "result": 1}.get(
                     str(row["shot"].get("action_phase") or "").strip().lower(), 0)
-            # 跨草稿台账：同任务其它版本用过的排到同级候选后面，其它任务用过的只扣一点分。
-            used = ledger_usage.get(usage_ledger.shot_key(
-                row["shot"].get("video"), row["shot"].get("source_start")))
+            # 跨草稿台账：同任务其它版本用过的排到同级候选后面。其它任务用过的，
+            # 展示句（开场、品牌、促销、包装标称）也往后排、用过的任务越多越靠后；
+            # 效果演示句同一个演示可以复用，只扣一点分。
+            ledger_key = usage_ledger.shot_key(
+                row["shot"].get("video"), row["shot"].get("source_start"))
+            used = ledger_usage.get(ledger_key)
             fresh = 0 if used == usage_ledger.SAME_TASK else 1
-            penalty = usage_ledger.OTHER_TASK_PENALTY if used == usage_ledger.OTHER_TASK else 0
+            spread = 0 if demo_sentence else -ledger_others.get(ledger_key, 0)
+            penalty = (usage_ledger.OTHER_TASK_PENALTY
+                       if demo_sentence and used == usage_ledger.OTHER_TASK else 0)
             # 本片里相似画面比跨版本复用更显眼，所以排在台账之前。
             novel = int(not (avoid_similar and _look_key(row["shot"]) in used_looks))
+            # 动作分段里真有这句主题的动作（抽纸、擦手背、碎散），比只靠标签沾边的镜头靠前。
+            located = int(bool(functional and demo_actions.topic_segments(row["shot"], contract)))
             return (int(usable), int(semantic_ok and window_ok), int(window_ok and tier > 0),
-                    int(semantic_ok), int(tier > 0), int(role_fit), int(phase_fit), novel, fresh,
-                    int(diversity_fit), row["score"] - penalty)
+                    int(semantic_ok), int(tier > 0), int(row.get("fit", 1)), located, int(role_fit),
+                    int(phase_fit), novel, fresh, spread, int(diversity_fit), row["score"] - penalty)
 
         eligible_good = _variant_tiebreak(
             [row for row in ranked if row["eligible"]], _priority,
@@ -1372,7 +1497,7 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
                 physical = bool(evidence_reqs) or bool(required_claims)
                 quantity_line = ("quantity" in intents) or any(
                     token in text for token in ("囤", "一箱", "一提", "多包", "成箱"))
-                if not physical and not quantity_line:
+                if not physical and not quantity_line and not functional:
                     display_rows = []
                     for row in ranked:
                         if not row["eligible"] or not row["window_ok"] or not _audit_ready_row(row):
@@ -1422,6 +1547,20 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
                         "material_gap": bool(evidence_reqs)})
                     continue
             unmatched_fallback = True
+        if (preview_mode and not multi_shot and not eligible_good["window_ok"]
+                and eligible_good["window_reason"] == timing_contract.REASON_EVIDENCE_SPAN_TOO_LONG):
+            # 预览：证据比这句长、时间相关又不许收窄时，引擎解不出窗口会退回素材开头播放，
+            # 画面和这句毫不相干。围绕审核帧收窄到句长再解一次，仍记未认证（证据被截短）。
+            narrowed = narrow_evidence(eligible_good["shot"],
+                                       (eligible_good["window"].detail or {}).get("max_window_us"))
+            retry = (candidate_window(narrowed, audio_duration_us=audio_duration_us,
+                                      manifest=manifest, time_sensitive=time_sensitive)
+                     if narrowed is not None else None)
+            if retry is not None and retry.ok:
+                eligible_good = {**eligible_good, "shot": narrowed, "window": retry}
+                preview_unresolved = True
+                preview_reason = (f"{timing_contract.REASON_EVIDENCE_SPAN_TOO_LONG}"
+                                  ":NARROWED_FOR_PREVIEW")
         # 只要不是「语义达标 + 窗口有解」这个理想组合，就在报告里留痕：
         # 人工复核要能一眼看出这一句是靠什么过的、哪里将就了。
         window_solution = eligible_good["window"]
@@ -1688,13 +1827,14 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
         def _keep_rank(seg: dict[str, Any]) -> int:
             text = str(seg.get("text") or "")
             claim = str(seg.get("claim_text") or text)
-            claims = demo_actions.requirements_for(text, claim)
-            intents = set(demo_actions.infer_intents(text, claim))
+            claims = demo_actions.requirements_for(text, claim, category)
+            intents = set(demo_actions.infer_intents(text, claim, category))
             direct = any(
                 getattr(c, "evidence_required", False)
                 and str(getattr(c, "evidence_status", "") or "") == "direct"
                 for c in claims)
-            physical = any(getattr(c, "evidence_required", False) for c in claims)
+            physical = (any(getattr(c, "evidence_required", False) for c in claims)
+                        or _contract(text, claim)["kind"] == "functional")
             cta = "cta" in intents or "quantity" in intents
             if direct:
                 return 3
@@ -1711,9 +1851,11 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
                 return False
             return bool(str(shot.get("shot_id") or "") and str(shot.get("video") or ""))
 
-        def _fresh(shot: dict[str, Any]) -> int:
-            used = ledger_usage.get(usage_ledger.shot_key(shot.get("video"), shot.get("source_start")))
-            return {usage_ledger.SAME_TASK: 0, usage_ledger.OTHER_TASK: 1}.get(used, 2)
+        def _fresh(shot: dict[str, Any], seg_contract: dict[str, Any]) -> tuple[int, int]:
+            key = usage_ledger.shot_key(shot.get("video"), shot.get("source_start"))
+            fresh = {usage_ledger.SAME_TASK: 0, usage_ledger.OTHER_TASK: 1}.get(ledger_usage.get(key), 2)
+            spread = 0 if demo_actions.is_demo_contract(seg_contract) else -ledger_others.get(key, 0)
+            return fresh, spread
 
         def _fit_window(shot: dict[str, Any], audio_us: int):
             # 补镜不当卖点直证，但窗口能罩住审核帧时优先罩住，罩不住再按画面长度摆。
@@ -1808,16 +1950,23 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
                 if not seg.get("visual_missing"):
                     continue
                 audio_us = int(seg.get("audio_duration_us") or 0)
+                seg_contract = _contract(str(seg.get("text") or ""),
+                                         str(seg.get("claim_text") or seg.get("text") or ""))
                 chosen: tuple[dict[str, Any], Any] | None = None
+                seg_intents = list(seg_contract.get("intents") or [])
                 carry_order = sorted(shots, reverse=True, key=lambda s: (
-                    int(not (avoid_similar and _look_key(s) in used_looks)), _fresh(s)))
+                    demo_actions.shot_fit(s, seg_contract),
+                    int(bool(demo_actions.topic_segments(s, seg_contract))),
+                    demo_actions.intent_role_score(s, seg_intents),
+                    int(not (avoid_similar and _look_key(s) in used_looks)), _fresh(s, seg_contract)))
                 for shot in carry_order:
-                    if not _ready_shot(shot):
+                    if not _ready_shot(shot) or not demo_actions.shot_fit(shot, seg_contract):
                         continue
                     shot_id = str(shot.get("shot_id") or "")
                     source_video = str(shot.get("video") or "")
                     if shot_id in used_shot_ids or source_use_counts.get(source_video, 0) >= 1:
                         continue
+                    shot = focus_on_topic(shot, seg_contract)
                     window = _fit_window(shot, audio_us)
                     if window is None:
                         continue
@@ -1834,6 +1983,9 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
                 continue
             text = str(seg.get("text") or "")
             audio_us = int(seg.get("audio_duration_us") or 0)
+            seg_contract = _contract(text, str(seg.get("claim_text") or text))
+            # 功能句只能填主题对得上的镜头，泛展示只给开场、品牌、促销这类展示句。
+            seg_functional = seg_contract["kind"] == "functional"
             best_related: tuple[tuple, dict[str, Any], Any] | None = None
             best_display: tuple[tuple, dict[str, Any], Any] | None = None
             best_related_reuse: tuple[tuple, dict[str, Any], Any] | None = None
@@ -1847,26 +1999,30 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
                 shot_id = str(shot.get("shot_id") or "")
                 source_video = str(shot.get("video") or "")
                 score, matched = _candidate_score(text, shot)
+                fit = demo_actions.shot_fit(shot, seg_contract)
+                if seg_functional:
+                    matched = (matched or ["topic"]) if fit else []
                 used_exact = shot_id in used_shot_ids
                 source_free = source_use_counts.get(source_video, 0) < 1
                 extra = assigned_extra.get(shot_id, 0)
-                fresh = _fresh(shot)
+                fresh = _fresh(shot, seg_contract)
                 novel = int(not (avoid_similar and _look_key(shot) in used_looks))
                 if matched:
-                    related_reuse_key = (fresh, score, -extra, shot_id)
+                    related_reuse_key = (fit, fresh, score, -extra, shot_id)
                     if best_related_reuse is None or related_reuse_key > best_related_reuse[0]:
                         best_related_reuse = (related_reuse_key, shot, window)
-                elif demo_actions.visual_role(shot) == "product_display":
+                elif demo_actions.visual_role(shot) == "product_display" and not seg_functional:
                     display_reuse_key = (fresh, -extra, score, shot_id)
                     if best_display_reuse is None or display_reuse_key > best_display_reuse[0]:
                         best_display_reuse = (display_reuse_key, shot, window)
                 if used_exact:
                     continue
                 if matched:
-                    related_key = (novel, fresh, score, 1 if source_free else 0, shot_id)
+                    related_key = (fit, novel, fresh, score, 1 if source_free else 0, shot_id)
                     if best_related is None or related_key > best_related[0]:
                         best_related = (related_key, shot, window)
-                if demo_actions.visual_role(shot) == "product_display" and source_free:
+                if (demo_actions.visual_role(shot) == "product_display" and source_free
+                        and not seg_functional):
                     display_key = (novel, fresh, score, shot_id)
                     if best_display is None or display_key > best_display[0]:
                         best_display = (display_key, shot, window)
@@ -1896,6 +2052,11 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
     # 于是「本批闸门未认证」这条状态在报告里看得见、在引擎里看不见，
     # 成片也就从来没带过 UNCERTIFIED 标注 —— 报告和交付物对不上。
     gate_coverage = demo_actions.gate_coverage(shots)
+    shots_by_id = {str(s.get("shot_id") or ""): s for s in shots if isinstance(s, dict)}
+    for seg in segments:
+        seg_text = str(seg.get("text") or "")
+        annotate_sentence_fit(seg, _contract(seg_text, str(seg.get("claim_text") or seg_text)),
+                              shots_by_id.get(str(seg.get("temporary_shot_id") or "")))
     output_manifest = dict(manifest)
     output_manifest["segments"] = segments
     output_manifest["temporary_material_analysis"] = True

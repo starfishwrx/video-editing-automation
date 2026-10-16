@@ -350,6 +350,14 @@ class InvariantTests(unittest.TestCase):
                                                  speed_range=(0.85, 1.20))])
         self.assertEqual([i["code"] for i in issues], [tc.INV_SPEED_OUT_OF_RANGE])
 
+    def test_fixed_speed_off_the_grid_is_not_out_of_range(self):
+        speed = tc.frame_speed(1.3889, lo=1.3889, hi=1.3889)
+        self.assertNotEqual(speed, 1.3889)
+        issues = tc.check_invariants([self._item(video_speed=speed,
+                                                 source_end_us=int(round(4_120_000 * speed)),
+                                                 speed_range=(1.3889, 1.3889))])
+        self.assertNotIn(tc.INV_SPEED_OUT_OF_RANGE, [i["code"] for i in issues])
+
     def test_aperture_mismatch_after_reread(self):
         """草稿写完后回读 → 目标时长与请求片段不等（旧 min(...) 截断的症状）。"""
         issues = tc.check_invariants([self._item(actual_video_us=3_745_000)])

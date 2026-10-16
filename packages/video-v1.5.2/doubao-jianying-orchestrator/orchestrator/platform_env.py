@@ -487,16 +487,19 @@ def check_python_deps() -> dict:
     def _scan(group: dict) -> dict:
         out = {}
         for mod, pip_name in group.items():
-            out[mod] = {"installed": importlib.util.find_spec(mod) is not None, "pip": pip_name}
+            out[mod] = {"installed": importlib.util.find_spec(mod) is not None,
+                        "pip": pip_name, "uv": pip_name}
         return out
 
     required_all = {**required, **required_win}
     status = {"required": _scan(required_all), "recommended": _scan(recommended),
               "optional": _scan(optional_win), "missing_required": [],
-              "missing_recommended": []}
-    status["missing_required"] = [v["pip"] for k, v in status["required"].items()
+              "missing_recommended": [],
+              "install_tool": "uv",
+              "install_hint": "uv sync  # 包根 packages/video-v1.5.3 或 JY_PIPE_ROOT"}
+    status["missing_required"] = [v["uv"] for k, v in status["required"].items()
                                   if not v["installed"]]
-    status["missing_recommended"] = [v["pip"] for k, v in status["recommended"].items()
+    status["missing_recommended"] = [v["uv"] for k, v in status["recommended"].items()
                                      if not v["installed"]]
     for mod in status["optional"]:
         status["optional"][mod]["needed"] = "windows_auto_unlock"

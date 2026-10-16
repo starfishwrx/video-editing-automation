@@ -54,7 +54,7 @@ def to_us(seconds: float) -> int:
 
 
 # v1.3.25：兜底段的成片可见标注。文案刻意短、位置刻意放画面上方（剪映里
-# 字幕默认在底部 transform_y=-0.8，这里取正向），避免和字幕叠在一起。
+# 字幕默认在底部 transform_y=-0.55，这里取正向），避免和字幕叠在一起。
 DEGRADED_MARK_TEXT = "【素材待补】"
 DEGRADED_MARK_TRACK = "Degraded_Marks"
 DEGRADED_MARK_FONT_SIZE = 6.0
@@ -471,11 +471,13 @@ class OrchestrationEngine:
                 "bin/ 目录，或设 FFMPEG_BIN/FFPROBE_BIN 环境变量，引擎也会自动复用剪映自带 ffmpeg；详见 README_Windows.md")
         missing = rep.get("python_deps", {}).get("missing_required", [])
         if missing:
-            problems.append("缺少必需 Python 依赖，请执行：python -m pip install " + " ".join(missing))
+            problems.append(
+                "缺少必需 Python 依赖，请在包根或 JY_PIPE_ROOT 执行："
+                "uv sync（或 uv add " + " ".join(missing) + "）。不要用 pip install。")
         self._dep_hints = rep.get("python_deps", {}).get("missing_recommended", [])
         if self._dep_hints:
-            print("[i] 建议安装以获得 TTS 兜底/云曲库能力：python -m pip install "
-                  + " ".join(self._dep_hints))
+            print("[i] 建议用 UV 安装以获得 TTS 兜底/云曲库能力："
+                  "uv sync（缺包时 uv add " + " ".join(self._dep_hints) + "）")
         if not rep["drafts_root_exists"]:
             problems.append(f"剪映草稿目录不存在：{rep['drafts_root']}（请先安装并打开一次剪映让其初始化）")
         else:
@@ -2657,7 +2659,7 @@ class OrchestrationEngine:
             "subtitle_font_size": 8.0,
             "subtitle_bold": True,
             "subtitle_transform_x": 0.0,
-            "subtitle_transform_y": -0.8,
+            "subtitle_transform_y": -0.55,
             "subtitle_strip_punctuation": True,
         }
         issues = draft_safety.post_write_validate(

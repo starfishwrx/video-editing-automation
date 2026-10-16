@@ -96,6 +96,11 @@ def load(category: str) -> dict[str, Any]:
         "match_prompt_rules": [*(base.get("match_prompt_rules") or []),
                                *(extra.get("match_prompt_rules") or [])],
         "scenes": [*(base.get("scenes") or []), *(extra.get("scenes") or [])],
+        "intent_keywords": {**(base.get("intent_keywords") or {}), **(extra.get("intent_keywords") or {})},
+        "excluded_claims": [*(base.get("excluded_claims") or []), *(extra.get("excluded_claims") or [])],
+        "sentence_topics": [*(base.get("sentence_topics") or []), *(extra.get("sentence_topics") or [])],
+        "shot_label_rules": [*(base.get("shot_label_rules") or []),
+                             *(extra.get("shot_label_rules") or [])],
     }
     return merged
 
@@ -124,20 +129,44 @@ def gap_tail_pad_s(max_gap_frames: Any, *, fps: Any = DEFAULT_FPS,
     return round(max(0.0, frames * frame_s - 2 * edge_keep_s - frame_s), 3)
 
 
-_VOICE_SPEED_SUFFIX = re.compile(r"\d+(?:\.\d+)?\s*倍速\s*$")
+_VOICE_SPEED_SUFFIX = re.compile(r"(?P<speed>\d+(?:\.\d+)?)\s*倍速\s*$")
+
+
+def voice_name_speed(voice: Any) -> Optional[float]:
+    """从配音名称末尾解析运营写的倍速（「tvb女声1.2倍速」→ 1.2）。
+
+    SAMI 合成本身不认这个后缀；倍速靠 ``voice_tempo`` → ffmpeg ``atempo`` 后处理。
+    以前误以为「名称带倍速=合成时已变速」，把 tempo 置 1.0，结果口播一直是原速。
+    """
+    if isinstance(voice, dict):
+        raw = voice.get("speed")
+        if raw in (None, "", 1, 1.0):
+            return None
+        try:
+            speed = float(raw)
+        except (TypeError, ValueError):
+            return None
+        return speed if 0.1 <= speed <= 10 else None
+    m = _VOICE_SPEED_SUFFIX.search(str(voice or ""))
+    if not m:
+        return None
+    try:
+        speed = float(m.group("speed"))
+    except (TypeError, ValueError):
+        return None
+    return speed if 0.1 <= speed <= 10 else None
 
 
 def voice_has_speed(voice: Any) -> bool:
-    """配音名称里运营已经写了倍速（「XX1.2倍速」）时，合成时就按它变速了。"""
-    if isinstance(voice, dict):
-        return voice.get("speed") not in (None, "", 1, 1.0)
-    return bool(_VOICE_SPEED_SUFFIX.search(str(voice or "")))
+    """配音名称/字段里是否写了显式倍速。"""
+    return voice_name_speed(voice) is not None
 
 
 def default_voice_tempo(rules: dict[str, Any], voice: Any) -> float:
-    """品类配音倍速只是默认值；配音名称自带倍速时不再叠加。"""
-    if voice_has_speed(voice):
-        return 1.0
+    """口播后处理倍速：名称写了用名称的，否则用品类默认（卫品 1.2）。不叠加两次。"""
+    named = voice_name_speed(voice)
+    if named is not None:
+        return float(named)
     return float((rules.get("voice") or {}).get("tempo", 1.0) or 1.0)
 
 
@@ -188,47 +217,267 @@ def _hits(text: str, keywords) -> bool:
     return any(k and k in text for k in keywords or [])
 
 
+def _strip(text: str, words) -> str:
+    for word in words or []:
+        if word:
+            text = text.replace(word, "")
+    return text
+
+
+def _scene_sentence(scene: dict[str, Any], text: str) -> str:
+    """去空白后再去掉 ``text_ignore``（「卫生巾」里的「卫生」不算干净卫生卖点）。"""
+    return _strip(re.sub(r"\s+", "", str(text or "")), scene.get("text_ignore"))
+
+
 def scene_for(rules: dict[str, Any], text: str, shot: Optional[dict[str, Any]] = None) -> Optional[dict]:
     """这一句 + 选中的镜头命中哪条场景规则（按规则顺序取第一条）。
 
     文案关键词和镜头内容都要对上：只看文案会把「吸收快」这种卖点句也当成吸水实验，
     只看镜头会把背景里有液体的镜头当成实验。没有文案关键词的规则（如正面指产品）只看镜头。
+    ``text_forces_visual`` 的规则（拆包）文案命中就算：选中的镜头没有该动作时由场景后处理换镜。
     """
-    sentence = re.sub(r"\s+", "", str(text or ""))
-    looks = _haystack(shot)
     pointing = bool((shot or {}).get("pointing_to_text") or (shot or {}).get("explicit_pointing"))
     phase = str((shot or {}).get("action_phase") or "").strip().lower()
     for scene in rules.get("scenes") or []:
+        sentence = _scene_sentence(scene, text)
         text_kw = scene.get("text_keywords") or []
         shot_kw = scene.get("shot_keywords") or []
         # 只管动作正在进行的镜头：静态陈列不存在「切在动作中途」的问题。
         if scene.get("action_phases") and phase not in scene["action_phases"]:
             continue
-        if scene.get("kind") == "require_visual":
+        if scene.get("kind") == "require_visual" or scene.get("text_forces_visual"):
             if _hits(sentence, text_kw):
                 return scene
             continue
         text_ok = _hits(sentence, text_kw) if text_kw else True
-        scene_looks = _haystack(shot, scene["shot_fields"]) if scene.get("shot_fields") else looks
-        shot_ok = _hits(scene_looks, shot_kw) or (scene.get("id") == "point_front" and pointing)
+        shot_ok = ((shot_has_visual(scene, shot) if shot_kw or scene.get("shot_exclude_keywords")
+                    else True)
+                   or (scene.get("id") == "point_front" and pointing))
         if text_ok and shot_ok:
             return scene
     return None
 
 
 def text_hits_scene(scene: dict[str, Any], text: str) -> bool:
-    return _hits(re.sub(r"\s+", "", str(text or "")), scene.get("text_keywords") or [])
+    return _hits(_scene_sentence(scene, text), scene.get("text_keywords") or [])
+
+
+def strip_shot_ignore(scene: dict[str, Any], text: str) -> str:
+    """去掉 ``shot_ignore``（「未拆封」里的「拆封」不是拆包动作）。"""
+    return _strip(str(text or ""), scene.get("shot_ignore"))
+
+
+def _scene_looks(scene: dict[str, Any], shot: dict[str, Any] | None) -> str:
+    return strip_shot_ignore(scene, _haystack(shot, scene.get("shot_fields")))
 
 
 def shot_has_visual(scene: dict[str, Any], shot: dict[str, Any] | None) -> bool:
-    return _hits(_haystack(shot, scene.get("shot_fields")), scene.get("shot_keywords") or [])
+    """镜头是否带这个场景要的画面。
+
+    ``shot_keywords`` 命中才算有；``shot_exclude_keywords`` 命中则一票否决
+    （例如透光轻薄镜头描述里写了「吸水层」，不能当成倒液吸水实验）。
+    """
+    looks = _scene_looks(scene, shot)
+    if _hits(looks, scene.get("shot_exclude_keywords") or []):
+        return False
+    keywords = scene.get("shot_keywords") or []
+    return (not keywords) or _hits(looks, keywords)
 
 
 def shot_keyword_hits(scene: dict[str, Any], shot: dict[str, Any] | None) -> int:
-    looks = _haystack(shot, scene.get("shot_fields"))
+    if not shot_has_visual(scene, shot):
+        return 0
+    looks = _scene_looks(scene, shot)
     return sum(1 for k in scene.get("shot_keywords") or [] if k and k in looks)
+
+
+def shot_extends(scene: dict[str, Any], shot: dict[str, Any] | None) -> bool:
+    """镜头在场景动作之外还拍到了 ``extend_keywords``（拆包后接着展开看面层）。"""
+    return _hits(_scene_looks(scene, shot), scene.get("extend_keywords") or [])
+
+
+def static_pack_shot(scene: dict[str, Any], shot: dict[str, Any] | None) -> bool:
+    """只拍了包装静态（袋面、未拆封展示），没有撕开、取出动作。"""
+    if not shot or not scene.get("static_keywords"):
+        return False
+    return (_hits(_haystack(shot, scene.get("shot_fields")), scene["static_keywords"])
+            and not shot_has_visual(scene, shot))
+
+
+def followup_scene(rules: dict[str, Any], text: str, previous_shot: dict[str, Any] | None,
+                   shot: dict[str, Any] | None = None) -> Optional[dict]:
+    """上一句是袋面/外包装静态时，这一句不要再叠同款包装展示，改配拆包动作镜。
+
+    触发任一即可：
+    - 文案仍在讲包装（``followup_keywords``）；
+    - 或这一句选中的又是袋面/外包装静态（产品展示一直拍包装时，优先换成取出产品）。
+
+    荧光、面层、吸水等有专属强制场景的句子，以及品牌/促销/报数量句，由调用方排除，
+    避免把「不含荧光剂」拐去拆包，也避免结尾外包装被换走。
+    """
+    for scene in rules.get("scenes") or []:
+        words = scene.get("followup_keywords") or []
+        if not static_pack_shot(scene, previous_shot):
+            continue
+        pack_copy = bool(words) and _hits(_scene_sentence(scene, text), words)
+        again_pack = static_pack_shot(scene, shot)
+        if pack_copy or again_pack:
+            return scene
+    return None
+
+
+def _rule_text(rule: Any) -> str:
+    return str(rule.get("text") or "") if isinstance(rule, dict) else str(rule or "")
 
 
 def prompt_rules(manifest: dict[str, Any] | None, kind: str = "match") -> list[str]:
     rules = for_manifest(manifest)
-    return list(rules.get(f"{kind}_prompt_rules") or [])
+    return [text for text in map(_rule_text, rules.get(f"{kind}_prompt_rules") or []) if text]
+
+
+def keyed_analysis_rules(manifest: dict[str, Any] | None) -> list[str]:
+    """改了就要整份重看素材的分析要求（纯文字写法）。"""
+    rules = for_manifest(manifest).get("analysis_prompt_rules") or []
+    return [str(r) for r in rules if not isinstance(r, dict) and str(r or "")]
+
+
+def analysis_rechecks(manifest: dict[str, Any] | None) -> list[tuple[str, list[str]]]:
+    """写成 ``{"text", "recheck"}`` 的分析要求：新增或改动时不作废整份视觉缓存，
+    只重看旧描述里出现 ``recheck`` 词的镜头；``recheck`` 为空就只管以后新分析的镜头。"""
+    rules = for_manifest(manifest).get("analysis_prompt_rules") or []
+    return [(_rule_text(r), [str(w) for w in r.get("recheck") or [] if w])
+            for r in rules if isinstance(r, dict) and _rule_text(r)]
+
+
+def _shot_observe_blob(shot: dict[str, Any] | None) -> str:
+    """镜头已观察文本，供卖点标签规则匹配；不含文件路径（避免吃到人工文件夹名）。"""
+    if not isinstance(shot, dict):
+        return ""
+    parts: list[str] = []
+    for field in ("description", "visual_description", "action", "object", "result",
+                  "visual_tags", "evidence_tags", "readable_claims"):
+        value = shot.get(field)
+        if isinstance(value, list):
+            parts.extend(str(v) for v in value if v)
+        elif value:
+            parts.append(str(value))
+    for seg in shot.get("action_segments") or []:
+        if isinstance(seg, dict):
+            parts.append(f"{seg.get('action') or ''}{seg.get('result') or ''}")
+    return "。".join(parts)
+
+
+# 否定前缀：词出现在这些后面时不算「看见了」。
+_LABEL_DENIAL_PREFIXES = (
+    "未看到", "没有看到", "未见", "未进行", "未做", "没有", "不存在", "无", "未",
+)
+_PACK_PRINT_MARKERS = ("字样", "印有", "印着", "标注", "写着", "卖点图标")
+_PACK_ONLY_MARKERS = ("只展示包装", "仅展示包装", "包装正面", "未拆封展示", "密封包装")
+# 仅包装印字不应推出的动作/结构卖点规则 id。
+_ACTION_LABEL_IDS = frozenset({
+    "surface", "waist", "side_leak", "thin_breath", "absorb", "fluorescence",
+})
+_ACTION_EVIDENCE = (
+    "拉伸", "撑开", "抚摸", "撕开", "取出", "倾倒", "倒入", "倒水", "检测笔",
+    "紫光", "对光", "捏薄", "扇形", "展开",
+)
+
+
+def _keyword_affirmed(blob: str, word: str) -> bool:
+    """``word`` 在观察文本里出现，且该处不是「未看到/没有…」否定。"""
+    if not word or word not in blob:
+        return False
+    start = 0
+    while True:
+        found = blob.find(word, start)
+        if found < 0:
+            return False
+        left = blob[max(0, found - 8):found]
+        if any(left.endswith(p) for p in _LABEL_DENIAL_PREFIXES):
+            start = found + 1
+            continue
+        return True
+
+
+def _pack_print_only(blob: str) -> bool:
+    """描述只说包装上印着卖点字，没有动作/结构演示证据。"""
+    printed = any(m in blob for m in _PACK_PRINT_MARKERS)
+    pack_only = any(m in blob for m in _PACK_ONLY_MARKERS)
+    if not (printed or pack_only):
+        return False
+    return not any(a in blob for a in _ACTION_EVIDENCE)
+
+
+def _strip_derived_labels(shot: dict[str, Any]) -> None:
+    """撤回上次由规则派生的标签，再按当前规则重算（模型原事实保留）。"""
+    sources = shot.get("shot_label_sources")
+    if not isinstance(sources, dict) or not sources:
+        return
+    derived = {str(t) for t, src in sources.items() if str(src).startswith("derived:")}
+    if not derived:
+        return
+
+    def keep(tags: list) -> list[str]:
+        return [str(t) for t in tags if t and str(t) not in derived]
+
+    shot["evidence_tags"] = keep(list(shot.get("evidence_tags") or []))
+    shot["visual_tags"] = keep(list(shot.get("visual_tags") or []))
+    shot["shot_labels"] = keep(list(shot.get("shot_labels") or []))
+    shot["shot_label_sources"] = {
+        str(t): str(src) for t, src in sources.items() if str(t) not in derived
+    }
+
+
+def annotate_shot_labels(shot: dict[str, Any], rules: dict[str, Any] | None = None,
+                         *, category: str = "") -> list[str]:
+    """按规则包 ``shot_label_rules`` 把可见卖点补进 ``evidence_tags`` / ``visual_tags``。
+
+    只根据画面描述和已有标签推断，**不读素材路径/文件夹名**。返回本次新加的标签。
+    否定句（未看到腰头）、仅包装印字、普通计时器不会变成动作/荧光证据。
+    派生标签记在 ``shot_label_sources``（``derived:<rule_id>``），再次调用会先撤回再重算。
+    """
+    if not isinstance(shot, dict):
+        return []
+    pack = rules if isinstance(rules, dict) else load(category) if category else {}
+    _strip_derived_labels(shot)
+    blob = _shot_observe_blob(shot)
+    if not blob:
+        return []
+    evidence = [str(t) for t in (shot.get("evidence_tags") or []) if t]
+    visual = [str(t) for t in (shot.get("visual_tags") or []) if t]
+    known = {t.casefold() for t in evidence + visual}
+    sources = dict(shot.get("shot_label_sources") or {}) if isinstance(
+        shot.get("shot_label_sources"), dict) else {}
+    pack_only = _pack_print_only(blob)
+    added: list[str] = []
+    for rule in pack.get("shot_label_rules") or []:
+        if not isinstance(rule, dict):
+            continue
+        rule_id = str(rule.get("id") or "")
+        if pack_only and rule_id in _ACTION_LABEL_IDS:
+            continue
+        exclude = [str(w) for w in rule.get("exclude_any") or [] if w]
+        if exclude and any(w in blob for w in exclude):
+            continue
+        require_any = [str(w) for w in rule.get("require_any") or [] if w]
+        if require_any and not any(_keyword_affirmed(blob, w) for w in require_any):
+            continue
+        require_all = [str(w) for w in rule.get("require_all") or [] if w]
+        if require_all and not all(_keyword_affirmed(blob, w) for w in require_all):
+            continue
+        for tag in rule.get("emit_tags") or []:
+            text = str(tag or "").strip()
+            if not text or text.casefold() in known:
+                continue
+            evidence.append(text)
+            visual.append(text)
+            known.add(text.casefold())
+            added.append(text)
+            sources[text] = f"derived:{rule_id or 'rule'}"
+    if added:
+        shot["evidence_tags"] = evidence
+        shot["visual_tags"] = visual
+        shot["shot_labels"] = list(dict.fromkeys(
+            [*(shot.get("shot_labels") or []), *added]))
+        shot["shot_label_sources"] = sources
+    return added

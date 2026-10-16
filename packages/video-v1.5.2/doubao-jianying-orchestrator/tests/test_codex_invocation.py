@@ -97,6 +97,39 @@ class MatchFailureTests(_Env):
         self.assertEqual(result["semantic_matches"], matches)
         self.assertEqual((record["error"], record["attempts"], record["stderr_tail"]), (None, 2, ""))
 
+    def test_all_empty_candidates_are_retried(self):
+        empty = [{"index": 1, "top3": []}, {"index": 2, "top3": []}]
+        matches = [{"index": 1, "top3": [{"shot_id": "S1", "score": 88}]}, {"index": 2, "top3": []}]
+        result, record, call = self._match(
+            [(0, "", json.dumps(empty)), (0, "", json.dumps(matches))])
+        self.assertEqual(call.call_count, 2)
+        self.assertEqual(result["semantic_matches"], matches)
+        self.assertEqual(record["attempts"], 2)
+
+
+class MatchPromptTests(_Env):
+    def test_sentence_carries_the_claim_it_must_prove(self):
+        prompts = []
+
+        def run(_args, prompt, stdout_path, stderr_path, _timeout):
+            prompts.append(Path(prompt).read_text(encoding="utf-8"))
+            stdout_path.write_text("", encoding="utf-8")
+            stderr_path.write_text("", encoding="utf-8")
+            (stdout_path.parent / "response.txt").write_text(
+                json.dumps([{"index": 1, "top3": [{"shot_id": "S1", "score": 80}]}]), encoding="utf-8")
+            return True, 0, ""
+
+        manifest = {"category": "weipin",
+                    "segments": [{"text": "量大的姐妹真的闭眼冲"}, {"text": "包装可爱"}]}
+        analysis = {"shots": [{"shot_id": "S1", "status": "ready_for_matching",
+                               "description": "倒蓝水演示吸收"}]}
+        with mock.patch.object(vision_analyzer, "_run_codex_file", side_effect=run):
+            vision_analyzer.match_with_codex(manifest, analysis, self.root / "report")
+        self.assertIn("1. 量大的姐妹真的闭眼冲（卖点：吸收容量——已吸水巾体，液体锁在中央不扩散）",
+                      prompts[0])
+        self.assertIn("2. 包装可爱\n", prompts[0])
+        self.assertIn("光从巾体透过来", prompts[0])
+
 
 class TemporaryMatchBlockTests(unittest.TestCase):
     def test_failed_ai_match_blocks_before_rule_fallback(self):

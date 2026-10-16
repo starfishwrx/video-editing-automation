@@ -66,7 +66,7 @@ class Release140ContractTests(unittest.TestCase):
     def test_subtitles_use_the_release_canvas_position(self):
         source = (ROOT / "jianying-editor/scripts/vendor/pyJianYingDraft/script_file.py").read_text(encoding="utf-8")
         self.assertIn("TextStyle(size=8, bold=True", source)
-        self.assertIn("ClipSettings(transform_x=0.0, transform_y=-0.8)", source)
+        self.assertIn("ClipSettings(transform_x=0.0, transform_y=-0.55)", source)
         self.assertNotIn("ClipSettings(transform_x=0.0, transform_y=-1000.0)", source)
 
     def test_table_update_blocks_without_token(self):

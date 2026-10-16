@@ -187,10 +187,21 @@ def infer_claim_ids(text: str) -> list[str]:
     return hits
 
 
-def requirements_for(text: str, claim_text: str = "") -> list[Claim]:
-    """一句话要求的全部卖点（正文与 claim_text 合并去重）。"""
+def _category_rules(category: str) -> dict[str, Any]:
+    if not category:
+        return {}
+    from . import rulepack
+    return rulepack.load(rulepack.normalize_category(category) or category)
+
+
+def requirements_for(text: str, claim_text: str = "", category: str = "") -> list[Claim]:
+    """一句话要求的全部卖点（正文与 claim_text 合并去重）。
+
+    给了品类时去掉该品类不适用的卖点：纸品的「大容量」是包装张数，不是卫生巾吸收容量。
+    """
     ids = list(dict.fromkeys(infer_claim_ids(text) + infer_claim_ids(claim_text)))
-    return [CLAIMS_BY_ID[cid] for cid in ids]
+    excluded = set(_category_rules(category).get("excluded_claims") or [])
+    return [CLAIMS_BY_ID[cid] for cid in ids if cid not in excluded]
 
 
 # 文案意图先于候选排序。意图只用于同等匹配候选之间的角色偏好，不得越过
@@ -200,28 +211,276 @@ _INTENT_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("cta", ("优惠", "福利", "活动", "到手", "下单", "购买", "买", "赠", "送",
               "划算", "囤", "库存", "不多", "链接", "入手")),
     ("quantity", ("六大卷", "几卷", "多卷", "多少卷", "一包", "一提", "一箱", "几包",
-                   "几提", "多少片", "片装", "抽", "数量", "规格", "大分量", "尺寸")),
+                   "几提", "多少片", "片装", "数量", "规格", "大分量", "尺寸")),
     ("effect", ("瞬吸", "吸收", "干爽", "反渗", "湿水", "不掉屑", "柔软", "亲肤",
                  "透气", "厚实", "加厚", "耐用", "结实", "防漏", "侧漏")),
     ("usage", ("擦手", "擦脸", "擦桌", "擦拭", "清洁", "使用", "展开", "撕开",
-                "按压", "揉搓", "拉伸")),
+                "按压", "揉搓", "拉伸", "抽出", "抽取", "一抽")),
     ("brand", ("品牌", "联名", "官方", "旗舰", "七度空间", "心相印")),
     ("opening", ("今天", "看看", "开箱", "实测", "测给你看", "不信")),
 )
+# 「抽」「张」「片」前面带数字才是包装数量（70抽、100片、几抽）；「单手一抽一张」是抽取动作。
+_COUNT_RE = re.compile(r"(\d+|[两三四五六七八九十百千几]+)\s*(?:抽|片|张|包|提|卷|箱)")
 
 
-def infer_intents(text: str, claim_text: str = "") -> list[str]:
+def count_mentions(text: str) -> list[str]:
+    """句子里报的包装数量数字（「70抽大容量」→ ``["70"]``）。"""
+    return [m.group(1) for m in _COUNT_RE.finditer(re.sub(r"\s+", "", str(text or "")))]
+
+
+def infer_intents(text: str, claim_text: str = "", category: str = "") -> list[str]:
     """返回完整语义段的意图标签，顺序稳定且允许多意图共存。"""
     blob = re.sub(r"\s+", "", f"{text or ''}{claim_text or ''}")
     if not blob:
         return []
-    return [intent for intent, keywords in _INTENT_KEYWORDS
-            if any(keyword in blob for keyword in keywords)]
+    extra = _category_rules(category).get("intent_keywords") or {}
+    out = []
+    for intent, keywords in _INTENT_KEYWORDS:
+        words = (*keywords, *(extra.get(intent) or ()))
+        if any(keyword in blob for keyword in words) or (intent == "quantity" and _COUNT_RE.search(blob)):
+            out.append(intent)
+    return out
 
 
-def classify_intent(text: str, claim_text: str = "") -> str:
+def classify_intent(text: str, claim_text: str = "", category: str = "") -> str:
     """返回主意图；多意图段仍通过 ``infer_intents`` 全量落盘。"""
-    return (infer_intents(text, claim_text) or ["unknown"])[0]
+    return (infer_intents(text, claim_text, category) or ["unknown"])[0]
+
+
+def _strip_product(value: str, product: str) -> str:
+    value = re.sub(r"\s+", "", str(value or ""))
+    product = re.sub(r"\s+", "", str(product or ""))
+    return value.replace(product, "") if product else value
+
+
+def sentence_contract(text: str, claim_text: str = "", *, category: str = "",
+                      product: str = "") -> dict[str, Any]:
+    """一句口播的选镜合同：品类、意图、卖点和要配的画面主题，各阶段共用这一份。
+
+    命中 ``sentence_topics``（抽取、挂墙、厚实不破、湿度、擦拭、冲散、包装标称、张数……）
+    的是功能句，只能配同主题的画面；其余是展示句（开场、品牌、促销、「真的绝」），
+    可以用产品展示衔接。商品名本身（「纯水湿厕纸」）不算卖点。
+    """
+    rules = _category_rules(category)
+    blob = _strip_product(f"{text or ''}{claim_text or ''}", product)
+    topics = []
+    for topic in rules.get("sentence_topics") or []:
+        hits = [k for k in topic.get("text_keywords") or [] if k and k in blob]
+        if topic.get("match") == "count" and count_mentions(blob):
+            hits.append("count")
+        if hits:
+            topics.append({"id": topic.get("id"), "label": topic.get("label"),
+                           "match": topic.get("match") or "keywords", "hits": hits,
+                           "shot_keywords": list(topic.get("shot_keywords") or []),
+                           "shot_exclude_keywords": list(topic.get("shot_exclude_keywords") or []),
+                           "contradicts": dict(topic.get("contradicts") or {})})
+    return {
+        "category": rulepack_category(category),
+        "product": product,
+        "intents": infer_intents(text, claim_text, category),
+        "claims": [c.claim_id for c in requirements_for(text, claim_text, category)],
+        "counts": count_mentions(blob),
+        "sheet_counts": [m.group(1) for m in _SHOWN_COUNT_RE.finditer(blob.lower())],
+        "topics": topics,
+        "kind": "functional" if topics else "display",
+    }
+
+
+def is_demo_contract(contract: dict[str, Any] | None) -> bool:
+    """这句要演示效果（抽、挂、拉、擦、湿度、冲散……），不是包装标称、张数或展示。"""
+    return any(t.get("match") not in ("count", "same_words")
+               for t in (contract or {}).get("topics") or [])
+
+
+def rulepack_category(category: str) -> str:
+    if not category:
+        return ""
+    from . import rulepack
+    return rulepack.normalize_category(category) or str(category)
+
+
+# 报张数的句子：没有同一个数字时，能看出「多包、成排」的画面算相关，光一个纸箱不算。
+_COUNT_RELATED = ("多包", "多提", "成排", "一排", "排列", "数量展示", "量感")
+_FIT_FIELDS = ("description", "visual_description", "action", "object", "result",
+               "visual_tags", "evidence_tags", "readable_claims")
+
+
+def _observed_text(shot: dict[str, Any] | None, contract: dict[str, Any],
+                   fields: tuple[str, ...]) -> str:
+    values: list[str] = []
+    for field in fields:
+        values.extend(_flatten_observation((shot or {}).get(field)))
+    return _strip_product("。".join(values), str(contract.get("product") or "")).lower()
+
+
+# 包装上印的张数（「170抽」「70PCS」）；和口播报的数字不同就是另一个规格。
+_SHOWN_COUNT_RE = re.compile(r"(?<!\d)(\d+)\s*(?:抽|片|张|pcs)")
+
+# 「无酒精」「不含荧光剂」「0添加」：否定前缀 + 标称本体。
+_LABEL_NEGATIONS = ("不含", "没有", "无", "不", "零", "0")
+
+
+def _label_base(word: str) -> tuple[str, bool]:
+    for prefix in _LABEL_NEGATIONS:
+        if word.startswith(prefix) and len(word) > len(prefix) + 1:
+            return word[len(prefix):], True
+    return word, False
+
+
+def _label_mentions(base: str, observed: str) -> tuple[bool, bool]:
+    """包装上这个标称出现的方向：(印着否定的，印着肯定的)。"""
+    negated = positive = False
+    cursor = 0
+    while True:
+        found = observed.find(base, cursor)
+        if found < 0:
+            return negated, positive
+        head = observed[max(0, found - 2):found]
+        if any(head.endswith(p) for p in _LABEL_NEGATIONS):
+            negated = True
+        else:
+            positive = True
+        cursor = found + len(base)
+
+
+def text_unverified(shot: dict[str, Any] | None) -> bool:
+    """包装文字排了高清复核却没复核成：画面里读到的字、数、标称都不能当证据。"""
+    return (shot or {}).get("text_pass") in ("pending", "failed")
+
+
+def _has_number(number: str, observed: str) -> bool:
+    if number.isdigit():
+        return re.search(rf"(?<!\d){re.escape(number)}(?!\d)", observed) is not None
+    return number in observed
+
+
+def contradiction(shot: dict[str, Any] | None, contract: dict[str, Any] | None) -> str:
+    """画面里正面看到了口播否定的事实（不滴水却在滴水、无酒精却印着含酒精），返回原因。
+
+    反证和缺证不同：缺证还能降级补位，反证任何路径都不能用。
+    """
+    if not contract or contract.get("kind") != "functional":
+        return ""
+    printed = _observed_text(shot, contract, _FIT_FIELDS)
+    acted = _observed_text(shot, contract, tuple(f for f in _FIT_FIELDS if f != "readable_claims"))
+    for topic in contract.get("topics") or []:
+        if topic.get("match") == "count":
+            spoken = contract.get("sheet_counts") or []
+            shown = {m.group(1) for m in _SHOWN_COUNT_RE.finditer(printed)}
+            if spoken and shown and not shown & set(spoken):
+                return f"count:{'/'.join(sorted(shown))}≠{'/'.join(spoken)}"
+            continue
+        if topic.get("match") == "same_words":
+            for hit in topic.get("hits") or []:
+                base, negated = _label_base(hit.lower())
+                if negated and _label_mentions(base, printed)[1]:
+                    return f"{topic.get('id')}:{hit}"
+            continue
+        for claim, words in (topic.get("contradicts") or {}).items():
+            # 画面描述里原样写着「不滴水」时，里面的「滴水」不是反证。
+            seen = acted.replace(claim.lower(), "。")
+            if claim in (topic.get("hits") or []) and any(
+                    _observed_keyword(w.lower(), seen) for w in words):
+                return f"{topic.get('id')}:{claim}"
+    return ""
+
+
+def shot_fit(shot: dict[str, Any], contract: dict[str, Any] | None) -> int:
+    """镜头和句子合同对不对得上：2 = 对上且是同一数字/同一标称，1 = 相关，0 = 无关或反证。
+
+    展示句任何非空镜都算 1；功能句必须命中至少一个主题的画面词，且没有反证。
+    """
+    if not contract or contract.get("kind") != "functional":
+        return 0 if is_empty_shot(shot or {}) else 1
+    if contradiction(shot, contract):
+        return 0
+    printed = _observed_text(shot, contract, _FIT_FIELDS)
+    # 演示类主题（冲散、抽取……）要拍到动作；包装上印着「可冲散」不算演示。
+    acted = _observed_text(shot, contract, tuple(f for f in _FIT_FIELDS if f != "readable_claims"))
+    unverified = text_unverified(shot)
+    best = 0
+    for topic in contract.get("topics") or []:
+        observed = printed if topic.get("match") in ("count", "same_words") else acted
+        if topic.get("match") == "count":
+            if not unverified and any(n and _has_number(n, observed)
+                                      for n in contract.get("counts") or []):
+                return 2
+            if any(marker in observed for marker in _COUNT_RELATED) or re.search(
+                    r"\d+\s*(?:包|提|箱|抽|张|片|卷)", observed):
+                best = max(best, 1)
+        elif topic.get("match") == "same_words":
+            for hit in [] if unverified else topic.get("hits") or []:
+                base, negated = _label_base(hit.lower())
+                said_no, said_yes = _label_mentions(base, observed)
+                if said_no if negated else said_yes:
+                    best = max(best, 2)
+        else:
+            # 口播否定的那个事实（「不滴水」里的滴水）不能拿来证明这句话。
+            denied = {w.lower() for c, ws in (topic.get("contradicts") or {}).items()
+                      if c in (topic.get("hits") or []) for w in ws}
+            if any(_observed_keyword(w.lower(), observed)
+                   for w in topic.get("shot_exclude_keywords") or []):
+                continue
+            if any(_observed_keyword(k.lower(), observed)
+                   for k in topic.get("shot_keywords") or [] if k.lower() not in denied):
+                best = max(best, 1)
+    return best
+
+
+_PRINTED_MARKERS = ("字样", "文字", "印有", "印着", "标注", "标签", "写着", "卖点图标")
+
+
+def printed_only_match(claims: list[str], contract: dict[str, Any] | None) -> bool:
+    """AI 判对上的理由只是包装上印着这句话，而这句要演示动作（抽、挂、拉、擦、冲散……）。
+
+    包装标称、张数这类主题印在包装上就是证据，不算。
+    """
+    topics = (contract or {}).get("topics") or []
+    if not topics or any(t.get("match") in ("count", "same_words") for t in topics):
+        return False
+    texts = [str(c) for c in claims or [] if str(c).strip()]
+    return bool(texts) and all(any(m in c for m in _PRINTED_MARKERS) for c in texts)
+
+
+def topic_segments(shot: dict[str, Any], contract: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """视觉分析切好的动作分段里，演的正是这句功能句主题的那几段（按时间顺序）。"""
+    words = []
+    for topic in (contract or {}).get("topics") or []:
+        denied = {w.lower() for c, ws in (topic.get("contradicts") or {}).items()
+                  if c in (topic.get("hits") or []) for w in ws}
+        words.extend(w.lower() for w in topic.get("shot_keywords") or []
+                     if w and w.lower() not in denied)
+    if not words:
+        return []
+    out = []
+    for row in (shot or {}).get("action_segments") or []:
+        if not isinstance(row, dict):
+            continue
+        text = f"{row.get('action') or ''}。{row.get('result') or ''}".lower()
+        if any(_observed_keyword(w, text) for w in words):
+            out.append(row)
+    return out
+
+
+# 「未见破洞、散开或碎裂」「排水口无可见碎片」是在否认，同一分句里出现这些词就不算看到。
+_FIT_NEGATIONS = ("未见", "没有", "没见", "未出现", "并未", "无可见", "看不到", "不见")
+_CLAUSE_BREAK = re.compile(r"[，。；;,.!！?？\n]")
+
+
+def _observed_keyword(keyword: str, observed: str) -> bool:
+    if not keyword:
+        return False
+    cursor = 0
+    while True:
+        found = observed.find(keyword, cursor)
+        if found < 0:
+            return False
+        clause = _CLAUSE_BREAK.split(observed[:found])[-1]
+        whole = clause + _CLAUSE_BREAK.split(observed[found:])[0]
+        if (not any(word in clause for word in _FIT_NEGATIONS)
+                and not any(word in whole for word in _PRINTED_MARKERS)):
+            return True
+        cursor = found + len(keyword)
 
 
 _INTENT_ROLE_PREFERENCE: dict[str, dict[str, int]] = {
@@ -685,6 +944,8 @@ def packaging_claim_direct(shot: dict[str, Any], claim_text: str) -> dict[str, A
     )
     if not matched_key:
         return {"ok": False, "reason": "NOT_PACKAGING_CLAIM"}
+    if text_unverified(shot):
+        return {"ok": False, "reason": "PACKAGING_TEXT_UNVERIFIED"}
     # A mixed sentence containing a functional claim must still go through the
     # functional action/result gate; the package mark may only support its own
     # narrow claim.
@@ -726,7 +987,8 @@ def packaging_claim_direct(shot: dict[str, Any], claim_text: str) -> dict[str, A
     }
 
 
-def cta_quantity_eligible(shot: dict[str, Any], text: str = "") -> tuple[bool, str]:
+def cta_quantity_eligible(shot: dict[str, Any], text: str = "",
+                          category: str = "") -> tuple[bool, str]:
     """Require a quantity/scale cue for CTA and value language.
 
     A single-pack beauty shot is not an acceptable CTA ending. A visible count
@@ -734,7 +996,7 @@ def cta_quantity_eligible(shot: dict[str, Any], text: str = "") -> tuple[bool, s
     enough; otherwise the caller must keep the voice/subtitle and emit
     MATERIAL_GAP instead of inserting unrelated B-roll.
     """
-    intents = infer_intents(text)
+    intents = infer_intents(text, category=category)
     if "cta" not in intents and "quantity" not in intents:
         return True, "NOT_CTA_OR_QUANTITY"
     if is_empty_shot(shot) or is_visual_metaphor(shot):

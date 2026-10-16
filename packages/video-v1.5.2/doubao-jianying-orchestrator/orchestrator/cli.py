@@ -259,23 +259,29 @@ def _run_shot_analysis(manifest: dict, input_path: Path, report_dir: Path) -> di
     """Create or consume task-local shot candidates; never writes a library."""
     report_dir.mkdir(parents=True, exist_ok=True)
     analysis_file = manifest.get("shot_analysis_file")
+    analysis = None
     if analysis_file:
         path = Path(str(analysis_file)).expanduser()
         path = (path if path.is_absolute() else input_path.parent / path).resolve()
         try:
-            return _read(path)
+            analysis = _read(path)
         except (OSError, ValueError) as exc:
             return {"ok": False, "pending_items": [{"type": "SHOT_ANALYSIS_FILE_INVALID", "message": str(exc)}]}
+        # 复用的候选一律交给 enrich 判定：输入签名对不上的整条重做，动作或文字复核
+        # 没做完的只补那一步；全部有效时 enrich 不调模型直接返回。
+        if not bool(manifest.get("vision_analysis", True)):
+            return analysis
     env = environment_report(refresh=True)
-    analysis = shot_analyzer.analyze_manifest(
-        manifest, input_path.parent, report_dir,
-        ffmpeg=env.get("ffmpeg"), ffprobe=env.get("ffprobe"))
-    # Automatic vision is the default for temporary task material.  The raw
-    # extractor remains available through ``analyze-shots --no-vision`` for
-    # diagnostics, but build must never ask the outer Codex turn to hand-fill
-    # semantic labels.
-    if not bool(manifest.get("vision_analysis", True)):
-        return analysis
+    if analysis is None:
+        analysis = shot_analyzer.analyze_manifest(
+            manifest, input_path.parent, report_dir,
+            ffmpeg=env.get("ffmpeg"), ffprobe=env.get("ffprobe"))
+        # Automatic vision is the default for temporary task material.  The raw
+        # extractor remains available through ``analyze-shots --no-vision`` for
+        # diagnostics, but build must never ask the outer Codex turn to hand-fill
+        # semantic labels.
+        if not bool(manifest.get("vision_analysis", True)):
+            return analysis
     from . import vision_analyzer
     return vision_analyzer.enrich_with_vision(manifest, analysis, report_dir,
                                               ffmpeg=env.get("ffmpeg"))
@@ -285,24 +291,26 @@ _PROBE_CACHE: dict = {}
 
 
 def _audio_probe():
-    """返回 ffprobe 时长探测函数；没有 ffprobe 时返回 None（调用方显式降级）。"""
+    """返回 ffprobe 时长探测函数；没有 ffprobe 时返回 None（调用方显式降级）。
+
+    和引擎 ``align_audio_video`` 用同一个探测口：音频文件只有容器时长，
+    引擎会减一帧。这里不对齐的话，场景规则按长一帧的配音切好的窗口
+    （定速、证据卡满整段）到引擎里会差一帧放不下，退回素材开头。
+    """
     if "probe" in _PROBE_CACHE:
         return _PROBE_CACHE["probe"]
     from .platform_env import find_ffmpeg
-    ffprobe = find_ffmpeg()[1]
+    ffmpeg, ffprobe = find_ffmpeg()[:2]
     if not ffprobe:
         _PROBE_CACHE["probe"] = None
         return None
 
     def probe(path: str) -> dict:
-        out = subprocess.run(
-            [str(ffprobe), "-v", "error", "-show_entries", "format=duration",
-             "-of", "json", str(path)],
-            capture_output=True, text=True, timeout=60)
-        if out.returncode != 0:
-            raise RuntimeError((out.stderr or "ffprobe 读取失败").strip()[:200])
-        data = json.loads(out.stdout or "{}")
-        return {"duration": float((data.get("format") or {}).get("duration") or 0.0)}
+        res = timing_contract.probe_material_duration_us(str(path), ffprobe=str(ffprobe),
+                                                         ffmpeg=str(ffmpeg) if ffmpeg else None)
+        if int(res.get("duration_us") or 0) <= 0:
+            raise RuntimeError(f"ffprobe 读取失败：{res.get('source')}")
+        return {"duration": int(res["duration_us"]) / timing_contract.US}
 
     _PROBE_CACHE["probe"] = probe
     return probe
@@ -387,6 +395,9 @@ def _pre_synthesize_narration(manifest: dict, report_dir: Path, preset) -> dict:
 def _temporary_match(manifest: dict, input_path: Path, report_dir: Path,
                      narration_timing: dict | None = None) -> tuple[dict, dict | None]:
     analysis = _run_shot_analysis(manifest, input_path, report_dir)
+    if analysis.get("shots"):
+        from . import material_corrections
+        analysis = material_corrections.apply(manifest, analysis, report_dir)
     if not analysis.get("shots"):
         return manifest, {"status": "SHOT_MATCH_BLOCKED", "message": "当前商品没有可分析的素材镜头。",
                           "pending_items": analysis.get("pending_items", []),
@@ -532,6 +543,11 @@ def cmd_build(args) -> int:
             if blocker:
                 blocker["report_dir"] = str(report_dir)
                 return _emit(_compact_build_result(finalize(blocker)), 1)
+            if manifest.get("usage_ledger_path"):
+                try:
+                    usage_ledger.record(manifest, manifest.get("segments") or [], reserved=True)
+                except (OSError, TimeoutError, ValueError) as exc:
+                    logger.event("usage_ledger_reserve_failed", error=str(exc))
     except Exception as exc:  # noqa: BLE001
         logger.event("prebuild_exception", error_type=type(exc).__name__, error=str(exc))
         result = finalize({
@@ -555,9 +571,12 @@ def cmd_build(args) -> int:
     except Exception as exc:  # noqa: BLE001
         logger.event("task_exception", error_type=type(exc).__name__, error=str(exc))
         result = {"status": "ERROR", "error": str(exc), "error_type": type(exc).__name__}
-    if result.get("status") == "SUCCESS" and manifest.get("usage_ledger_path"):
+    if manifest.get("usage_ledger_path"):
         try:
-            result["usage_ledger"] = usage_ledger.record(manifest, manifest.get("segments") or [])
+            if result.get("status") == "SUCCESS":
+                result["usage_ledger"] = usage_ledger.record(manifest, manifest.get("segments") or [])
+            else:
+                usage_ledger.release(manifest)
         except (OSError, TimeoutError, ValueError) as exc:
             logger.event("usage_ledger_failed", error=str(exc))
     if manifest.get("rulepack"):

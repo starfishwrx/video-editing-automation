@@ -29,7 +29,7 @@ Use the bundled `scripts/jy_wrapper.py` and `pyJianYingDraft` vendor package for
   color.
 - Displayed subtitle text removes Chinese and English punctuation while
   retaining letters, numbers, and necessary spaces.
-- Subtitle clip position defaults to `X=0`, `Y=-0.8` in JianYing's half-canvas-
+- Subtitle clip position defaults to `X=0`, `Y=-0.55` in JianYing's half-canvas-
   height coordinate system. A caller may override these values explicitly; the
   orchestrator's generated drafts use the defaults and validate them after
   saving.
