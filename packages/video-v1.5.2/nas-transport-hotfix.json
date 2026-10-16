@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "component": "jianying-nas-transport",
+  "version": "4.0.0",
+  "base_video_tool_version": "1.5.0",
+  "files": [
+    {
+      "path": "tools/nas_portable.py",
+      "sha256": "a6c9041ec465db286c54e9c55dcbaa93e6bd23943dd08b478ebba71446839d6f"
+    },
+    {
+      "path": "tests/test_nas_portable.py",
+      "sha256": "88bb9699d4b71efe0688860ec16e4278e454386232da3a4fda51b356a6cbe48f"
+    },
+    {
+      "path": "tests/test_mac_review_handoff.py",
+      "sha256": "b628f797fa28107b9fa04063c2a23da5a496e12799b8152684fdc3929d22322d"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/ship_distribute.py",
+      "sha256": "11252453a4ff853816040685746a6c3cb267edc9eda2291a5c8c638546785969"
+    },
+    {
+      "path": "nas-tools/安装草稿自动同步.bat",
+      "sha256": "fba91a2e95079d2bc7c246b25332bd16d517b737a580fc17e052b1f1d1ea0483"
+    },
+    {
+      "path": "nas-tools/上传草稿.bat",
+      "sha256": "86e8877bb3ab54e887bab8e78a212613404093b21f861b7c49c3ce718cd40b65"
+    },
+    {
+      "path": "nas-tools/使用说明.md",
+      "sha256": "d16099d8a5dca199bd30189a1798d5af8f17f6fb597bf470bc9383c130fcb33d"
+    },
+    {
+      "path": "nas-tools/素材本地化修复.bat",
+      "sha256": "ebbaeeb2158ca907ec22c7e88313ed202c60e5c756cc072a939bd55b2673dd47"
+    },
+    {
+      "path": "nas-tools/一键取稿.bat",
+      "sha256": "0d6159b01de7b2b2f2d5a0df325d5e7735a569ae5c96d3b99f68e24018c90564"
+    },
+    {
+      "path": "nas-tools/fix_local.ps1",
+      "sha256": "a7971ac0cf12a65b377fec0aebc69d48fb07c12269cf8787218709c664f6e910"
+    },
+    {
+      "path": "nas-tools/nas-tool.ps1",
+      "sha256": "a2d0071503158369cb04be5eaabc201f8deffe385af052c39fa27d36dc41f728"
+    },
+    {
+      "path": "nas-tools/sync.ps1",
+      "sha256": "1719069a2cfdb978769c4e6d2cd8b468485e242b45650514b1dcf81018088bc4"
+    }
+  ],
+  "verification": {
+    "automated_tests": 28,
+    "real_nas_roundtrip": true,
+    "media_files": 26,
+    "video_files_decoded": 9,
+    "timeline_preserved": true,
+    "windows_entrypoint_verified": true,
+    "visual_verified": false,
+    "encrypted_input": "blocked_without_modifying_draft",
+    "existing_user_drafts_overwritten": false,
+    "scheduled_tasks_enabled": false
+  },
+  "limitations": [
+    "Encrypted current timelines cannot be localized offline; old plaintext records are never substituted.",
+    "File validation is not a guarantee of editor rendering across all versions."
+  ]
+}
