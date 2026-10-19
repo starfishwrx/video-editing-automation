@@ -1,0 +1,49 @@
+[project]
+name = "video-automation"
+version = "1.5.4"
+description = "Jianying / Doubao video automation skill pack (orchestrator + editor + tools)"
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+  "pymediainfo>=6.0.0",
+  "websockets>=12.0",
+  "pillow>=10.0.0",
+  "uiautomation>=2.0.0; sys_platform == 'win32'",
+]
+
+[dependency-groups]
+# TTS 兜底、云曲库、进程辅助（缺了主链仍可跑）
+recommended = [
+  "edge-tts>=6.1.0",
+  "requests>=2.31.0",
+  "psutil>=5.9.0",
+]
+# 视觉拼图 / 抽帧辅助（vision_analyzer 按需 import）
+vision = [
+  "numpy>=1.26.0",
+  "opencv-python-headless>=4.8.0",
+]
+dev = []
+indexing = [
+  "torch==2.7.1",
+  "transformers>=4.51,<5",
+  "sentencepiece>=0.2,<0.3",
+  "safetensors>=0.5",
+  "huggingface-hub>=0.30,<1",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu126", marker = "sys_platform == 'win32' or sys_platform == 'linux'" }
+
+[tool.uv]
+package = false
+default-groups = ["recommended", "vision"]
+
+[tool.uv.pip]
+# 与本机已验证的 Python 3.11 对齐；用 `uv python pin` 写入 .python-version
+python-version = "3.11"
