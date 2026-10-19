@@ -170,7 +170,7 @@
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/material_store.py",
-      "sha256": "190af2871ff00539616f9f7067eb22c9dd42777e425c4d562295874ecfff4c19"
+      "sha256": "fd23fa61f46a3d533403cfd444e3d75ccf38a7690b413b5be471f56f03f24f1a"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/migration.py",
@@ -791,7 +791,7 @@
   ],
   "release_id": "video-v1.5.4",
   "schema_version": 1,
-  "source_sha256": "ccc7dde7ac124ffa8e6e7fd0ebda4c5204ca6e1c4a116c161a34d1f95c16fb44",
+  "source_sha256": "5c45d4b5b05dbc03de23a7f9e96531ac43c7ba0f8eda409c3422a0c1aa510ec8",
   "tree_hash_algorithm": "video-release-tree-v1",
   "version": "1.5.4",
   "visual_policy_version": "1.4.1"
