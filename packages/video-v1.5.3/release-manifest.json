@@ -58,7 +58,7 @@
     },
     {
       "path": "doubao-jianying-orchestrator/CHANGELOG.md",
-      "sha256": "64d1ae98b011d3a316ead056209b61fa87703df8d172b8fa85e94db3c5cf6b8b"
+      "sha256": "94896d67508a00c47ee2cb696685c0fdb121ee87e2ee74bb33cda2f4af3fd940"
     },
     {
       "path": "doubao-jianying-orchestrator/SKILL.md",
@@ -190,7 +190,7 @@
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/shot_analyzer.py",
-      "sha256": "5396b157c16a5746e0819d924ed090e80567c2a9285a664cb7cf4bd6d89a5b22"
+      "sha256": "ddface1aaf4d84bbcf97a907daf689910d5f0ea5b72af9895e4ce25b5fcc235a"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/shot_notes.py",
@@ -222,7 +222,7 @@
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/vision_analyzer.py",
-      "sha256": "61648f01d89221928b774c98e6b570ac5b7a3e5764f56c9a0ee72d9f012ea423"
+      "sha256": "2deb4f4586bf7d3a7d2f1567abe7df42b7b6757cf6ae56fc0f67fc6f35faa29d"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/visual_match.py",
@@ -306,7 +306,7 @@
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_v152_r18_review.py",
-      "sha256": "7406d06bc6d40586bac2974e6d6dc2ff55172695bf0afca1e70554cbd762c385"
+      "sha256": "36f6d959d5c60959927676cfc219c76358683cbec6e5b9d4e2035bc9b979568b"
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_v152_resume_integrity.py",
@@ -314,7 +314,7 @@
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_v152_vision_v3.py",
-      "sha256": "5fb52a19ceaf445c038a61a92f578c33dd413e91ae97c904736a2d16fae49960"
+      "sha256": "29cb838c77039798928f74e2cf58f561c83d2748a4d2c2f15a26993710699c35"
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_v152_weipin_feedback.py",
@@ -719,7 +719,7 @@
   ],
   "release_id": "video-v1.5.3",
   "schema_version": 1,
-  "source_sha256": "6960d17c1595285605cdb0ce561fb4d8a1867dd5b647e3fb9ff85678b2389da8",
+  "source_sha256": "8ff892569d560e1f4122406489af8c2fc7c8537d21fef14677be7e042f8f2184",
   "tree_hash_algorithm": "video-release-tree-v1",
   "version": "1.5.3",
   "visual_policy_version": "1.4.1"

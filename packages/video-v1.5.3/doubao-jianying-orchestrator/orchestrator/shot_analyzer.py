@@ -69,6 +69,10 @@ DEFAULT_TAIL_TRIM_S = 0.2
 # 取值偏小是故意的：区间越窄，引擎越容易把配音长度的切片套在上面，
 # 同时保证切片里包含 AI 真正看过的那一帧。
 EVIDENCE_HALF_WINDOW = 0.6
+# 正式稿：已审核的证据比这句口播长时，加速播完这段证据，不再报装不下。
+# 只加速、不慢放；上限与卫品吸水实验吸收段一致（weipin absorb_max_speed=20）。
+# 预览仍收窄证据。
+EVIDENCE_FIT_SPEED_MAX = 20.0
 # 一句话最多跨几个镜头（定案第 6 条的多镜组合）。
 # 上限存在的目的是**防走捷径**：不设限的话，任何长句都能靠「把素材库切碎拼上去」
 # 过关，成片会变成一堆闪帧。超过这个数仍无解就如实报 MATERIAL_GAP，让运营补素材。
@@ -148,6 +152,35 @@ def _us(seconds: Any, default: float = 0.0) -> int:
     return int(round(_number(seconds, default) * timing_contract.US))
 
 
+def _preview_delivery(manifest: dict[str, Any] | None) -> bool:
+    return str((manifest or {}).get("delivery_mode") or "").lower() in (
+        "preview", "preview_only", "预览")
+
+
+def _fit_speed_range(shot: dict[str, Any], *, manifest: dict[str, Any] | None,
+                     time_sensitive: bool) -> tuple[float, float]:
+    """画面角色的变速范围。正式稿的时间相关证据允许加速到 20 倍以罩住整段证据。"""
+    speed_min, speed_max = timing_contract.speed_range_for_role(
+        demo_actions.visual_role(shot), time_sensitive=time_sensitive)
+    if time_sensitive and not _preview_delivery(manifest):
+        speed_max = max(speed_max, EVIDENCE_FIT_SPEED_MAX)
+    return speed_min, speed_max
+
+
+def _absorb_text_role(manifest: dict[str, Any], text: str) -> str:
+    """吸水实验组句：命中卖点开组，效果句只在组内续上。"""
+    from . import rulepack
+    rules = rulepack.for_manifest(manifest)
+    scene = next((s for s in rules.get("scenes") or []
+                  if isinstance(s, dict) and s.get("id") == "absorb_test"), None)
+    if not scene:
+        return ""
+    if rulepack.text_hits_scene(scene, text):
+        return "hit"
+    follow = {"text_keywords": scene.get("follow_keywords") or []}
+    return "follow" if rulepack.text_hits_scene(follow, text) else ""
+
+
 def candidate_window(shot: dict[str, Any], *, audio_duration_us: int,
                      manifest: dict[str, Any] | None = None,
                      time_sensitive: bool = False,
@@ -156,8 +189,9 @@ def candidate_window(shot: dict[str, Any], *, audio_duration_us: int,
 
     用户定案（2026-09-16）：
     - 每个候选都要跑求解，不能再用「2 秒占位探针 / 字符数估算」短路；
-    - 变速范围由画面角色决定（``speed_range_for_role``），与时间相关的直接证据
-      锁 1.0 —— 不允许用变速把装不下的证据镜头塞进配音长度（等于伪造证据）；
+    - 变速范围由画面角色决定（``speed_range_for_role``）。时间相关的直接证据
+      不慢放；正式稿证据比口播长时加速到最多 20 倍（与吸水吸收段一致），
+      把已审核的那一段播完。预览仍锁 1.0，由调用方收窄证据。
     - 无解返回结构化原因码，**引擎不得静默换镜**，由规划层决定换镜/多镜/缺口。
 
     返回 `timing_contract.WindowSolution`；`audio_duration_us<=0` 时同样返回失败解
@@ -165,8 +199,8 @@ def candidate_window(shot: dict[str, Any], *, audio_duration_us: int,
     """
     source = manifest or {}
     evidence_start, evidence_end, _frame = candidate_evidence_interval(shot)
-    speed_min, speed_max = timing_contract.speed_range_for_role(
-        demo_actions.visual_role(shot), time_sensitive=time_sensitive)
+    speed_min, speed_max = _fit_speed_range(
+        shot, manifest=manifest, time_sensitive=time_sensitive)
     frm = _number(source.get("fps"), 0) or 0
     # 素材总长（1.3.27.1）：analyze_manifest 新产物自带 material_duration_us，与
     # 写入层同一把尺；旧产物没有时退回 source_end 的换算值。
@@ -204,8 +238,8 @@ def span_segment_for(shot: dict[str, Any], *, manifest: dict[str, Any] | None = 
     """
     source = manifest or {}
     evidence_start, evidence_end, _frame = candidate_evidence_interval(shot)
-    speed_min, speed_max = timing_contract.speed_range_for_role(
-        demo_actions.visual_role(shot), time_sensitive=time_sensitive)
+    speed_min, speed_max = _fit_speed_range(
+        shot, manifest=manifest, time_sensitive=time_sensitive)
     frm = _number(source.get("fps"), 0) or 0
     return timing_contract.SpanSegment(
         source_in_us=_us(shot.get("source_start")),
@@ -885,6 +919,9 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
     # 纸品规则：整条片子里同机位、同动作的展示画面只用一次，再次出现时排到同级候选后面。
     avoid_similar = bool(manifest.get("avoid_similar_shots"))
     used_looks: set[str] = set()
+    # 连续吸水/吸收量句共用一条实验镜头，组句规则再按相位切开；不把「量大」当成囤货数量。
+    absorb_hold_id = ""
+    absorb_hold_source = ""
 
     def _audit_ready_row(row: dict[str, Any]) -> bool:
         """只把已经写完描述、证据标签和动作确认的镜头当成可交付画面。"""
@@ -913,6 +950,18 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
         # 与时间相关的直接证据不得通过变速伪造（定案第 6 条）：这句话只要有任何
         # 一条 claim 要求直接证据，该句全部候选一律锁 1.0 倍速。
         time_sensitive = any(c.evidence_required for c in required_claim_objs)
+        absorb_role = _absorb_text_role(manifest, text)
+        absorb_scene = None
+        if absorb_role == "hit":
+            from . import rulepack
+            absorb_scene = next(
+                (s for s in rulepack.for_manifest(manifest).get("scenes") or []
+                 if isinstance(s, dict) and s.get("id") == "absorb_test"), None)
+        in_absorb_run = absorb_role == "hit" or (absorb_role == "follow" and bool(absorb_hold_id))
+        if not in_absorb_run:
+            absorb_hold_id = ""
+            absorb_hold_source = ""
+        share_absorb = bool(absorb_hold_id) and in_absorb_run
         ranked = []
         for shot in shots:
             shot = focus_on_topic(shot, contract)
@@ -943,9 +992,10 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
             source_video = str(shot.get("video", ""))
             reuse_count = source_use_counts.get(source_video, 0)
             reuse_reasons: list[str] = []
-            if shot_id in used_shot_ids:
+            if shot_id in used_shot_ids and not (share_absorb and shot_id == absorb_hold_id):
                 reuse_reasons.append("exact_shot_already_used")
-            if reuse_count >= max_source_reuse:
+            if (reuse_count >= max_source_reuse
+                    and not (share_absorb and source_video == absorb_hold_source)):
                 reuse_reasons.append("source_video_reuse_limit")
             # 功能句（抽取、不破、湿度、擦拭、冲散……）只收画面主题对得上的镜头，
             # 或 AI 逐句判过关的；纸箱、泛包装不能靠「没用过」「动作完整」混进来。
@@ -986,6 +1036,10 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
                               "reason": "PACKAGING_CLAIM_DIRECT",
                               "packaging_claim": packaging_claim}
             cta_ok, cta_reason = demo_actions.cta_quantity_eligible(shot, text, category)
+            if absorb_role == "hit" and not cta_ok:
+                cta_ok, cta_reason = True, "ABSORB_GROUP_NOT_PACK_QUANTITY"
+            absorb_visual = bool(
+                absorb_scene is not None and rulepack.shot_has_visual(absorb_scene, shot))
             ranked.append({
                 "score": score, "shot_id": shot_id, "shot": shot, "matched": matched, "fit": fit,
                 "source_video": source_video, "reuse_count_before": reuse_count,
@@ -994,6 +1048,7 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
                 "packaging_claim": packaging_claim,
                 "cta_visual_ok": cta_ok,
                 "cta_visual_reason": cta_reason,
+                "absorb_visual": absorb_visual,
                 # 求解结果（可行解或结构化失败原因）。这是选镜的硬闸门之一。
                 "window": window,
                 "window_ok": bool(window.ok),
@@ -1130,7 +1185,7 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
             # 空镜一票否决；证据要求为真的句子必须拿到 role>=要求 且 strength=A
             # 的动作。旧分析结果缺字段时 judge() 返回 status="ungated"/ok=True，
             # 行为与旧版一致，但覆盖率会写进报告。
-            claim_ok = bool(row["claim_gate"].get("ok"))
+            claim_ok = bool(row["claim_gate"].get("ok")) or bool(row.get("absorb_visual"))
             cta_ok = bool(row.get("cta_visual_ok", True))
             # 语义卖点（吸水、厚实等）必须在镜头证据文本里找得到直接或关联标签。
             # 只靠模型分数会选中正式证据闸门随后拒绝的镜头。
@@ -1140,7 +1195,9 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
                 supported = [semantic_gate.claim_supported(tag, blob) for tag in required_claims]
                 # 一句讲两个卖点（「厚实」+「不容易破」）时，主题对得上的镜头证明其中一个也能用，
                 # 不要求一个镜头同时拍全；没拍到的那个照样走缺口报告。
-                evidence_ok = all(supported) or (functional and row.get("fit", 0) > 0 and any(supported))
+                evidence_ok = (all(supported)
+                               or (functional and row.get("fit", 0) > 0 and any(supported))
+                               or bool(row.get("absorb_visual")))
             usable = claim_ok and cta_ok and window_ok and evidence_ok and (semantic_ok or tier > 0)
             role_fit = demo_actions.intent_role_score(row["shot"], intents)
             # 多样性只做同等匹配候选的最后一级 tie-break：优先换源、换机位/构图
@@ -1666,8 +1723,13 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
             continue
         selected_id = str(selected.get("shot_id", ""))
         selected_source = str(selected.get("video", ""))
-        source_use_counts[selected_source] = source_use_counts.get(selected_source, 0) + 1
+        absorb_shared = bool(share_absorb and selected_id == absorb_hold_id)
+        if not absorb_shared:
+            source_use_counts[selected_source] = source_use_counts.get(selected_source, 0) + 1
         used_shot_ids.add(selected_id)
+        if in_absorb_run:
+            absorb_hold_id = selected_id
+            absorb_hold_source = selected_source
         if source_use_counts[selected_source] > 1:
             reuse_events.append({"index": index, "shot_id": selected_id,
                                  "video": selected_source,
@@ -1775,6 +1837,11 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
             # 明明允许微调的展示镜头也会变成无解。
             "visual_role": demo_actions.visual_role(selected),
             "time_sensitive": bool(time_sensitive),
+            **({"speed_range_override": [1.0, EVIDENCE_FIT_SPEED_MAX],
+                "evidence_fit_speedup": True}
+               if (time_sensitive and not preview_mode
+                   and float(window_solution.speed) > 1.0 + 1e-6) else {}),
+            **({"absorb_group_share": True} if absorb_shared else {}),
             # ─ 多镜组合（v1.3.27 B 步 / 定案第 6 条）──────────────────────
             # 这一段由**几镜共同承担**时，完整解在 `span_parts`（每段：素材、窗口解、
             # 证据区间、速度各一份）。单镜路径下 `multi_shot=False`、`span_parts=None`，
