@@ -595,6 +595,43 @@ def _needs_recheck(row: dict[str, Any] | None, checks: dict[str, list[str]]) -> 
     return any(w in observed for w in words)
 
 
+def _recheck_policy() -> str:
+    """分析要求增量复核策略。
+
+    - ``reuse``（默认）：缓存键一致且已有可用描述时，只盖章 ``rule_checks`` 复用，
+      不再整段调视觉。卫品 ``recheck`` 词很宽时避免每升一次规则就重看整池。
+    - ``vision``：命中 ``recheck`` 词就重新看图（旧行为）。
+    - ``off``：忽略增量复核。
+    """
+    raw = os.environ.get("JY_VISION_RECHECK", "reuse").strip().lower()
+    if raw in {"0", "off", "false", "no", "none"}:
+        return "off"
+    if raw in {"vision", "force", "1", "true", "yes", "full"}:
+        return "vision"
+    return "reuse"
+
+
+def _stamp_rule_checks(row: dict[str, Any], checks: dict[str, list[str]]) -> dict[str, Any]:
+    if not checks:
+        return row
+    return {**row, "rule_checks": sorted(checks)}
+
+
+def _resolve_recheck(row: dict[str, Any] | None, checks: dict[str, list[str]]
+                     ) -> tuple[dict[str, Any] | None, str]:
+    """返回 ``(观察, 处置)``：``keep`` / ``stamp`` / ``redo``。"""
+    if not isinstance(row, dict) or not _needs_recheck(row, checks):
+        return row, "keep"
+    policy = _recheck_policy()
+    if policy == "off":
+        return _stamp_rule_checks(row, checks), "stamp"
+    ready = (row.get("status") == "ready_for_matching"
+             and bool(str(row.get("description") or "").strip()))
+    if policy == "reuse" and ready:
+        return _stamp_rule_checks(row, checks), "stamp"
+    return None, "redo"
+
+
 def _vision_cache_key(manifest: dict[str, Any], shot: dict[str, Any], profile: str,
                       rules: list[str] | None = None) -> str:
     source = str(shot.get("video") or "").strip()
@@ -1308,6 +1345,7 @@ def enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repor
     seeded = 0
     stale = 0
     rechecked = 0
+    recheck_reused = 0
     checks = _rule_checks(manifest)
     every_rule = _analysis_rules(manifest)
     for shot in shots:
@@ -1323,9 +1361,13 @@ def enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repor
                     and cache[full].get("status") == "ready_for_matching"):
                 cached = cache[key] = {**cache[full], "rule_checks": sorted(checks)}
                 seeded += 1
-        if isinstance(cached, dict) and _needs_recheck(cached, checks):
+        cached, cached_recheck = _resolve_recheck(cached, checks)
+        if cached_recheck == "redo":
             rechecked += 1
-            cached = None
+        elif cached_recheck == "stamp":
+            recheck_reused += 1
+            if key and isinstance(cached, dict):
+                cache[key] = cached
         if (isinstance(cached, dict)
                 and cached.get("status") == "ready_for_matching"
                 and shot.get("frame_exists") is not False):
@@ -1349,12 +1391,15 @@ def enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repor
         local = (shot.get("status") == "ready_for_matching"
                  and bool(shot.get("description"))
                  and shot.get("frame_exists") is not False)
-        if (local and key and shot.get("analysis_cache_key") == key
-                and not _needs_recheck(shot, checks)):
+        _, local_recheck = _resolve_recheck(shot if local else None, checks)
+        if local and key and shot.get("analysis_cache_key") == key and local_recheck != "redo":
+            if local_recheck == "stamp":
+                recheck_reused += 1
+                shot["rule_checks"] = sorted(checks)
             if shot.get("text_pass") != "pending":
                 shot["analysis_cache_hit"] = True
                 projection = _cache_projection(shot)
-                if projection is not None and key not in cache:
+                if projection is not None and (key not in cache or local_recheck == "stamp"):
                     cache[key] = projection
                     seeded += 1
                 cache_hits += 1
@@ -1367,6 +1412,8 @@ def enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repor
                 text_resume[shot_id] = items
                 cache_hits += 1
                 continue
+        if local and local_recheck == "redo":
+            rechecked += 1
         if local:
             stale += 1
         if shot.get("status") == "ready_for_matching":
@@ -1393,6 +1440,7 @@ def enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repor
             "cache_misses": cache_misses,
             "stale_local": stale,
             "rule_rechecked": rechecked,
+            "rule_recheck_reused": recheck_reused,
             "text_resumed": len(text_resume),
             "cache_path": str(cache_path),
             "partial": partial,

@@ -1,4 +1,4 @@
-# Changelog
+﻿# Changelog
 
 ## 1.5.3 - 2026-10-16
 
@@ -11,6 +11,9 @@
 - formal 禁止 settled / lead_in / pool_fill 冒充完整动作：仅 `delivery_mode=preview` 才挂这些降级阶段；正式稿动作放不下时记 `unmet`，保留原镜头。离线反例：2 秒口播、指产品动作 1–15 秒，formal 不得落到 15–17 秒 settled。
 - 派生卖点标签门控：否定句（未看到/没有…）与仅包装印字不再打腰腹/防侧漏等动作标签；删除「计时器+红字+巾体→荧光」规则，荧光须检测笔/紫光/荧光测试证据。标签带来源 `shot_label_sources`（`derived:<rule_id>`），再次标注可撤回旧派生。
 - 吸水连播：`absorb_test.group_max` 3→5；场景 `text_keywords` 补「量大/量多/一整晚/不扩散/锁中央」，相关口播可同一实验连续覆盖；透气等其它场景句仍阻断。
+- 正式选镜时长：时间相关证据比这句口播长时，加速播完已审核画面，最高 20 倍，与吸水吸收段 `absorb_max_speed` 相同；只加速、不慢放。不再因此整稿 `SHOT_TIMING_INFEASIBLE`。预览仍把证据收窄到句长。
+- 吸水组句前移到选镜：连续的吸水、吸收、量大句共用一条倒液实验镜头。「干净」「量大」不再拆成另一条证据或囤货数量，复用上限也不把组内后面的句子卡掉。场景规则仍按倒水、吸收、擦拭切开。
+- 视觉复检默认 `JY_VISION_RECHECK=reuse`：已有可匹配描述时只盖上 `rule_checks`，不整镜重看。`vision` 才强制重看，`off` 忽略增量复检。
 - 包内增加 `references/production_quality_and_lessons.md`；`WEIPIN_1.5.2_PITFALLS.md` 标注历史适用范围，旧 preview/settled 口径不再作为 formal 默认。
 
 ## 1.5.2 - 2026-10-13

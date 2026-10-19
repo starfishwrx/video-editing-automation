@@ -286,7 +286,7 @@ class EnrichV3Test(unittest.TestCase):
     def test_recheck_rule_reanalyzes_only_matching_shots_once(self):
         self._run([(True, self._first_pass()), self._text(["EDI纯水"]), self._text(["EDI纯水"])])
         rules, checks = self._with_recheck(["挂钩"])
-        with rules, checks:
+        with rules, checks, mock.patch.dict(os.environ, {"JY_VISION_RECHECK": "vision"}):
             result, prompts = self._run([(True, self._first_pass()),
                                          self._text(["EDI纯水"]), self._text(["EDI纯水"])])
             self.assertEqual(result["vision_analysis"]["rule_rechecked"], 1)
@@ -294,6 +294,17 @@ class EnrichV3Test(unittest.TestCase):
             again, prompts = self._run([])
         self.assertEqual(prompts, [])
         self.assertEqual(again["shots"][0]["rule_checks"], ["r1"])
+
+    def test_recheck_reuses_ready_observation_by_default(self):
+        self._run([(True, self._first_pass()), self._text(["EDI纯水"]), self._text(["EDI纯水"])])
+        rules, checks = self._with_recheck(["挂钩"])
+        with rules, checks, mock.patch.dict(os.environ, {"JY_VISION_RECHECK": "reuse"}):
+            result, prompts = self._run([])
+        self.assertEqual(prompts, [])
+        self.assertEqual(result["vision_analysis"]["rule_rechecked"], 0)
+        self.assertEqual(result["vision_analysis"]["rule_recheck_reused"], 1)
+        self.assertEqual(result["vision_analysis"]["cache_hits"], 1)
+        self.assertEqual(result["shots"][0]["rule_checks"], ["r1"])
 
     def test_observations_made_under_every_rule_are_adopted(self):
         rule = "新增：挂钩要写清挂的是哪种"

@@ -173,10 +173,42 @@ class PreviewNarrowTests(unittest.TestCase):
         self.assertTrue(seg["preview_unresolved"])
         self.assertIn("NARROWED_FOR_PREVIEW", seg["preview_reason"])
 
-    def test_formal_still_reports_the_gap(self):
+    def test_formal_speeds_up_long_evidence(self):
+        manifest = _manifest("亲肤舒适", audio_s=1.0, category="weipin", product="萌睡裤",
+                             product_name="萌睡裤", delivery_mode="formal")
+        window = shot_analyzer.candidate_window(
+            self.SOFT, audio_duration_us=US, manifest=manifest, time_sensitive=True)
+        self.assertTrue(window.ok, window.reason)
+        self.assertGreater(window.speed, 1.0)
+        self.assertLessEqual(window.speed, shot_analyzer.EVIDENCE_FIT_SPEED_MAX)
+        self.assertLessEqual(window.source_start_us, 1_272_000)
+        self.assertGreaterEqual(window.source_end_us, 3_770_000)
         matched = self._match("formal")
-        self.assertIn("SHOT_TIMING_INFEASIBLE",
-                      [p.get("type") for p in matched.get("pending_items") or []])
+        self.assertNotIn("SHOT_TIMING_INFEASIBLE",
+                         [p.get("type") for p in matched.get("pending_items") or []])
+
+
+class AbsorbGroupShareTests(unittest.TestCase):
+    def test_volume_sentences_share_one_experiment_shot(self):
+        shot = _shot(
+            "exp", description="往卫生巾上倒蓝色液体，液体被吸收并锁在中央",
+            evidence_tags=["倒水", "吸收", "锁在中央"], visual_tags=["倒水", "吸收"],
+            evidence_intervals=[{"start": 1.0, "end": 2.2, "frame_time": 1.5}])
+        texts = ["内含高分子吸水因子", "吸收更快更干净", "量大的姐妹真的闭眼冲"]
+        manifest = _manifest(
+            texts[0], audio_s=1.2, category="weipin", product="小暖心", product_name="小暖心",
+            delivery_mode="formal", max_source_reuse=1)
+        manifest["segments"] = [{"text": text, "audio_duration_us": int(1.2 * US),
+                                 "timing_certainty": "audio"} for text in texts]
+        analysis = {"shots": [shot], "semantic_matches": [
+            {"index": index, "top3": [{"shot_id": "exp", "score": 90,
+                                       "matched_claims": ["倒蓝色液体被吸收"]}]}
+            for index in (1, 2, 3)]}
+        matched = shot_analyzer.match_manifest(manifest, analysis)
+        self.assertTrue(matched["ok"], matched.get("pending_items"))
+        segments = matched["manifest"]["segments"]
+        self.assertEqual([row["temporary_shot_id"] for row in segments], ["exp", "exp", "exp"])
+        self.assertEqual([row.get("absorb_group_share") for row in segments], [None, True, True])
 
 
 class CrossTaskLedgerTests(unittest.TestCase):
