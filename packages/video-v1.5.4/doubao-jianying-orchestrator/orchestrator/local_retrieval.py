@@ -219,15 +219,16 @@ class LocalRetriever:
                 material_rows = [row for material_id in chunk_ids for row in grouped[material_id]]
                 missing = []
                 seen = set()
-                for row in material_rows:
-                    if row["frame_id"] in seen:
-                        continue
-                    seen.add(row["frame_id"])
-                    vector = self.store.get_vector(row["frame_id"], model_key)
-                    if vector is not None and vector.shape == (metadata["dimension"],):
-                        stats["cache_hits"] += 1
-                    else:
-                        missing.append(row)
+                with self.store.batch():
+                    for row in material_rows:
+                        if row["frame_id"] in seen:
+                            continue
+                        seen.add(row["frame_id"])
+                        vector = self.store.get_vector(row["frame_id"], model_key)
+                        if vector is not None and vector.shape == (metadata["dimension"],):
+                            stats["cache_hits"] += 1
+                        else:
+                            missing.append(row)
                 if missing:
                     values = self.encoder.encode_images([row["path"] for row in missing], batch_size=self.batch_size)
                     if len(values) != len(missing):
@@ -267,11 +268,12 @@ class LocalRetriever:
                 snapshot = None
         if not snapshot:
             rows, vectors = [], []
-            for row in self.store.frames(allowed):
-                vector = self.store.get_vector(row["frame_id"], model_key)
-                if vector is not None and vector.shape == query_vector.shape:
-                    rows.append(row)
-                    vectors.append(vector)
+            with self.store.batch():
+                for row in self.store.frames(allowed):
+                    vector = self.store.get_vector(row["frame_id"], model_key)
+                    if vector is not None and vector.shape == query_vector.shape:
+                        rows.append(row)
+                        vectors.append(vector)
             matrix = np.stack(vectors) if vectors else np.empty((0, len(query_vector)), dtype=np.float32)
             signatures = [(Path(row["path"]).stat().st_mtime_ns, Path(row["path"]).stat().st_size) for row in rows]
             self._ranking_cache[snapshot_key] = (rows, matrix, signatures)

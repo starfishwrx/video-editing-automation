@@ -122,7 +122,7 @@ PROMPTS = {
     "group": """理解整篇口播后，结合available_observations里真实存在的动作划分连续语义组。原文、句序、音频时长不变。每组最终只能使用一个原片中的连续窗口，因此拆封取出、湿敷、擦脸等不同动作应在自然转折处分组；说明性相关句可跨句延续同一动作，不能每个短句重起手。不要把拆包装和另一原片上的敷脸硬绑成一组。明确动作或效果句require_complete_action=true；包装不能替代功能。叙述、情绪、承接、未给具体数字的促销价可用同商品的相关画面，不需虚构皮肤问题实拍或凭空要求价签；不能把文案没要求的促销图、提醒手势等加成素材硬要求。required_requirements只能选required_visual_checks提供的id，未提供则必须[]。query描述本组实际视觉目标，retrieval_query用不超过30个汉字简述对象和动作供检索，不写长叙述。只输出JSON：{\"groups\":[{\"id\":\"g1\",\"members\":[1,2],\"query\":\"具体视觉目标\",\"retrieval_query\":\"生理盐水湿巾拆封抽出\",\"require_complete_action\":true,\"required_requirements\":[]}]}。members连续按序，每句恰好一次。""",
     "plan": """为当前句组选择一个已核验候选及连续动作窗口。结合完整口播和前后组，不能改文案/音频/句序。locked_visual_windows是已锁定前组，优先避免重复同一源窗起手，不能以不相关画面换取差异。只能选择提供的 candidate_id，source_start_us/source_end_us 在候选范围内；普通承接/情绪/无具体数字促销句可延续同商品相关画面，不新增价签或手势要求；完整动作必须覆盖候选已观察的起手和结果。源窗长度/句组时长得到倍速，必须在 speed_range 内。包装、透光、拿纸不能证明吸水或擦净；缺素材则输出 gap，不准补包装/黑屏。只输出 JSON：{\"candidate_id\":\"...\",\"source_start_us\":0,\"source_end_us\":4000000,\"reason\":\"基于可见事实\"}；无解输出 {\"gap\":\"具体缺口\"}。""",
     "repair": """仅修复提供的失败句组，其他组已锁定不可改。遵守 plan 输入契约，只选择已核验候选、合法源窗和倍速。认真处理独立审核指出的语义/动作/结果/速度问题；透光不等于吸水，拿纸不等于擦净。无解输出 gap，不准改文案、重跑整稿、用包装或黑屏补位。只输出 {\"candidate_id\":\"...\",\"source_start_us\":0,\"source_end_us\":4000000,\"reason\":\"修复依据\"} 或 {\"gap\":\"具体缺口\"}。""",
-    "observe": """你是独立切片观察员。不要信任选镜理由或标签。图片来自已按实际源窗和倍速渲染的连续句组；根据时间顺序、口播、前后文判断实际可见对象、动作、结果是否对应。包装不能证明功能，透光不能证明吸水，动作后定住不能冒充全过程。查看是否重复起手、跳过动作、截断结果，以及此倍速是否仍能看明白；证据不足填 uncertain，不猜测。完整动作需能看到开始与结果。按口播实际要求审核，不附加原文没有的准备步骤或主观效果验证：湿敷动作的可见结果是巾体贴合稳定，不要求额外泡水或皮肤疾病消失；但若画面开头已经贴好而没看到开始，仍是不完整。擦脸清洁必须可见擦脸动作，明确污渍擦净/吸水实验仍须看到前后过程与结果。已有require_complete_action=true时不能因口播是介绍就用not_required忽略动作完整性。只输出 JSON：{\"status\":\"complete|not_required|unsupported|uncertain\",\"observation\":\"实际看见的内容\",\"action_complete\":true,\"visible_at_speed\":true,\"issues\":[],\"observations\":[{\"index\":1,\"status\":\"supported|contextual|unsupported|uncertain\",\"observation\":\"实际画面与该句关系\"}]}。每个成员必须一项；无法凭采样判断动感时保持 uncertain。""",
+    "observe": """你是独立切片观察员。只裁决current_utterances及members列出的当前句组，不要求当前画面展示其它句组的卖点。surrounding_context只用于理解代词，不是本组验收要求。不要信任选镜理由或标签。图片来自已按实际源窗和倍速渲染的连续句组；根据时间顺序、口播、前后文判断实际可见对象、动作、结果是否对应。包装不能证明功能，透光不能证明吸水，动作后定住不能冒充全过程。查看是否重复起手、跳过动作、截断结果，以及此倍速是否仍能看明白；证据不足填 uncertain，不猜测。完整动作需能看到开始与结果。按口播实际要求审核，不附加原文没有的准备步骤或主观效果验证：湿敷动作的可见结果是巾体贴合稳定，不要求额外泡水或皮肤疾病消失；但若画面开头已经贴好而没看到开始，仍是不完整。擦脸清洁必须可见擦脸动作，明确污渍擦净/吸水实验仍须看到前后过程与结果。已有require_complete_action=true时不能因口播是介绍就用not_required忽略动作完整性。只输出 JSON：{\"status\":\"complete|not_required|unsupported|uncertain\",\"observation\":\"实际看见的内容\",\"action_complete\":true,\"visible_at_speed\":true,\"issues\":[],\"observations\":[{\"index\":1,\"status\":\"supported|contextual|unsupported|uncertain\",\"observation\":\"实际画面与该句关系\"}]}。每个成员必须一项；无法凭采样判断动感时保持 uncertain。""",
 }
 
 
@@ -417,7 +417,13 @@ def _observe(group: dict, rows: list[dict], manifest: dict, report: Path, model:
     images, preview = _frames(group, rows, report, frame_extractor=frame_extractor,
                               slice_renderer=slice_renderer, ffmpeg=ffmpeg,
                               fps=float(manifest.get("fps") or 30))
-    response = _call("observe", {"full_script": [s["text"] for s in manifest["segments"]],
+    before = group["members"][0] - 2
+    after = group["members"][-1]
+    response = _call("observe", {"current_utterances": [{"index": r["index"], "text": r["text"]} for r in rows],
+                     "surrounding_context": {
+                         "before": manifest["segments"][before]["text"] if before >= 0 else "",
+                         "after": manifest["segments"][after]["text"] if after < len(manifest["segments"]) else "",
+                         "is_acceptance_requirement": False},
                      "group_id": group["id"], "members": group["members"],
                      "require_complete_action": group["require_complete_action"],
                      "required_source_start_us": group["required_source_start_us"],

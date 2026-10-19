@@ -120,6 +120,9 @@ class IndexedPlannerTests(unittest.TestCase):
         observer = next(r for r in self.calls if r["stage"] == "observe")
         self.assertNotIn("candidates", observer["payload"])
         self.assertNotIn("reason", json.dumps(observer["payload"]))
+        self.assertNotIn("full_script", observer["payload"])
+        self.assertEqual([r["index"] for r in observer["payload"]["current_utterances"]], [1, 2])
+        self.assertFalse(observer["payload"]["surrounding_context"]["is_acceptance_requirement"])
         self.assertGreater(len(observer["images"]), 4)
         self.assertIn("rendered_timestamp_us", observer["images"][0])
 
