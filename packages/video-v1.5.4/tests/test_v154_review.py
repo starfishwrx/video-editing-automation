@@ -6,7 +6,7 @@ import tempfile
 import unittest
 
 from tools.v154_pilot import freeze_inputs, read_json, verify_frozen, write_json
-from tools.v154_review import readback_plan, review_document, validate_feedback, write_review
+from tools.v154_review import readback_plan, render_groups, review_document, validate_feedback, write_review
 
 
 class FrozenInputsTests(unittest.TestCase):
@@ -65,6 +65,42 @@ class ReviewEvidenceTests(unittest.TestCase):
             "source_timerange": {"start": 0, "duration": 1100000}}]})
         with self.assertRaisesRegex(ValueError, "Audio is outside"):
             readback_plan(draft)
+
+    def test_continuous_source_resamples_once_without_rewriting_saved_rows(self):
+        rows = [
+            {"path": "continuous.mov", "source_start_us": 700000, "source_duration_us": 2231976,
+             "target_start_us": 10508671, "target_duration_us": 1345605, "frames": 41,
+             "speed": 1.6587156778790026, "brightness": .08, "flip_h": False},
+            {"path": "continuous.mov", "source_start_us": 2931976, "source_duration_us": 1948024,
+             "target_start_us": 11854276, "target_duration_us": 1174417, "frames": 35,
+             "speed": 1.6587156778790026, "brightness": .08, "flip_h": False},
+        ]
+        plan = {"video": rows, "total_frames": 76,
+                "audio": [{"path": "original-audio.ogg", "start_us": 10508671}],
+                "subtitles": [{"text": "第一句"}, {"text": "下一句连续播放"}]}
+        original = copy.deepcopy(plan)
+        groups = render_groups(plan)
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0]["video_indices"], [0, 1])
+        self.assertEqual(groups[0]["frames"], 76)
+        self.assertEqual(groups[0]["source_start_us"], 700000)
+        self.assertEqual(groups[0]["source_duration_us"], 4180000)
+        self.assertEqual(groups[0]["target_duration_us"], 2520022)
+        self.assertEqual(plan, original)
+
+    def test_render_group_never_bridges_source_jumps_or_different_video_settings(self):
+        first = {"path": "continuous.mov", "source_start_us": 0, "source_duration_us": 1000000,
+                 "target_start_us": 0, "target_duration_us": 1000000, "frames": 30,
+                 "speed": 1, "brightness": .08, "flip_h": False}
+        next_row = {**first, "source_start_us": 1000000, "target_start_us": 1000000}
+        for change in ({"source_start_us": 1100000}, {"source_start_us": 900000},
+                       {"path": "other.mov"}, {"speed": 2}, {"brightness": .1}, {"flip_h": True}):
+            with self.subTest(change=change):
+                plan = {"video": [first, {**next_row, **change}], "total_frames": 60}
+                self.assertEqual(len(render_groups(plan)), 2)
+        invalid = {"video": [first, {**next_row, "frames": 29}], "total_frames": 59}
+        with self.assertRaisesRegex(ValueError, "global frame coverage"):
+            render_groups(invalid)
 
     def test_feedback_cannot_attach_to_changed_source_or_plan(self):
         document = review_document({"title": "example"}, arms=[{"name": "B", "plan": {"groups": []},

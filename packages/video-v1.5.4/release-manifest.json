@@ -714,7 +714,7 @@
     },
     {
       "path": "tests/test_v154_review.py",
-      "sha256": "484b431802406d02082de3733bdc4561497f4abcec8d48b5118fe72bcfc56c02"
+      "sha256": "a7421cf6fdcb15a6d311dcd305ea42443849dd92a98b58a23a12044f31a84bb6"
     },
     {
       "path": "tests/test_visual_governance_rules.py",
@@ -782,7 +782,7 @@
     },
     {
       "path": "tools/v154_review.py",
-      "sha256": "aa6ca0eabda63d9bf6ea5ecfed53360fe3dcfeab6424938a2e6af1710da13b92"
+      "sha256": "845b524b35867ba83723993c2ace3458fe805a49726c3c2c74ca15999b0a59e5"
     },
     {
       "path": "uv.lock",
@@ -791,7 +791,7 @@
   ],
   "release_id": "video-v1.5.4",
   "schema_version": 1,
-  "source_sha256": "f4ddf1d568883c81d6bd51a46323d73203fc360c945cca1047a1b20e517aacf5",
+  "source_sha256": "be6976a05af1438b6fdd45751bb6e002809facf57cde2612e748c3025e2b74da",
   "tree_hash_algorithm": "video-release-tree-v1",
   "version": "1.5.4",
   "visual_policy_version": "1.4.1"

@@ -6,6 +6,7 @@ not desktop playback evidence and a feedback download is not certification.
 from __future__ import annotations
 
 import argparse
+import copy
 import html
 import json
 from pathlib import Path
@@ -108,6 +109,48 @@ def readback_plan(info: dict) -> dict:
     return plan
 
 
+def render_groups(plan: dict) -> list[dict]:
+    """Resample a continuous shot once, independent of its subtitle boundaries.
+
+    Saved sentence windows use rounded global frame boundaries. Resetting the
+    FPS phase for every sentence can ask for 41 frames from a 40.368-frame
+    duration even though the following sentence continues the same source.
+    Joining only identical contiguous video settings removes that artificial
+    decode boundary; saved subtitles and every original audio row stay intact.
+    """
+    groups = []
+    for index, original in enumerate(plan["video"]):
+        row = copy.deepcopy(original)
+        row["video_indices"] = [index]
+        previous = groups[-1] if groups else None
+        if previous is not None:
+            source_end = previous["source_start_us"] + previous["source_duration_us"]
+            target_end = previous["target_start_us"] + previous["target_duration_us"]
+            same = (row["path"] == previous["path"]
+                    and abs(row["speed"] - previous["speed"]) <= 1e-12
+                    and row["brightness"] == previous["brightness"]
+                    and row["flip_h"] == previous["flip_h"]
+                    and abs(row["source_start_us"] - source_end) <= 1
+                    and abs(row["target_start_us"] - target_end) <= 1)
+            if same:
+                previous["source_duration_us"] = (row["source_start_us"] + row["source_duration_us"]
+                                                   - previous["source_start_us"])
+                previous["target_duration_us"] = (row["target_start_us"] + row["target_duration_us"]
+                                                   - previous["target_start_us"])
+                previous["frames"] += row["frames"]
+                previous["video_indices"].append(index)
+                continue
+        groups.append(row)
+    for row in groups:
+        expected = (_frames(row["target_start_us"] + row["target_duration_us"])
+                    - _frames(row["target_start_us"]))
+        if row["frames"] != expected:
+            raise ValueError("Merged review window changed global frame coverage")
+    if sum(row["frames"] for row in groups) != plan["total_frames"]:
+        raise ValueError("Merged review windows do not cover the actual draft duration")
+    return groups
+
+
 def _ass_time(us: int) -> str:
     cs = round(us / 10000)
     h, cs = divmod(cs, 360000)
@@ -152,12 +195,24 @@ def render_saved_draft(draft: Path, output: Path, package_root: Path) -> dict:
             raise RuntimeError("A libass-enabled FFmpeg is required")
         ffmpeg = alternate
     work = output.parent / (output.stem + "_render")
-    work.mkdir(parents=True, exist_ok=False)
+    attempt = 1
+    while True:
+        try:
+            work.mkdir(parents=True, exist_ok=False)
+            break
+        except FileExistsError:
+            attempt += 1
+            work = output.parent / f"{output.stem}_render_{attempt}"
     os.environ["JY_GPU_CALL_LOG"] = str(work / "gpu_calls.jsonl")
     write_json(work / "readback_timeline.json", plan)
+    groups = render_groups(plan)
+    write_json(work / "render_groups.json", {"groups": groups, "source_video_segments": len(plan["video"]),
+               "total_frames": plan["total_frames"], "audio_rows_preserved": len(plan["audio"]),
+               "subtitle_rows_preserved": len(plan["subtitles"]),
+               "method": "one resample per identical contiguous source/speed/effects window"})
     _ass(plan, work / "captions.ass")
     started, clips = time.monotonic(), []
-    for index, row in enumerate(plan["video"]):
+    for index, row in enumerate(groups):
         clip = work / f"video_{index:03}.mkv"
         clips.append(clip)
         filters = [f"setpts=(PTS-STARTPTS)/{row['speed']:.9f}", "fps=30",
@@ -215,6 +270,8 @@ def render_saved_draft(draft: Path, output: Path, package_root: Path) -> dict:
                "draft_sha256": digest_file(info_path), "plan_sha256": canonical_hash(plan),
                "output": str(output), "output_sha256": digest_file(output),
                "encoder": encoder, "elapsed_s": time.monotonic() - started,
+               "render_work_dir": str(work), "render_group_count": len(groups),
+               "source_video_segments": len(plan["video"]),
                "resolution": [720, 1280], "duration_s": total,
                "scope": "Review rendering of saved draft tracks; not Jianying desktop acceptance",
                "human_accepted": False, "production_deployed": False}
