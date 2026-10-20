@@ -8,9 +8,11 @@ from __future__ import annotations
 import copy
 import argparse
 import contextlib
+import concurrent.futures
 import io
 import hashlib
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -158,6 +160,23 @@ class IndexedPipelineTests(unittest.TestCase):
         changed = self.run_pipeline(report="other-report")
         self.assertTrue(changed["ok"], changed.get("issues"))
         self.assertEqual(sum(c["stage"] == "material_observation" for c in self.calls), before)
+
+    def test_agy_candidate_scheduler_uses_available_twenty_budget_and_others_keep_two(self):
+        sources = [self.video]
+        for index in range(1, 8):
+            path = self.root/f"source_{index:02}.mp4"
+            path.write_bytes(f"offline unique source {index}".encode())
+            sources.append(path)
+        self.manifest["material_sources"] = [str(path) for path in sources]
+        for transport, expected in (("agy", 8), ("codex-file", 2), ("anthropic", 2)):
+            with self.subTest(transport=transport), mock.patch.dict(os.environ,
+                    {"JY_VISION_TRANSPORT": transport, "JY_AGY_CONCURRENCY": "20"}), \
+                    mock.patch.object(pipeline, "ThreadPoolExecutor", wraps=concurrent.futures.ThreadPoolExecutor) as pool:
+                result = self.run_pipeline(report="scheduler-"+transport)
+                self.assertTrue(result["ok"], result.get("issues"))
+                self.assertEqual(pool.call_args.kwargs["max_workers"], expected)
+        with mock.patch.dict(os.environ, {"JY_VISION_TRANSPORT": "agy", "JY_AGY_CONCURRENCY": "99"}):
+            self.assertEqual(pipeline._candidate_workers(80), 20)
 
     def test_new_requirement_only_rechecks_selected_material(self):
         self.assertTrue(self.run_pipeline()["ok"])

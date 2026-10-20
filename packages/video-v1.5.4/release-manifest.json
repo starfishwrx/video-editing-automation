@@ -6,7 +6,7 @@
     "machine-specific paths",
     "knowledge-base bodies"
   ],
-  "file_count": 195,
+  "file_count": 197,
   "files": [
     {
       "path": ".gitattributes",
@@ -22,11 +22,11 @@
     },
     {
       "path": "ENVIRONMENT.md",
-      "sha256": "cb446ca87e07dc5285e2e4daee23f8b2795d45a2631af30939a71cbb358a4951"
+      "sha256": "7c68595788636be74ccadd09dee77206cecd6088221baff30aa89611a4a2d3bc"
     },
     {
       "path": "README.md",
-      "sha256": "510092f45151b0a9c3dca7d6d2d76747d4d22dfdd6b656ba3c98f70f8576a54e"
+      "sha256": "b596ddbeb18fd0c43b2177275fe95b996ad9dda1c1c991dee54f4cdbc5a4a336"
     },
     {
       "path": "RULES.md",
@@ -89,6 +89,10 @@
       "sha256": "ae55899f8ee2c5c031a95a746d9485cae6172800b55281cf44b182a9a25ad4a5"
     },
     {
+      "path": "doubao-jianying-orchestrator/orchestrator/agy_transport.py",
+      "sha256": "d83d39ad3a7f4b08089962beda203f9088112409344eadbd9dc4eac9d39c7cd9"
+    },
+    {
       "path": "doubao-jianying-orchestrator/orchestrator/audio_loudness.py",
       "sha256": "fa2890902dd73f30fa35caa906146089f5fb8974fe1e636f3ac328e21b1206c2"
     },
@@ -146,15 +150,15 @@
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/indexed_pipeline.py",
-      "sha256": "b4095772604325cecd19ba9015382fbcdfa0c6db1da92fc7e34b7d9b0e563a7d"
+      "sha256": "474962c0295401a226ca77e286e048229ef66f4b9862fc71287f580ba68d1e07"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/indexed_planner.py",
-      "sha256": "aafe16777a4a031a3ba35de952183360a471c776257e759592f1be22182cf7de"
+      "sha256": "4de5cdd6c0b89a9a268100ff3135d696b38e80b9e5ac0e3cd5387ef7e95e499c"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/indexed_remote.py",
-      "sha256": "7f6002158af6724ca5b4264020b74da1935df8ecbd44922d619ed0209108ffc3"
+      "sha256": "4d774ddc5cbce8b6c1903580c529f547a1dacd06d65d6d1ef8f8cd08c6713e1c"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/json_extract.py",
@@ -258,7 +262,7 @@
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/vision_analyzer.py",
-      "sha256": "2deb4f4586bf7d3a7d2f1567abe7df42b7b6757cf6ae56fc0f67fc6f35faa29d"
+      "sha256": "a20908156fa33a6c8a72e763cf77fcf4c2b582e2504cff95b33f9bfc4615fb61"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/visual_match.py",
@@ -305,6 +309,10 @@
       "sha256": "f1172dbdd9343afb6024b3fe3bf20b3afe8d70599cc4027cad9501104cd7198b"
     },
     {
+      "path": "doubao-jianying-orchestrator/tests/test_agy_transport.py",
+      "sha256": "5957a58435fccdc15f3e9d99225e7278c0ffd86fbe0d47aa2ccb225b6ba5fa9d"
+    },
+    {
       "path": "doubao-jianying-orchestrator/tests/test_capacity_and_sync.py",
       "sha256": "3d597ca8f9b0a08619daec23ef017f5289268c9bb27a1f7a25fad4e7f5196a9f"
     },
@@ -322,15 +330,15 @@
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_indexed_pipeline.py",
-      "sha256": "ff8b79a029ab754d9034223d50480274a492a732aa769ef6fc38b4b311243eac"
+      "sha256": "5597731954a09670b1115f9c062f4174b01158e6aed06f0558f43c93e8f5b922"
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_indexed_planner.py",
-      "sha256": "bf1a7fe201e633ee39b25830e6a2ec0ab8a200df890f3311cfc91b52233e2024"
+      "sha256": "399b51deca6c0e6e74b14c4043a0b1c059a737fe980ca4d912b1d254ae3296a5"
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_indexed_remote.py",
-      "sha256": "579451c7d2eacc2dbdeeeb76d794e87d0ed062028c828d3512449dffe8e210cd"
+      "sha256": "760f5fe8bae34cb465bd5c0772befcc46b4b696a5547248416902658898d1a8b"
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_local_retrieval.py",
@@ -791,7 +799,7 @@
   ],
   "release_id": "video-v1.5.4",
   "schema_version": 1,
-  "source_sha256": "be6976a05af1438b6fdd45751bb6e002809facf57cde2612e748c3025e2b74da",
+  "source_sha256": "fe7939660163bb134460e32d0e6f24af8aa0dabff90e698d330fdfd3afa6e259",
   "tree_hash_algorithm": "video-release-tree-v1",
   "version": "1.5.4",
   "visual_policy_version": "1.4.1"

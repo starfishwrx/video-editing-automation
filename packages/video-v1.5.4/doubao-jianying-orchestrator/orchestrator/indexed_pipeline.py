@@ -13,11 +13,16 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from . import indexed_planner, shot_analyzer
+from . import agy_transport, indexed_planner, shot_analyzer
 from .material_store import MaterialStore, product_identity, OBSERVATION_PROTOCOL
 from .local_retrieval import LocalRetriever
 
 US = 1_000_000
+
+
+def _candidate_workers(count: int) -> int:
+    capacity = agy_transport.concurrency() if agy_transport.selected() else 2
+    return max(1, min(count, capacity))
 
 
 def _write(path, value):
@@ -193,7 +198,7 @@ def prepare(manifest, base_dir, report_dir, *, env=None, model=None, retriever_f
             hits = retriever.retrieve(group.get("retrieval_query") or group["query"], paths.keys(), topk=topk)
             fresh = [h for h in hits if h["material_id"] not in seen]
             seen.update(h["material_id"] for h in fresh)
-            with ThreadPoolExecutor(max_workers=2) as executor:
+            with ThreadPoolExecutor(max_workers=_candidate_workers(len(fresh))) as executor:
                 futures = [(h, executor.submit(verify, h, group)) for h in fresh]
                 for hit, future in futures:
                     try:

@@ -523,6 +523,29 @@ class IndexedPlannerTests(unittest.TestCase):
                 self.assertEqual(result["issues"][0]["type"], "CONTEXTUAL_ACCEPTANCE_INVALID")
         self.assertEqual(self.calls, [])
 
+    def test_remote_route_identity_changes_only_image_stage_cache_when_vision_model_changes(self):
+        owner = self
+        class RoutedModel:
+            vision = "glm"
+            def cache_identity(self, *, stage, with_images):
+                return {"model": self.vision if with_images else "frozen-text-model",
+                        "transport": "agy-cli" if with_images and self.vision == "gemini" else "codex-file"}
+            def __call__(self, request):
+                return owner.model(request)
+        routed = RoutedModel()
+        first = self.run_plan(model=routed)
+        self.assertTrue(first["ok"], first["issues"])
+        self.calls.clear()
+        routed.vision = "gemini"
+        second = self.run_plan(model=routed)
+        self.assertTrue(second["ok"], second["issues"])
+        self.assertEqual([r["stage"] for r in self.calls], ["observe", "observe"])
+        self.calls.clear()
+        routed.vision = "glm"
+        restored = self.run_plan(model=routed)
+        self.assertTrue(restored["ok"], restored["issues"])
+        self.assertEqual(self.calls, [])
+
 
 if __name__ == "__main__":
     unittest.main()

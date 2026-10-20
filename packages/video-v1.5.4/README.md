@@ -34,6 +34,8 @@ uv run --frozen --group indexing python doubao-jianying-orchestrator/run.py inde
 
 只有经过观察证据核验的候选可以建稿；素材相关度高、程序测试通过或生成成功都不能代替成片与人工审核。缺证、截断动作或时长无解时保留具体句组缺口，不用包装、动作结束定住或黑屏冒充功能画面。所有试跑保持 `formal_delivery_allowed=false`、人工审核 `PENDING`，不自动部署、发 PR、写 NAS 或回填飞书。
 
+可选 AGY CLI 图像通道默认 **20 并发**，候选观察调度和跨进程槽位共同限流；纯文字规划及其他视觉通道仍沿用原配置。配置见 [运行环境](ENVIRONMENT.md#optional-antigravity-cli-image-transport)。本机两次 Gemini 3.8 Flash 实测均被服务以地区不支持拒绝，因此尚未完成真实视觉效果或吞吐验证；并发机制使用本地模拟 CLI 验证。
+
 ## 继承的 1.5.3 功能
 
 2026-10-13 至 10-16 的 Codex 审核与本机实现对照见 [这四天更新说明](docs/UPDATES_20261013-16.md)。

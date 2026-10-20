@@ -13,6 +13,8 @@ from PIL import Image
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from orchestrator import indexed_remote as remote
 
+REAL_SIGNATURE = remote._model_signature
+
 
 class IndexedRemoteTests(unittest.TestCase):
     def setUp(self):
@@ -133,6 +135,79 @@ class IndexedRemoteTests(unittest.TestCase):
                         self.model(request)
         expected = (self.root / "local-appdata" / "doubao-jianying" / "indexed_remote_slots").resolve()
         self.assertEqual(observed, [(2, expected), (2, expected)])
+
+    def test_agy_has_twenty_independent_shared_slots_without_altering_codex_capacity(self):
+        observed = []
+        @contextlib.contextmanager
+        def capture(name, capacity, **kwargs):
+            if not name.startswith("indexed-request-"):
+                observed.append((name, capacity, kwargs["slot_dir"]))
+            yield SimpleNamespace(acquired=True, waited=0.0)
+        target = self.root/"agy-global-slots"
+        with mock.patch.dict(os.environ, {"JY_VISION_TRANSPORT": "agy", "JY_AGY_CONCURRENCY": "20",
+                                          "JY_AGY_SLOT_DIR": str(target)}), \
+                mock.patch.object(remote, "slot", side_effect=capture), \
+                mock.patch.object(remote.agy, "slot", side_effect=capture), \
+                mock.patch.object(remote.vision, "_run_vision", return_value=(True, '{"ok":true}')):
+            for arm in ("a", "b"):
+                with mock.patch.dict(os.environ, {"TEMP": str(self.root/arm/"temp")}):
+                    self.model({**self.request, "output": str(self.root/arm/"response.json")})
+        self.assertEqual(observed, [("agy-cli", 20, target.resolve()), ("agy-cli", 20, target.resolve())])
+
+    def test_agy_location_rejection_stops_after_one_attempt_without_fallback(self):
+        with mock.patch.dict(os.environ, {"JY_VISION_TRANSPORT": "agy", "JY_AGY_SLOT_DIR": str(self.root/"agy-slots")}), \
+                mock.patch.object(remote.vision, "_run_vision", return_value=(False,
+                    "AGY_NON_RETRYABLE[LOCATION_NOT_SUPPORTED]: native CLI rejected user location")) as vision, \
+                mock.patch.object(remote.vision, "_run_codex_file") as codex:
+            with self.assertRaisesRegex(RuntimeError, "non-retryable"):
+                self.model(self.request)
+            with self.assertRaisesRegex(RuntimeError, "blocked for this run"):
+                self.model({**self.request, "output": str(self.root/"other.json")})
+        self.assertEqual(vision.call_count, 1)
+        codex.assert_not_called()
+        self.assertEqual(self.model.stats["remote_requests"], 1)
+        self.assertEqual(list((self.root/"report"/"remote_cache").glob("*.json")), [])
+
+    def test_agy_selection_keeps_text_on_codex_two_slots_and_uses_glm_model(self):
+        observed = []
+        real_command = remote.vision._codex_command
+        @contextlib.contextmanager
+        def capture(name, capacity, **kwargs):
+            if name == "vision":
+                observed.append(capacity)
+            yield SimpleNamespace(acquired=True, waited=0.0)
+        def command(sheet, output, profile, **kwargs):
+            assembled = str(real_command(sheet, output, profile, **kwargs))
+            self.assertIn("glm-probe", assembled)
+            self.assertNotIn("gemini-3.8", assembled)
+            return ["offline-codex", str(output)]
+        def run(args, *unused):
+            Path(args[1]).write_text('{"groups":[]}', encoding="utf-8")
+            return True, 0, ""
+        with mock.patch.dict(os.environ, {"JY_VISION_TRANSPORT": "agy", "JY_AGY_MODEL": "gemini-3.8-flash-high",
+                                          "JY_VISION_MODEL": "glm-probe"}), \
+                mock.patch.object(remote, "slot", side_effect=capture), \
+                mock.patch.object(remote.vision, "_codex_command", side_effect=command), \
+                mock.patch.object(remote.vision, "_run_codex_file", side_effect=run), \
+                mock.patch.object(remote.agy, "run") as agy:
+            self.assertEqual(self.model({**self.request, "images": [], "stage": "group"}), {"groups": []})
+        self.assertEqual(observed, [2])
+        agy.assert_not_called()
+
+    def test_pure_route_identity_separates_agy_images_from_glm_text_without_credentials(self):
+        binary = self.root/"fake-native.exe"
+        binary.write_bytes(b"offline identity only; never executed")
+        config = self.root/"codex-config"
+        config.mkdir()
+        (config/"config.toml").write_text('model="glm-probe"\nmodel_provider="probe"\n', encoding="utf-8")
+        with mock.patch.dict(os.environ, {"JY_VISION_TRANSPORT": "agy", "JY_AGY_BIN": str(binary),
+            "JY_AGY_MODEL": "gemini-3.8-flash-high", "JY_VISION_MODEL": "glm-probe", "CODEX_HOME": str(config),
+            "ANTHROPIC_AUTH_TOKEN": "do-not-leak"}):
+            images = REAL_SIGNATURE("test", with_images=True)
+            text = REAL_SIGNATURE("test", with_images=False)
+        self.assertEqual((images["transport"], images["model"]), ("agy-cli", "gemini-3.8-flash-high"))
+        self.assertEqual((text["transport"], text["model"]), ("codex-file", "glm-probe"))
+        self.assertNotIn("do-not-leak", str(images)+str(text))
 
 
 if __name__ == "__main__":

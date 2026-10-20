@@ -982,6 +982,9 @@ def _run_vision(sheet: Path, prompt: str, output: Path, *, profile: str,
     stderr_path = output.with_suffix(".stderr.log")
     prompt_path = output.with_suffix(".prompt.txt")
     prompt_path.write_text(prompt, encoding="utf-8")
+    from . import agy_transport
+    if agy_transport.selected():
+        return agy_transport.run(sheet, prompt, output, timeout=min(120, timeout))
     if os.environ.get("JY_VISION_TRANSPORT", "").strip().lower() in {
             "anthropic", "ccswitch", "ccswitch_anthropic"}:
         return _run_anthropic_messages(sheet, prompt, output, timeout=timeout)
@@ -1051,12 +1054,18 @@ def _run_vision_with_retry(sheet: Path, prompt: str, output: Path, *,
     """
     attempts = (env_int("JY_VISION_RETRIES", 4, minimum=1) if max_retries is None
                 else max(1, int(max_retries) + 1))
+    from . import agy_transport
+    use_agy = agy_transport.selected()
+    if use_agy:
+        attempts = min(attempts, 2)
     last: tuple[bool, str] = (False, "")
     for attempt in range(attempts):
         if on_attempt is not None:
             on_attempt(attempt + 1, attempts, last[1][-300:] if attempt else "")
-        with _vision_slot() as handle:
+        with (agy_transport.provider_slot() if use_agy else _vision_slot()) as handle:
             if not handle.acquired:
+                if use_agy:
+                    return False, "AGY_NON_RETRYABLE[SLOT_TIMEOUT]: AGY request was not started"
                 print(f"[vision] slot wait {handle.waited:.0f}s timed out; calling without throttle",
                       file=sys.stderr, flush=True)
             ok, text = _run_vision(sheet, prompt, output, profile=profile, timeout=timeout,

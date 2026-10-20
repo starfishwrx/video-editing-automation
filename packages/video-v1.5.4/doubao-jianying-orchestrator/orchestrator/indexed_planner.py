@@ -134,6 +134,12 @@ def _call(stage: str, payload: dict, report: Path, model: Model | None,
     identity = {"stage": stage, "payload": payload, "prompt": effective_prompt,
                 "images": [{"sha256": i["sha256"], "timestamp_us": i.get("timestamp_us")}
                            for i in images]}
+    identify_model = getattr(model, "cache_identity", None)
+    if callable(identify_model):
+        model_identity = identify_model(stage=stage, with_images=bool(images))
+        if not isinstance(model_identity, dict) or not model_identity:
+            _fail("MODEL_IDENTITY_INVALID", "model cache identity must be a nonempty credential-free object", stage=stage)
+        identity["model"] = model_identity
     key = _digest(identity)
     output = report / "model" / f"{stage}_{key}.json"
     if output.is_file():

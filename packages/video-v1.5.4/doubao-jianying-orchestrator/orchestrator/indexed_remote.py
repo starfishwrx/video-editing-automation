@@ -1,6 +1,6 @@
 """Bounded remote JSON transport for indexed planning and material observation.
 
-The shared ``vision`` slot is mandatory.  No failure of locking, transport or
+The selected provider's shared slot is mandatory. No failure of locking, transport or
 JSON parsing may become an approval or trigger an unthrottled request.
 MaterialStore leases belong to the caller, which rechecks facts under the lease.
 """
@@ -15,7 +15,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from . import vision_analyzer as vision
+from . import agy_transport as agy, vision_analyzer as vision
 from .json_extract import extract_json
 from .proc_slots import env_float, env_int, slot
 
@@ -51,6 +51,8 @@ def _write(path: Path, value: Any) -> None:
 
 def _model_signature(profile: str, *, with_images: bool = True) -> dict[str, Any]:
     """Read only model routing fields; credentials never enter receipts."""
+    if with_images and agy.selected():
+        return agy.signature()
     signature = {"profile": profile,
                  "transport": os.environ.get("JY_VISION_TRANSPORT", "codex-file").strip() or "codex-file",
                  "model": os.environ.get("JY_VISION_MODEL", "").strip(),
@@ -132,16 +134,31 @@ class RemoteModel:
         self.stats: dict[str, Any] = {"remote_requests": 0, "cache_hits": 0,
                                       "attempts": 0, "slot_wait_s": 0.0, "requests_by_stage": {}}
         self._stats_lock = threading.Lock()
+        self._blocked_agy_routes: dict[str, str] = {}
 
     def _count(self, key: str, value: int | float = 1):
         with self._stats_lock:
             self.stats[key] += value
 
+    def cache_identity(self, *, stage: str = "", with_images: bool = True) -> dict[str, Any]:
+        """Expose a credential-free identity before an upper planner cache lookup."""
+        return {"protocol": REMOTE_PROTOCOL, "model": _model_signature(self.profile, with_images=with_images)}
+
+    def _require_agy_route(self, key: str) -> None:
+        with self._stats_lock:
+            error = self._blocked_agy_routes.get(key)
+        if error:
+            raise RuntimeError(f"AGY route is blocked for this run after a non-retryable rejection: {error}")
+
     def __call__(self, request: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(request, dict) or not str(request.get("prompt") or "").strip():
             raise ValueError("remote request requires a prompt")
         images = _images(request)
+        use_agy = bool(images) and agy.selected()
         signature = _model_signature(self.profile, with_images=bool(images))
+        route_key = _digest(signature)
+        if use_agy:
+            self._require_agy_route(route_key)
         identity = {"protocol": REMOTE_PROTOCOL, "stage": str(request.get("stage") or ""),
                     "prompt": request["prompt"], "payload": request.get("payload") or {},
                     "images": [_image_identity(row) for row in images], "model": signature}
@@ -187,11 +204,15 @@ class RemoteModel:
                 attempt_dir = output.parent / "remote_attempts" / key / f"{attempt:02d}_{uuid.uuid4().hex}"
                 attempt_dir.mkdir(parents=True, exist_ok=True)
                 response_file = attempt_dir / "response.json"
-                with slot("vision", min(2, env_int("JY_VISION_SLOTS", 2, minimum=1)),
-                          timeout=wait, slot_dir=_global_slot_dir()) as handle:
+                provider_lock = (agy.provider_slot(timeout=wait) if use_agy else
+                    slot("vision", min(2, env_int("JY_VISION_SLOTS", 2, minimum=1)),
+                         timeout=wait, slot_dir=_global_slot_dir()))
+                with provider_lock as handle:
                     self._count("slot_wait_s", handle.waited)
                     if not handle.acquired:
                         raise TimeoutError("global vision slot timed out; remote call was not started")
+                    if use_agy:
+                        self._require_agy_route(route_key)
                     self._count("attempts")
                     self._count("remote_requests")
                     with self._stats_lock:
@@ -217,7 +238,12 @@ class RemoteModel:
                     except (OSError, ValueError, RuntimeError) as exc:
                         last_error = str(exc)
                         _write(attempt_dir / "failure.json", {"attempt": attempt, "error": last_error,
+                                                               "retryable": not (use_agy and agy.is_non_retryable(last_error)),
                                                                "formal_delivery_allowed": False})
+                        if use_agy and agy.is_non_retryable(last_error):
+                            with self._stats_lock:
+                                self._blocked_agy_routes[route_key] = last_error
+                            raise RuntimeError(f"indexed remote model rejected a non-retryable request: {last_error}") from exc
                         continue
                 _write(cache, {"input_sha256": key, "protocol": REMOTE_PROTOCOL,
                                "model": signature, "response": response,

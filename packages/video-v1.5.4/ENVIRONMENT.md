@@ -33,12 +33,55 @@ queue are untouched. Do not copy test paths into a production runtime file.
 fields. `index-materials` can populate the same local index without remote visual
 calls. SQLite/NumPy data and representative frames stay in the index; weights
 stay in the model cache. Remote vision uses the existing provider transport,
-two slots, a 120-second request timeout and at most two attempts. Missing evidence
+two slots by default, a 120-second request timeout and at most two attempts. The
+opt-in AGY CLI image transport uses its separate 20-worker limit described below. Missing evidence
 stays unresolved, never an automatic switch to legacy or degraded footage.
 
 All test receipts keep `formal_delivery_allowed=false` and human review
 `PENDING`. There is no automatic production installation, PR, NAS distribution
 or Feishu writeback. See [the test plan](docs/V154_UPDATE_PLAN.md).
+
+## Optional Antigravity CLI image transport
+
+Set these variables only in the isolated test process; no global environment or
+production runtime change is required:
+
+```powershell
+$env:JY_VISION_TRANSPORT = "agy"
+$env:JY_AGY_BIN = "<absolute path to the verified native Antigravity CLI executable>"
+$env:JY_AGY_MODEL = "gemini-3.8-flash-high"
+$env:JY_AGY_CONCURRENCY = "20"
+```
+
+`JY_AGY_CONCURRENCY` defaults to **20**. Indexed candidate observations use that
+worker count, with a shared cross-process AGY slot pool bounding all simultaneous
+CLI invocations. This is an upper limit: a semantic group's top-8 retrieval or
+top-16 expansion only starts its actual missing-evidence candidates, rather than
+issuing extra requests just to fill 20 slots. Planning and other text-only requests retain the existing
+Codex/profile route and its two-slot limit; `JY_AGY_MODEL` is never sent there.
+Selecting another image provider retains its existing two-slot indexed limit.
+
+The default AGY slot directory is under the user's local application-data
+directory (`doubao-jianying/agy_cli_slots`), independent of each task's report or
+temporary directory. `JY_AGY_SLOT_DIR` may override it, but every participating
+process must use the same absolute directory and concurrency value. A waiting
+request never bypasses the slot limit.
+
+Each CLI invocation creates a fresh conversation in a minimal private scratch
+directory, with only its task, evidence image, schema and output/log files.
+`JY_AGY_SCRATCH_DIR` can select that private root. Scratch contents are ignored by
+Git and excluded from release packages. Do not commit or publish them. The CLI
+must return zero and create a nonempty JSON object in its required result file;
+stdout is not a substitute. Internal/outer timeouts are 110/120 seconds, and a
+timeout terminates only that invocation's process tree. Location, authentication
+or model rejection is not a reason to fall back to another provider.
+
+Local authentication and model listing do not establish inference availability.
+On 2026-10-20, two real `gemini-3.8-flash-high` image smoke requests authenticated
+but both were rejected with `User location is not supported` (HTTP 400). The
+20-worker implementation is checked using local fake CLI processes, without
+retrying that rejected service. Actual Gemini visual accuracy, throughput and
+production readiness remain unverified.
 
 ## Python dependencies
 
