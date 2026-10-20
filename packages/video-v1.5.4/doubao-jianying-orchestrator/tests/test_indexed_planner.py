@@ -435,6 +435,94 @@ class IndexedPlannerTests(unittest.TestCase):
         self.assertEqual(expanded, ["g1"])
         self.assertEqual(result["stats"]["group_repairs"]["g1"], 0)
 
+    def test_task_owner_acceptance_only_invalidates_selected_observer_cache(self):
+        baseline = self.run_plan()
+        self.assertTrue(baseline["ok"], baseline["issues"])
+        old_groups = {g["id"]: g for g in baseline["contextual_plan"].observer["groups"]}
+        self.calls.clear()
+        self.manifest["indexed_contextual_acceptance"] = {
+            "utterance_indices": [3], "basis": "task_owner", "criterion": "same_product_contextual"}
+        result = self.run_plan()
+        self.assertTrue(result["ok"], result["issues"])
+        self.assertEqual([(r["stage"], r["payload"].get("group_id")) for r in self.calls], [("observe", "g2")])
+        request = self.calls[0]
+        self.assertEqual(request["payload"]["contextual_acceptance"]["utterance_indices"], [3])
+        self.assertIn("不要求包装上的片数/规格文字可读", request["prompt"])
+        new_groups = {g["id"]: g for g in result["contextual_plan"].observer["groups"]}
+        self.assertEqual(new_groups["g1"]["response_file"], old_groups["g1"]["response_file"])
+        self.assertNotEqual(new_groups["g2"]["response_file"], old_groups["g2"]["response_file"])
+        self.assertFalse(result["formal_delivery_allowed"])
+        self.assertEqual(result["human_review"], "PENDING")
+        self.manifest.pop("indexed_contextual_acceptance")
+        self.calls.clear()
+        resumed = self.run_plan()
+        self.assertTrue(resumed["ok"], resumed["issues"])
+        self.assertEqual(self.calls, [])
+        resumed_groups = {g["id"]: g for g in resumed["contextual_plan"].observer["groups"]}
+        self.assertEqual(resumed_groups["g2"]["response_file"], old_groups["g2"]["response_file"])
+
+    def test_contextual_acceptance_cannot_relax_action_group(self):
+        self.manifest["indexed_groups"] = self.groups
+        self.manifest["indexed_contextual_acceptance"] = {
+            "utterance_indices": [1, 3], "basis": "task_owner", "criterion": "same_product_contextual"}
+        result = self.run_plan()
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["issues"][0]["type"], "CONTEXTUAL_ACCEPTANCE_ACTION_CONFLICT")
+        self.assertEqual(result["issues"][0]["utterance_indices"], [1])
+        self.assertEqual(self.calls, [])
+
+    def test_acceptance_scope_does_not_expand_to_other_group_members(self):
+        self.groups = [dict(self.groups[0], members=[1], require_complete_action=False),
+                       dict(self.groups[1], members=[2, 3])]
+        self.manifest["product"] = "测试纸品"
+        self.manifest["indexed_contextual_acceptance"] = {
+            "utterance_indices": [3], "basis": "task_owner", "criterion": "same_product_contextual"}
+        original = copy.deepcopy(self.manifest)
+        result = self.run_plan()
+        self.assertTrue(result["ok"], result["issues"])
+        calls = [r for r in self.calls if r["stage"] == "observe"]
+        untouched = next(r for r in calls if r["payload"]["group_id"] == "g1")
+        selected = next(r for r in calls if r["payload"]["group_id"] == "g2")
+        self.assertEqual(untouched["prompt"], ip.PROMPTS["observe"])
+        self.assertNotIn("contextual_acceptance", untouched["payload"])
+        self.assertEqual(selected["payload"]["contextual_acceptance"]["utterance_indices"], [3])
+        self.assertEqual(selected["payload"]["contextual_acceptance"]["expected_product"], {"product": "测试纸品"})
+        self.assertEqual(self.manifest, original)
+
+    def test_explicit_acceptance_still_obeys_actual_observer_rejection_and_speed(self):
+        self.manifest["indexed_contextual_acceptance"] = {
+            "utterance_indices": [3], "basis": "task_owner", "criterion": "same_product_contextual"}
+        for failure in ("wrong_product", "unreadable_speed"):
+            with self.subTest(failure=failure):
+                self.report = self.root/failure
+                def model(request):
+                    response = self.model(request)
+                    if request["stage"] == "observe" and request["payload"]["group_id"] == "g2":
+                        if failure == "wrong_product":
+                            response.update(status="unsupported", observation="实际切片为另一商品，缺少同商品关联")
+                            response["observations"][0].update(status="unsupported")
+                        else:
+                            response["visible_at_speed"] = False
+                    return response
+                result = self.run_plan(model=model, max_repairs=0)
+                self.assertFalse(result["ok"])
+                self.assertIsNone(result["prepared_manifest"])
+                expected = "SLICE_SEMANTIC_UNSUPPORTED" if failure == "wrong_product" else "PLAYBACK_NOT_INTELLIGIBLE"
+                self.assertIn(expected, [r["type"] for r in result["issues"]])
+
+    def test_contextual_acceptance_requires_explicit_valid_owner_and_sentence_binding(self):
+        for contract in (
+            {"utterance_indices": [True], "basis": "task_owner", "criterion": "same_product_contextual"},
+            {"utterance_indices": [4], "basis": "task_owner", "criterion": "same_product_contextual"},
+            {"utterance_indices": [3], "basis": "model", "criterion": "same_product_contextual"},
+        ):
+            with self.subTest(contract=contract):
+                self.manifest["indexed_contextual_acceptance"] = contract
+                result = self.run_plan()
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["issues"][0]["type"], "CONTEXTUAL_ACCEPTANCE_INVALID")
+        self.assertEqual(self.calls, [])
+
 
 if __name__ == "__main__":
     unittest.main()

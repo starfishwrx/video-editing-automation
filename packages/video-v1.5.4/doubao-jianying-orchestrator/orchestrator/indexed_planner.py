@@ -127,9 +127,11 @@ PROMPTS = {
 
 
 def _call(stage: str, payload: dict, report: Path, model: Model | None,
-          *, images: list[dict] | None = None, stats: dict | None = None) -> dict:
+          *, images: list[dict] | None = None, stats: dict | None = None,
+          prompt: str | None = None) -> dict:
     images = images or []
-    identity = {"stage": stage, "payload": payload, "prompt": PROMPTS[stage],
+    effective_prompt = PROMPTS[stage] if prompt is None else prompt
+    identity = {"stage": stage, "payload": payload, "prompt": effective_prompt,
                 "images": [{"sha256": i["sha256"], "timestamp_us": i.get("timestamp_us")}
                            for i in images]}
     key = _digest(identity)
@@ -145,7 +147,7 @@ def _call(stage: str, payload: dict, report: Path, model: Model | None,
     if model is None:
         _fail("MODEL_REQUIRED", "no model transport supplied and no matching receipt", stage=stage)
     output.parent.mkdir(parents=True, exist_ok=True)
-    request = {"stage": stage, "prompt": PROMPTS[stage], "payload": payload,
+    request = {"stage": stage, "prompt": effective_prompt, "payload": payload,
                "images": copy.deepcopy(images), "output": str(output.with_suffix(".raw.json")),
                "failed_groups": payload.get("failed_groups", [])}
     _write(output.with_suffix(".request.json"), request)
@@ -411,15 +413,57 @@ def _frames(group: dict, rows: list[dict], report: Path, *, frame_extractor: Cal
     return result, preview
 
 
+def _acceptance_contract(manifest: dict) -> dict | None:
+    if "indexed_contextual_acceptance" not in manifest:
+        return None
+    contract = manifest["indexed_contextual_acceptance"]
+    keys = {"utterance_indices", "basis", "criterion"}
+    if (not isinstance(contract, dict) or set(contract) != keys
+            or contract.get("basis") != "task_owner"
+            or contract.get("criterion") != "same_product_contextual"):
+        _fail("CONTEXTUAL_ACCEPTANCE_INVALID", "explicit task-owner contextual acceptance contract required")
+    indices = contract.get("utterance_indices")
+    count = len(manifest.get("segments") or [])
+    if (not isinstance(indices, list) or not indices or any(type(i) is not int for i in indices)
+            or indices != sorted(set(indices)) or indices[0] < 1 or indices[-1] > count):
+        _fail("CONTEXTUAL_ACCEPTANCE_INVALID", "acceptance utterance indices must be unique ordered existing sentences")
+    return copy.deepcopy(contract)
+
+
+def _acceptance_for_group(manifest: dict, group: dict) -> dict | None:
+    contract = _acceptance_contract(manifest)
+    if contract is None:
+        return None
+    members = [i for i in group["members"] if i in contract["utterance_indices"]]
+    if not members:
+        return None
+    if group["require_complete_action"]:
+        _fail("CONTEXTUAL_ACCEPTANCE_ACTION_CONFLICT",
+              "contextual acceptance cannot relax a complete-action group",
+              group_id=group["id"], utterance_indices=members)
+    contract["utterance_indices"] = members
+    product = {key: manifest[key] for key in ("product", "product_name", "category", "sku")
+               if manifest.get(key)}
+    if product:
+        contract["expected_product"] = product
+    return contract
+
+
+def _acceptance_prompt(contract: dict) -> str:
+    indices = ",".join(str(i) for i in contract["utterance_indices"])
+    return PROMPTS["observe"] + f"""\n任务所有者仅对句索引[{indices}]明确指定了本次业务验收口径（contextual_acceptance），不是预先认定画面通过。这些句只需实际画面展示同一商品且与口播有语义关联；不要求促销价签、活动图、价格数字，也不要求包装上的片数/规格文字可读，口播的规格无需在画面重复证明。若实际画面确为同一商品的相关展示，可以将对应句评为contextual；必须根据本次实际切片核对商品、关联性、素材和倍速可辨识性，不相信上游标签。不同商品、无关画面、明显语义矛盾、缺素材或速度看不清仍应unsupported/uncertain，不得自动给PASS。合同只适用于列出的句索引，组内其他句仍按原口播要求判断；完整动作要求不能取消，不改变原文、音频或时长。"""
+
+
 def _observe(group: dict, rows: list[dict], manifest: dict, report: Path, model: Model | None,
              stats: dict, *, frame_extractor: Callable | None, slice_renderer: Callable | None,
              ffmpeg: str | None) -> tuple[dict, list[dict], list[dict]]:
+    acceptance = _acceptance_for_group(manifest, group)
     images, preview = _frames(group, rows, report, frame_extractor=frame_extractor,
                               slice_renderer=slice_renderer, ffmpeg=ffmpeg,
                               fps=float(manifest.get("fps") or 30))
     before = group["members"][0] - 2
     after = group["members"][-1]
-    response = _call("observe", {"current_utterances": [{"index": r["index"], "text": r["text"]} for r in rows],
+    payload = {"current_utterances": [{"index": r["index"], "text": r["text"]} for r in rows],
                      "surrounding_context": {
                          "before": manifest["segments"][before]["text"] if before >= 0 else "",
                          "after": manifest["segments"][after]["text"] if after < len(manifest["segments"]) else "",
@@ -431,8 +475,11 @@ def _observe(group: dict, rows: list[dict], manifest: dict, report: Path, model:
                      "speed": rows[0]["speed"], "segments": [{k: r[k] for k in
                          ("index", "text", "duration_us", "source_start_us", "source_end_us")} for r in rows],
                      "frame_mapping": [{k: i[k] for k in ("index", "timestamp_us", "rendered_timestamp_us")}
-                                       for i in images], "temporal_review": "sampled_rendered_sequence"},
-                     report, model, images=images, stats=stats)
+                                       for i in images], "temporal_review": "sampled_rendered_sequence"}
+    if acceptance is not None:
+        payload["contextual_acceptance"] = acceptance
+    response = _call("observe", payload, report, model, images=images, stats=stats,
+                     prompt=_acceptance_prompt(acceptance) if acceptance is not None else None)
     observations, issues = response.get("observations"), []
     by_index = {r.get("index"): r for r in observations or [] if isinstance(r, dict)}
     if not isinstance(observations, list) or len(observations) != len(rows) or set(by_index) != set(group["members"]):
@@ -460,6 +507,8 @@ def _observe(group: dict, rows: list[dict], manifest: dict, report: Path, model:
               "evidence": images, "preview_file": str(preview), "preview_sha256": cp._hash(preview),
               "response_file": response["_response_file"], "response_sha256": response["_response_sha256"],
               "temporal_review": "sampled_rendered_sequence"}
+    if acceptance is not None:
+        result["contextual_acceptance"] = acceptance
     return result, compiled, issues
 
 
@@ -568,7 +617,10 @@ def prepare(manifest: dict, candidates: list[dict], report_dir: Path, *, base_di
         if manifest.get("delivery_mode") != "formal":
             _fail("FORMAL_MODE_REQUIRED", "indexed contextual construction requires explicit formal mode")
         frozen = _frozen(manifest, base)
+        _acceptance_contract(manifest)
         groups = group_script(manifest, report, model, base_dir=base, stats=stats)
+        for group in groups:
+            _acceptance_for_group(manifest, group)
         verified, rejected = _candidates(candidates, base)
         stats["verified_candidates"], stats["rejected_candidates"] = len(verified), rejected
         if not verified and candidate_expander is None:
