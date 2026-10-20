@@ -1,0 +1,23 @@
+{
+  "rulepack": "global",
+  "version": "1.5.2-1",
+  "source": "2026-10-12 会议纪要：AI 自动剪辑视频相关问题讨论",
+  "auto_transition": false,
+  "voice": {
+    "tempo": 1.0,
+    "edge_trim": true,
+    "max_gap_frames": 5
+  },
+  "analysis_prompt_rules": [
+    "head_waste/tail_waste 的废料包括：手刚伸进画面或正在离开画面、动作开始前的空等、停止录制前的定格或拿手机的动作、调整机位/对焦/曝光的晃动。",
+    "action_phase 只在动作正在进行时写 perform；画面里只是静物摆放、动作还没开始或已经结束时不要写 perform。",
+    "同一个镜头里先后出现几个动作时，description 要按时间顺序把每个动作都写出来，不能只描述其中一帧。",
+    "包装上的文字只逐字抄写实际看清的部分，不要凭印象补全，也不要把相近的字形猜成别的词。"
+  ],
+  "match_prompt_rules": [
+    "镜头之间直接硬切，不考虑转场效果。",
+    "口播描述动作或使用过程时，优先选动作正在进行（action_phase=perform）的镜头，不选静止摆放的镜头。",
+    "不要选手正在进入或离开画面、或停在录制结束定格上的镜头作为这一句的主画面。"
+  ],
+  "scenes": []
+}
