@@ -1028,7 +1028,7 @@ def _backoff_seconds(attempt: int) -> float:
 
 
 def _vision_slot():
-    return slot("vision", env_int("JY_VISION_SLOTS", 2),
+    return slot("vision", env_int("JY_VISION_SLOTS", 10),
                 timeout=env_float("JY_VISION_SLOT_TIMEOUT", 600.0))
 
 
