@@ -791,6 +791,8 @@ def _split_groups(segments: list, rules: dict[str, Any],
                 return ""
             if rulepack.text_hits_scene(scene, seg.get("text")):
                 return "hit"
+            if any(rulepack.text_hits_scene(other, seg.get("text")) for other in others):
+                return ""
             return "follow" if rulepack.text_hits_scene(follow, seg.get("text")) else ""
 
         def free(seg: Any) -> bool:
@@ -799,8 +801,12 @@ def _split_groups(segments: list, rules: dict[str, Any],
             if not usable(seg) or any(rulepack.text_hits_scene(o, seg.get("text")) for o in others):
                 return False
             from . import demo_actions
-            return not any(c.evidence_required for c in demo_actions.requirements_for(
-                str(seg.get("text") or ""), str(seg.get("claim_text") or ""), category))
+            text, claim = str(seg.get("text") or ""), str(seg.get("claim_text") or "")
+            contract = demo_actions.sentence_contract(text, claim, category=category)
+            return (contract.get("kind") != "functional"
+                    and not ({"cta", "quantity", "brand"} & set(contract.get("intents") or []))
+                    and not any(c.evidence_required for c in demo_actions.requirements_for(
+                        text, claim, category)))
 
         count = len(segments)
         position = 0
@@ -848,8 +854,11 @@ def _split_groups(segments: list, rules: dict[str, Any],
                 rulepack.shot_has_visual(
                     scene, shots_by_id.get(str(segments[p].get("temporary_shot_id") or "")) or {})
                 for p in run if role(segments[p]) == "hit")
-            groups.append({"scene": scene, "positions": run, "spare": spare,
-                           "trigger": "shot" if hit else "text"})
+            # full_window 单句无邻句可借时继续走普通单句入口，避免重复占组。
+            if (len(run) > 1 or spare
+                    or scene.get("id") not in {"fluorescence", "ultra_thin"}):
+                groups.append({"scene": scene, "positions": run, "spare": spare,
+                               "trigger": "shot" if hit else "text"})
             position = cursor
     return groups
 
@@ -890,13 +899,19 @@ def _group_candidates(scene: dict[str, Any], members: list[dict[str, Any]], posi
         if hits:
             # 拆包：同一条素材拆完接着展面层的排最前（与单句 _visual_candidates 一致）。
             pool.append((not rulepack.shot_extends(scene, shot), -hits,
-                         -_number(shot.get("duration")), shot_id, shot))
+                         _number(shot.get("duration")), shot_id, shot))
     pool.sort(key=lambda row: row[:4])
     limit = max(0, int(scene.get("pool_search_limit", 8) or 0))
     out.extend((row[4], "pool_search") for row in pool[:limit])
     if scene.get("extend_keywords"):
         out.sort(key=lambda item: (not rulepack.shot_extends(scene, item[0]),
                                    item[1] != "selected", item[1] != "top3"))
+    # 先试更短且完整的实验，避免 selected 的几十秒静置尾抢走池里几秒就演完的素材。
+    # 后续仍逐条验证相位完整与窗口可解，短片本身不获得通过资格。
+    out.sort(key=lambda item: (
+        not rulepack.shot_extends(scene, item[0]) if scene.get("extend_keywords") else False,
+        _number(item[0].get("duration"), float("inf")),
+        item[1] != "selected", str(item[0].get("shot_id") or "")))
     return out
 
 

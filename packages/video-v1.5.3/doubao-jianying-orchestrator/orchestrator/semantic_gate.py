@@ -254,6 +254,15 @@ def evaluate_segments(segments: list[dict[str, Any]], *, require_explicit: bool 
         # 被画面明确否定的卖点不参与关联补证，且每一次关联放行都记进 evidence_basis。
         evidence_basis: dict[str, dict[str, Any]] = {
             tag: {"via": "direct"} for tag in matched}
+        # 只承接经过重新核验的层数标称，不能把包装当成柔软/吸收等功能实验。
+        from . import demo_actions
+        package_mark = demo_actions.packaging_claim_direct(item, claim_text or text)
+        if package_mark.get("ok") and package_mark.get("claim_key") == "LAYERS":
+            for tag in required:
+                if tag == "厚实" and tag not in matched and tag not in negated:
+                    matched.append(tag)
+                    evidence_basis[tag] = {"via": "packaging_claim", "claim_key": "LAYERS",
+                                           "authenticity_not_verified": True}
         for tag in required:
             if tag in matched or tag in negated:
                 continue

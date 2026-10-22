@@ -1925,14 +1925,10 @@ def match_with_codex(manifest: dict[str, Any], analysis: dict[str, Any], report_
         timeout = env_int("JY_VISION_TIMEOUT", 600, minimum=60)
     profile = _clean_profile(
         profile if profile is not None else os.environ.get("JY_VISION_PROFILE", "volc"))
-    claims = []
-    text = str(manifest.get("full_script") or manifest.get("script") or "")
-    parts = re.split(r"[。！？!?；;\n\r]+", text)
-    if manifest.get("segments"):
-        claims = [{"index": i, "text": str(s.get("text", s.get("caption", "")))}
-                  for i, s in enumerate(manifest.get("segments", []), 1)]
-    else:
-        claims = [{"index": i, "text": p.strip()} for i, p in enumerate(parts, 1) if p.strip()]
+    from . import timing_contract
+    sentence_rows = timing_contract.split_sentences(manifest)
+    claims = [{"index": i, "text": timing_contract.sentence_text(row)}
+              for i, row in enumerate(sentence_rows, 1)]
     shots = [s for s in analysis.get("shots", []) if s.get("status") == "ready_for_matching"]
     if not claims or not shots:
         analysis["semantic_matches"] = []
@@ -1942,12 +1938,14 @@ def match_with_codex(manifest: dict[str, Any], analysis: dict[str, Any], report_
         f"描述:{s.get('description','')} | 画面标签:{'、'.join(_as_list(s.get('visual_tags')))} | "
         f"证据:{'、'.join(_as_list(s.get('evidence_tags')))} | action_complete={s.get('action_complete')} | "
         f"action_phase={s.get('action_phase') or ''} | "
+        f"角色:{s.get('role') or ''} | 证据强度:{s.get('evidence_strength') or ''} | "
+        f"观察置信度:{s.get('analysis_confidence', '')} | 可见结果:{s.get('result') or ''} | "
         f"动作分段:{_segments_text(s)} | 包装可读文字:{'、'.join(_as_list(s.get('readable_claims')))} | "
         f"头尾废料={_number(s.get('head_waste')):.2f}/{_number(s.get('tail_waste')):.2f}"
         for s in shots
     )
     from . import demo_actions, rulepack, shot_notes
-    segments = manifest.get("segments") if isinstance(manifest.get("segments"), list) else []
+    segments = sentence_rows
     category = str(manifest.get("category") or "")
     claim_lines = []
     for c in claims:
@@ -1958,9 +1956,13 @@ def match_with_codex(manifest: dict[str, Any], analysis: dict[str, Any], report_
             req.name + (f"——{req.object}，{req.result}" if req.result else "")
             for req in demo_actions.requirements_for(c["text"], claim_text, category)
             if req.evidence_required)
+        contract = demo_actions.sentence_contract(c["text"], claim_text, category=category,
+                                                   product=str(manifest.get("product") or ""))
+        context = " / ".join(row["text"] for row in claims[max(0, c["index"] - 2):c["index"] + 1])
         claim_lines.append(f"{c['index']}. {c['text']}"
                            + (f"（卖点：{proves}）" if proves else "")
-                           + (f"（画面要求：{note}）" if note else ""))
+                           + (f"（画面要求：{note}）" if note else "")
+                           + f"\n   句子合同：{contract['kind']}；上下文：{context}")
     claim_text = "\n".join(claim_lines)
     rules = rulepack.prompt_rules(manifest, "match")
     rules += [f"整条视频的画面要求：{g}" for g in manifest.get("shot_notes_general") or []]
@@ -1969,6 +1971,12 @@ def match_with_codex(manifest: dict[str, Any], analysis: dict[str, Any], report_
 每句口播必须匹配真实画面：画面在展示什么，口播就应讲什么。对没有直接证据的句子返回空 top3，不要用产品无关空镜凑数。输出严格 JSON 数组：
 [{{"index":1,"top3":[{{"shot_id":"...","score":0,"matched_claims":["..."],"reason":"..."}}]}}]
 score 0-100；只有明确匹配并且证据足够才给 70 以上；`matched_claims` 必须写观察到的画面事实，不要把口播原文复制成证据。
+先通读完整口播，再结合前后句给每句打分；不要只拿这句里的一个词检索整条素材。
+90-100：画面直接展示该句要求的动作、部位或可读标称，过程与结果足够；70-89：同主题且满足这句的证据要求；不足70：缺少关键动作/结果、只有关联、观察不确定或无关。分数不能替代证据。
+无功能卖点的开场、共鸣和衔接句可以正常配同商品的手持入画、拆包或本体展示；这类展示不证明相邻功能句。价格/囤货仍要求量感画面。
+荧光、透气、吸收等实验可由相邻且语义兼容的多句共同承担，接同一素材的后续过程，不能每句从头重播；独立的侧漏、面层、品牌或价格句要换到对应画面。
+逐句比较所有合格候选，再让重复/机位变化在同等证据且分数接近的候选中决定顺序。包装文字不能冒充功能实验；检测仪本身不证明已出现有效读数。
+每个候选的 reason 写明可见事实、未满足内容及建议用哪段动作；若有反证请返回 contradictions 数组并给低于70分，不得为填满Top3虚构事实。
 句子后面括号里的「卖点」是这句要用画面证明的事，按卖点选镜，不要按口播字面词去对画面。
 句子后面括号里的「画面要求」是运营写的备注，候选镜头要尽量满足它，满足不了的在 reason 里写明。
 {rule_text}

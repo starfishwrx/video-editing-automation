@@ -20,7 +20,7 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 class WeipinVoiceGapTests(unittest.TestCase):
     def test_weipin_voice_has_no_tail_pad(self):
         rules = rulepack.load("weipin")
-        self.assertEqual(rules["versions"]["weipin"], "1.5.3-1")
+        self.assertEqual(rules["versions"]["weipin"], "1.5.3-9")
         self.assertEqual(rules["voice"]["tempo"], 1.2)
         self.assertEqual(rules["voice"]["max_gap_frames"], 1)
         self.assertEqual(rulepack.gap_tail_pad_s(1, fps=30), 0.0)
