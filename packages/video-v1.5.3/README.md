@@ -1,4 +1,4 @@
-# Video automation candidate v1.5.3
+# Video automation candidate v1.5.6
 
 2026-10-13 至 10-16 的 Codex 审核与本机实现对照见 [这四天更新说明](docs/UPDATES_20261013-16.md)。
 

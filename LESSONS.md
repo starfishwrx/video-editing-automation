@@ -19,6 +19,15 @@
 
 ## 已有条目（从代码注释与 references 中回填的种子，hits 按已知次数）
 
+### L-20261022-01 视觉默认直连后 Codex 单测必须显式钉 transport
+- status: OPEN
+- hits: 1
+- 模块: visual-matching
+- 现象: 默认 `volc_glm` 后，只 mock `_run_codex_file` 的匹配用例 call_count=0。
+- 根因: unset `JY_VISION_TRANSPORT` 已不再走 Codex。
+- 以后怎么做: Codex 回滚路径测试在 setUp 写 `JY_VISION_TRANSPORT=codex`；直连默认另开 `test_volc_glm_vision`。
+- 证据: `packages/video-v1.5.3/doubao-jianying-orchestrator/tests/test_codex_invocation.py`
+
 ### L-20261016-01 副本哈希一致不代表媒体路径有效
 - status: OPEN
 - hits: 1

@@ -3,7 +3,7 @@ name: doubao-jianying-orchestrator
 description: Build and recover editable Jianying video drafts from task manifests using evidence-based shot matching, narration timing, visual QC, and human review gates. Use with the sibling jianying-editor skill for video automation.
 ---
 
-# Doubao/Jianying orchestrator v1.5.3
+# Doubao/Jianying orchestrator v1.5.6
 
 For new production tasks, freeze task-level Eval inputs and runtime identity
 before generation. Use the reviewed category/SKU material index when configured;
@@ -55,8 +55,10 @@ formal 不得用 settled/lead_in/黑屏冒充完整动作；派生卖点标签�
 - 环境失败只重做预检；语义失败只消费已有分析做匹配或人工确认；写稿和桌面验收
   分别从对应阶段恢复，不重新做视觉分析。
 - 视觉服务调用最多进行一次有限重试；凭据、路径、编码和余额错误直接停机。
-- 视觉子进程默认使用渲染机 `.codex/volc.config.toml` 的 `volc` profile 和火山
-  CodingPlan OpenAI-compatible 接口；CC Switch Anthropic env 文件只作为显式回滚路径。
+- 视觉默认直连火山 Ark `glm-5.3-flash`（`JY_VISION_TRANSPORT=volc_glm`），密钥放
+  `ARK_API_KEY`（或 `JY_VOLC_API_KEY`）。批次与槽位并发默认 20。`codex` /
+  `anthropic` 只作显式回滚；媒体解码默认全部走 GPU（`JY_GPU_DECODE_CODECS=*`，
+  单帧默认开启），显存不足或槽位超时仍回退 CPU。
 - `draft_write` 只接受 `semantic_match` 产生的成功嵌套结果；原始 manifest 或损坏缓存
   不得作为恢复输入。桌面诊断失败保持 `DESKTOP_IMPORT_BLOCKED` / `PACKAGE_NOT_ACTIVE`。
 - 批量跳过必须由操作者显式设置 `JY_TASK_SKIP_CURRENT=1`，并先写入

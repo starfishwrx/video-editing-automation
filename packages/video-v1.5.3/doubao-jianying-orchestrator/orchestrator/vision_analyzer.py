@@ -20,6 +20,12 @@ minutes and periodically crossed the 300 s timeout; before v1.3.17 the pipe
 drain turned that into a permanent hang.  This version removes the tool
 surface that feeds the loop and routes *every* codex call through one
 file-backed runner so a timeout is always expressible as a process-tree kill.
+
+Default transport is ``JY_VISION_TRANSPORT=volc_glm``: contact sheets post
+straight to Volcengine Ark chat completions (``glm-5.3-flash``) with no Codex
+agent process. Set ``codex`` / ``anthropic`` only as explicit rollback paths.
+Batch and slot concurrency default to 20 (``JY_VISION_BATCH_WORKERS`` /
+``JY_VISION_SLOTS``).
 """
 from __future__ import annotations
 
@@ -448,14 +454,20 @@ def _vision_summary(profile: str, batches: list[Any], responses: list[dict[str, 
     behind by a failed run reports how many batches actually returned instead
     of carrying a stale count from an earlier attempt.
     """
-    return {
-        "provider": "codex_exec_image",
+    transport = _vision_transport()
+    summary = {
+        "provider": {"codex": "codex_exec_image", "anthropic": "anthropic_messages",
+                     "volc_glm": "volc_chat"}.get(transport, "volc_chat"),
+        "transport": transport,
         "profile": profile,
         "batch_count": len(batches),
         "responses": list(responses),
         "errors": list(errors),
         "partial": partial,
     }
+    if transport == "volc_glm":
+        summary["model"] = _volc_settings()["model"]
+    return summary
 
 
 _PROGRESS_LOCK = threading.Lock()
@@ -657,6 +669,11 @@ def _vision_cache_key(manifest: dict[str, Any], shot: dict[str, Any], profile: s
             _keyed_rules(manifest) if rules is None else rules,
             ensure_ascii=False).encode("utf-8")).hexdigest()[:16],
     }
+    transport = _vision_transport()
+    if transport != "codex":
+        # 非 Codex 缓存键带上传输与模型，避免不同后端观察互相复用。
+        identity["transport"] = transport
+        identity["model"] = os.environ.get("JY_VISION_MODEL", "").strip() or "glm-5.3-flash"
     raw = json.dumps(identity, ensure_ascii=False, sort_keys=True,
                      separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
@@ -982,9 +999,11 @@ def _run_vision(sheet: Path, prompt: str, output: Path, *, profile: str,
     stderr_path = output.with_suffix(".stderr.log")
     prompt_path = output.with_suffix(".prompt.txt")
     prompt_path.write_text(prompt, encoding="utf-8")
-    if os.environ.get("JY_VISION_TRANSPORT", "").strip().lower() in {
-            "anthropic", "ccswitch", "ccswitch_anthropic"}:
+    transport = _vision_transport()
+    if transport == "anthropic":
         return _run_anthropic_messages(sheet, prompt, output, timeout=timeout)
+    if transport == "volc_glm":
+        return _run_volc_chat(sheet, prompt, output, timeout=timeout)
     ok, code, error = _run_codex_file(
         _codex_command(sheet, output, profile, workdir=workdir, schema=schema),
         prompt_path, stdout_path, stderr_path, timeout)
@@ -1004,6 +1023,145 @@ def _run_vision(sheet: Path, prompt: str, output: Path, *, profile: str,
 
 
 EMPTY_RESPONSE = "vision model returned an empty response"
+
+
+_ANTHROPIC_TRANSPORTS = {"anthropic", "ccswitch", "ccswitch_anthropic"}
+_VOLC_TRANSPORTS = {"volc_glm", "glm", "volc"}
+
+
+def _vision_transport() -> str:
+    """Resolve the vision backend. Unset env means GLM 5.3 direct HTTP."""
+    raw = os.environ.get("JY_VISION_TRANSPORT", "").strip().lower()
+    if raw in _ANTHROPIC_TRANSPORTS:
+        return "anthropic"
+    if raw in {"codex", "volc_codex"}:
+        return "codex"
+    if raw in _VOLC_TRANSPORTS or raw == "":
+        return "volc_glm"
+    return raw or "volc_glm"
+
+
+def _direct_http_transport() -> bool:
+    return _vision_transport() == "volc_glm"
+
+
+def _contact_sheet_source() -> str:
+    return {
+        "codex": "codex_vision_contact_sheet_v3",
+        "anthropic": "anthropic_vision_contact_sheet_v3",
+        "volc_glm": "volc_glm_contact_sheet_v3",
+    }.get(_vision_transport(), "volc_glm_contact_sheet_v3")
+
+
+def _requested_batch_workers() -> int:
+    """How many contact-sheet calls may be in flight.
+
+    Codex stays at one agent process. Direct GLM HTTP defaults to 20.
+    """
+    raw = os.environ.get("JY_VISION_BATCH_WORKERS", "").strip()
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            return 1
+    return 20 if _direct_http_transport() else 1
+
+
+def _batch_workers(batch_count: int) -> int:
+    return max(1, min(_requested_batch_workers(), max(1, batch_count)))
+
+
+def _call_indexed(jobs: list[Any], fn, workers: int) -> dict[int, Any]:
+    """``fn(job) -> (index, value)``. One worker stays on the calling thread."""
+    if workers <= 1 or len(jobs) <= 1:
+        return {index: value for index, value in (fn(job) for job in jobs)}
+    found: dict[int, Any] = {}
+    with ThreadPoolExecutor(max_workers=min(workers, len(jobs))) as pool:
+        futures = [pool.submit(fn, job) for job in jobs]
+        for future in as_completed(futures):
+            index, value = future.result()
+            found[index] = value
+    return found
+
+
+def _redact_secret(text: str) -> str:
+    text = re.sub(r"ark-[A-Za-z0-9_\-]{8,}", "ark-***", text)
+    text = re.sub(r"(?i)(bearer\s+)[A-Za-z0-9_\-\.]+", r"\1***", text)
+    return text
+
+
+def _volc_settings() -> dict[str, str]:
+    return {
+        "api_key": (os.environ.get("ARK_API_KEY", "").strip()
+                    or os.environ.get("JY_VOLC_API_KEY", "").strip()),
+        "base_url": (os.environ.get("JY_VOLC_BASE_URL", "").strip()
+                     or "https://ark.cn-beijing.volces.com/api/plan/v3").rstrip("/"),
+        "model": os.environ.get("JY_VISION_MODEL", "").strip() or "glm-5.3-flash",
+    }
+
+
+def _run_volc_chat(sheet: Path | None, prompt: str, output: Path,
+                   *, timeout: int) -> tuple[bool, str]:
+    """Post one contact sheet to Volcengine Ark chat completions.
+
+    Skips Codex. ``glm-5.3-flash`` rejects ``thinking.type=disabled`` and
+    spends the completion budget on reasoning when the cap is small, so thinking
+    stays enabled with a bounded budget and a larger ``max_tokens``.
+    """
+    cfg = _volc_settings()
+    if not cfg["api_key"]:
+        return False, "VOLC_API_KEY_MISSING"
+    content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+    if sheet is not None:
+        try:
+            image = base64.b64encode(sheet.read_bytes()).decode("ascii")
+        except OSError as exc:
+            return False, f"VOLC_IMAGE_READ_FAILED:{exc}"
+        media_type = mimetypes.guess_type(sheet.name)[0] or "image/jpeg"
+        content.append({"type": "image_url", "image_url": {
+            "url": f"data:{media_type};base64,{image}",
+        }})
+    if os.environ.get("JY_VISION_THINKING", "").strip().lower() == "disabled":
+        thinking = {"type": "disabled"}
+    else:
+        thinking = {"type": "enabled", "budget_tokens": int(
+            os.environ.get("JY_VISION_THINKING_BUDGET", "2048"))}
+    body = {
+        "model": cfg["model"],
+        "messages": [{"role": "user", "content": content}],
+        "thinking": thinking,
+        "max_tokens": int(os.environ.get("JY_VISION_MAX_TOKENS", "8192")),
+        "temperature": 0,
+        "stream": False,
+    }
+    request = urllib.request.Request(
+        cfg["base_url"] + "/chat/completions",
+        data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "content-type": "application/json",
+            "authorization": f"Bearer {cfg['api_key']}",
+        }, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as exc:
+        detail = _redact_secret(exc.read(800).decode("utf-8", "replace"))
+        return False, f"VOLC_HTTP_{exc.code}:{detail[-500:]}"
+    except (OSError, ValueError) as exc:
+        return False, f"VOLC_REQUEST_FAILED:{_redact_secret(str(exc))}"
+    choices = payload.get("choices") or []
+    message = choices[0].get("message", {}) if choices and isinstance(choices[0], dict) else {}
+    out = str((message or {}).get("content") or "").strip()
+    if not out:
+        return False, EMPTY_RESPONSE
+    try:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(out, encoding="utf-8")
+    except OSError:
+        pass
+    return True, out
+
+
 _TRANSIENT_MARKERS = (
     "502", "503", "429", "too many requests", "temporarily unavailable",
     "timed out", "timeout", "connection reset", "connection refused", "network",
@@ -1018,6 +1176,10 @@ def is_empty_failure(text: str) -> bool:
 
 def _is_transient(text: str) -> bool:
     lowered = str(text or "").casefold()
+    if (re.search(r"http_40[13]\b", lowered)
+            or "volc_api_key_missing" in lowered
+            or "user location is not supported" in lowered):
+        return False
     return is_blank(text) or any(marker in lowered for marker in _TRANSIENT_MARKERS)
 
 
@@ -1028,7 +1190,13 @@ def _backoff_seconds(attempt: int) -> float:
 
 
 def _vision_slot():
-    return slot("vision", env_int("JY_VISION_SLOTS", 2),
+    if os.environ.get("JY_VISION_SLOTS", "").strip():
+        capacity = env_int("JY_VISION_SLOTS", 20)
+    elif _direct_http_transport():
+        capacity = max(20, _requested_batch_workers())
+    else:
+        capacity = 2
+    return slot("vision", capacity,
                 timeout=env_float("JY_VISION_SLOT_TIMEOUT", 600.0))
 
 
@@ -1540,19 +1708,10 @@ def enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repor
     with private_temp_dir(prefix="jy_vision_", dir=report_dir) as temp:
         temp_dir = Path(temp)
         schema = _write_schema(temp_dir)
-        for batch_index, batch in enumerate(batches, 1):
-            if batch_index > 1:
-                _checkpoint()
-            sheet = temp_dir / f"sheet_{batch_index:04d}.jpg"
-            response_file = temp_dir / f"response_{batch_index:04d}.txt"
-            tiles = [{**item, "label": f"#{n} {item['timestamp']:.1f}s"}
-                     for n, item in enumerate(batch, 1)]
-            if not _write_sheet(tiles, sheet, ffmpeg=ffmpeg, fit=True, font_size=22,
-                                **_sheet_geometry(batch)):
-                vision_errors.append({"type": "VISION_SHEET_FAILED", "batch": batch_index})
-                continue
-            ok, text = _run_vision_with_retry(
-                sheet,
+        def _call_batch(job: tuple[int, list[dict[str, Any]], Path]) -> tuple[int, tuple[bool, str]]:
+            batch_index, batch, response_file = job
+            result = _run_vision_with_retry(
+                temp_dir / f"sheet_{batch_index:04d}.jpg",
                 _vision_prompt(batch, batch_index, len(batches), analysis_rules),
                 response_file,
                 profile=profile,
@@ -1562,6 +1721,32 @@ def enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repor
                 on_attempt=_attempts("vision", batch_index, len(batches),
                                      sorted({str(item["shot_id"]) for item in batch})),
             )
+            return batch_index, result
+
+        prepared: list[tuple[int, list[dict[str, Any]], Path | None]] = []
+        for batch_index, batch in enumerate(batches, 1):
+            sheet = temp_dir / f"sheet_{batch_index:04d}.jpg"
+            tiles = [{**item, "label": f"#{n} {item['timestamp']:.1f}s"}
+                     for n, item in enumerate(batch, 1)]
+            written = _write_sheet(tiles, sheet, ffmpeg=ffmpeg, fit=True, font_size=22,
+                                   **_sheet_geometry(batch))
+            prepared.append((batch_index, batch,
+                             temp_dir / f"response_{batch_index:04d}.txt" if written else None))
+        jobs = [item for item in prepared if item[2] is not None]
+        workers = _batch_workers(len(jobs))
+        prefetched = _call_indexed(jobs, _call_batch, workers) if workers > 1 else {}
+        _progress(report_dir, batch_workers=workers, transport=_vision_transport())
+
+        for batch_index, batch, response_file in prepared:
+            if batch_index > 1:
+                _checkpoint()
+            if response_file is None:
+                vision_errors.append({"type": "VISION_SHEET_FAILED", "batch": batch_index})
+                continue
+            if batch_index in prefetched:
+                ok, text = prefetched[batch_index]
+            else:
+                _, (ok, text) = _call_batch((batch_index, batch, response_file))
             if not ok:
                 vision_errors.append({"type": "VISION_CALL_FAILED", "batch": batch_index,
                                       "message": text[-4000:]})
@@ -1604,7 +1789,7 @@ def enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repor
                     "head_waste": max(0.0, min(1.0, _number(raw.get("head_waste")))),
                     "tail_waste": max(0.0, min(1.0, _number(raw.get("tail_waste")))),
                     "analysis_confidence": confidence,
-                    "analysis_source": "codex_vision_contact_sheet_v3",
+                    "analysis_source": _contact_sheet_source(),
                     "status": "ready_for_matching" if action_complete else "pending_analysis",
                     # DEMO_ACTIONS V0.2 素材侧字段。缺失时**不写键**（而不是写
                     # None）—— demo_actions.judge() 靠「键不存在」区分「旧分析结果」
@@ -1805,21 +1990,30 @@ score 0-100；只有明确匹配并且证据足够才给 70 以上；`matched_cl
             response = temp_dir / "response.txt"
             prompt_path = temp_dir / "prompt.txt"
             prompt_path.write_text(prompt, encoding="utf-8")
-            # Text-only call: no image attachment.  v1.3.20 routes it through the
-            # same file-backed runner as the vision batches.  It previously kept
-            # the old stdout=PIPE pattern, which is the same deadlock v1.3.17
-            # fixed in _run_vision and left behind here.
-            with _vision_slot():
-                ok, code, error = _run_codex_file(
-                    _codex_command(None, response, profile, workdir=temp_dir),
-                    prompt_path, temp_dir / "stdout.log", temp_dir / "stderr.log", timeout)
-            stderr_tail = _tail(temp_dir / "stderr.log", 2000).strip()
-            if response.is_file() and response.stat().st_size:
-                raw_text = response.read_text(encoding="utf-8", errors="replace")
-            elif ok:
-                raw_text = _tail(temp_dir / "stdout.log")
+            if _vision_transport() == "volc_glm":
+                with _vision_slot():
+                    ok, text = _run_volc_chat(None, prompt, response, timeout=timeout)
+                stderr_tail = ""
+                if ok:
+                    raw_text, error, code = text, "", 0
+                else:
+                    raw_text, error, code = "", text, 1
             else:
-                raw_text = ""
+                # Text-only call: no image attachment.  v1.3.20 routes it through the
+                # same file-backed runner as the vision batches.  It previously kept
+                # the old stdout=PIPE pattern, which is the same deadlock v1.3.17
+                # fixed in _run_vision and left behind here.
+                with _vision_slot():
+                    ok, code, error = _run_codex_file(
+                        _codex_command(None, response, profile, workdir=temp_dir),
+                        prompt_path, temp_dir / "stdout.log", temp_dir / "stderr.log", timeout)
+                stderr_tail = _tail(temp_dir / "stderr.log", 2000).strip()
+                if response.is_file() and response.stat().st_size:
+                    raw_text = response.read_text(encoding="utf-8", errors="replace")
+                elif ok:
+                    raw_text = _tail(temp_dir / "stdout.log")
+                else:
+                    raw_text = ""
             if error:
                 failure = f"match call {error}"
             elif not raw_text.strip():
