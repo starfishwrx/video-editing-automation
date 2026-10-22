@@ -17,6 +17,8 @@ class _Env(unittest.TestCase):
         self.root = Path(self._tmp.name)
         clean = {k: v for k, v in os.environ.items() if not k.startswith("JY_VISION_")}
         clean["JY_SLOT_DIR"] = str(self.root / "slots")
+        # 本文件测 Codex 回滚路径；默认视觉已是 volc_glm 直连。
+        clean["JY_VISION_TRANSPORT"] = "codex"
         self._env = mock.patch.dict(os.environ, clean, clear=True)
         self._env.start()
         self._sleep = mock.patch.object(vision_analyzer.time, "sleep")

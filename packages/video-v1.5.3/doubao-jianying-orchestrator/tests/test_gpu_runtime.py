@@ -296,14 +296,15 @@ class EncodeRoutingTests(unittest.TestCase):
 
 
 class DecodeRouteTests(unittest.TestCase):
-    """实测驱动的分流：HEVC 走 CUDA，H.264 与单帧抽取走 CPU。"""
+    """默认全部走 GPU；收窄 CODECS / 关闭单帧时才回 CPU。"""
 
     def setUp(self):
         isolate_gpu_runtime(self)
-        env = mock.patch.dict(os.environ, {"JY_GPU_DECODE_CODECS": "hevc"})
+        # 默认是 *；本套用例先钉成 hevc，方便测 codec 收窄。
+        env = mock.patch.dict(os.environ, {"JY_GPU_DECODE_CODECS": "hevc",
+                                           "JY_GPU_SINGLE_FRAME": "0"})
         env.start()
         self.addCleanup(env.stop)
-        os.environ.pop("JY_GPU_SINGLE_FRAME", None)
         self.addCleanup(video_decode.clear_decode_cache)
 
     def _route(self, cmd, codec):
@@ -313,18 +314,29 @@ class DecodeRouteTests(unittest.TestCase):
     def test_hevc_may_use_gpu(self):
         self.assertIsNone(self._route(["ffmpeg", "-i", "a.mov", "-f", "null", "-"], "hevc"))
 
-    def test_h264_goes_to_cpu(self):
+    def test_h264_goes_to_cpu_when_codecs_narrowed(self):
         self.assertEqual(self._route(["ffmpeg", "-i", "a.mp4", "-f", "null", "-"], "h264"),
                          "codec_cpu")
 
     def test_unknown_codec_keeps_gpu_attempt(self):
         self.assertIsNone(self._route(["ffmpeg", "-i", "a.mov", "-f", "null", "-"], None))
 
-    def test_single_frame_goes_to_cpu_unless_enabled(self):
+    def test_single_frame_defaults_to_gpu_unless_disabled(self):
         cmd = ["ffmpeg", "-ss", "1", "-i", "a.mov", "-frames:v", "1", "o.jpg"]
         self.assertEqual(self._route(cmd, "hevc"), "single_frame_cpu")
         with mock.patch.dict(os.environ, {"JY_GPU_SINGLE_FRAME": "1"}):
             self.assertIsNone(self._route(cmd, "hevc"))
+
+    def test_default_allows_all_codecs_and_single_frame(self):
+        clean = {k: v for k, v in os.environ.items()
+                 if k not in {"JY_GPU_DECODE_CODECS", "JY_GPU_SINGLE_FRAME"}}
+        with mock.patch.dict(os.environ, clean, clear=True):
+            self.assertIsNone(gpu_runtime.decode_codecs())
+            self.assertTrue(gpu_runtime.single_frame_gpu())
+            self.assertIsNone(self._route(
+                ["ffmpeg", "-i", "a.mp4", "-f", "null", "-"], "h264"))
+            self.assertIsNone(self._route(
+                ["ffmpeg", "-ss", "1", "-i", "a.mov", "-frames:v", "1", "o.jpg"], "hevc"))
 
     def test_wildcard_allows_all_codecs(self):
         with mock.patch.dict(os.environ, {"JY_GPU_DECODE_CODECS": "*"}):

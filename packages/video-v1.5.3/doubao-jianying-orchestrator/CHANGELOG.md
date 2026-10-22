@@ -1,5 +1,11 @@
 ﻿# Changelog
 
+## 1.5.6 - 2026-10-22
+
+- 远端视觉默认改为火山 Ark `glm-5.3-flash` 直连（`JY_VISION_TRANSPORT=volc_glm`），不再默认走 Codex agent；`codex`/`anthropic` 仅作显式回滚。
+- 视觉批次与跨进程槽位默认并发 20（`JY_VISION_BATCH_WORKERS` / `JY_VISION_SLOTS`）；直连路径按批次并行预取。
+- GPU 默认放开：`JY_GPU_DECODE_CODECS=*`、单帧抽取默认开 CUDA（`JY_GPU_SINGLE_FRAME=1`）；显存不足、槽位超时或初始化失败仍回退 CPU。
+
 ## 1.5.3 - 2026-10-16
 
 - 把已验证修复合包技能纳入编排器技能引用与 `SKILL_PACKAGE.json`；新增 `tools.release_package build/verify`，校验清单、生成 ZIP、异目录解压并运行交付相关或完整回归，输出独立发布收据。此命令不部署、不发布、不修改生产队列。

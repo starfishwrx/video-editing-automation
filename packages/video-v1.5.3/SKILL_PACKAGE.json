@@ -1,6 +1,6 @@
 {
   "name": "doubao-jianying-skill-pack",
-  "version": "v1.5.3",
+  "version": "v1.5.6",
   "version_policy": {
     "major": "incompatible release +1",
     "minor": "daily feature iteration +1",

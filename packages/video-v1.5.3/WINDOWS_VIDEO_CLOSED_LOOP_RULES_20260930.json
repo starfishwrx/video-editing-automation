@@ -1,7 +1,7 @@
 {
   "policy_id": "windows-video-closed-loop-20260930",
   "policy_version": "1.4.1",
-  "video_tool_version": "1.5.3",
+  "video_tool_version": "1.5.6",
   "visual_policy_version": "1.4.1",
   "effective_date": "2026-09-30",
   "source": "user-confirmed-manual-rules-2026-09-29-2026-09-30",

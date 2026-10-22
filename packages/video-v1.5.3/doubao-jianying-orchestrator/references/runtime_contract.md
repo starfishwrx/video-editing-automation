@@ -1,6 +1,6 @@
 # Local v1.5 runtime contract
 
-This source package's tool, orchestrator, and editor version is 1.5.3; read the active installed version from the deployment host. Visual policy stays at 1.4.1. v1.5.3 tightens formal no-settled gates, derived label negation/pack-print/fluorescence and absorb group continuity; see CHANGELOG and [production_quality_and_lessons.md](production_quality_and_lessons.md). Preview fills remain uncertified.
+This source package's tool, orchestrator, and editor version is 1.5.6; read the active installed version from the deployment host. Visual policy stays at 1.4.1. v1.5.6 defaults remote vision to Volc Ark `glm-5.3-flash` direct HTTP (20-way concurrency) and GPU decode for all codecs; formal no-settled gates from 1.5.3 remain. See CHANGELOG and [production_quality_and_lessons.md](production_quality_and_lessons.md). Preview fills remain uncertified.
 
 Use the installed sibling skills for standalone operations. The deployed pipeline is selected by `JY_PIPE_ROOT`. Do not select archived task runtimes or backup folders for new work. Read actual VERSION and release-manifest metadata before executing.
 

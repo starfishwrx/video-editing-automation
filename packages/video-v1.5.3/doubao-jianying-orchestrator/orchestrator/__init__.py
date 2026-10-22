@@ -15,6 +15,6 @@
 """
 from .engine import OrchestrationEngine
 
-__version__ = "1.5.3"
+__version__ = "1.5.6"
 
 __all__ = ["OrchestrationEngine"]

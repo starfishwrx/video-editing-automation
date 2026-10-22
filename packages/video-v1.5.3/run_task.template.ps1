@@ -98,15 +98,19 @@ try {
   # ---- Codex 执行（无人值守；90 分钟超时保护）----
   $cdir = Join-Path $WORK $RID
 
-  # 视觉子进程固定走火山 CodingPlan 的 OpenAI-compatible profile。
-  # 旧的 CC Switch Anthropic Messages env 文件会返回空响应；这里显式
-  # 选择 .codex/volc.config.toml 对应的 `codex exec -p volc`，避免
-  # 视觉请求和外层任务使用不同 provider。
-  $env:JY_VISION_TRANSPORT = 'codex'
+  # 视觉默认直连火山 Ark glm-5.3-flash（不经 Codex）。回滚可设
+  # JY_VISION_TRANSPORT=codex 并保留 volc profile。并发默认 20。
+  $env:JY_VISION_TRANSPORT = 'volc_glm'
   $env:JY_VISION_PROFILE = 'volc'
   $env:JY_VISION_PROVIDER = 'volc'
   $env:JY_VISION_MODEL = 'glm-5.3-flash'
+  if (-not $env:JY_VISION_SLOTS) { $env:JY_VISION_SLOTS = '20' }
+  if (-not $env:JY_VISION_BATCH_WORKERS) { $env:JY_VISION_BATCH_WORKERS = '20' }
   Remove-Item Env:JY_VISION_ANTHROPIC_ENV -ErrorAction SilentlyContinue
+
+  # 媒体路径默认走 GPU；显存不足 / 槽位超时仍回退 CPU。
+  if (-not $env:JY_GPU_DECODE_CODECS) { $env:JY_GPU_DECODE_CODECS = '*' }
+  if (-not $env:JY_GPU_SINGLE_FRAME) { $env:JY_GPU_SINGLE_FRAME = '1' }
 
   # 版本号从**运行时实际文件**读取，不写死在提示词里。
   # 起因：tools/promote_feedback.py 的幂等沉淀只自动改写 `skill_version=X.Y.Z` 字面量，

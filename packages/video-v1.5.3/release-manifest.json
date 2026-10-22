@@ -721,6 +721,6 @@
   "schema_version": 1,
   "source_sha256": "8ff892569d560e1f4122406489af8c2fc7c8537d21fef14677be7e042f8f2184",
   "tree_hash_algorithm": "video-release-tree-v1",
-  "version": "1.5.3",
+  "version": "1.5.6",
   "visual_policy_version": "1.4.1"
 }

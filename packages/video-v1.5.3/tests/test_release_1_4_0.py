@@ -30,17 +30,17 @@ class Release140ContractTests(unittest.TestCase):
         with redirect_stdout(StringIO()):
             self.assertEqual(main(["--help"]), 0)
 
-    def test_runtime_153_and_independent_policy_141(self):
+    def test_runtime_156_and_independent_policy_141(self):
         package = json.loads((ROOT / "SKILL_PACKAGE.json").read_text(encoding="utf-8"))
         policy = json.loads((ROOT / "WINDOWS_VIDEO_CLOSED_LOOP_RULES_20260930.json").read_text(encoding="utf-8"))
 
-        self.assertEqual((ROOT / "VERSION").read_text(encoding="utf-8").strip(), "1.5.3")
-        self.assertEqual(package["version"], "v1.5.3")
+        self.assertEqual((ROOT / "VERSION").read_text(encoding="utf-8").strip(), "1.5.6")
+        self.assertEqual(package["version"], "v1.5.6")
         self.assertIn("version: 1.4.1", (ROOT / "RULES.md").read_text(encoding="utf-8"))
-        self.assertEqual((ROOT / "jianying-editor" / "VERSION").read_text(encoding="utf-8").strip(), "1.5.3")
-        self.assertEqual((ROOT / "doubao-jianying-orchestrator" / "VERSION").read_text(encoding="utf-8").strip(), "1.5.3")
-        self.assertEqual(__version__, "1.5.3")
-        self.assertEqual(policy["video_tool_version"], "1.5.3")
+        self.assertEqual((ROOT / "jianying-editor" / "VERSION").read_text(encoding="utf-8").strip(), "1.5.6")
+        self.assertEqual((ROOT / "doubao-jianying-orchestrator" / "VERSION").read_text(encoding="utf-8").strip(), "1.5.6")
+        self.assertEqual(__version__, "1.5.6")
+        self.assertEqual(policy["video_tool_version"], "1.5.6")
         self.assertEqual(policy["visual_policy_version"], "1.4.1")
 
     def test_credentials_are_environment_bound(self):

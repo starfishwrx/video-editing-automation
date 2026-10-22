@@ -14,11 +14,11 @@
   NVENC 并发会话数，给剪映预览/导出留出余量。<=0 表示不限。
 - ``JY_GPU_SLOT_TIMEOUT``：排队上限秒数，默认 120，超时走 CPU。
 - ``JY_GPU_MIN_FREE_MB``：nvidia-smi 报告的空闲显存低于该值时走 CPU，默认 768。
-- ``JY_GPU_DECODE_CODECS``：走 CUDA 解码的视频编码格式，逗号分隔，默认 ``hevc``；
-  ``*`` 表示不限。2026-10-10 实测：HEVC 稳定性检测 GPU 约快 1.4 倍；H.264 在
-  ``-threads 1`` 下 GPU 只有 CPU 的 0.5–0.95 倍。
-- ``JY_GPU_SINGLE_FRAME``：1 时单帧抽取也尝试 CUDA。默认关闭：CUDA 初始化的
-  固定开销大于单帧收益（实测 0.7–1.0 倍）。
+- ``JY_GPU_DECODE_CODECS``：走 CUDA 解码的视频编码格式，逗号分隔；默认 ``*``
+  （全部格式走 GPU）。设 ``hevc`` 等可收窄。显存不足 / 槽位超时 / 初始化失败
+  仍回退 CPU。
+- ``JY_GPU_SINGLE_FRAME``：单帧抽取是否尝试 CUDA。默认开启；设 ``0/false/off``
+  可关掉。
 - ``JY_GPU_CALL_LOG``：逐次调用 JSONL 路径；``set_call_log`` 显式设置时优先。
 """
 from __future__ import annotations
@@ -215,15 +215,19 @@ def gpu_slot(kind: str = "decode") -> Iterator[SlotHandle]:
 
 
 def decode_codecs() -> Optional[set[str]]:
-    """允许 CUDA 解码的编码格式；None 表示不限。"""
-    raw = os.environ.get("JY_GPU_DECODE_CODECS", "hevc").strip().lower()
+    """允许 CUDA 解码的编码格式；None 表示不限。默认全部走 GPU。"""
+    raw = os.environ.get("JY_GPU_DECODE_CODECS", "*").strip().lower()
     if raw in {"*", "all", "any"}:
         return None
     return {item.strip() for item in raw.split(",") if item.strip()}
 
 
 def single_frame_gpu() -> bool:
-    return os.environ.get("JY_GPU_SINGLE_FRAME", "").strip().lower() in {"1", "true", "yes", "on"}
+    """单帧抽取默认尝试 CUDA；仅显式 ``0/false/off`` 时强制 CPU。"""
+    raw = os.environ.get("JY_GPU_SINGLE_FRAME", "1").strip().lower()
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return True
 
 
 _codec_cache: dict[str, Optional[str]] = {}

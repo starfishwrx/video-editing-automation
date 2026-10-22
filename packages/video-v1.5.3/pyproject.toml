@@ -1,6 +1,6 @@
 [project]
 name = "video-automation"
-version = "1.5.3"
+version = "1.5.6"
 description = "Jianying / Doubao video automation skill pack (orchestrator + editor + tools)"
 readme = "README.md"
 requires-python = ">=3.11,<3.13"
