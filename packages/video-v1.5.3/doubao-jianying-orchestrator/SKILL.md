@@ -15,6 +15,9 @@ PASS and does not replace existing delivery gates.
 [references/production_quality_and_lessons.md](references/production_quality_and_lessons.md)。
 formal 不得用 settled/lead_in/黑屏冒充完整动作；派生卖点标签不是视觉重看。
 
+近期人工审稿对应的打分、选镜与实验组句行为见包根
+`docs/SELECTION_REVIEW_20261022.md`。语义观察和实际窗口先于去重；包装标称只支持对应标称，不替代功能实验。
+
 这是视频自动化执行引擎，不包含业务账号、机器路径或生产日志。
 
 草稿素材丢失、NAS/ZIP 交付或加密历史稿恢复，先读

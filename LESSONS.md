@@ -19,6 +19,15 @@
 
 ## 已有条目（从代码注释与 references 中回填的种子，hits 按已知次数）
 
+### L-20261022-02 新版本必须回收已验证的选镜热修
+- status: OPEN
+- hits: 1
+- 模块: visual-matching
+- 现象: 新候选沿用旧规则，正确的抽数/层数候选被旧闸门挡住，开场展示提前消耗后续直证。
+- 根因: 工具包版本升级与业务规则回流分离；排序、复用、场景相位和最终语义门采用不同口径。
+- 以后怎么做: 发版对照人工审稿案例与已验证修复，冻结文案、观察、模型响应及真实音频回放；验证候选实际窗口，缺证不得靠抬分通过。多镜组合共享证据门，明确反证在所有兜底前排除。
+- 证据: `packages/video-v1.5.3/docs/SELECTION_REVIEW_20261022.md`、`test_v156_selection_feedback.py`、`test_v156_feedback_semantics.py`。
+
 ### L-20261022-01 视觉默认直连后 Codex 单测必须显式钉 transport
 - status: OPEN
 - hits: 1

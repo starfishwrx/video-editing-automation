@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a deterministic manifest for the video-v1.5.3 release package."""
+"""Build a deterministic manifest for the version declared by this package."""
 from __future__ import annotations
 
 import hashlib
@@ -48,6 +48,9 @@ def tree_hash(items: list[Path]) -> str:
 
 
 def main() -> int:
+    version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+    if not version:
+        raise ValueError("PACKAGE_VERSION_MISSING")
     items = files()
     lines = [f"{sha256(path)}  {path.relative_to(ROOT).as_posix()}" for path in items]
     (ROOT / "PACKAGE_CONTENTS.sha256").write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
@@ -56,8 +59,8 @@ def main() -> int:
         old = json.loads((ROOT / "release-manifest.json").read_text(encoding="utf-8"))
     manifest = {
         "schema_version": 1,
-        "release_id": "video-v1.5.3",
-        "version": "1.5.3",
+        "release_id": "video-v" + version,
+        "version": version,
         "tree_hash_algorithm": "video-release-tree-v1",
         "source_sha256": tree_hash(items),
         "file_count": len(items),

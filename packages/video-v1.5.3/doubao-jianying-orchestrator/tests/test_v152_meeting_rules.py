@@ -107,7 +107,7 @@ class RulepackTests(unittest.TestCase):
         self.assertEqual(rulepack.scene_for(rules, "这款很好用",
                                             {"pointing_to_text": True})["id"], "point_front")
         self.assertEqual([s["id"] for s in rulepack.load("zhipin")["scenes"]],
-                         ["stack_product", "show_product", "usage_action"])
+                         ["stack_product", "show_product", "usage_action", "fluorescence"])
 
 
 class WasteTrimTests(unittest.TestCase):
@@ -1002,7 +1002,7 @@ class ExperimentGroupChainTests(unittest.TestCase):
         self.assertEqual(row["status"], "applied")
         self.assertEqual(row["shot_id"], "pool1")
         self.assertEqual([(a["shot_id"], a["source"]) for a in row["attempts"]],
-                         [("s1", "selected"), ("pool1", "pool_search")])
+                         [("pool1", "pool_search")])
         first, second = matched["manifest"]["segments"][:2]
         self.assertEqual({first["video"], second["video"]}, {"D:/m/full.mp4"})
 

@@ -1304,7 +1304,7 @@ class FallbackPoolTests(unittest.TestCase):
                       "`restrict_fallback` 未生效（demo_actions.fallback_allowed）")
 
     def test_related_product_closeup_is_explicit_degraded_fallback(self):
-        """功能卖点没有动作证据时，相关产品特写可承接但必须留痕。"""
+        """功能句相关特写保留作诊断，正式模式必须同时阻断写稿。"""
         from orchestrator import shot_analyzer as sa
         shots = [_fallback_shot(
             1, "product_display", "纸张面层特写，展示柔软的压花纹理",
@@ -1312,7 +1312,8 @@ class FallbackPoolTests(unittest.TestCase):
         res = sa.match_manifest(_fallback_manifest("面层柔软", seconds=2.0),
                                 {"shots": shots, "semantic_matches": []})
 
-        self.assertTrue(res["ok"])
+        self.assertFalse(res["ok"])
+        self.assertIn("FORMAL_EVIDENCE_REQUIRED", [p["type"] for p in res["pending_items"]])
         self.assertEqual(len(res["segments"]), 1)
         self.assertTrue(res["segments"][0]["degraded_no_match"])
         self.assertEqual(res["degraded_fallback_count"], 1)

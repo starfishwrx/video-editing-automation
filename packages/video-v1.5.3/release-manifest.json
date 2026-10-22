@@ -6,7 +6,7 @@
     "machine-specific paths",
     "knowledge-base bodies"
   ],
-  "file_count": 177,
+  "file_count": 182,
   "files": [
     {
       "path": ".gitignore",
@@ -22,7 +22,7 @@
     },
     {
       "path": "README.md",
-      "sha256": "ebdfab2436bf9c2374bc89a0c985c1d8371ca98f6b7665172a6d317a528c6422"
+      "sha256": "f98dfe89edcb1252ca081cdba44b1f41fd019dd0ebed35a895b2e96dcd8d3b6d"
     },
     {
       "path": "RULES.md",
@@ -30,15 +30,15 @@
     },
     {
       "path": "SKILL_PACKAGE.json",
-      "sha256": "6753a564732ca224b229f0c81c49d532749968e3e4c10ad41231ca946f1af5a3"
+      "sha256": "7caed89c291abf5e2ca81548bb282574df5d2f34274634d6aa75f432648e2a36"
     },
     {
       "path": "VERSION",
-      "sha256": "c03e3824001f39b9518249b8d6522422fc4de7227e12a568c0164662b03b7758"
+      "sha256": "dab64e06c0817d77b4f887261832cbb34ba023cac7c74d72d81068553652d0c5"
     },
     {
       "path": "WINDOWS_VIDEO_CLOSED_LOOP_RULES_20260930.json",
-      "sha256": "fb7064bf94f471d8cfa9df8af0667b160c9f1b9d8c0e9814f5bfdd91966349d9"
+      "sha256": "75902be5bcbe8219571386f12cda370b5b8a0d732cd6efa2a4e4f3c23cda0abf"
     },
     {
       "path": "batch_worker.py",
@@ -47,6 +47,10 @@
     {
       "path": "closed_loop.py",
       "sha256": "fb6da0c50fac67e7d2e12599437702876ddcfb8ab59fc9fa0b0411a6997905c0"
+    },
+    {
+      "path": "docs/SELECTION_REVIEW_20261022.md",
+      "sha256": "a4d26afd8d6c0d7588760397773891af38a93751be4d07843e7b5026f4fb222c"
     },
     {
       "path": "docs/UPDATES_20261013-16.md",
@@ -58,23 +62,23 @@
     },
     {
       "path": "doubao-jianying-orchestrator/CHANGELOG.md",
-      "sha256": "94896d67508a00c47ee2cb696685c0fdb121ee87e2ee74bb33cda2f4af3fd940"
+      "sha256": "4bf9390f30b5ae82bd68c9d0bdbd910de5d272d3e1403cf80af24bbb65540245"
     },
     {
       "path": "doubao-jianying-orchestrator/SKILL.md",
-      "sha256": "ac43369744e7bdd446681cd5ac67d45edc002f3246dbab1358085513b81a3a39"
+      "sha256": "f535c574d3154cea7b4289d195d762d510eac0b84e7d8ef1048b1ef72668abe5"
     },
     {
       "path": "doubao-jianying-orchestrator/VERSION",
-      "sha256": "c03e3824001f39b9518249b8d6522422fc4de7227e12a568c0164662b03b7758"
+      "sha256": "dab64e06c0817d77b4f887261832cbb34ba023cac7c74d72d81068553652d0c5"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/VERSION",
-      "sha256": "c03e3824001f39b9518249b8d6522422fc4de7227e12a568c0164662b03b7758"
+      "sha256": "dab64e06c0817d77b4f887261832cbb34ba023cac7c74d72d81068553652d0c5"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/__init__.py",
-      "sha256": "aa4286c15d9cfd52a823abecf498d693fbf46b3dcbe942b1e4ff7d35f9afb717"
+      "sha256": "9641acb61339e450857e2d602111bdb3b7ff38a580d2fe7846831a1ce486cbd3"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/audio_loudness.py",
@@ -94,7 +98,7 @@
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/demo_actions.py",
-      "sha256": "2a2e3ddcbb959b3ebc152f9820cba7f5d43be59fd5f55f1311e7deb6eb76a76d"
+      "sha256": "e1dc0a5b1a287ab91434aafd5c419549038646bfb91e5f044e4f8e29ab052f34"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/diagnostics.py",
@@ -126,7 +130,7 @@
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/gpu_runtime.py",
-      "sha256": "d5e64c4c555265c414c87c57a7e6d48ecec7b739250b531951d916101a53cfe3"
+      "sha256": "a81905bb00c7416e91235d69ed987bc916c1716704687925f39c6f1bed51ef01"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/json_extract.py",
@@ -158,7 +162,7 @@
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/rulepack.py",
-      "sha256": "834995ec04ee7c6b5e05e5c97a22f8dad001daf81b3263b10a92954d65e3593e"
+      "sha256": "4d49172e9b0c062fa5e9b6be355266b7c408937c1c89e0824b2b6f0bc21fa8c5"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/rules/global.json",
@@ -166,15 +170,15 @@
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/rules/weipin.json",
-      "sha256": "f0d22625d33431020e5d40465e4c3c4c29b3bdc19e2082fe03115b08f8fbaf11"
+      "sha256": "3b84519df21e9b262f5e16002f71b27041ae6c3c0fc57142d1a908a795408287"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/rules/zhipin.json",
-      "sha256": "069152e3c5df5e692a6fc910a8f2ce0ab295a28e02706f7ccf3bc82599f0fb84"
+      "sha256": "da6f178f466bb367a0d4c62cbac86dd5ca0db70430bafe3ec768a27abbd95258"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/scene_rules.py",
-      "sha256": "b8712fc45b93509313a4c22fad4ae117a8e1d97dd590dc78221093cf1f0e2cfe"
+      "sha256": "97d23cb766b9338e8b27dbde11576dd54612a790b58e92a958bd110bf5266bbb"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/script_polish.py",
@@ -182,7 +186,7 @@
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/semantic_gate.py",
-      "sha256": "c7e71c2a5337ca463bbdc115cc0aad3a5e23f339e8e36a162e9a2d8f70f560f1"
+      "sha256": "ee6a09820842abe3c7b35705b3e3b0fcac0864f1a2498c95d5c97483c1b9eec5"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/ship_distribute.py",
@@ -190,7 +194,7 @@
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/shot_analyzer.py",
-      "sha256": "ddface1aaf4d84bbcf97a907daf689910d5f0ea5b72af9895e4ce25b5fcc235a"
+      "sha256": "4e7ae14320fc9513bb8a6b4201e84df85d53cb02c842e8f3daa9b492dde1bcc9"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/shot_notes.py",
@@ -222,7 +226,7 @@
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/vision_analyzer.py",
-      "sha256": "2deb4f4586bf7d3a7d2f1567abe7df42b7b6757cf6ae56fc0f67fc6f35faa29d"
+      "sha256": "c7dd56a45ab40618cba3edd95690dab3299e38dd42c613ebc1bd83961dde76ab"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/visual_match.py",
@@ -258,7 +262,7 @@
     },
     {
       "path": "doubao-jianying-orchestrator/references/runtime_contract.md",
-      "sha256": "14179cc41214852a0ffa80216e4c4abc36db06a2c03a3bf72a2844ec101b2b28"
+      "sha256": "4c5f65048f4689821a0c701c5e9256821c6c156d204ce4906217813b22bee44b"
     },
     {
       "path": "doubao-jianying-orchestrator/references/validated_fix_to_release.md",
@@ -274,7 +278,7 @@
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_codex_invocation.py",
-      "sha256": "a1fc0dec3fe4e11208721ba20edcc78d4bbe62388680c010e14f9c1eb5e43141"
+      "sha256": "073ceae7dec0a20d04e2c044ecf0255e974f4e18a9c6f1024a02e27a006a5a56"
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_file_safety.py",
@@ -282,7 +286,7 @@
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_gpu_runtime.py",
-      "sha256": "72c220af81ba791a6b1154b95a869b95018c6c887f14f57c8840fcdf7fe49c70"
+      "sha256": "14f44d9d6d64ef317458592e63db5cb830debe58f183b51fdc618edaeedc3abf"
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_resource_profile.py",
@@ -294,15 +298,15 @@
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_task_control.py",
-      "sha256": "ba5d571fb6ca42ad5dbb2e1bcb3d549df3937d75ce7bcdce22d25ea9a0d9473f"
+      "sha256": "148b5782b5ebd33a1897e587695fb63e9aa13fc30317f3439e124a396a6a2c9f"
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_timing_contract.py",
-      "sha256": "8ab26ac4684d984fde3ad865e49d298981d988e92078b2db442f98863cf3c727"
+      "sha256": "18312cf633ada44ddb4366b37d8f440cd5f27f50f6a7f6a662bc164cea0643f4"
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_v152_meeting_rules.py",
-      "sha256": "d8c05a07efffde381c4a3b3c609a627754f1590acfa50b083a0e1b4980cbf45f"
+      "sha256": "3381b5d71bf0bb571d181480be6872b658e6b8051581b98edb94394a1366da23"
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_v152_r18_review.py",
@@ -318,7 +322,15 @@
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_v152_weipin_feedback.py",
-      "sha256": "9b6c822b7fb6d390a1b3df9868a7ffa1a18a0e0866ab8736e705e182cdcd1e9d"
+      "sha256": "ac70677d166e9856086b1b0076a43127db1b227135cce49fe57d11db8fa789cb"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/tests/test_v156_feedback_semantics.py",
+      "sha256": "8ea3a2d8610ebb97b2220f8c1c11237e154e9fcff0c18463e32e5f8796b87beb"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/tests/test_v156_selection_feedback.py",
+      "sha256": "7ac5853ab60b1b53f117170e3c35abf2c4b0f818e43856807dff07a6d8cde359"
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_video_decode.py",
@@ -337,6 +349,10 @@
       "sha256": "48816c77a4d95e66c9235e9995dbe74b2779d91611dd1f7f2bf86a5361d97e56"
     },
     {
+      "path": "doubao-jianying-orchestrator/tests/test_volc_glm_vision.py",
+      "sha256": "f545b3dc36fd52dde26e31f9e7c7e6e873e5aa50cb370ab84be9b63646be06ee"
+    },
+    {
       "path": "gold-reference.json",
       "sha256": "8051496bbd34e2b2d6658d1be0d1734248bf2ad3fc7df4e5bc6924b8a2c212d5"
     },
@@ -346,7 +362,7 @@
     },
     {
       "path": "jianying-editor/VERSION",
-      "sha256": "c03e3824001f39b9518249b8d6522422fc4de7227e12a568c0164662b03b7758"
+      "sha256": "dab64e06c0817d77b4f887261832cbb34ba023cac7c74d72d81068553652d0c5"
     },
     {
       "path": "jianying-editor/scripts/cloud_manager.py",
@@ -618,11 +634,11 @@
     },
     {
       "path": "pyproject.toml",
-      "sha256": "43720c4de6c4cc23ec96226533c03b330f83b9146b5c1955d3b26e9f65c60ab4"
+      "sha256": "427064a722daad6bbacdd749dec76590b424ab66b2e105c1d21d41fc13b6b779"
     },
     {
       "path": "run_task.template.ps1",
-      "sha256": "d35650118ac98f507c782af7c3cbedb463420beaa8a13ce741f52ec0150e999f"
+      "sha256": "b7f9806ffa6c993fc9f543b7fa31ede683de4309a685b10f57441fa90ca11dca"
     },
     {
       "path": "scripts/uv_sync.ps1",
@@ -650,7 +666,11 @@
     },
     {
       "path": "tests/test_release_1_4_0.py",
-      "sha256": "bbee7e496aebfe1e6b22698a1638ec8c32e8e5c720b9a3cf981ae54fd266d241"
+      "sha256": "38e1192e70cd860a277f046cabbd2af25e9dfee103e5695ae5a4013b1157fd3e"
+    },
+    {
+      "path": "tests/test_release_version.py",
+      "sha256": "ea20cdb1dc67771def11795d03b9cd7e54f72b0a5aff64d74367d2a9903517e7"
     },
     {
       "path": "tests/test_visual_governance_rules.py",
@@ -717,9 +737,9 @@
       "sha256": "fbf91e728d899ae5ea11a92a87f7e9372db3d1e4d70d6c92daeb380f452a7778"
     }
   ],
-  "release_id": "video-v1.5.3",
+  "release_id": "video-v1.5.6",
   "schema_version": 1,
-  "source_sha256": "8ff892569d560e1f4122406489af8c2fc7c8537d21fef14677be7e042f8f2184",
+  "source_sha256": "72a3d3b6d0b3fe3cd3ee96cb466d23d11b8877ac7ce71677fad7a2ed4d1cdd43",
   "tree_hash_algorithm": "video-release-tree-v1",
   "version": "1.5.6",
   "visual_policy_version": "1.4.1"

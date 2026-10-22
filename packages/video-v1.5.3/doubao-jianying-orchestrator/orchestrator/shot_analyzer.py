@@ -768,7 +768,8 @@ def _candidate_score(claim: str, shot: dict[str, Any], requirements: Any = None)
 
 
 def _variant_tiebreak(rows: list[dict[str, Any]], priority: Callable[[dict[str, Any]], tuple],
-                      *, variant_index: int, score_tolerance: int) -> dict[str, Any] | None:
+                      *, variant_index: int, score_tolerance: int,
+                      quality_components: int | None = None) -> dict[str, Any] | None:
     """Rotate only near-tied candidates with the same evidence/match tier.
 
     This gives same-script drafts a visible, deterministic difference without
@@ -777,6 +778,15 @@ def _variant_tiebreak(rows: list[dict[str, Any]], priority: Callable[[dict[str, 
     """
     if not rows:
         return None
+    if quality_components is not None:
+        ordered = _ordered_candidates(rows, priority, score_tolerance=score_tolerance,
+                                      quality_components=quality_components)
+        first = ordered[0]
+        band = priority(first)[:quality_components]
+        best_score = max(priority(row)[-1] for row in ordered if priority(row)[:quality_components] == band)
+        pool = [row for row in ordered if priority(row)[:quality_components] == band
+                and best_score - priority(row)[-1] <= max(0, int(score_tolerance))]
+        return pool[int(variant_index) % len(pool)]
     ordered = sorted(rows, key=priority, reverse=True)
     best = ordered[0]
     best_priority = priority(best)
@@ -799,6 +809,32 @@ def _variant_tiebreak(rows: list[dict[str, Any]], priority: Callable[[dict[str, 
         str(row.get("shot_id") or ""),
     ))
     return pool[int(variant_index) % len(pool)]
+
+
+def _ordered_candidates(rows, priority, *, score_tolerance, quality_components):
+    """Diversity can break ties only inside one evidence and semantic band.
+
+    Construct each band from its highest score, not pairwise differences,
+    which could drift arbitrarily far through a chain of near neighbours.
+    The displayed ranking and final selector consume the same ordering.
+    """
+    pending = sorted(rows, key=lambda row: (bool(row.get("eligible", True)),
+        priority(row)[:quality_components], priority(row)[-1]), reverse=True)
+    ordered = []
+    while pending:
+        head = pending[0]
+        base = priority(head)[:quality_components]
+        eligible = bool(head.get("eligible", True))
+        top = priority(head)[-1]
+        band = [row for row in pending if priority(row)[:quality_components] == base
+                and bool(row.get("eligible", True)) == eligible
+                and top - priority(row)[-1] <= max(0, int(score_tolerance))]
+        band.sort(key=lambda row: (priority(row)[quality_components:-1], priority(row)[-1],
+                                   str(row.get("shot_id", ""))), reverse=True)
+        ordered.extend(band)
+        consumed = {id(row) for row in band}
+        pending = [row for row in pending if id(row) not in consumed]
+    return ordered
 
 
 def _look_key(shot: dict[str, Any] | None) -> str:
@@ -885,6 +921,9 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
         reserve_claims = demo_actions.requirements_for(reserve_text, reserve_claim, category)
         reserve_contract = _contract(reserve_text, reserve_claim)
         reserve_rows: set[str] = set()
+        if reserve_contract.get("kind") != "functional" and not reserve_claims:
+            direct_reservations[reserve_index] = reserve_rows
+            continue
         reserve_minimum = 70 if reserve_index in ai_matches else 100
         for reserve_shot in shots:
             reserve_score, reserve_matched = _candidate_score(
@@ -892,6 +931,8 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
                 reserve_segment.get("visual_requirements", reserve_segment.get("required_visuals")))
             reserve_id = str(reserve_shot.get("shot_id") or "")
             ai_row = ai_matches.get(reserve_index, {}).get(reserve_id)
+            if ai_row is not None and ai_row.get("contradictions"):
+                continue
             if ai_row is not None:
                 ai_claims = semantic_gate.normalize_tags(ai_row.get("matched_claims"))
                 reserve_score = (max(0, min(100, int(_number(ai_row.get("score"), 0))))
@@ -905,7 +946,7 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
             gate = demo_actions.judge(reserve_shot, reserve_claims)
             reserve_cta_ok, _reserve_cta_reason = demo_actions.cta_quantity_eligible(
                 reserve_shot, reserve_text, category)
-            if packaging.get("ok") and not reserve_claims:
+            if packaging.get("ok"):
                 gate = {"status": "ok", "ok": True, "reason": "PACKAGING_CLAIM_DIRECT",
                         "packaging_claim": packaging}
             if (gate.get("ok") and reserve_cta_ok and reserve_score >= reserve_minimum
@@ -913,6 +954,27 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
                 reserve_rows.add(reserve_id)
         direct_reservations[reserve_index] = reserve_rows
     previous_source = ""
+    # 用与相位重排相同的句组边界预留连续实验，避免逐句复用限制先把它拆散。
+    from . import rulepack, scene_rules
+    context_rows = []
+    for context_index, context_seg in enumerate(sentence_rows, 1):
+        context_audio, _ = timing_contract.duration_for(
+            narration_timing, context_index,
+            key=timing_contract.sentence_key(context_seg, context_index), segment=context_seg)
+        context_rows.append({**context_seg, "video": "context_pending",
+                             "audio_duration_us": context_audio})
+    context_groups = scene_rules._split_groups(
+        context_rows, rulepack.for_manifest(manifest), {}, category=category)
+    context_by_index: dict[int, dict[str, Any]] = {}
+    for context_group in context_groups:
+        if len(context_group["positions"]) < 2 or context_group["scene"].get("id") == "absorb_test":
+            continue
+        if any(p + 1 in context_by_index for p in context_group["positions"]):
+            continue
+        context_group["key"] = f"{context_group['scene']['id']}:{context_group['positions'][0]}"
+        for context_position in context_group["positions"]:
+            context_by_index[context_position + 1] = context_group
+    context_holds: dict[str, str] = {}
     # 上一段采用的镜头本体（反重复新判据要读它的 setup_id / action_phase，
     # 光有 source 名不够 —— 同一条素材里不同机位属于不同 setup）。
     previous_shot: dict[str, Any] | None = None
@@ -962,6 +1024,13 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
             absorb_hold_id = ""
             absorb_hold_source = ""
         share_absorb = bool(absorb_hold_id) and in_absorb_run
+        context_group = context_by_index.get(index)
+        context_hold = context_holds.get(context_group["key"], "") if context_group else ""
+        display_contract = (
+            not _preview_delivery(manifest) and not functional and not required_claim_objs
+            and not semantic_gate.inferred_claim_tags(claim)
+            and not ({"cta", "quantity"} & set(intents))
+            and not any(k in text for k in demo_actions._FUNCTIONAL_ACTION_GUARD))
         ranked = []
         for shot in shots:
             shot = focus_on_topic(shot, contract)
@@ -984,18 +1053,27 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
                 score = (max(0, min(100, int(_number(ai_row.get("score"), 0))))
                          if ai_claims else 0)
                 matched = ai_claims
+                if ai_row.get("contradictions"):
+                    score, matched = 0, []
+            raw_score = score
+            score = max(0, min(100, score))
             packaging_claim = demo_actions.packaging_claim_direct(shot, claim)
             if packaging_claim.get("ok"):
                 score = max(score, 100)
                 if "PACKAGING_CLAIM_DIRECT" not in matched:
                     matched = [*matched, "PACKAGING_CLAIM_DIRECT"]
             source_video = str(shot.get("video", ""))
+            scene_continuation = bool(
+                context_hold and shot_id == context_hold and context_group
+                and rulepack.shot_has_visual(context_group["scene"], shot))
             reuse_count = source_use_counts.get(source_video, 0)
             reuse_reasons: list[str] = []
-            if shot_id in used_shot_ids and not (share_absorb and shot_id == absorb_hold_id):
+            if ai_row is not None and ai_row.get("contradictions"):
+                reuse_reasons.append("MODEL_CONTRADICTED")
+            if shot_id in used_shot_ids and not (scene_continuation or (share_absorb and shot_id == absorb_hold_id)):
                 reuse_reasons.append("exact_shot_already_used")
             if (reuse_count >= max_source_reuse
-                    and not (share_absorb and source_video == absorb_hold_source)):
+                    and not (scene_continuation or (share_absorb and source_video == absorb_hold_source))):
                 reuse_reasons.append("source_video_reuse_limit")
             # 功能句（抽取、不破、湿度、擦拭、冲散……）只收画面主题对得上的镜头，
             # 或 AI 逐句判过关的；纸箱、泛包装不能靠「没用过」「动作完整」混进来。
@@ -1005,7 +1083,10 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
             # 演示类主题（冲散、抽取……）不收「包装上印着可冲散字样」这种理由。
             # 画面正面演着口播否定的事实（不滴水却在挤水）时，AI 给多高分都不收。
             contradicted = demo_actions.contradiction(shot, contract)
-            if (functional and not fit and not contradicted and matched
+            if (functional and not fit and not contradicted
+                    and not demo_actions.topic_hard_excluded(shot, contract)
+                    and not any(t.get("id") in demo_actions.KEYWORD_LOCKED_TOPICS
+                                for t in contract.get("topics") or []) and matched
                     and ai_row is not None and score >= 70):
                 raw = ai_row.get("matched_claims")
                 raw = raw if isinstance(raw, list) else [raw]
@@ -1031,7 +1112,7 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
                     if retry.ok:
                         shot, window = narrowed, retry
             claim_gate = demo_actions.judge(shot, required_claim_objs)
-            if packaging_claim.get("ok") and not required_claim_objs:
+            if packaging_claim.get("ok"):
                 claim_gate = {"status": "ok", "ok": True,
                               "reason": "PACKAGING_CLAIM_DIRECT",
                               "packaging_claim": packaging_claim}
@@ -1041,9 +1122,15 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
             absorb_visual = bool(
                 absorb_scene is not None and rulepack.shot_has_visual(absorb_scene, shot))
             ranked.append({
-                "score": score, "shot_id": shot_id, "shot": shot, "matched": matched, "fit": fit,
+                "score": score, "raw_score": raw_score, "score_source": "model" if ai_row is not None else "rule",
+                "shot_id": shot_id, "shot": shot, "matched": matched, "fit": fit,
                 "source_video": source_video, "reuse_count_before": reuse_count,
                 "eligible": eligible, "reuse_block_reason": reuse_reasons,
+                "display_carry_ok": (display_contract and _audit_ready_row({"shot": shot})
+                                     and str(shot.get("role") or "") == "product_display"
+                                     and not demo_actions.is_empty_shot(shot)),
+                "scene_continuation": scene_continuation,
+                "scene_context_ok": bool(display_contract and scene_continuation),
                 "claim_gate": claim_gate,
                 "packaging_claim": packaging_claim,
                 "cta_visual_ok": cta_ok,
@@ -1058,75 +1145,6 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
                 "fits_narration": narration_fits(shot, text, manifest),
             })
 
-        # 相邻不得同源 —— v1.3.25 改为**硬约束**。用户定案：「重复可以两次，
-        # 但两个片段连在一起就不行」。
-        #
-        # 旧实现是排序偏好，且门槛写死 `row["score"] >= 100`，而 AI 匹配走
-        # 70 分制（见下方 `minimum_match_score = 70 if index in ai_matches`），
-        # 条件对 AI 匹配的句子恒为假 —— 等于这个开关从来没生效过。实测
-        # 2026-09-15 的「萌睡裤AI分镜测试」：18 段只用了 10 个素材，其中一个
-        # 源连用 4 次，且段 12→15 连着四段都是它。
-        #
-        # 现在的语义是「有替代就禁止相邻」：只有当同源之外不存在任何可用镜头
-        # 时才放行，避免把整句逼成 SHOT_NO_MATCH（那属于素材不足，应由
-        # SHOT_NO_MATCH 如实报告，而不是靠相邻重复凑数）。
-        adjacent_blocked = 0
-        if avoid_adjacent_source_repeat and previous_source:
-            has_other_source = any(r["eligible"] and r["source_video"] != previous_source
-                                   for r in ranked)
-            if has_other_source:
-                for r in ranked:
-                    if r["eligible"] and r["source_video"] == previous_source:
-                        r["eligible"] = False
-                        r["reuse_block_reason"] = [*r["reuse_block_reason"],
-                                                   "adjacent_source_repeat"]
-                        adjacent_blocked += 1
-        # DEMO_ACTIONS V0.2 §4（用户定案）：反重复判据从「同一素材」升级为
-        # 「同一机位 + 同一构图 + 同一动作阶段」。这样参考片 ref1#13→ref1#14
-        # 连续两镜拉伸（机位或阶段不同，属于「一个卖点配 2–4 个不同角度」的
-        # 正确做法）不会被误杀，而我方 12/21 镜的「木台排排包装 + 手推」
-        # （setup 相同、阶段同为 static）会被拦住。
-        #
-        # 与相邻同源同一条口径：**有替代才禁**，否则会为了这条规则把整句逼成
-        # SHOT_NO_MATCH —— 那属于素材不足，应如实上报而不是靠重复凑数。
-        setup_blocked = 0
-        if previous_shot is not None:
-            def _conflict(row: dict[str, Any]) -> bool:
-                return demo_actions.repeat_conflict(previous_shot, row["shot"])
-            if any(r["eligible"] and _conflict(r) for r in ranked) and \
-                    any(r["eligible"] and not _conflict(r) for r in ranked):
-                for r in ranked:
-                    if r["eligible"] and _conflict(r):
-                        r["eligible"] = False
-                        r["reuse_block_reason"] = [*r["reuse_block_reason"],
-                                                   "same_setup_same_phase"]
-                        setup_blocked += 1
-        ranked.sort(key=lambda row: (not row["eligible"], -row["score"], row["shot_id"]))
-        # DEMO_ACTIONS V0.2 §7：素材缺口按 **claim 粒度**在这里就登记，不等到
-        # 「没选中镜头」才报。一句话常常同时要求多条卖点，其中品牌/形态那条容易
-        # 满足、超薄那条可能根本无法证明 —— 整句一起判会让易满足的短路掉难的，
-        # 缺口就报不出来（回归 R7b）。
-        #
-        # 缺口照报（不静默），但**不因此把整句判死**：v1.3.24 曾硬阻断到零成片，
-        # 用户当时已否决。真正禁止的是拿包装展示/空镜去糊（见下方兜底池收紧）。
-        for gap_claim in demo_actions.unmet_claims(shots, required_claim_objs):
-            material_gaps.append(
-                demo_actions.material_gap(index, text, claim, [gap_claim], shots))
-        top = []
-        for row in ranked[:max(1, int(topk))]:
-            shot = row["shot"]
-            top.append({"shot_id": row["shot_id"], "score": row["score"], "matched_claims": row["matched"],
-                        "video": shot.get("video"), "source_start": shot.get("source_start"),
-                        "duration": shot.get("duration"), "description": shot.get("description"),
-                        "frame_path": shot.get("frame_path"), "status": shot.get("status"),
-                        "eligible": row["eligible"],
-                        "reuse_count_before": row["reuse_count_before"],
-                        "reuse_block_reason": row["reuse_block_reason"]})
-        recommendations.append({"index": index, "text": text, "claim_text": claim,
-                                "intent": primary_intent, "intents": intents,
-                                "top3": top, "adjacent_source_blocked": bool(adjacent_blocked),
-                                "same_setup_same_phase_blocked": int(setup_blocked),
-                                "required_claims": [c.as_dict() for c in required_claim_objs]})
         # Scores from the text matcher are 0-100; deterministic tag scores are
         # intentionally kept on the old 0/100 scale.  Treat an AI score of 70
         # or more as a qualifying semantic match, then still require the
@@ -1151,6 +1169,8 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
             现在退回 tier 0：这类句子只剩语义分一条路，必须达到
             minimum_match_score 才可用。
             """
+            if row.get("packaging_claim", {}).get("ok"):
+                return 2, "PACKAGING_CLAIM_DIRECT"
             if not required_claims:
                 return 0, ""
             blob = semantic_gate.shot_evidence_text(row["shot"])
@@ -1162,6 +1182,19 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
                 if hit:
                     return 1, f"{tag}←{hit}"
             return 0, ""
+
+        def _evidence_qualified(row: dict[str, Any]) -> bool:
+            claim_ok = bool(row["claim_gate"].get("ok")) or bool(row.get("absorb_visual"))
+            evidence_ok = True
+            if required_claims:
+                blob = semantic_gate.shot_evidence_text(row["shot"])
+                supported = [semantic_gate.claim_supported(tag, blob) for tag in required_claims]
+                evidence_ok = (all(supported)
+                               or (functional and row.get("fit", 0) > 0 and any(supported))
+                               or bool(row.get("absorb_visual"))
+                               or bool(row.get("packaging_claim", {}).get("ok")))
+            return (_audit_ready_row(row) and claim_ok and row.get("cta_visual_ok", True)
+                    and evidence_ok)
 
         def _priority(row: dict[str, Any]) -> tuple:
             """选镜优先级（v1.3.27 结构修复后的口径）。
@@ -1181,25 +1214,12 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
             tier, _basis = _tier(row)
             semantic_ok = row["score"] >= minimum_match_score
             window_ok = bool(row["window_ok"])
-            # DEMO_ACTIONS V0.2 闸门是**必要条件**，不参与打分：
-            # 空镜一票否决；证据要求为真的句子必须拿到 role>=要求 且 strength=A
-            # 的动作。旧分析结果缺字段时 judge() 返回 status="ungated"/ok=True，
-            # 行为与旧版一致，但覆盖率会写进报告。
-            claim_ok = bool(row["claim_gate"].get("ok")) or bool(row.get("absorb_visual"))
-            cta_ok = bool(row.get("cta_visual_ok", True))
-            # 语义卖点（吸水、厚实等）必须在镜头证据文本里找得到直接或关联标签。
-            # 只靠模型分数会选中正式证据闸门随后拒绝的镜头。
-            evidence_ok = True
-            if required_claims:
-                blob = semantic_gate.shot_evidence_text(row["shot"])
-                supported = [semantic_gate.claim_supported(tag, blob) for tag in required_claims]
-                # 一句讲两个卖点（「厚实」+「不容易破」）时，主题对得上的镜头证明其中一个也能用，
-                # 不要求一个镜头同时拍全；没拍到的那个照样走缺口报告。
-                evidence_ok = (all(supported)
-                               or (functional and row.get("fit", 0) > 0 and any(supported))
-                               or bool(row.get("absorb_visual")))
-            usable = claim_ok and cta_ok and window_ok and evidence_ok and (semantic_ok or tier > 0)
+            usable = (_evidence_qualified(row) and window_ok
+                      and (semantic_ok or tier > 0 or row.get("display_carry_ok", False)
+                                           or row.get("scene_context_ok", False)))
             role_fit = demo_actions.intent_role_score(row["shot"], intents)
+            if row.get("display_carry_ok"):
+                role_fit = 6 + sum(demo_actions.opening_display_rank(row["shot"]))
             # 多样性只做同等匹配候选的最后一级 tie-break：优先换源、换机位/构图
             # 和换动作阶段，但永远排在 claim/window/semantic/tier 之后，不能为了
             # “看起来丰富”牺牲脚本匹配度。
@@ -1228,19 +1248,114 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
             used = ledger_usage.get(ledger_key)
             fresh = 0 if used == usage_ledger.SAME_TASK else 1
             spread = 0 if demo_sentence else -ledger_others.get(ledger_key, 0)
-            penalty = (usage_ledger.OTHER_TASK_PENALTY
-                       if demo_sentence and used == usage_ledger.OTHER_TASK else 0)
             # 本片里相似画面比跨版本复用更显眼，所以排在台账之前。
             novel = int(not (avoid_similar and _look_key(row["shot"]) in used_looks))
             # 动作分段里真有这句主题的动作（抽纸、擦手背、碎散），比只靠标签沾边的镜头靠前。
             located = int(bool(functional and demo_actions.topic_segments(row["shot"], contract)))
-            return (int(usable), int(semantic_ok and window_ok), int(window_ok and tier > 0),
-                    int(semantic_ok), int(tier > 0), int(row.get("fit", 1)), located, int(role_fit),
-                    int(phase_fit), novel, fresh, spread, int(diversity_fit), row["score"] - penalty)
+            topic_ids = {t.get("id") for t in contract.get("topics") or []}
+            pack_direct = int(bool((row.get("packaging_claim") or {}).get("ok")))
+            surface_rank = (demo_actions.surface_action_rank(row["shot"])
+                            if topic_ids & {"surface", "soft", "chafe"} else 0)
+            lint_rank = (demo_actions.lint_action_rank(row["shot"])
+                         if "lint_free" in topic_ids else 0)
+            count_rank = (demo_actions.count_readable_rank(row["shot"], contract)
+                          if topic_ids & {"count", "layers", "sheet_count"} else 0)
+            return (int(usable), int(row.get("scene_continuation", False)),
+                    int(semantic_ok and window_ok), int(window_ok and tier > 0),
+                    int(semantic_ok), tier, int(row.get("fit", 1)), pack_direct, count_rank, lint_rank, surface_rank, located, int(role_fit),
+                    int(phase_fit), novel, fresh, spread, int(diversity_fit), row["score"])
 
+
+        # 相邻不得同源 —— v1.3.25 改为**硬约束**。用户定案：「重复可以两次，
+        # 但两个片段连在一起就不行」。
+        #
+        # 旧实现是排序偏好，且门槛写死 `row["score"] >= 100`，而 AI 匹配走
+        # 70 分制（见下方 `minimum_match_score = 70 if index in ai_matches`），
+        # 条件对 AI 匹配的句子恒为假 —— 等于这个开关从来没生效过。实测
+        # 2026-09-15 的「萌睡裤AI分镜测试」：18 段只用了 10 个素材，其中一个
+        # 源连用 4 次，且段 12→15 连着四段都是它。
+        #
+        # 现在的语义是「有替代就禁止相邻」：只有当同源之外不存在任何可用镜头
+        # 时才放行，避免把整句逼成 SHOT_NO_MATCH（那属于素材不足，应由
+        # SHOT_NO_MATCH 如实报告，而不是靠相邻重复凑数）。
+        def _valid_alternative(other: dict[str, Any], current: dict[str, Any]) -> bool:
+            if not other["eligible"] or not _priority(other)[0]:
+                return False
+            other_quality, current_quality = _priority(other)[:14], _priority(current)[:14]
+            return (other_quality > current_quality
+                    or (other_quality == current_quality
+                        and current["score"] - other["score"] <= variant_tolerance))
+
+        # 开场展示有替代时，不提前用掉后面层数/抽数等功能句的已知直证。
+        future_reserved = set().union(*(direct_reservations.get(i, set())
+                                        for i in range(index + 1, len(sentence_rows) + 1)))
+        if display_contract and any(r["eligible"] and _priority(r)[0]
+                                    and r["shot_id"] not in future_reserved for r in ranked):
+            for row in ranked:
+                if row["eligible"] and row["shot_id"] in future_reserved:
+                    row["eligible"] = False
+                    row["reuse_block_reason"].append("reserved_for_later_functional_sentence")
+
+        adjacent_blocked = 0
+        if avoid_adjacent_source_repeat and previous_source and not (share_absorb or context_hold):
+            for r in ranked:
+                if (r["eligible"] and r["source_video"] == previous_source
+                        and any(other["source_video"] != previous_source
+                                and _valid_alternative(other, r) for other in ranked)):
+                    r["eligible"] = False
+                    r["reuse_block_reason"] = [*r["reuse_block_reason"], "adjacent_source_repeat"]
+                    adjacent_blocked += 1
+        # DEMO_ACTIONS V0.2 §4（用户定案）：反重复判据从「同一素材」升级为
+        # 「同一机位 + 同一构图 + 同一动作阶段」。这样参考片 ref1#13→ref1#14
+        # 连续两镜拉伸（机位或阶段不同，属于「一个卖点配 2–4 个不同角度」的
+        # 正确做法）不会被误杀，而我方 12/21 镜的「木台排排包装 + 手推」
+        # （setup 相同、阶段同为 static）会被拦住。
+        #
+        # 与相邻同源同一条口径：**有替代才禁**，否则会为了这条规则把整句逼成
+        # SHOT_NO_MATCH —— 那属于素材不足，应如实上报而不是靠重复凑数。
+        setup_blocked = 0
+        if previous_shot is not None and not (share_absorb or context_hold):
+            def _conflict(row: dict[str, Any]) -> bool:
+                return demo_actions.repeat_conflict(previous_shot, row["shot"])
+            for r in ranked:
+                if (r["eligible"] and _conflict(r)
+                        and any(not _conflict(other) and _valid_alternative(other, r)
+                                for other in ranked)):
+                    r["eligible"] = False
+                    r["reuse_block_reason"] = [*r["reuse_block_reason"], "same_setup_same_phase"]
+                    setup_blocked += 1
+        ranked = _ordered_candidates(ranked, _priority, score_tolerance=variant_tolerance, quality_components=14)
+        # DEMO_ACTIONS V0.2 §7：素材缺口按 **claim 粒度**在这里就登记，不等到
+        # 「没选中镜头」才报。一句话常常同时要求多条卖点，其中品牌/形态那条容易
+        # 满足、超薄那条可能根本无法证明 —— 整句一起判会让易满足的短路掉难的，
+        # 缺口就报不出来（回归 R7b）。
+        #
+        # 缺口照报（不静默），但**不因此把整句判死**：v1.3.24 曾硬阻断到零成片，
+        # 用户当时已否决。真正禁止的是拿包装展示/空镜去糊（见下方兜底池收紧）。
+        for gap_claim in demo_actions.unmet_claims(shots, required_claim_objs):
+            material_gaps.append(
+                demo_actions.material_gap(index, text, claim, [gap_claim], shots))
+        top = []
+        for row in ranked[:max(1, int(topk))]:
+            shot = row["shot"]
+            top.append({"shot_id": row["shot_id"], "score": row["score"], "matched_claims": row["matched"],
+                        "video": shot.get("video"), "source_start": shot.get("source_start"),
+                        "duration": shot.get("duration"), "description": shot.get("description"),
+                        "frame_path": shot.get("frame_path"), "status": shot.get("status"),
+                        "eligible": row["eligible"], "usable": bool(_priority(row)[0]),
+                        "priority": list(_priority(row)), "score_source": row["score_source"],
+                        "raw_score": row["raw_score"], "window_reason": row["window_reason"],
+                        "claim_gate": row["claim_gate"], "cta_visual_ok": row["cta_visual_ok"],
+                        "reuse_count_before": row["reuse_count_before"],
+                        "reuse_block_reason": row["reuse_block_reason"]})
+        recommendations.append({"index": index, "text": text, "claim_text": claim,
+                                "intent": primary_intent, "intents": intents,
+                                "top3": top, "adjacent_source_blocked": bool(adjacent_blocked),
+                                "same_setup_same_phase_blocked": int(setup_blocked),
+                                "required_claims": [c.as_dict() for c in required_claim_objs]})
         eligible_good = _variant_tiebreak(
             [row for row in ranked if row["eligible"]], _priority,
-            variant_index=variant_index, score_tolerance=variant_tolerance)
+            variant_index=variant_index, score_tolerance=variant_tolerance, quality_components=14)
         duration_degraded = False
         if eligible_good is not None:
             if not _priority(eligible_good)[0]:
@@ -1257,7 +1372,7 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
                             if row["eligible"] and _audit_ready_row(row) and _priority(row)[0]]
             replacement = _variant_tiebreak(
                 ready_usable, _priority,
-                variant_index=variant_index, score_tolerance=variant_tolerance)
+                variant_index=variant_index, score_tolerance=variant_tolerance, quality_components=14)
             if replacement is not None:
                 eligible_good = replacement
         # 多镜解（定案第 6 条）：这一段由**几镜共同承担**，各段窗口解在 span_parts 里。
@@ -1348,9 +1463,12 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
             had_good = next((row for row in ranked if row["score"] >= minimum_match_score), None)
             # 复用上限在 preview/formal 都是硬约束。preview 不能因为要出整体草稿
             # 就绕过精确镜头、同源相邻和同机位同阶段规则；没有合资格画面时留黑。
+            reuse_reason_codes = {"exact_shot_already_used", "source_video_reuse_limit",
+                                  "adjacent_source_repeat", "same_setup_same_phase"}
             if had_good and all(
-                    not row["eligible"] for row in ranked if row["score"] >= minimum_match_score):
-                block_reasons = sorted({reason for row in ranked if row["score"] >= 100
+                    not row["eligible"] and reuse_reason_codes.intersection(row["reuse_block_reason"])
+                    for row in ranked if row["score"] >= minimum_match_score):
+                block_reasons = sorted({reason for row in ranked if row["score"] >= minimum_match_score
                                         for reason in row["reuse_block_reason"]})
                 if preview_mode:
                     _append_visual_missing(
@@ -1365,7 +1483,8 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
                                 "block_reasons": block_reasons, "candidates": top})
                 continue
             semantic_ok_rows = [row for row in ranked
-                                if row["eligible"] and row["score"] >= minimum_match_score]
+                                if row["eligible"] and row["score"] >= minimum_match_score
+                                and _evidence_qualified(row)]
             if semantic_ok_rows and not any(r["window_ok"] for r in semantic_ok_rows):
                 # 语义够、窗口全无解 —— 这就是本次定案要根治的场景。
                 #
@@ -1471,139 +1590,140 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
             #   · 句子**全部**卖点都要求直接证据时再收紧：不拿包装展示 / 场景 /
             #     隐喻 / 空镜充数，且闸门已判 blocked 的镜头也不捡回来（否则会
             #     出现「闸门说它证明不了，兜底又把它们捡回来」）。
-            fallback_pool = [row for row in ranked if row["eligible"]]
-            if required_claims:
-                fallback_pool = [
-                    row for row in fallback_pool
-                    if all(semantic_gate.claim_supported(
-                        tag, semantic_gate.shot_evidence_text(row["shot"]))
-                           for tag in required_claims)
-                ]
-            if "cta" in intents or "quantity" in intents:
-                fallback_pool = [row for row in fallback_pool
-                                 if row.get("cta_visual_ok", True)]
-                if not fallback_pool:
-                    material_gaps.append({
-                        "index": index,
-                        "type": "MATERIAL_GAP",
-                        "reason": "CTA_REQUIRES_MULTI_PACK_QUANTITY_SHOT",
-                        "text": text,
-                        "claim_text": claim,
-                        "message": "CTA/数量话术没有多包、成排、整箱或可见数量关系；保留旁白字幕，不硬插单包特写",
-                    })
-            if preview_mode:
-                # 预览的降级也必须是“相似的可用画面”：无卖点要求的句子不能
-                # 因为池里有任意包装镜头就被硬塞进去。真正没有关联镜头时走
-                # visual_missing，避免把不相干画面配到旁白上。
-                fallback_pool = [row for row in fallback_pool
-                                 if _tier(row)[0] > 0
-                                 or row["score"] >= minimum_match_score]
-        # 收紧池只在 formal 生效（2026-09-18 用户定案）：preview 下保留
-            # product_display/context 等“关键字级别关联”的展示类镜头参与兜底，
-            # 画面能展示卖点的镜头直接用 —— 不再因为「要求直接证据」就把池子
-            # 掏空（那正是「100抽大容量→C-ABSORB-CAPACITY」张冠李戴的场景）。
-            restrict_fallback = bool(evidence_reqs) and not preview_mode and all(
-                c.evidence_required for c in required_claim_objs)
-            if restrict_fallback:
-                def _fallback_ok(row: dict[str, Any]) -> bool:
-                    # 相关产品特写是明确的降级通道：它的 claim_gate 仍可为
-                    # blocked（因为没有直接动作/结果），但必须把降级原因留在
-                    # row 里，不能让它看起来像精准证据。
-                    related_reason = demo_actions.fallback_reason(
-                        row["shot"], required_claim_objs)
-                    if related_reason:
-                        row["fallback_reason"] = related_reason
-                        return True
-                    return (demo_actions.fallback_allowed(row["shot"])
-                            and row["claim_gate"].get("status") != "blocked")
-
-                fallback_pool = [row for row in fallback_pool if _fallback_ok(row)]
-            # A degraded candidate may not consume a shot that a later sentence
-            # can use as direct evidence.  Direct candidates were reserved in a
-            # pre-pass because this decision is otherwise order-dependent.
-            future_reserved = set().union(
-                *(direct_reservations.get(future_index, set())
-                  for future_index in range(index + 1, len(sentence_rows) + 1))
-            )
-            if future_reserved:
-                fallback_pool = [row for row in fallback_pool
-                                 if row["shot_id"] not in future_reserved]
-            eligible_good = max(fallback_pool, key=_priority, default=None)
-            if eligible_good is not None and not eligible_good["window_ok"]:
-                detail = eligible_good["window"].detail or {}
+            if eligible_good is None:
+                fallback_pool = [row for row in ranked if row["eligible"]]
+                if required_claims:
+                    fallback_pool = [
+                        row for row in fallback_pool
+                        if all(semantic_gate.claim_supported(
+                            tag, semantic_gate.shot_evidence_text(row["shot"]))
+                               for tag in required_claims)
+                    ]
+                if "cta" in intents or "quantity" in intents:
+                    fallback_pool = [row for row in fallback_pool
+                                     if row.get("cta_visual_ok", True)]
+                    if not fallback_pool:
+                        material_gaps.append({
+                            "index": index,
+                            "type": "MATERIAL_GAP",
+                            "reason": "CTA_REQUIRES_MULTI_PACK_QUANTITY_SHOT",
+                            "text": text,
+                            "claim_text": claim,
+                            "message": "CTA/数量话术没有多包、成排、整箱或可见数量关系；保留旁白字幕，不硬插单包特写",
+                        })
                 if preview_mode:
-                    # 预览：兜底镜头也装不下 —— 照样采用，让预览出图，同时记账。
-                    preview_unresolved = True
-                    preview_reason = str(eligible_good["window_reason"])
-                else:
-                    pending.append({
-                        "index": index, "type": "SHOT_TIMING_INFEASIBLE",
-                        "reason": str(eligible_good["window_reason"]),
-                        "message": "该句口播的真实音频时长在**全部可选镜头**的允许窗口内都无解；"
-                                   "需规划层换镜或如实上报素材缺口",
-                        "claim_text": claim, "text": text,
-                        "audio_duration_us": int(audio_duration_us),
-                        "timing_certainty": timing_certainty,
-                        "time_sensitive": bool(time_sensitive),
-                        "detail": detail,
-                        "candidates": top})
-                    continue
-            if eligible_good is None and not preview_mode:
-                # 无物理卖点、也不是囤货量感句：用同商品已就绪的展示/场景镜头承接，
-                # 报告标成展示承接。不拿它去证明厚实、纯棉、侧漏或「赶紧囤」。
-                physical = bool(evidence_reqs) or bool(required_claims)
-                quantity_line = ("quantity" in intents) or any(
-                    token in text for token in ("囤", "一箱", "一提", "多包", "成箱"))
-                if not physical and not quantity_line and not functional:
-                    display_rows = []
-                    for row in ranked:
-                        if not row["eligible"] or not row["window_ok"] or not _audit_ready_row(row):
-                            continue
-                        role = str((row.get("shot") or {}).get("role") or "")
-                        if role not in {"product_display", "context"}:
-                            continue
-                        if demo_actions.is_empty_shot(row["shot"]):
-                            continue
-                        display_rows.append(row)
-                    picked = _variant_tiebreak(
-                        display_rows, _priority,
-                        variant_index=variant_index, score_tolerance=variant_tolerance)
-                    if picked is not None:
-                        eligible_good = picked
-                        degraded_fallback = {
-                            "reason": "DISPLAY_CARRY",
-                            "score": picked["score"],
-                            "minimum_match_score": minimum_match_score,
-                            "unmatched_fallback": True,
-                            "match_tier": "display",
-                            "match_basis": "展示承接",
-                            "fallback_reason": "DISPLAY_CARRY",
+                    # 预览的降级也必须是“相似的可用画面”：无卖点要求的句子不能
+                    # 因为池里有任意包装镜头就被硬塞进去。真正没有关联镜头时走
+                    # visual_missing，避免把不相干画面配到旁白上。
+                    fallback_pool = [row for row in fallback_pool
+                                     if _tier(row)[0] > 0
+                                     or row["score"] >= minimum_match_score]
+            # 收紧池只在 formal 生效（2026-09-18 用户定案）：preview 下保留
+                # product_display/context 等“关键字级别关联”的展示类镜头参与兜底，
+                # 画面能展示卖点的镜头直接用 —— 不再因为「要求直接证据」就把池子
+                # 掏空（那正是「100抽大容量→C-ABSORB-CAPACITY」张冠李戴的场景）。
+                restrict_fallback = bool(evidence_reqs) and not preview_mode and all(
+                    c.evidence_required for c in required_claim_objs)
+                if restrict_fallback:
+                    def _fallback_ok(row: dict[str, Any]) -> bool:
+                        # 相关产品特写是明确的降级通道：它的 claim_gate 仍可为
+                        # blocked（因为没有直接动作/结果），但必须把降级原因留在
+                        # row 里，不能让它看起来像精准证据。
+                        related_reason = demo_actions.fallback_reason(
+                            row["shot"], required_claim_objs)
+                        if related_reason:
+                            row["fallback_reason"] = related_reason
+                            return True
+                        return (demo_actions.fallback_allowed(row["shot"])
+                                and row["claim_gate"].get("status") != "blocked")
+
+                    fallback_pool = [row for row in fallback_pool if _fallback_ok(row)]
+                # A degraded candidate may not consume a shot that a later sentence
+                # can use as direct evidence.  Direct candidates were reserved in a
+                # pre-pass because this decision is otherwise order-dependent.
+                future_reserved = set().union(
+                    *(direct_reservations.get(future_index, set())
+                      for future_index in range(index + 1, len(sentence_rows) + 1))
+                )
+                if future_reserved:
+                    fallback_pool = [row for row in fallback_pool
+                                     if row["shot_id"] not in future_reserved]
+                eligible_good = max(fallback_pool, key=_priority, default=None)
+                if eligible_good is not None and not eligible_good["window_ok"]:
+                    detail = eligible_good["window"].detail or {}
+                    if preview_mode:
+                        # 预览：兜底镜头也装不下 —— 照样采用，让预览出图，同时记账。
+                        preview_unresolved = True
+                        preview_reason = str(eligible_good["window_reason"])
+                    else:
+                        pending.append({
+                            "index": index, "type": "SHOT_TIMING_INFEASIBLE",
+                            "reason": str(eligible_good["window_reason"]),
+                            "message": "该句口播的真实音频时长在**全部可选镜头**的允许窗口内都无解；"
+                                       "需规划层换镜或如实上报素材缺口",
+                            "claim_text": claim, "text": text,
                             "audio_duration_us": int(audio_duration_us),
                             "timing_certainty": timing_certainty,
-                            "window_reason": str(picked["window_reason"]),
-                            "duration_degraded": False,
-                            "message": "该句无物理卖点，使用同商品已就绪的展示或场景镜头承接",
-                        }
-            if eligible_good is None:
-                if preview_mode:
-                    # 不能再用 max(ranked) 绕过 eligible。没有相似且可审计的可用
-                    # 镜头时，留黑并把处理动作写入报告；这比拿不相关画面配卖点更安全。
-                    _append_visual_missing(
-                        "素材库中没有同时满足画面相关性、证据完整性和复用约束的可用镜头",
-                        "SHOT_NO_MATCH",
-                    )
-                    continue
-                else:
-                    pending.append({
-                        "index": index, "type": "SHOT_NO_MATCH",
-                        "message": "当前商品素材没有任何可用的镜头（可选的都已被重复使用上限占用）"
-                                   if not evidence_reqs else
-                                   "该句要求直接证据，但素材库里没有可承担证明的镜头，"
-                                   "且包装展示/空镜已被禁止兜底",
-                        "claim_text": claim, "candidates": top,
-                        "material_gap": bool(evidence_reqs)})
-                    continue
-            unmatched_fallback = True
+                            "time_sensitive": bool(time_sensitive),
+                            "detail": detail,
+                            "candidates": top})
+                        continue
+                if eligible_good is None and not preview_mode:
+                    # 无物理卖点、也不是囤货量感句：用同商品已就绪的展示/场景镜头承接，
+                    # 报告标成展示承接。不拿它去证明厚实、纯棉、侧漏或「赶紧囤」。
+                    physical = bool(evidence_reqs) or bool(required_claims)
+                    quantity_line = ("quantity" in intents) or any(
+                        token in text for token in ("囤", "一箱", "一提", "多包", "成箱"))
+                    if not physical and not quantity_line and not functional:
+                        display_rows = []
+                        for row in ranked:
+                            if not row["eligible"] or not row["window_ok"] or not _audit_ready_row(row):
+                                continue
+                            role = str((row.get("shot") or {}).get("role") or "")
+                            if role not in {"product_display", "context"}:
+                                continue
+                            if demo_actions.is_empty_shot(row["shot"]):
+                                continue
+                            display_rows.append(row)
+                        picked = _variant_tiebreak(
+                            display_rows, _priority,
+                            variant_index=variant_index, score_tolerance=variant_tolerance, quality_components=14)
+                        if picked is not None:
+                            eligible_good = picked
+                            degraded_fallback = {
+                                "reason": "DISPLAY_CARRY",
+                                "score": picked["score"],
+                                "minimum_match_score": minimum_match_score,
+                                "unmatched_fallback": True,
+                                "match_tier": "display",
+                                "match_basis": "展示承接",
+                                "fallback_reason": "DISPLAY_CARRY",
+                                "audio_duration_us": int(audio_duration_us),
+                                "timing_certainty": timing_certainty,
+                                "window_reason": str(picked["window_reason"]),
+                                "duration_degraded": False,
+                                "message": "该句无物理卖点，使用同商品已就绪的展示或场景镜头承接",
+                            }
+                if eligible_good is None:
+                    if preview_mode:
+                        # 不能再用 max(ranked) 绕过 eligible。没有相似且可审计的可用
+                        # 镜头时，留黑并把处理动作写入报告；这比拿不相关画面配卖点更安全。
+                        _append_visual_missing(
+                            "素材库中没有同时满足画面相关性、证据完整性和复用约束的可用镜头",
+                            "SHOT_NO_MATCH",
+                        )
+                        continue
+                    else:
+                        pending.append({
+                            "index": index, "type": "SHOT_NO_MATCH",
+                            "message": "当前商品素材没有任何可用的镜头（可选的都已被重复使用上限占用）"
+                                       if not evidence_reqs else
+                                       "该句要求直接证据，但素材库里没有可承担证明的镜头，"
+                                       "且包装展示/空镜已被禁止兜底",
+                            "claim_text": claim, "candidates": top,
+                            "material_gap": bool(evidence_reqs)})
+                        continue
+                unmatched_fallback = True
         if (preview_mode and not multi_shot and not eligible_good["window_ok"]
                 and eligible_good["window_reason"] == timing_contract.REASON_EVIDENCE_SPAN_TOO_LONG):
             # 预览：证据比这句长、时间相关又不许收窄时，引擎解不出窗口会退回素材开头播放，
@@ -1621,7 +1741,9 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
         # 只要不是「语义达标 + 窗口有解」这个理想组合，就在报告里留痕：
         # 人工复核要能一眼看出这一句是靠什么过的、哪里将就了。
         window_solution = eligible_good["window"]
-        if degraded_fallback is None and not preview_unresolved:
+        display_carry = bool((eligible_good.get("display_carry_ok") or eligible_good.get("scene_context_ok"))
+                             and not unmatched_fallback)
+        if degraded_fallback is None and not preview_unresolved and not display_carry:
             tier_rank, tier_basis = _tier(eligible_good)
             # 兜底即使语义分数达标，也不是直接证据通过：它是因为 claim
             # gate 未通过才被选中，必须显式记成降级，尤其是产品特写承接卖点时。
@@ -1672,6 +1794,16 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
         # 多镜的可见性由段落自己的 `multi_shot` / `span_parts` / `span_solution`
         # 承担：人工复核要能看到「这句话是三镜拼的、各段多长、各段解在哪」。
         selected = eligible_good["shot"]
+        formal_rejected = bool(str(manifest.get("delivery_mode") or "").lower() == "formal"
+                               and (degraded_fallback or preview_unresolved))
+        if formal_rejected:
+            pending.append({
+                "index": index, "type": "FORMAL_EVIDENCE_REQUIRED", "text": text,
+                "claim_text": claim, "shot_id": eligible_good["shot_id"],
+                "reason": (degraded_fallback or {}).get("reason") or preview_reason,
+                "claim_gate": eligible_good.get("claim_gate"),
+                "message": "保留候选供诊断；该句证据或时间窗未满足正式要求，不能交给写稿当成通过。",
+            })
         material_cost = len(span_parts) if multi_shot and span_parts else 1
         if selected_material_count + material_cost > max_final_materials:
             material_gaps.append({
@@ -1710,6 +1842,10 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
                             "message": "当前策略要求自动采用 Top1；未启用人工选镜头", "claim_text": claim,
                             "selected": top[0]})
             continue
+        # variant_index 可在同档容差内轮换，报告仍应把实际采用镜头列为第一项。
+        top[:] = [selected_top, *(item for item in top
+                                  if item["shot_id"] != selected_top["shot_id"])][:max(1, int(topk))]
+        recommendations[-1]["selected_shot_id"] = selected_top["shot_id"]
         if not selected or selected.get("status") != "ready_for_matching" or selected.get("action_complete") is not True:
             if preview_mode:
                 _append_visual_missing(
@@ -1724,9 +1860,12 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
         selected_id = str(selected.get("shot_id", ""))
         selected_source = str(selected.get("video", ""))
         absorb_shared = bool(share_absorb and selected_id == absorb_hold_id)
-        if not absorb_shared:
+        context_shared = bool(eligible_good.get("scene_continuation"))
+        if not absorb_shared and not context_shared:
             source_use_counts[selected_source] = source_use_counts.get(selected_source, 0) + 1
         used_shot_ids.add(selected_id)
+        if context_group and rulepack.shot_has_visual(context_group["scene"], selected):
+            context_holds[context_group["key"]] = selected_id
         if in_absorb_run:
             absorb_hold_id = selected_id
             absorb_hold_source = selected_source
@@ -1785,7 +1924,8 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
                 "frame_time": frame_ts,
             }]
         next_best_score = max((row["score"] for row in ranked
-                               if row["shot_id"] != selected_id and row["eligible"]), default=0)
+                               if row["shot_id"] != selected_id and row["eligible"] and _priority(row)[0]
+                               and _priority(row)[:14] == _priority(eligible_good)[:14]), default=0)
         margin = selected_top["score"] - next_best_score
         segments.append({
             **{k: v for k, v in source_segment.items() if k not in {"video", "source_start", "duration", "in"}},
@@ -1801,6 +1941,10 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
             "action": selected.get("action"),
             "result": selected.get("result"),
             "object": selected.get("object"),
+            "readable_claims": selected.get("readable_claims") or [],
+            "pointing_to_text": selected.get("pointing_to_text", selected.get("explicit_pointing", False)),
+            "pointing_action": selected.get("pointing_action") or selected.get("gesture"),
+            "text_pass": selected.get("text_pass"),
             "evidence_intervals": evidence, "action_complete": True,
             # 被分析过的场景窗口边界。引擎据此校验成片切片没有越界到
             # 「未经分析」的画面上去（v1.3.24 用户定案）。
@@ -1809,9 +1953,17 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
             "head_waste": selected.get("head_waste", 0.0), "tail_waste": selected.get("tail_waste", 0.0),
             "temporary_shot_id": selected_id, "persist_to_library": False,
             "selection_mode": (f"auto_top1_degraded_{(degraded_fallback or {}).get('match_tier', 'none')}"
-                               if degraded_fallback else "auto_top1_with_reuse_guard"),
+                               if degraded_fallback else "auto_top1_display_carry" if display_carry else "auto_top1_with_reuse_guard"),
+            "display_carry": display_carry,
+            "formal_rejected": formal_rejected,
+            **({"scene_group_plan": {"scene": context_group["scene"]["id"],
+                                      "indices": [p + 1 for p in context_group["positions"]],
+                                      "continuation": context_shared}}
+               if context_group else {}),
             "degraded_no_match": bool(degraded_fallback), "selection_score": selected_top["score"],
-            "selection_margin": margin,
+            "selection_margin": margin, "selection_margin_basis": "same_usable_quality_band",
+            "selection_priority": list(_priority(eligible_good)),
+            "selection_score_source": eligible_good.get("score_source"),
             "source_reuse_count": source_use_counts[selected_source],
             # DEMO_ACTIONS V0.2：这一段是靠哪条 claim 要求、通过什么证据档选中的。
             "claim_gate": eligible_good.get("claim_gate"),
