@@ -219,6 +219,7 @@ def _expected_claims(report_dir: pathlib.Path) -> list[dict[str, Any]]:
             "sentence_kind": row.get("sentence_kind"),
             "ai_segment": row if row.get("selection_mode") == "ai_editor" else None,
             "product": (data.get("manifest") or {}).get("product", ""),
+            "category": (data.get("manifest") or {}).get("category", ""),
         })
     return result
 
@@ -373,9 +374,13 @@ def main() -> int:
             result["response_contract"]["version"] = response_version
             match_data = json.loads((report_dir / "shot_match_report.json").read_text(encoding="utf-8-sig"))
             result["selection_sha256"] = ai_editor_contract.digest(match_data.get("segments", []))
+            result["editorial_rules"] = ai_editor_contract.rules_identity(match_data.get("manifest"))
+            result["policy_version"] = ai_editor_contract.POLICY_VERSION
             identity = json.loads((draft / "ai_selection_identity.json").read_text(encoding="utf-8-sig"))
             if identity.get("selection_sha256") != result["selection_sha256"]:
                 raise ValueError("AI_SELECTION_DRAFT_IDENTITY_CHANGED")
+            if identity.get("editorial_rules") != result["editorial_rules"] or identity.get("policy_version") != result["policy_version"]:
+                raise ValueError("AI_SELECTION_RULES_CHANGED")
             if any(c.get("selection_mode") != "ai_editor" for c in claims):
                 raise ValueError("MIXED_SELECTION_MODES")
         result["preview_only_reasons"] = [

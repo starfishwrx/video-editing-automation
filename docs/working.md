@@ -6,6 +6,8 @@
 
 ### 2026-10-23
 
+- 接入纸品13类视觉合同，贯通AI选镜、独立QC与规则身份；纸品口播默认1.3倍、擦拭画面偏好1.3倍、硬切、像素字幕位置和实际气口核验，保留独立候选及验收状态。
+
 - 按鸭哥 / context-infrastructure 脚手架补齐 `docs/prd.md`、`docs/rfc.md`、`docs/working.md`、`docs/test.md` 与 `docs/README.md`。
 - 将 `AGENTS.md` 与根 `README.md` 的活代码路由统一到 `packages/video-v1.5.3/`，版本叙事改为读 `VERSION`（当前 1.5.6）。
 - 批量修正 `docs/` 内仍指向 `packages/video-v1.5.1/` 的路径到活包；测试口径改为 `uv` + `unittest`。

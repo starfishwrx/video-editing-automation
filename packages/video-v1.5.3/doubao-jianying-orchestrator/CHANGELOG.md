@@ -10,6 +10,12 @@
 
 - 回灌流水线 HelloKitty 整词口径：新增 `subtitle_units.text_units`（`KEEP_WORDS` 内品牌/品类词只算 1 字）；引擎口播长度闸改为 15 字软目标、`text_units` >30 才硬拦，避免 `HelloKitty` 等整词被按字母切碎或误拦。
 
+## 纸品生产规则候选 - 2026-10-23
+
+- 13类纸品视觉合同接入AI候选、整稿和独立QC，绑定生效规则版本及哈希，旧AI认证不直接复用。
+- 纸品口播默认1.3倍，清洁画面首选1.3倍但保留完整证据优先；新增可选preferred_speed，其他场景默认行为不变。
+- 纸品硬切、像素字幕位置及实际音频气口核验；字幕写入与检查共用坐标，音频EOF后的空白也计入气口。
+
 ## 1.5.6-1 (rulepack global) - 2026-10-23
 
 - 配音轨不留气口升为**全局**规则：`rules/global.json` `voice.max_gap_frames=1` → 默认 `tail_pad_s=0`，纸品/卫品/通用相邻口播首尾相接（各句首尾仍保留 25 ms 自然静音）。卫品倍速仍 1.2；任务显式 `tail_pad_s` 或 `JY_VOICE_MAX_GAP_FRAMES` 仍可覆盖。

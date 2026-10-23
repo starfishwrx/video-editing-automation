@@ -12,7 +12,10 @@ def prompt(claims: list[dict], frame_count: int) -> str:
     # Purpose is an instruction to inspect, never the selector's pass verdict.
     mapping = "\n".join(f"S{i:02d}: 商品={c.get('product', '')}；口播={c['claim']}；建议用途={c.get('sentence_kind', '')}；物理片段数={c.get('slots', 1)}"
                         for i, c in enumerate(claims, 1))
-    return contract.POLICY + f"""
+    contexts = {contract.digest(contract.rules_identity({"category": c.get("category"), "product": c.get("product")})):
+        {"category": c.get("category"), "product": c.get("product")} for c in claims}
+    policy = "\n".join(contract.policy_prompt(manifest) for manifest in contexts.values())
+    return policy + f"""
 你是独立成片审稿人，这是全新调用，不知道选镜器的结论。仅根据最终切片中新抽出的实际画面判断。
 每个物理片段依时间顺序提供开始、过程、结束帧，并补充关键动作/结果帧，总共{frame_count}张。
 {mapping}
@@ -31,7 +34,9 @@ DIRECT表示本句按其用途正常匹配：贴切的轻薄/柔软展示和普�
 
 def validate_cut(claim: dict, rows: list[dict]) -> list[str]:
     item = claim["ai_segment"]
-    check = contract.validate_segment_receipt(item, index=claim["index"])
+    check = contract.validate_segment_receipt(item, index=claim["index"], manifest={
+        "category": claim.get("category"), "product": claim.get("product")}
+        if claim.get("category") or claim.get("product") else None)
     issues = list(check["reasons"])
     expected = item.get("span_parts") if item.get("multi_shot") else [item]
     if len(expected) != len(rows):

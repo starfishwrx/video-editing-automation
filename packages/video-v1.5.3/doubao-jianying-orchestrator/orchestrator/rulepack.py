@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 from functools import lru_cache
@@ -82,6 +83,19 @@ def load(category: str) -> dict[str, Any]:
     """合并后的规则：标量与 voice 字典由品类覆盖全局，列表规则按「全局 + 品类」拼接。"""
     base = _read_rules("global")
     extra = _read_rules(category) if category in _CATEGORY_FILES else {}
+    editorial = extra.get("editorial_contract") or {}
+    contract_prompts = [
+        f"仅当句意适用时使用「{rule.get('id')}」合同：{rule.get('when')}；"
+        f"画面证据：{rule.get('evidence')}；偏好倍率 {rule.get('preferred_speed', 1.0)}。"
+        for rule in editorial.get("semantic_visual_contracts") or []
+        if isinstance(rule, dict)
+    ]
+    observation_prompts = [
+        f"纸品「{rule.get('id')}」观察要求：{rule.get('evidence')}。"
+        "只记录实际可见的支持、反证或不确定及其起止时间；未见过程、文字或结果不得按规范补全。"
+        for rule in editorial.get("semantic_visual_contracts") or []
+        if isinstance(rule, dict)
+    ]
     merged: dict[str, Any] = {
         "category": category,
         "label": extra.get("label") or "通用",
@@ -92,15 +106,16 @@ def load(category: str) -> dict[str, Any]:
                                               base.get("avoid_similar_shots", False))),
         "voice": {**(base.get("voice") or {}), **(extra.get("voice") or {})},
         "analysis_prompt_rules": [*(base.get("analysis_prompt_rules") or []),
-                                  *(extra.get("analysis_prompt_rules") or [])],
+                                  *(extra.get("analysis_prompt_rules") or []), *observation_prompts],
         "match_prompt_rules": [*(base.get("match_prompt_rules") or []),
-                               *(extra.get("match_prompt_rules") or [])],
+                               *(extra.get("match_prompt_rules") or []), *contract_prompts],
         "scenes": [*(base.get("scenes") or []), *(extra.get("scenes") or [])],
         "intent_keywords": {**(base.get("intent_keywords") or {}), **(extra.get("intent_keywords") or {})},
         "excluded_claims": [*(base.get("excluded_claims") or []), *(extra.get("excluded_claims") or [])],
         "sentence_topics": [*(base.get("sentence_topics") or []), *(extra.get("sentence_topics") or [])],
         "shot_label_rules": [*(base.get("shot_label_rules") or []),
                              *(extra.get("shot_label_rules") or [])],
+        "editorial_contract": editorial,
     }
     return merged
 
@@ -108,6 +123,38 @@ def load(category: str) -> dict[str, Any]:
 def for_manifest(manifest: dict[str, Any] | None) -> dict[str, Any]:
     category, _ = detect_category(manifest)
     return load(category)
+
+
+def editorial_context(manifest: dict[str, Any] | None) -> dict[str, Any]:
+    """Return versioned editorial guidance for downstream vision/orchestration/QC.
+
+    The hash covers the effective versions and returned ``rules`` payload.
+    ``rules`` contains merged global AI rules plus the selected category editorial
+    contract, while legacy prompt_rules also expose its semantic contracts.
+    """
+    category, _ = detect_category(manifest)
+    merged = load(category)
+    source_rules = _read_rules(category) if category in _CATEGORY_FILES else {}
+    rules = {
+        "semantic_contracts": source_rules.get("editorial_contract", {}).get(
+            "semantic_visual_contracts", []),
+        "production_rules": source_rules.get("editorial_contract", {}).get("editing", []),
+        "style": source_rules.get("editorial_contract", {}).get("visual_preferences", []),
+        "match_rules": merged.get("match_prompt_rules", []),
+        "analysis_rules": merged.get("analysis_prompt_rules", []),
+        "voice_acceptance": source_rules.get("voice", {}),
+        "subtitle_position_px": source_rules.get("editorial_contract", {}).get(
+            "subtitle_position_px"),
+    }
+    digest_payload = json.dumps({"versions": merged.get("versions") or {}, "rules": rules},
+                                ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(digest_payload.encode("utf-8")).hexdigest()
+    return {
+        "category": category,
+        "versions": dict(merged.get("versions") or {}),
+        "sha256": digest,
+        "rules": rules,
+    }
 
 
 def gap_tail_pad_s(max_gap_frames: Any, *, fps: Any = DEFAULT_FPS,
@@ -181,6 +228,10 @@ def apply_manifest_defaults(manifest: dict[str, Any]) -> dict[str, Any]:
     out.setdefault("avoid_similar_shots", rules.get("avoid_similar_shots", False))
     out.setdefault("voice_tempo", default_voice_tempo(rules, out.get("voice")))
     out.setdefault("voice_edge_trim", bool(voice.get("edge_trim", True)))
+    if category == CATEGORY_ZHIPIN:
+        position = (rules.get("editorial_contract") or {}).get("subtitle_position_px") or {
+            "x": 0, "y": -800}
+        out.setdefault("subtitle_position_px", position)
     max_gap = os.environ.get("JY_VOICE_MAX_GAP_FRAMES") or voice.get("max_gap_frames", 1)
     if out.get("tail_pad_s") is None:
         out["tail_pad_s"] = gap_tail_pad_s(max_gap, fps=out.get("fps") or DEFAULT_FPS)
@@ -191,6 +242,8 @@ def apply_manifest_defaults(manifest: dict[str, Any]) -> dict[str, Any]:
         "rulepacks": rules.get("rulepacks"),
         "versions": rules.get("versions"),
         "voice_max_gap_frames": int(max_gap),
+        **({"voice_acceptance_max_gap_frames": int(
+            voice.get("acceptance_max_gap_frames", 5))} if category == CATEGORY_ZHIPIN else {}),
     }
     return out
 
