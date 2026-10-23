@@ -27,11 +27,15 @@ from .platform_env import (bootstrap_path, environment_report, find_drafts_root,
 from .resource_profile import FRIENDLY_PROFILES, apply_process_priority, choose_profile
 from .video_encode import run_h264_encode
 from .voice_catalog import recommend_voices, resolve_voice
+from .subtitle_units import text_units
 from .timing_contract import frame_speed
 
 US = 1_000_000
 TAIL_PAD = 0.12  # 每句口播尾部留白秒数，避免贴边
-MAX_SUBTITLE_CHARS = 15  # 用户定案：单个分镜字幕（含标点）不得超过 15 字
+# 15 字是软目标：按词拆开时尽量靠近。词表里的整词只算 1 个字。
+# 硬上限只拦完全没拆开的长段，避免一整段文案压在一个镜头里。
+MAX_SUBTITLE_CHARS = 15
+SUBTITLE_HARD_CHARS = 30
 
 # 探测缓存世代戳（v1.3.27.1）：换探针口径时 +1，老缓存重新探测。
 PROBE_KIND = "material_us_v1"
@@ -679,28 +683,35 @@ class OrchestrationEngine:
         return out
 
     def _script_segment_length_gate(self, clips: list[Clip]) -> Optional[dict]:
-        """阻止超长口播进入 TTS/写稿，避免一个语义段撑成长镜头。"""
+        """15 字是软目标。只拦住完全没按词拆开、长到硬上限的口播。"""
         offenders = []
         for index, clip in enumerate(self._parent_clips(clips), 1):
             text = re.sub(r"\s+", "", str(getattr(clip, "text", "") or ""))
-            if text and len(text) > MAX_SUBTITLE_CHARS:
+            units = text_units(text)
+            if text and units > SUBTITLE_HARD_CHARS:
                 offenders.append({
                     "index": index,
                     "text": text,
-                    "chars": len(text),
-                    "max_chars": MAX_SUBTITLE_CHARS,
-                    "reason": "完整语义段超过字幕硬上限，需按标点/语义拆分",
+                    "chars": units,
+                    "raw_chars": len(text),
+                    "max_chars": SUBTITLE_HARD_CHARS,
+                    "soft_chars": MAX_SUBTITLE_CHARS,
+                    "reason": "口播远超 15 字软目标且没有按词拆开",
                 })
         if not offenders:
             return None
         self._event("script_segment_length_blocked",
-                    max_chars=MAX_SUBTITLE_CHARS, offenders=offenders)
+                    max_chars=SUBTITLE_HARD_CHARS, offenders=offenders)
         return {
             "status": "SCRIPT_SEGMENT_TOO_LONG",
-            "message": f"存在 {len(offenders)} 个分镜超过 {MAX_SUBTITLE_CHARS} 字硬上限，未开始上传素材或生成配音。",
-            "max_chars": MAX_SUBTITLE_CHARS,
+            "message": (
+                f"存在 {len(offenders)} 个分镜超过 {SUBTITLE_HARD_CHARS} 字，"
+                f"没有按词靠近 {MAX_SUBTITLE_CHARS} 字拆开，未开始上传素材或生成配音。"
+            ),
+            "max_chars": SUBTITLE_HARD_CHARS,
+            "soft_chars": MAX_SUBTITLE_CHARS,
             "segments": offenders,
-            "guidance": "保留原文，按完整语义/标点拆成多个 segments；不要缩写、改写或把长文案压在一个镜头里。",
+            "guidance": "保留原文，按词和标点拆开，尽量靠近 15 字；不要从词中间切开，也不要缩写。",
         }
 
     def _visual_duplicate_gate(self, clips: list[Clip]) -> Optional[dict]:
