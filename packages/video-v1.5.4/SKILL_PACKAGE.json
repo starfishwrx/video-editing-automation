@@ -1,0 +1,22 @@
+{
+  "name": "doubao-jianying-skill-pack",
+  "version": "v1.5.4",
+  "version_policy": {
+    "major": "incompatible release +1",
+    "minor": "daily feature iteration +1",
+    "patch": "bug fix +1"
+  },
+  "components": [
+    "jianying-editor",
+    "doubao-jianying-orchestrator"
+  ],
+  "runtime": "windows",
+  "entrypoint": "doubao-jianying-orchestrator/run.py",
+  "maintenance_entrypoints": {
+    "draft_delivery": "python -m tools.draft_delivery",
+    "release_package": "python -m tools.release_package"
+  },
+  "maintenance_skill": "doubao-jianying-orchestrator/references/validated_fix_to_release.md",
+  "experimental": true,
+  "default_pipeline_strategy": "legacy"
+}
