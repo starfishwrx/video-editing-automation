@@ -66,7 +66,7 @@
     },
     {
       "path": "docs/WEIPIN_1.5.2_PITFALLS.md",
-      "sha256": "c242a6229b8ad83561d8edc9131016b4257a538e92c5d7d91597b6cd0c729950"
+      "sha256": "aad16473c4343664649f9e5370d05933d8e28c1bac5e724fa691ef9bb3d992a2"
     },
     {
       "path": "docs/sentence-review.md",
@@ -74,11 +74,11 @@
     },
     {
       "path": "doubao-jianying-orchestrator/CHANGELOG.md",
-      "sha256": "c04af659ce643ff6dc83748e797482bafc40a4d9704ec42e458b2e7407f84b23"
+      "sha256": "c1a8e137c743c9070dec0d28585a2dfa6d9bbc5c62354ef0a47e1f2a1f7e9640"
     },
     {
       "path": "doubao-jianying-orchestrator/SKILL.md",
-      "sha256": "b2fab647834800742322aa62551c45a8289b130bec19a6009842ab0b452b9b9e"
+      "sha256": "8cdf397685e6d1814ecdefed6b536f1dc9665cd1e900c928c288092cd3d22ab7"
     },
     {
       "path": "doubao-jianying-orchestrator/VERSION",
@@ -174,11 +174,11 @@
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/rulepack.py",
-      "sha256": "4d49172e9b0c062fa5e9b6be355266b7c408937c1c89e0824b2b6f0bc21fa8c5"
+      "sha256": "5b3e03970a1ec82cf2aaef1a06e63606d008989fef146c47ce28cc0c5b49f984"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/rules/global.json",
-      "sha256": "42407f9538fdb7135478845806485335978d279a555c0313ad9f20e12007e226"
+      "sha256": "f0966059b40c94d7380979ffb0b8c5ee1fc6a9f73f9f4c9531b5d1935f53d306"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/rules/weipin.json",
@@ -326,7 +326,7 @@
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_v152_meeting_rules.py",
-      "sha256": "3aea9fba5c01e3d16a2d06873aabace51c5e664f85866af3fd4a620298caa33b"
+      "sha256": "7b1f558f4d948aa97a7b5efa01417a0c4fe429c0a671a84109970ae3b0aeb474"
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_v152_r18_review.py",
@@ -342,7 +342,7 @@
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_v152_weipin_feedback.py",
-      "sha256": "ac70677d166e9856086b1b0076a43127db1b227135cce49fe57d11db8fa789cb"
+      "sha256": "073410a266b82e55e88e7d669f09403ffc4bd0777891941306a79677ad525365"
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_v156_evidence_contracts.py",
@@ -799,7 +799,7 @@
   ],
   "release_id": "video-v1.5.6",
   "schema_version": 1,
-  "source_sha256": "fc3269f921d9c39bbafcb50f0429e287dcd3656a6b41c15640e113f54392cc0d",
+  "source_sha256": "fba7f3bb8f8a43f144f66ba58225c0971119ba0cbab097637d5868d3810eada4",
   "tree_hash_algorithm": "video-release-tree-v1",
   "version": "1.5.6",
   "visual_policy_version": "1.4.1"

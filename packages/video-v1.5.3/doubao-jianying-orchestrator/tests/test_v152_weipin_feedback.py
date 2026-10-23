@@ -29,10 +29,14 @@ class WeipinVoiceGapTests(unittest.TestCase):
         self.assertEqual(out["voice_tempo"], 1.2)
         self.assertEqual(out["rulepack"]["voice_max_gap_frames"], 1)
 
-    def test_other_categories_keep_global_gap(self):
+    def test_other_categories_use_global_no_gap(self):
+        # 配音不留气口是全局规则：纸品与卫品一致 tail_pad_s=0 / max_gap_frames=1
         out = rulepack.apply_manifest_defaults({"product": "湿厕纸"})
-        self.assertAlmostEqual(out["tail_pad_s"], 0.083, places=3)
-        self.assertEqual(out["rulepack"]["voice_max_gap_frames"], 5)
+        self.assertEqual(out["tail_pad_s"], 0.0)
+        self.assertEqual(out["rulepack"]["voice_max_gap_frames"], 1)
+        general = rulepack.apply_manifest_defaults({"product": "未知商品"})
+        self.assertEqual(general["tail_pad_s"], 0.0)
+        self.assertEqual(general["rulepack"]["voice_max_gap_frames"], 1)
 
     def test_explicit_tail_pad_still_wins(self):
         out = rulepack.apply_manifest_defaults({"product": "夜用卫生巾", "tail_pad_s": 0.1})

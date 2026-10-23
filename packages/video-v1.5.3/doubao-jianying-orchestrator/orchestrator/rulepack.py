@@ -120,7 +120,7 @@ def gap_tail_pad_s(max_gap_frames: Any, *, fps: Any = DEFAULT_FPS,
     try:
         frames = max(1, int(max_gap_frames))
     except (TypeError, ValueError):
-        frames = 5
+        frames = 1
     try:
         rate = float(fps) or DEFAULT_FPS
     except (TypeError, ValueError):
@@ -181,7 +181,7 @@ def apply_manifest_defaults(manifest: dict[str, Any]) -> dict[str, Any]:
     out.setdefault("avoid_similar_shots", rules.get("avoid_similar_shots", False))
     out.setdefault("voice_tempo", default_voice_tempo(rules, out.get("voice")))
     out.setdefault("voice_edge_trim", bool(voice.get("edge_trim", True)))
-    max_gap = os.environ.get("JY_VOICE_MAX_GAP_FRAMES") or voice.get("max_gap_frames", 5)
+    max_gap = os.environ.get("JY_VOICE_MAX_GAP_FRAMES") or voice.get("max_gap_frames", 1)
     if out.get("tail_pad_s") is None:
         out["tail_pad_s"] = gap_tail_pad_s(max_gap, fps=out.get("fps") or DEFAULT_FPS)
     out["rulepack"] = {

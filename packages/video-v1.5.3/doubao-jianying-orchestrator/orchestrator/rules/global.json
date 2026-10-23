@@ -1,12 +1,12 @@
 {
   "rulepack": "global",
-  "version": "1.5.2-1",
-  "source": "2026-10-12 会议纪要：AI 自动剪辑视频相关问题讨论",
+  "version": "1.5.6-1",
+  "source": "2026-10-12 会议纪要；2026-10-23 配音不留气口升为全局（纸品/卫品/通用一致）",
   "auto_transition": false,
   "voice": {
     "tempo": 1.0,
     "edge_trim": true,
-    "max_gap_frames": 5
+    "max_gap_frames": 1
   },
   "analysis_prompt_rules": [
     "head_waste/tail_waste 的废料包括：手刚伸进画面或正在离开画面、动作开始前的空等、停止录制前的定格或拿手机的动作、调整机位/对焦/曝光的晃动。",

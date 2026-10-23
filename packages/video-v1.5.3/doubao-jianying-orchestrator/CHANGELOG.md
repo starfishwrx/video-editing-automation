@@ -1,5 +1,9 @@
 ﻿# Changelog
 
+## 1.5.6-1 (rulepack global) - 2026-10-23
+
+- 配音轨不留气口升为**全局**规则：`rules/global.json` `voice.max_gap_frames=1` → 默认 `tail_pad_s=0`，纸品/卫品/通用相邻口播首尾相接（各句首尾仍保留 25 ms 自然静音）。卫品倍速仍 1.2；任务显式 `tail_pad_s` 或 `JY_VOICE_MAX_GAP_FRAMES` 仍可覆盖。
+
 ## 当前候选修订 - 2026-10-23
 
 - NAS 正常分发复用官方素材收集流程，隔离同名异字节素材；复制到同级隐藏目录并读回核验后才发布，冲突不覆盖，旧同哈希目标可安全续跑。
@@ -133,4 +137,3 @@
 - 视觉子进程默认切到火山 CodingPlan 的 `volc` profile（OpenAI-compatible `/api/plan/v3`），不再默认走 CC Switch Anthropic Messages 空响应链路。
 - 视觉去重闸门升级：同一草稿全局禁止复用同一 `visual_signature`；同一源文件同一起止窗口即使签名不同也阻断；同源同类镜头只有不同审计动作/构图签名才允许复用，并新增第三次非相邻重复回归测试。
 - 出货门禁补强：Mac 分发前强制校验主 JSON 与 sidecar 可解析且 ID/名称一致，并写入 macOS 平台标记；元数据异常直接阻断出货，禁止生成不可打开的预览包。
-
