@@ -29,6 +29,8 @@ QC v3 响应、当前观察的证据合同、场景重排后复验与人工反�
 相对运输包需 import；共享交付必须检查实际绝对路径。加密时间轴不得自动换成旧明文，
 仅在用户确认恢复原始生成版后使用包内 `tools.draft_delivery restore-generated`。
 
+正常分发必须走 `ship_one` 的官方收集流程与授权 finalizer；多版本归档使用自身最终媒体路径。安装后运行 `tools.delivery_runtime` 对 pipeline 与 skills 两个执行面逐文件核对，不得仅凭 VERSION 或目录存在报告分发成功。行为和恢复边界见包根 `docs/NAS_DELIVERY_STABILITY.md`。
+
 用户确认修复有效并要求合入包时，读
 [已验证修复合入发布包](references/validated_fix_to_release.md)，
 使用包内 `tools.release_package` 完成清单、ZIP 和全新解压验收。

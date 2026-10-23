@@ -19,6 +19,7 @@ import sys
 import time
 from typing import Any
 from tools.delivery_identity import tree_identity
+from tools.draft_delivery import archive_shared_copy, verify_existing_shared
 
 HERE = pathlib.Path(__file__).resolve().parent
 PIPE = HERE.parent
@@ -242,6 +243,7 @@ def archive_parent(task_path: pathlib.Path, done_path: pathlib.Path, policy_path
         check = package_check(source)
         if not check.get("ok"):
             raise RuntimeError("SINGLE_PACKAGE_INVALID:%s:%s" % (source, check.get("issues")))
+        verify_existing_shared(source)
         receipt = {
             "record_id": task.get("record_id"),
             "parent_folder": parent,
@@ -274,12 +276,9 @@ def archive_parent(task_path: pathlib.Path, done_path: pathlib.Path, policy_path
         source = pathlib.Path(raw)
         if not source.is_dir():
             raise RuntimeError("NAS_DRAFT_MISSING:" + raw)
-        source_identity = tree_identity(source)
         target = parent / ("版本%d" % index)
-        shutil.copytree(source, target)
-        copied_identity = tree_identity(target)
-        if source_identity['sha256'] != copied_identity['sha256']:
-            raise RuntimeError("GROUPED_COPY_HASH_MISMATCH:%s" % target)
+        archived = archive_shared_copy(source, target)
+        copied_identity = archived['tree_identity']
         check = package_check(target)
         if not check.get("ok"):
             raise RuntimeError("GROUPED_PACKAGE_INVALID:%s:%s" % (target, check.get("issues")))
@@ -290,6 +289,7 @@ def archive_parent(task_path: pathlib.Path, done_path: pathlib.Path, policy_path
         "parent_folder": str(parent),
         "versions": versions,
         "source_links": links,
+        "self_contained_versions": True,
         "policy_id": rules["policy_id"],
         "policy_version": rules["policy_version"],
         "verified": True,

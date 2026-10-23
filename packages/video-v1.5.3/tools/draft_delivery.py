@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import shutil
 import sys
+import uuid
 import zipfile
 
 from tools import nas_portable as transport
@@ -67,6 +68,90 @@ def ship_module():
     return module
 
 
+def collect_delivery_stage(source: Path, staging: Path, package: Path) -> dict:
+    """Use the same validated collection path for normal delivery and repair.
+
+    Hash-prefixed names keep distinct files with the same basename separate.
+    Only newly created staging is modified; the reviewed source stays intact.
+    """
+    source, staging, package = (Path(path).resolve() for path in (source, staging, package))
+    for destination in (staging, package):
+        if destination.is_relative_to(source) or source.is_relative_to(destination):
+            raise RuntimeError('SOURCE_DESTINATION_OVERLAP')
+    before = tree_identity(source)
+    transport.package_draft(source, package)
+    transport.import_package(package, staging)
+    for filename in (transport.MANIFEST, 'nas-import-receipt.json'):
+        (staging / filename).unlink(missing_ok=True)
+    if tree_identity(source)['sha256'] != before['sha256']:
+        raise RuntimeError('SOURCE_CHANGED_DURING_DELIVERY')
+    return {'source_tree_sha256': before['sha256'], 'media_collected': True}
+
+
+def publish_tree(source: Path, target: Path, expected: dict, *, copier=None,
+                 reference_root: Path | None = None) -> bool:
+    """Publish a complete verified tree via a same-directory rename.
+
+    A failed copy remains under a unique staging name for diagnosis. An
+    existing final directory is never merged or overwritten.
+    """
+    source, target = Path(source).resolve(), Path(target).resolve()
+    if target.is_relative_to(source) or source.is_relative_to(target):
+        raise RuntimeError('SOURCE_DESTINATION_OVERLAP')
+    if target.exists():
+        if tree_identity(target)['sha256'] != expected['sha256']:
+            raise RuntimeError('DELIVERY_TARGET_IDENTITY_CONFLICT')
+        if reference_root is not None:
+            verify_shared(target, reference_root)
+        return False
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.parent / ('.publishing-' + uuid.uuid4().hex)
+    if copier is None:
+        shutil.copytree(source, temporary)
+    else:
+        rc = copier(str(source), str(temporary))
+        if type(rc) is not int or not 0 <= rc < 8:
+            raise RuntimeError('DELIVERY_COPY_FAILED')
+    if tree_identity(temporary)['sha256'] != expected['sha256']:
+        raise RuntimeError('DELIVERY_COPY_HASH_MISMATCH')
+    if reference_root is not None:
+        verify_shared(temporary, reference_root)
+    if target.exists():
+        raise RuntimeError('DELIVERY_TARGET_APPEARED_DURING_COPY')
+    os.rename(temporary, target)
+    if tree_identity(target)['sha256'] != expected['sha256']:
+        raise RuntimeError('PUBLISHED_TREE_HASH_MISMATCH')
+    return True
+
+
+def verify_existing_shared(root: Path) -> dict:
+    """Recheck the literal dependency of a previously published draft."""
+    docs, _ = transport.inspect(Path(root))
+    recorded = docs['draft_meta_info.json'].get('draft_fold_path')
+    if not isinstance(recorded, str) or not Path(recorded).is_absolute():
+        raise RuntimeError('SHARED_REGISTRATION_PATH_MISSING')
+    return verify_shared(Path(root), Path(recorded))
+
+
+def archive_shared_copy(source: Path, target: Path) -> dict:
+    """Create a self-contained version; no paths depend on the old NAS folder."""
+    source, target = Path(source).resolve(), Path(target).resolve()
+    if target.exists():
+        raise RuntimeError('DESTINATION_EXISTS')
+    # Validate before creating a public version directory.
+    transport.inspect(source)
+    before = tree_identity(source)
+    work = target.parent / ('.nas-package-archive-' + uuid.uuid4().hex)
+    transport.package_draft(source, work / 'transport')
+    transport.import_package(work / 'transport', target)
+    check = verify_shared(target, target)
+    if tree_identity(source)['sha256'] != before['sha256']:
+        raise RuntimeError('SOURCE_CHANGED_DURING_DELIVERY')
+    transport.cleanup_staging(work, target.parent)
+    return {'source_tree_sha256': before['sha256'],
+            'tree_identity': tree_identity(target), 'shared_check': check}
+
+
 def publish_shared(source: Path, share: Path, name: str, work: Path) -> dict:
     """Publish NEW shared-path drafts; never alter source or overwrite a target.
 
@@ -91,12 +176,7 @@ def publish_shared(source: Path, share: Path, name: str, work: Path) -> dict:
     before = tree_identity(source)
     work.mkdir(parents=True, exist_ok=False)
     package, staging = work / "transport", work / "staging" / name
-    transport.package_draft(source, package)
-    transport.import_package(package, staging)
-    # Certificates describe the relative transport package, not the new UNC
-    # derivative. Only delete these two files inside our newly created staging.
-    for filename in (transport.MANIFEST, "nas-import-receipt.json"):
-        (staging / filename).unlink(missing_ok=True)
+    collect_delivery_stage(source, staging, package)
     ship = ship_module()
     previous = os.environ.get("JY_NAS_SHARE")
     try:
@@ -110,9 +190,8 @@ def publish_shared(source: Path, share: Path, name: str, work: Path) -> dict:
     ship.inject_tools(str(staging))
     identity = tree_identity(staging)
     for target in (final, distribution):
-        shutil.copytree(staging, target)  # raises on existing target, no merge
-        if tree_identity(target)["sha256"] != identity["sha256"]:
-            raise RuntimeError("PUBLISHED_TREE_HASH_MISMATCH: " + str(target))
+        publish_tree(staging, target, identity,
+                     reference_root=final if target == distribution else None)
         verify_shared(target, final)
     archive = work / (name + ".zip")
     with zipfile.ZipFile(archive, "x", zipfile.ZIP_DEFLATED) as zipped:

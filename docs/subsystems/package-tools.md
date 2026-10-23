@@ -13,6 +13,8 @@
 - 失败分类（`classify_build_failure`）：区分确定性/瞬时/提供商/环境，供上层回退与通知
 
 ## 2. 闭环与交付（`closed_loop.py` 与 tools）
+
+- 当前候选的 `ship_one` 与修复入口复用 `tools.draft_delivery.collect_delivery_stage` 收集实际引用；`publish_tree` 在同级隐藏目录读回核验后才重命名发布。两个归档入口通过官方导出/导入将每版素材绑定到最终目录，旧目录移动不影响归档稿。安装完整性用 `tools.delivery_runtime` 同时检查 pipeline 与 skills 执行位置；见当前包 `docs/NAS_DELIVERY_STABILITY.md`。
 - `audit`：读取 `task.json/done.json` 与 `report/draft_visual_qc.json`，按策略校验是否满足正式交付（QC=PASS、Mac 审阅绑定、包完整）
 - `archive-parent`：把多版本草稿归档到一个父目录（`版本1/版本2/...`），核验后回写收据
 - `table-update`：将“草稿目录/成片状态”等回写业务表（飞书 Base），使用 `LARK_BASE_TOKEN`

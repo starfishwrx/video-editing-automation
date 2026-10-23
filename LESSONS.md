@@ -75,3 +75,12 @@
 - 根因: 观察、证据合同、排序、场景重排和交付消费者使用不同判据；任务反馈尚未形成可重复回放的句级标准。
 - 以后怎么做: 对当前观察逐项验证功能和数量要求，重排后重新验合同，QC消费者复核同一响应合同及草稿身份；未定义判据与素材缺口分开，人工允许/拒绝的候选与时间窗留在私有评估账本。
 - 证据: `packages/video-v1.5.3/docs/QUALITY_CONTRACT_FIXES.md`；`test_v156_quality_ranking.py`、`test_visual_qc_response_contract.py`、`test_sentence_review.py`。
+
+### L-20261023-04 分发和归档必须验证最终引用，部署必须包含校验模块
+- status: OPEN
+- hits: 1
+- 模块: package-tools
+- 现象: 目录存在或复制标记成功，接收稿仍可能依赖旧交付目录；只升级分发脚本会遗漏它实际导入的校验模块。
+- 根因: 修复入口与日常收集入口不一致，归档只复制不重绑定路径，安装检查只看部分文件与版本号。
+- 以后怎么做: 正常分发和修复共用实际引用收集；目的端暂存核验后发布；归档使用自身最终媒体路径；两个执行位置都按发布清单核对依赖和字节。不同会话使用独立工作树，提交前核对 HEAD。
+- 证据: `packages/video-v1.5.3/docs/NAS_DELIVERY_STABILITY.md`、`tests/test_draft_delivery.py`、`tests/test_delivery_runtime.py`。

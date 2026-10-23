@@ -31,6 +31,7 @@ import uuid
 from tools import production_eval, material_index
 from tools.delivery_identity import tree_identity
 from tools.draft_delivery import verify_shared
+from tools.delivery_runtime import require_ship_dependencies
 
 try:
     # Windows OpenSSH sessions may expose a GBK console even though the
@@ -750,15 +751,12 @@ def run_post_draft_qc(draft_dir: pathlib.Path, report_dir: pathlib.Path) -> dict
 def ship_one(draft_dir: pathlib.Path, task_dir: pathlib.Path | None = None,
              frozen: dict | None = None) -> dict:
     """Ship a verified copy so path rewriting never mutates the reviewed draft."""
+    require_ship_dependencies(SKILL.parent)
     source_identity = production_eval.output_identity([draft_dir])
     task_dir = task_dir or (WORK / '.manual-ship-stage')
     staging = task_dir / 'shipping-stage' / (uuid.uuid4().hex) / draft_dir.name
-    staging.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(draft_dir, staging)
-    if production_eval.output_identity([staging]) != source_identity:
-        raise RuntimeError('SHIP_STAGING_SOURCE_HASH_MISMATCH')
     cmd = [PY, str(SKILL / "orchestrator" / "ship_distribute.py"),
-           "--draft", str(staging), "--style", "unc"]
+           "--draft", str(draft_dir), "--style", "unc", "--work", str(staging.parent)]
     env = dict(os.environ, PYTHONUTF8="1")
     p = subprocess.run(cmd, cwd=str(SKILL), env=env, capture_output=True,
                        text=True, encoding="utf-8", errors="replace",
@@ -774,7 +772,6 @@ def ship_one(draft_dir: pathlib.Path, task_dir: pathlib.Path | None = None,
             payload = candidate
             break
     if (p.returncode != 0 or not payload or payload.get('status') != 'OK'
-            or payload.get('root_copied') is not True
             or payload.get('nas_root_verified') is not True
             or payload.get('distribution_verified') is not True
             or payload.get('shared_media_references_verified') is not True
@@ -782,6 +779,9 @@ def ship_one(draft_dir: pathlib.Path, task_dir: pathlib.Path | None = None,
         return {"rc": p.returncode or 2, "out": (p.stdout or p.stderr or "")[-1200:],
                 "staging_path": str(staging), "source_output_sha256": source_identity['sha256'],
                 "distribution": payload or {"status": "UNCERTIFIED"}}
+    if production_eval.output_identity([draft_dir]) != source_identity:
+        return {"rc": 2, "out": 'SOURCE_CHANGED_DURING_DELIVERY',
+                "staging_path": str(staging), "source_output_sha256": source_identity['sha256']}
     receipt = {
         'schema_version': 1, 'status': 'VERIFIED',
         'draft_name': draft_dir.name,
@@ -1982,6 +1982,10 @@ def _queue_preflight(task: dict) -> dict:
     version_path = SKILL / "VERSION"
     if _pipeline_version() == "unknown" or not version_path.is_file():
         issues.append("pipeline VERSION missing or unreadable")
+    try:
+        require_ship_dependencies(SKILL.parent)
+    except RuntimeError as exc:
+        issues.append(str(exc))
     material_dir = str(task.get("material_dir") or "").strip()
     sources = []
     if not material_dir:

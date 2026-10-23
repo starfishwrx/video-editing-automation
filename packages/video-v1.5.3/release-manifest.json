@@ -6,7 +6,7 @@
     "machine-specific paths",
     "knowledge-base bodies"
   ],
-  "file_count": 194,
+  "file_count": 197,
   "files": [
     {
       "path": ".gitignore",
@@ -22,7 +22,7 @@
     },
     {
       "path": "README.md",
-      "sha256": "84587231631c7abb5dde8845abba91194312141dab3c49c939b68efccf59eedc"
+      "sha256": "16d2f9ab41f6006e036b609c2d8f713a25cf3e50beb991a0f2ce8276ef27a120"
     },
     {
       "path": "RULES.md",
@@ -42,11 +42,15 @@
     },
     {
       "path": "batch_worker.py",
-      "sha256": "4ebb71a6b75aca38cb97a5b4da5679291918426efeef0f4327999e6b3d3f4d7d"
+      "sha256": "474c80799d92a39176d8340ec1d01c1088355001da9061a6078ffb5e5d97aa5e"
     },
     {
       "path": "closed_loop.py",
-      "sha256": "fb6da0c50fac67e7d2e12599437702876ddcfb8ab59fc9fa0b0411a6997905c0"
+      "sha256": "9fb8a5a2c58c68df774a6d5e66b9974ee4485407d2ed719faff07ad6b457a720"
+    },
+    {
+      "path": "docs/NAS_DELIVERY_STABILITY.md",
+      "sha256": "6ed02a47723158f78949002fa9bc014193a171b6a77e52593f7b2d8dfd728ddf"
     },
     {
       "path": "docs/QUALITY_CONTRACT_FIXES.md",
@@ -70,11 +74,11 @@
     },
     {
       "path": "doubao-jianying-orchestrator/CHANGELOG.md",
-      "sha256": "e1c87e753e62cb215e0008bfa6273fa00887abd762b1675d952243a458d955e5"
+      "sha256": "c04af659ce643ff6dc83748e797482bafc40a4d9704ec42e458b2e7407f84b23"
     },
     {
       "path": "doubao-jianying-orchestrator/SKILL.md",
-      "sha256": "31ab09b8c1394b6221f8b23d57c8fe063fbbc2c8c5e80572c15de155d55513b3"
+      "sha256": "b2fab647834800742322aa62551c45a8289b130bec19a6009842ab0b452b9b9e"
     },
     {
       "path": "doubao-jianying-orchestrator/VERSION",
@@ -198,7 +202,7 @@
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/ship_distribute.py",
-      "sha256": "3c9d6b56222cac9d7d78ea2ac519755429124eedb83a2398e4b2795fd440f6d6"
+      "sha256": "004bcc54f55c4b647b46930e92d4aae3c79c069190e3cbd25043bad28f9b2628"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/shot_analyzer.py",
@@ -262,7 +266,7 @@
     },
     {
       "path": "doubao-jianying-orchestrator/references/draft_delivery_and_recovery.md",
-      "sha256": "415efad4eb7eeb38174caa6cb276d53e958897695918df7d8d46ec154d7c6134"
+      "sha256": "00ba9f53cfd135fa783b7531861837cdd6946c706b930a0622a2e8bbf64641a9"
     },
     {
       "path": "doubao-jianying-orchestrator/references/preview_gap_and_pitfalls.md",
@@ -673,8 +677,12 @@
       "sha256": "99c19758dff7208612c9f3e44b2203ee859d126c5caffe93be0b6cdaa7e1ff59"
     },
     {
+      "path": "tests/test_delivery_runtime.py",
+      "sha256": "4dd1e6c5919d1813e70432c8c602a5caa063cd0d473f9e3bbce8cb710ffeda9b"
+    },
+    {
       "path": "tests/test_draft_delivery.py",
-      "sha256": "e51ef0c9b3f5314d3de5efbaed153931a557a138891148f35735004d0e4eafbf"
+      "sha256": "f6f4f82142fe491262a7076dbd41f1127d15f108d0a14ac328a1e4dd7d6ab750"
     },
     {
       "path": "tests/test_eval_bootstrap.py",
@@ -730,15 +738,19 @@
     },
     {
       "path": "tools/closed_loop.py",
-      "sha256": "3584f76cfbe1f63cf0b41769781af647123810aff7255e4bc61b5d621ac4dad0"
+      "sha256": "5bad94b8b0bdda40f9f8d3a5742b4cd42a0df9e66dadf6b2f1cdd1206034faca"
     },
     {
       "path": "tools/delivery_identity.py",
       "sha256": "37adc03f3f47e12e5c008a57b9cd004c7d6e4a4909f2087a5789f6e1c14d86e5"
     },
     {
+      "path": "tools/delivery_runtime.py",
+      "sha256": "dd6067ca0157e7b4137c2c783776b58b35eadf124421b6747475f377140ac0d6"
+    },
+    {
       "path": "tools/draft_delivery.py",
-      "sha256": "f49d3b7ff64d7da8d600986abfc28811b689b9bf9dd0966cd5d2198e45b0aa40"
+      "sha256": "114d9f745b15efc1ed3b86d586141a506236f9326fc009519655d09d1e66b7d7"
     },
     {
       "path": "tools/eval_bootstrap.py",
@@ -787,7 +799,7 @@
   ],
   "release_id": "video-v1.5.6",
   "schema_version": 1,
-  "source_sha256": "bf374ed83a7aa81a5fb542fb213082d4856e9c89c1c914b71d7514bd645df84a",
+  "source_sha256": "fc3269f921d9c39bbafcb50f0429e287dcd3656a6b41c15640e113f54392cc0d",
   "tree_hash_algorithm": "video-release-tree-v1",
   "version": "1.5.6",
   "visual_policy_version": "1.4.1"
