@@ -1099,7 +1099,9 @@ class OrchestrationEngine:
                 merged.append(item)
             raw = merged
         require_explicit = bool(self.m.get("visual_evidence_required", True))
-        report = semantic_gate.evaluate_segments(raw, require_explicit=require_explicit)
+        report = semantic_gate.evaluate_segments(
+            raw, require_explicit=require_explicit,
+            category=str(self.m.get("category") or ""))
         # Persist both passing and blocked reports.  A passing task must leave
         # an auditable claim-to-shot record for NAS/Feishu review; blocked tasks
         # keep the same artifact so operators can fix the exact pending items.

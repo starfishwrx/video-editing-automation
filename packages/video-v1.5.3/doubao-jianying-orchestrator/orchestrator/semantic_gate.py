@@ -186,6 +186,7 @@ def _is_negated(required: str, audit_text: str) -> bool:
 
 
 def evaluate_segments(segments: list[dict[str, Any]], *, require_explicit: bool = False,
+                      category: str = "",
                       head_waste_threshold: float = 0.8,
                       tail_waste_threshold: float = 0.8) -> dict[str, Any]:
     """Return evidence coverage and pending blockers for storyboard segments.
@@ -206,29 +207,63 @@ def evaluate_segments(segments: list[dict[str, Any]], *, require_explicit: bool 
         text = str(item.get("text", item.get("caption", "")) or "")
         claim_text = str(item.get("claim_text", "") or "").strip()
         if item.get("visual_missing"):
-            # 预览缺画面是显式的编排结果，不是把黑色视频冒充证据。
-            # 旁白/字幕仍然进入时间线；证据缺口由 operator_note 与报告承载，
-            # 不在这里重复生成一组“缺标签”错误。
+            # 预览缺画面由 visual_missing 与原报告机制承载，不重复判成合同缺口。
             coverage.append({
-                "index": index,
-                "video": "",
-                "text": text,
-                "claim_text": claim_text,
-                "required": [],
-                "matched": [],
-                "missing": ["visual_missing"],
-                "negated": [],
-                "evidence_basis": {},
-                "match_tier": "visual_missing",
-                "degraded_claims": [],
-                "evidence": [],
-                "audit_evidence": [],
-                "action_complete": False,
-                "status": "visual_missing",
+                "index": index, "video": "", "text": text, "claim_text": claim_text,
+                "required": [], "matched": [], "missing": ["visual_missing"],
+                "negated": [], "evidence_basis": {}, "match_tier": "visual_missing",
+                "degraded_claims": [], "evidence": [], "audit_evidence": [],
+                "action_complete": False, "status": "visual_missing",
                 "operator_note": item.get("operator_note", ""),
                 "reason": item.get("visual_missing_reason", ""),
             })
             continue
+        from . import demo_actions
+        # A scene override can replace the original match after selection. Rebuild
+        # its business contract from the *current* observation; cached claim_gate
+        # decisions describe an earlier shot and are not evidence for this one.
+        item_category = str(item.get("evidence_category") or category or "").strip()
+        claim_contract = None
+        quantity_contract = None
+        quantity_blocked = False
+        if item_category:
+            contract_claims = demo_actions.requirements_for(text, claim_text, item_category)
+            claim_contract = demo_actions.judge(item, contract_claims)
+            required_claims = [claim for claim in contract_claims if claim.evidence_required]
+            if required_claims and (
+                    claim_contract.get("status") == "ungated"
+                    or any(not claim.contract_defined for claim in required_claims)):
+                claim_contract = {**claim_contract, "ok": False,
+                                  "status": "blocked",
+                                  "reason": ("CONTRACT_UNDEFINED" if any(
+                                      not claim.contract_defined for claim in required_claims)
+                                      else "NO_ROLE_FIELD"),
+                                  "unmet_claim_ids": [claim.claim_id for claim in required_claims
+                                                      if not claim.contract_defined] or
+                                                      [claim.claim_id for claim in required_claims]}
+            quantity_ok, quantity_reason = demo_actions.cta_quantity_eligible(
+                item, text, item_category)
+            absorb_quantity = demo_actions.absorb_quantity_context(text, item_category)
+            quantity_contract = {"ok": bool(quantity_ok or absorb_quantity),
+                                 "reason": ("ABSORB_QUANTITY_CONTEXT" if absorb_quantity
+                                            else quantity_reason)}
+            quantity_blocked = not quantity_contract["ok"]
+            if not claim_contract.get("ok", False):
+                issues.append({"index": index, "type": "visual_claim_contract_failed",
+                               "video": str(item.get("video", "")),
+                               "category": item_category,
+                               "reason": claim_contract.get("reason", "CLAIM_CONTRACT_FAILED"),
+                               "unmet_claim_ids": claim_contract.get("unmet_claim_ids", []),
+                               "claim_results": claim_contract.get("claim_results", []),
+                               "message": "当前选中镜头未满足品类卖点证据合同",
+                               "suggestion": "更换为满足该卖点角色、强度和动作结果要求的镜头"})
+            if quantity_blocked:
+                issues.append({"index": index, "type": "cta_quantity_evidence_missing",
+                               "video": str(item.get("video", "")),
+                               "category": item_category,
+                               "reason": quantity_reason,
+                               "message": "购买或数量口播缺少可见购买单位/数量证据",
+                               "suggestion": "补充多包、整箱或可见数量的当前镜头"})
         explicit = []
         for field in _EXPLICIT_REQUIREMENT_FIELDS:
             explicit.extend(normalize_tags(item.get(field)))
@@ -255,8 +290,13 @@ def evaluate_segments(segments: list[dict[str, Any]], *, require_explicit: bool 
         evidence_basis: dict[str, dict[str, Any]] = {
             tag: {"via": "direct"} for tag in matched}
         # 只承接经过重新核验的层数标称，不能把包装当成柔软/吸收等功能实验。
-        from . import demo_actions
         package_mark = demo_actions.packaging_claim_direct(item, claim_text or text)
+        perception = demo_actions.perception_reliability(item)
+        perception_blocked = not perception["ok"] and not package_mark.get("ok")
+        if perception_blocked:
+            issues.append({"index": index, "type": "visual_observation_unreliable",
+                           "reason": perception["reason"], "video": str(item.get("video", "")),
+                           "message": "当前画面观察置信不足或无效，不能认证卖点证据"})
         if package_mark.get("ok") and package_mark.get("claim_key") == "LAYERS":
             for tag in required:
                 if tag == "厚实" and tag not in matched and tag not in negated:
@@ -320,7 +360,8 @@ def evaluate_segments(segments: list[dict[str, Any]], *, require_explicit: bool 
 
         head_waste = number("head_waste")
         tail_waste = number("tail_waste")
-        segment_blocked = bool(missing) or (
+        segment_blocked = perception_blocked or quantity_blocked or bool(missing) or bool(
+            claim_contract is not None and not claim_contract.get("ok", False)) or (
             text and require_explicit and (
                 not claim_text or not (explicit or explicit_evidence) or not audit_values or action_complete is not True
             )
@@ -338,6 +379,9 @@ def evaluate_segments(segments: list[dict[str, Any]], *, require_explicit: bool 
                          "required": required, "matched": matched,
                          "missing": missing, "negated": negated,
                          "evidence_basis": evidence_basis,
+                         "perception": perception,
+                         "claim_contract": claim_contract,
+                         "quantity_contract": quantity_contract,
                          "match_tier": match_tier, "degraded_claims": degraded_claims,
                          "evidence": normalize_tags(evidence_values),
                          "audit_evidence": normalize_tags(audit_values),

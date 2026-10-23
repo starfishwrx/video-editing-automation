@@ -1271,8 +1271,9 @@ class PostDraftQcMappingTests(unittest.TestCase):
             def model(*args, **_kw):
                 prompts.append(args[2])
                 count = args[2].count("- S")
-                return True, json.dumps({"segments": [
-                    {"index": i + 1, "match_level": verdict, "visual_ok": True, "confidence": 1.0}
+                return True, json.dumps({"response_version": qc.RESPONSE_VERSION, "segments": [
+                    {"index": i + 1, "match_level": verdict, "visual_ok": True, "confidence": 1.0,
+                     "observed": "合成测试帧中的完整动作", "reason": "合成观察与测试句匹配"}
                     for i in range(count)], "overall": "PASS"})
 
             argv = ["qc", "--draft", str(draft), "--report-dir", str(report),

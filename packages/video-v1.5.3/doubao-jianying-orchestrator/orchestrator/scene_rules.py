@@ -285,7 +285,9 @@ def _tail_guard_us(manifest: dict[str, Any]) -> int:
 
 # ── 段落字段 ──────────────────────────────────────────────────────────
 _SHOT_FIELDS = ("description", "visual_description", "visual_tags", "evidence_tags",
-                "action", "object", "result")
+                "action", "object", "result", "role", "evidence_strength", "analysis_confidence",
+                "has_subject", "readable_claims", "pointing_to_text", "explicit_pointing",
+                "pointing_action", "gesture", "text_pass", "text_agreed", "pointed_agreed")
 
 
 def _shot_fields(shot: dict[str, Any]) -> dict[str, Any]:
@@ -489,6 +491,13 @@ def _pool_fill(seg: dict[str, Any], rules: dict[str, Any], shots_by_id: dict[str
     return [(row[6], True) for row in rows[:limit]]
 
 
+def _scene_candidate_rank(scene: dict[str, Any], shot: dict[str, Any]) -> tuple:
+    """截断候选池前先试短的完整过程；最终仍由相位和真实音频窗口认证。"""
+    return (not rulepack.shot_extends(scene, shot),
+            _number(shot.get("duration"), float("inf")),
+            -rulepack.shot_keyword_hits(scene, shot), str(shot.get("shot_id") or ""))
+
+
 def _visual_candidates(scene: dict[str, Any], candidates: list[tuple[dict[str, Any], bool]],
                        shots_by_id: dict[str, dict], used: set[str], segments: list, position: int,
                        contract: Optional[dict[str, Any]] = None) -> list[tuple[dict[str, Any], bool]]:
@@ -509,18 +518,18 @@ def _visual_candidates(scene: dict[str, Any], candidates: list[tuple[dict[str, A
                 or not rulepack.shot_has_visual(scene, shot)
                 or (contract and demo_actions.contradiction(shot, contract))):
             continue
-        pool.append((not rulepack.shot_extends(scene, shot), -rulepack.shot_keyword_hits(scene, shot),
-                     -_number(shot.get("duration")), shot_id, shot))
-    pool.sort(key=lambda row: row[:4])
+        pool.append(shot)
+    pool.sort(key=lambda shot: _scene_candidate_rank(scene, shot))
     limit = max(0, int(scene.get("pool_search_limit", 8) or 0))
     merged = [(shot, swapped) for shot, swapped in candidates
               if not swapped or rulepack.shot_has_visual(scene, shot)]
-    merged += [(row[4], True) for row in pool[:limit]]
+    merged += [(shot, True) for shot in pool[:limit]]
 
-    def rank(item: tuple[dict[str, Any], bool]) -> tuple[bool, bool, bool]:
+    def rank(item: tuple[dict[str, Any], bool]) -> tuple:
         shot, swapped = item
         visual = rulepack.shot_has_visual(scene, shot)
-        return (not visual, not (visual and rulepack.shot_extends(scene, shot)), swapped)
+        return (not visual, *_scene_candidate_rank(scene, shot)[:2], swapped,
+                *_scene_candidate_rank(scene, shot)[2:])
 
     return sorted(merged, key=rank)
 
@@ -898,11 +907,10 @@ def _group_candidates(scene: dict[str, Any], members: list[dict[str, Any]], posi
         hits = rulepack.shot_keyword_hits(scene, shot)
         if hits:
             # 拆包：同一条素材拆完接着展面层的排最前（与单句 _visual_candidates 一致）。
-            pool.append((not rulepack.shot_extends(scene, shot), -hits,
-                         _number(shot.get("duration")), shot_id, shot))
-    pool.sort(key=lambda row: row[:4])
+            pool.append(shot)
+    pool.sort(key=lambda shot: _scene_candidate_rank(scene, shot))
     limit = max(0, int(scene.get("pool_search_limit", 8) or 0))
-    out.extend((row[4], "pool_search") for row in pool[:limit])
+    out.extend((shot, "pool_search") for shot in pool[:limit])
     if scene.get("extend_keywords"):
         out.sort(key=lambda item: (not rulepack.shot_extends(scene, item[0]),
                                    item[1] != "selected", item[1] != "top3"))

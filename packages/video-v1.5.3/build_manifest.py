@@ -13,6 +13,7 @@ EXCLUDED_PARTS = {"__pycache__", ".pytest_cache", ".venv", ".uv-cache", ".git",
                   "media", "config", "backups", "validation_runs", "report", "work"}
 EXCLUDED_SUFFIXES = {".pyc", ".pyo", ".mp4", ".mov", ".m4v", ".wav", ".mp3",
                      ".ogg", ".m4a", ".aac", ".flac", ".zip"}
+EXCLUDED_PREFIXES = {("jianying-editor", "data")}  # 本机同步的音色、云音乐缓存。
 
 
 def files() -> list[Path]:
@@ -20,6 +21,8 @@ def files() -> list[Path]:
     for path in ROOT.rglob("*"):
         rel = path.relative_to(ROOT)
         if path.name in EXCLUDED_NAMES or any(part in EXCLUDED_PARTS for part in rel.parts):
+            continue
+        if rel.parts[:2] in EXCLUDED_PREFIXES:
             continue
         if path.name == ".env" or path.name.startswith(".env."):
             continue

@@ -729,10 +729,12 @@ def run_post_draft_qc(draft_dir: pathlib.Path, report_dir: pathlib.Path) -> dict
             payload = json.loads(output.read_text(encoding="utf-8"))
         except (OSError, ValueError, TypeError):
             payload = {}
-    status = str(payload.get("status") or "UNCERTIFIED")
+    if not isinstance(payload, dict):
+        payload = {}
+    status = production_eval.visual_qc_contract.report_status(payload)
     issues_text = " ".join(str(item) for item in (payload.get("issues") or []))
     if p.returncode != 0 or status not in {"PASS", "PASS_WITH_DEGRADED", "PASS_WITH_GAPS"}:
-        if "timed out" in issues_text.lower() or "timeout" in issues_text.lower():
+        if status != "FAIL" and ("timed out" in issues_text.lower() or "timeout" in issues_text.lower()):
             return {"rc": 2, "status": "UNCERTIFIED_TIMEOUT",
                     "message": "POST_DRAFT_VISION_QC_TIMEOUT: internal visual call timed out; draft retained for deferred QC",
                     "output": str(output), "report": payload,
@@ -961,16 +963,39 @@ def evaluate_task(task_dir: pathlib.Path, task: dict, drafts: list[str],
                    files_verified=bool(checks) and all(c["ok"] for c in checks), checks=checks)
     package_path = eval_dir / ("package-" + identity["sha256"] + ".json")
     production_eval.write_once(package_path, package)
-    qc_files = [pathlib.Path(str(row.get("report") or "")) for row in qc_reports]
+    output_by_name = {path.name: path for path in outputs}
+    report_rows = list(qc_reports) if isinstance(qc_reports, list) else []
+    qc_files = [pathlib.Path(str(row.get("report") or "")) if isinstance(row, dict)
+                else pathlib.Path("") for row in report_rows]
     qc_payloads = [_read_json(path) if path.is_file() else {} for path in qc_files]
-    statuses = [str(row.get("status") or "UNCERTIFIED") for row in qc_payloads]
+    qc_payloads = [row if isinstance(row, dict) else {} for row in qc_payloads]
+    statuses = [production_eval.visual_qc_contract.report_status(row) for row in qc_payloads]
+    seen_drafts = set()
+    qc_identity_valid = len(report_rows) == len(outputs) and bool(outputs)
+    for ref, report in zip(report_rows, qc_payloads):
+        draft_name = ref.get("draft") if isinstance(ref, dict) else None
+        target = output_by_name.get(str(draft_name))
+        if (target is None or str(draft_name) in seen_drafts
+                or not production_eval.visual_qc_contract.report_matches_draft(report, target)):
+            qc_identity_valid = False
+        if target is not None:
+            seen_drafts.add(str(draft_name))
+    qc_identity_valid = qc_identity_valid and len(seen_drafts) == len(outputs)
     qc_status = ("FAIL" if "FAIL" in statuses else
                  "PASS_WITH_DEGRADED" if statuses and len(statuses) == len(drafts)
+                 and qc_identity_valid
                  and all(s in {"PASS", "PASS_WITH_DEGRADED"} for s in statuses)
                  and "PASS_WITH_DEGRADED" in statuses else
-                 "PASS" if len(statuses) == len(drafts) and statuses and all(s == "PASS" for s in statuses)
+                 "PASS" if len(statuses) == len(drafts) and statuses and qc_identity_valid
+                 and all(s == "PASS" for s in statuses)
                  else "UNCERTIFIED")
-    qc = dict(binding, qc_status=qc_status,
+    contract_status = ("VALIDATED" if len(qc_payloads) == len(drafts) and qc_payloads and qc_identity_valid
+                       and all(isinstance(row.get("response_contract"), dict)
+                               and row["response_contract"].get("status") == "VALIDATED"
+                               and status in {"PASS", "PASS_WITH_DEGRADED", "FAIL"}
+                               for row, status in zip(qc_payloads, statuses)) else "UNCERTIFIED")
+    qc = dict(binding, qc_status=qc_status, contract_status=contract_status,
+              response_version=production_eval.visual_qc_contract.RESPONSE_VERSION,
               status="FAIL" if qc_status == "FAIL" else "PASS" if qc_status in {"PASS", "PASS_WITH_DEGRADED"} else "UNCERTIFIED",
               reports=[{"path": str(p), "sha256": production_eval.file_hash(p)} for p in qc_files if p.is_file()])
     qc_path = eval_dir / ("qc-" + production_eval.digest(qc) + ".json")

@@ -22,19 +22,17 @@ from typing import Any
 try:
     from .json_extract import EmptyResponseError, is_blank, iter_json_values
     from .video_decode import run_ffmpeg_decode
+    from .visual_qc_contract import (MATCH_LEVELS, REPORT_VERSION, RESPONSE_VERSION,
+                                     draft_metadata_fingerprint, normalize_match_level,
+                                     response_errors)
 except ImportError:
     # 这个文件会被 python draft_visual_qc.py 直接启动，没有包上下文。
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
     from orchestrator.json_extract import EmptyResponseError, is_blank, iter_json_values
     from orchestrator.video_decode import run_ffmpeg_decode
-
-
-MATCH_LEVELS = {
-    "DIRECT",
-    "ACCEPTABLE_DEGRADED",
-    "MISMATCH",
-    "INSUFFICIENT_EVIDENCE",
-}
+    from orchestrator.visual_qc_contract import (MATCH_LEVELS, REPORT_VERSION, RESPONSE_VERSION,
+                                                draft_metadata_fingerprint, normalize_match_level,
+                                                response_errors)
 
 
 def _claim_gate_summary(claim: dict[str, Any]) -> str:
@@ -53,30 +51,7 @@ def _claim_gate_summary(claim: dict[str, Any]) -> str:
 
 
 def _normalize_match_level(row: dict[str, Any]) -> str:
-    raw = str(row.get("match_level") or row.get("level") or "").strip().upper()
-    aliases = {
-        "PASS": "DIRECT",
-        "OK": "DIRECT",
-        "DEGRADED": "ACCEPTABLE_DEGRADED",
-        "ACCEPTABLE": "ACCEPTABLE_DEGRADED",
-        "FAIL": "MISMATCH",
-        "UNCERTAIN": "INSUFFICIENT_EVIDENCE",
-        "NOT_VERIFIED": "INSUFFICIENT_EVIDENCE",
-    }
-    level = aliases.get(raw, raw)
-    if level in MATCH_LEVELS:
-        expected_ok = level in {"DIRECT", "ACCEPTABLE_DEGRADED"}
-        if (level != "MISMATCH" and isinstance(row.get("visual_ok"), bool)
-                and row["visual_ok"] != expected_ok):
-            return "INSUFFICIENT_EVIDENCE"
-        return level
-    if raw:
-        return "INSUFFICIENT_EVIDENCE"
-    # Keep compatibility with the previous boolean response contract while
-    # requiring the new prompt to explicitly label degraded matches.
-    if row.get("visual_ok") is True:
-        return "DIRECT"
-    return "MISMATCH" if row.get("visual_ok") is False else "INSUFFICIENT_EVIDENCE"
+    return normalize_match_level(row)
 
 
 def _hard_issue(issue: str) -> bool:
@@ -262,7 +237,7 @@ def _prompt(claims: list[dict[str, Any]], frame_count: int) -> str:
 
 卖点动作/结果优先直接匹配；只有泛包装、远景、静态陈列不能证明瞬吸、干爽、透气、反渗、柔软等效果。对已标记 degraded=true 的语义段，相关的产品/对应部位特写不因缺少直接动作被判为 MISMATCH。品牌、包装、联名、数量、赠品和 CTA 按对应画面相关性判断。黑帧、空帧、完全看不到产品、明显无关画面仍为 MISMATCH。不要因为上游 expected_shot 或 gate 状态自动通过。
 
-只输出 JSON：{{"segments":[{{"index":1,"match_level":"DIRECT|ACCEPTABLE_DEGRADED|MISMATCH|INSUFFICIENT_EVIDENCE","visual_ok":true,"observed":"看到的事实","reason":"判断原因","confidence":0.0}}],"overall":"PASS|PASS_WITH_DEGRADED|FAIL|UNCERTIFIED"}}。每段必须有一条，index 从 1 开始且只对应本批次，confidence 为 0 到 1。ACCEPTABLE_DEGRADED 和 DIRECT 的 visual_ok 都填 true；MISMATCH 和 INSUFFICIENT_EVIDENCE 填 false。"""
+只输出一个 JSON 对象：{{"response_version":"{RESPONSE_VERSION}","segments":[{{"index":1,"match_level":"DIRECT|ACCEPTABLE_DEGRADED|MISMATCH|INSUFFICIENT_EVIDENCE","visual_ok":true,"observed":"看到的具体事实","reason":"这些事实为什么满足或不满足本句","confidence":0.8}}],"overall":"PASS|PASS_WITH_DEGRADED|FAIL|UNCERTIFIED"}}。每段必须且只能有一条，index 是从 1 开始且只对应本批次的整数，不得重复、漏段或输出其他批次编号。所有字段必填，observed/reason 不得为空。confidence 必须为有限数值且在 0 到 1 内；零置信度不得给 DIRECT/ACCEPTABLE_DEGRADED，无法判断时应给 INSUFFICIENT_EVIDENCE。ACCEPTABLE_DEGRADED 和 DIRECT 的 visual_ok 都填 true；MISMATCH 和 INSUFFICIENT_EVIDENCE 填 false。不得只给布尔值代替匹配等级。"""
 
 
 def _parse_model(text: str) -> dict[str, Any]:
@@ -271,42 +246,57 @@ def _parse_model(text: str) -> dict[str, Any]:
     payloads: list[Any] = list(iter_json_values(text))
 
     if payloads:
-        # Some compatible vision endpoints emit a valid JSON array and then
-        # repeat the same result in a second envelope (or append prose). Parse
-        # each complete top-level JSON value, then merge only when all
-        # judgments for a segment agree. This recovers harmless formatting
-        # noise without allowing contradictory model output to pass QC.
+        # Preserve negative judgments even in legacy/malformed envelopes.
+        # Formatting recovery is useful for diagnosis, never certification.
         rows_by_index: dict[int, dict[str, Any]] = {}
         overall_values: list[str] = []
+        versions: list[Any] = []
+        errors: list[str] = []
+        recognized = 0
         for payload in payloads:
             if isinstance(payload, dict):
                 rows = payload.get("segments")
                 if isinstance(rows, list):
+                    recognized += 1
+                    versions.append(payload.get("response_version"))
                     overall = str(payload.get("overall") or "").strip().upper()
                     if overall:
                         overall_values.append(overall)
                 elif str(payload.get("index") or "").isdigit():
+                    recognized += 1
+                    errors.append("RESPONSE_ENVELOPE_MISSING")
                     rows = [payload]
                 else:
+                    recognized += 1
+                    errors.append("SEGMENTS_NOT_LIST")
+                    if str(payload.get("overall") or "").strip().upper() == "FAIL":
+                        overall_values.append("FAIL")
                     rows = []
             elif isinstance(payload, list):
+                recognized += 1
+                errors.append("RESPONSE_ENVELOPE_MISSING")
                 rows = payload
             else:
+                errors.append("RESPONSE_NOT_OBJECT")
                 rows = []
             for row in rows:
-                if not isinstance(row, dict) or not str(row.get("index") or "").isdigit():
+                if isinstance(row, dict) and _normalize_match_level(row) == "MISMATCH":
+                    overall_values.append("FAIL")
+                if not isinstance(row, dict) or type(row.get("index")) is not int or row["index"] < 1:
+                    errors.append("SEGMENT_INDEX_INVALID")
                     continue
-                index = int(row["index"])
+                index = row["index"]
                 previous = rows_by_index.get(index)
                 if previous is not None:
-                    old_verdict = (str(previous.get("match_level") or "").upper(),
-                                   previous.get("visual_ok"))
-                    new_verdict = (str(row.get("match_level") or "").upper(),
-                                   row.get("visual_ok"))
-                    if old_verdict != new_verdict:
-                        raise ValueError(f"conflicting visual QC judgments for segment {index}")
+                    errors.append(f"DUPLICATE_SEGMENT:{index}")
+                    if previous != row:
+                        errors.append(f"CONFLICTING_SEGMENT:{index}")
+                    if _normalize_match_level(row) != "MISMATCH":
+                        continue
                 rows_by_index[index] = row
-        if rows_by_index:
+        if recognized:
+            if recognized != 1:
+                errors.append("MULTIPLE_RESPONSE_ENVELOPES")
             unknown = [value for value in overall_values if value not in {
                 "PASS", "PASS_WITH_DEGRADED", "PASS_WITH_GAPS", "FAIL", "UNCERTIFIED"}]
             overall = "FAIL" if "FAIL" in overall_values else (
@@ -315,7 +305,9 @@ def _parse_model(text: str) -> dict[str, Any]:
                 "PASS_WITH_DEGRADED" if "PASS_WITH_DEGRADED" in overall_values else
                 ("PASS" if overall_values else ""))
             return {"segments": [rows_by_index[i] for i in sorted(rows_by_index)],
-                    "overall": overall}
+                    "overall": overall,
+                    "response_version": versions[0] if len(versions) == 1 else None,
+                    "contract_errors": sorted(set(errors))}
     raise ValueError("visual QC response is not JSON")
 
 
@@ -346,7 +338,7 @@ def main() -> int:
     report_dir = pathlib.Path(args.report_dir)
     out_path = pathlib.Path(args.output)
     result: dict[str, Any] = {
-        "version": "chatcut-visual-qc-v2",
+        "version": REPORT_VERSION,
         "draft": str(draft),
         "status": "UNCERTIFIED",
         "checks": [],
@@ -356,8 +348,11 @@ def main() -> int:
         "degraded_matches": [],
         "batch_results": [],
         "preview_only_reasons": [],
+        "response_contract": {"version": RESPONSE_VERSION, "status": "NOT_VALIDATED",
+                              "validated_batches": [], "errors": []},
     }
     try:
+        result["draft_metadata_sha256"] = draft_metadata_fingerprint(draft)
         info = _load_json(draft)
         claims = _expected_claims(report_dir)
         result["preview_only_reasons"] = [
@@ -494,12 +489,13 @@ def main() -> int:
                         "batch_no": batch_no,
                         "claim_indices": [claim["index"] for claim in claims],
                         "frame_labels": [item["label"] for item in items],
-                        "prompt_version": "chatcut-visual-qc-v2",
+                        "prompt_version": RESPONSE_VERSION,
                     }, ensure_ascii=False, indent=2), encoding="utf-8")
                     ok, text = _call_qc_model(vision_analyzer, chunk_sheet,
                                               _prompt(claims, len(items)), response,
                                               timeout=timeout, workdir=report_dir)
                     if not ok:
+                        result["response_contract"]["errors"].append(f"B{batch_no:02d}:CALL_FAILED")
                         result["batch_results"].append({
                             "batch_no": batch_no,
                             "claim_indices": [claim["index"] for claim in claims],
@@ -512,6 +508,15 @@ def main() -> int:
                         continue
                     try:
                         model = _parse_model(text)
+                        contract_errors = response_errors(model, len(claims))
+                        if contract_errors:
+                            result["response_contract"]["errors"].extend(
+                                f"B{batch_no:02d}:{error}" for error in contract_errors)
+                            result["warnings"].append(
+                                f"POST_DRAFT_VISION_CONTRACT_INVALID:B{batch_no:02d}:" + ";".join(contract_errors))
+                            result["uncertified"] = True
+                        else:
+                            result["response_contract"]["validated_batches"].append(batch_no)
                         overall = model.get("overall")
                         if overall == "FAIL":
                             result["issues"].append(f"POST_DRAFT_VISUAL_MISMATCH:B{batch_no:02d}:MODEL_OVERALL_FAIL")
@@ -532,6 +537,8 @@ def main() -> int:
                             "batch_no": batch_no,
                             "claim_indices": claim_indices,
                             "status": "PARSED",
+                            "contract_status": "INVALID" if contract_errors else "VALIDATED",
+                            "contract_errors": contract_errors,
                             "returned_local_indices": sorted(
                                 int(x.get("index")) for x in model.get("segments") or []
                                 if isinstance(x, dict) and str(x.get("index") or "").isdigit()
@@ -566,9 +573,13 @@ def main() -> int:
                                 result["warnings"].append(f"POST_DRAFT_VISUAL_INSUFFICIENT:S{claim['index']:02d}:{row.get('reason','')}")
                                 result["uncertified"] = True
                     except (ValueError, TypeError, AttributeError) as exc:
+                        result["response_contract"]["errors"].append(f"B{batch_no:02d}:JSON_INVALID")
                         result["warnings"].append("POST_DRAFT_VISION_JSON_INVALID:" + str(exc))
                         result["uncertified"] = True
                 result["model_review"] = visual_rows
+                if (not result["response_contract"]["errors"] and
+                        result["response_contract"]["validated_batches"] == list(range(1, batch_count + 1))):
+                    result["response_contract"]["status"] = "VALIDATED"
                 result["checks"].append({
                     "name": "independent_visual_match",
                     "status": "FAIL" if any(str(x).startswith("POST_DRAFT_VISUAL_MISMATCH")
@@ -577,6 +588,10 @@ def main() -> int:
                     "batches": batch_count,
                     "batch_size_claims": batch_size,
                 })
+        result["draft_metadata_sha256_final"] = draft_metadata_fingerprint(draft)
+        if result["draft_metadata_sha256_final"] != result["draft_metadata_sha256"]:
+            result["issues"].append("DRAFT_METADATA_CHANGED_DURING_QC")
+            result["uncertified"] = True
         degraded_count = len(result.get("degraded_matches") or [])
         result["match_grade_counts"] = {
             "degraded": degraded_count,

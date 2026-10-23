@@ -26,6 +26,8 @@
 - `eval_bootstrap.py/eval_stage.py/production_eval.py`：生产评估流程与证据（contract 与 receipt 校验）
 - `material_index.py/material_library.py`：素材索引/库工具（不在 v1.5.1 正常路径写入素材库）
 - `classify_feedback.py`：将业务反馈归类到可复用规则候选，产出可审计规则文本
+- `feedback_candidates.py`：只追加私有反馈候选与人工审核/回归/发布事件，不在运行中提升全局规则
+- `sentence_review.py`：从 `eval_stage.collect` 收集哈希绑定的句级人工审稿，并冻结输入、调用实际 matcher 离线回放和比较；命令见当前包 `docs/sentence-review.md`，人工标签不授予正式交付许可
 - `mac_review_handoff.py`：Mac 端人工审核交接脚本
 
 ## 4. Windows 脚本

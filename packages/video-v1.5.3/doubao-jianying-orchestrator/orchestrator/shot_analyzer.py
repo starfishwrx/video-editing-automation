@@ -876,6 +876,7 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
     # 降级是「画面将就了」，缺口是「**这个卖点在当前素材类型下无法被证明**」，
     # 只能补拍或改脚本，匹配层修不掉。
     material_gaps: list[dict[str, Any]] = []
+    contract_issues: list[dict[str, Any]] = []
     # 预览稿里未解出可行窗口的段落（定案第 9 条）。单独记账，不并进 degraded_matches：
     # 那个列表驱动成片的「素材待补」标注，而这些段要打的是「未认证」标注。
     preview_unresolved_matches: list[dict[str, Any]] = []
@@ -1117,7 +1118,8 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
                               "reason": "PACKAGING_CLAIM_DIRECT",
                               "packaging_claim": packaging_claim}
             cta_ok, cta_reason = demo_actions.cta_quantity_eligible(shot, text, category)
-            if absorb_role == "hit" and not cta_ok:
+            if (absorb_role == "hit" and not cta_ok
+                    and demo_actions.absorb_quantity_context(text, category)):
                 cta_ok, cta_reason = True, "ABSORB_GROUP_NOT_PACK_QUANTITY"
             absorb_visual = bool(
                 absorb_scene is not None and rulepack.shot_has_visual(absorb_scene, shot))
@@ -1174,26 +1176,37 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
             if not required_claims:
                 return 0, ""
             blob = semantic_gate.shot_evidence_text(row["shot"])
+            bases = []
             for tag in required_claims:
                 if semantic_gate._matches(tag, blob):
-                    return 2, tag
-            for tag in required_claims:
+                    bases.append((2, tag))
+                    continue
                 hit = semantic_gate._associative_hit(tag, blob)
-                if hit:
-                    return 1, f"{tag}←{hit}"
-            return 0, ""
+                if not hit:
+                    return 0, ""
+                bases.append((1, f"{tag}←{hit}"))
+            # 一条直接标签不能把同句其余关联卖点一起提升为精准档。
+            return min(rank for rank, _ in bases), "; ".join(basis for _, basis in bases)
 
         def _evidence_qualified(row: dict[str, Any]) -> bool:
-            claim_ok = bool(row["claim_gate"].get("ok")) or bool(row.get("absorb_visual"))
+            gate = row["claim_gate"]
+            # 吸收组仅能延后本组动作的相位认证，不能替同句的柔软/防漏等要求作证。
+            absorb_ok = bool(row.get("absorb_visual")) and all(
+                not c.evidence_required or c.claim_id in {"C-ABSORB-SPEED", "C-ABSORB-CAPACITY"}
+                or demo_actions.judge_claim(row["shot"], c)[0] for c in required_claim_objs)
+            claim_ok = bool(gate.get("ok")) or absorb_ok
+            if any(c.evidence_required and not c.contract_defined for c in required_claim_objs):
+                claim_ok = bool(row.get("packaging_claim", {}).get("ok"))
+            perception_ok = (demo_actions.perception_reliability(row["shot"])["ok"]
+                             or bool(row.get("packaging_claim", {}).get("ok")))
             evidence_ok = True
             if required_claims:
                 blob = semantic_gate.shot_evidence_text(row["shot"])
                 supported = [semantic_gate.claim_supported(tag, blob) for tag in required_claims]
                 evidence_ok = (all(supported)
-                               or (functional and row.get("fit", 0) > 0 and any(supported))
-                               or bool(row.get("absorb_visual"))
+                               or (absorb_ok and set(required_claims) <= {"吸水"})
                                or bool(row.get("packaging_claim", {}).get("ok")))
-            return (_audit_ready_row(row) and claim_ok and row.get("cta_visual_ok", True)
+            return (_audit_ready_row(row) and perception_ok and claim_ok and row.get("cta_visual_ok", True)
                     and evidence_ok)
 
         def _priority(row: dict[str, Any]) -> tuple:
@@ -1205,7 +1218,8 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
             - ``window.ok``：可行窗口求解有解（真实音频时长 + 保护区 + 转场把手 +
               变速范围 + 证据覆盖，全部同时满足）。
 
-            在闸门之内按「语义达标 / 画面沾边」排优劣：语义达标优先，其次沾边。
+            在闸门之内先比较直接/关联档，再比较语义是否达标。
+            低分精准候选仍须保留待审；不能用高分把关联证据升级成直接证据。
             与 v1.3.24 的关键差别：长度判据从**字符数估算**换成**真实音频求解**，
             而且是硬闸门 —— 求解无解的镜头不再「先取最相关的、交引擎裁决」，
             因为引擎那边的裁决结果必然也是装不下（两边同一口径），拖到最后只会
@@ -1260,9 +1274,9 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
                          if "lint_free" in topic_ids else 0)
             count_rank = (demo_actions.count_readable_rank(row["shot"], contract)
                           if topic_ids & {"count", "layers", "sheet_count"} else 0)
-            return (int(usable), int(row.get("scene_continuation", False)),
+            return (int(usable), int(row.get("scene_continuation", False)), tier,
                     int(semantic_ok and window_ok), int(window_ok and tier > 0),
-                    int(semantic_ok), tier, int(row.get("fit", 1)), pack_direct, count_rank, lint_rank, surface_rank, located, int(role_fit),
+                    int(semantic_ok), int(row.get("fit", 1)), pack_direct, count_rank, lint_rank, surface_rank, located, int(role_fit),
                     int(phase_fit), novel, fresh, spread, int(diversity_fit), row["score"])
 
 
@@ -1332,7 +1346,11 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
         #
         # 缺口照报（不静默），但**不因此把整句判死**：v1.3.24 曾硬阻断到零成片，
         # 用户当时已否决。真正禁止的是拿包装展示/空镜去糊（见下方兜底池收紧）。
+        for undefined in (c for c in required_claim_objs if c.evidence_required and not c.contract_defined):
+            contract_issues.append(demo_actions.material_gap(index, text, claim, [undefined], shots))
         for gap_claim in demo_actions.unmet_claims(shots, required_claim_objs):
+            if not gap_claim.contract_defined:
+                continue
             material_gaps.append(
                 demo_actions.material_gap(index, text, claim, [gap_claim], shots))
         top = []
@@ -1344,7 +1362,9 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
                         "frame_path": shot.get("frame_path"), "status": shot.get("status"),
                         "eligible": row["eligible"], "usable": bool(_priority(row)[0]),
                         "priority": list(_priority(row)), "score_source": row["score_source"],
-                        "raw_score": row["raw_score"], "window_reason": row["window_reason"],
+                         "raw_score": row["raw_score"], "window_reason": row["window_reason"],
+                         "match_tier": {2: "exact", 1: "fuzzy"}.get(_tier(row)[0], "semantic_only"),
+                         "match_basis": _tier(row)[1],
                         "claim_gate": row["claim_gate"], "cta_visual_ok": row["cta_visual_ok"],
                         "reuse_count_before": row["reuse_count_before"],
                         "reuse_block_reason": row["reuse_block_reason"]})
@@ -1747,7 +1767,7 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
             tier_rank, tier_basis = _tier(eligible_good)
             # 兜底即使语义分数达标，也不是直接证据通过：它是因为 claim
             # gate 未通过才被选中，必须显式记成降级，尤其是产品特写承接卖点时。
-            if (unmatched_fallback
+            if (unmatched_fallback or tier_rank == 1
                     or not (eligible_good["score"] >= minimum_match_score
                             and eligible_good["window_ok"])):
                 reasons: list[str] = []
@@ -1766,7 +1786,7 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
                         reasons.append("素材库里没有能证明该句口播的镜头（AI 候选为空或全部低于阈值），"
                                        "本段为兜底采用，成片画面已打「素材待补」标注")
                 if tier_rank == 1:
-                    reasons.append(f"靠产品展示类画面关联证明（{tier_basis}）")
+                    reasons.append(f"相关画面降级承接，未升级为直接证据（{tier_basis}）")
                 elif tier_rank == 0:
                     reasons.append("句中没有可识别的卖点关键词（CLAIM_SYNONYMS 未覆盖），"
                                    "画面相关性无法用标签核验"
@@ -1941,10 +1961,16 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
             "action": selected.get("action"),
             "result": selected.get("result"),
             "object": selected.get("object"),
+            "role": selected.get("role"), "evidence_strength": selected.get("evidence_strength"),
+            "analysis_confidence": selected.get("analysis_confidence"),
+            "has_subject": selected.get("has_subject"),
+            "evidence_category": category,
             "readable_claims": selected.get("readable_claims") or [],
             "pointing_to_text": selected.get("pointing_to_text", selected.get("explicit_pointing", False)),
             "pointing_action": selected.get("pointing_action") or selected.get("gesture"),
             "text_pass": selected.get("text_pass"),
+            "text_agreed": selected.get("text_agreed") or [],
+            "pointed_agreed": selected.get("pointed_agreed") or [],
             "evidence_intervals": evidence, "action_complete": True,
             # 被分析过的场景窗口边界。引擎据此校验成片切片没有越界到
             # 「未经分析」的画面上去（v1.3.24 用户定案）。
@@ -2307,6 +2333,7 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
     # 闸门未认证这一条理由，运营看不出「哪几句是没算出来的」。
     output_manifest["preview_unresolved"] = preview_unresolved_matches
     output_manifest["visual_missing_matches"] = visual_missing_matches
+    output_manifest["contract_issues"] = contract_issues
     result = {"version": _skill_version(), "ok": not pending and bool(segments),
               "selection_policy": "auto_top1_no_human_gate_with_reuse_guard",
               "duplicate_policy": {"exact_shot_max_reuse": 1,
@@ -2326,6 +2353,8 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
               "material_gaps": material_gaps,
               "material_gap_count": len(material_gaps),
               "material_gap_claims": sorted({g["claim_id"] for g in material_gaps if g.get("claim_id")}),
+              "contract_issues": contract_issues,
+              "contract_issue_count": len(contract_issues),
               # 预览稿未解出的段落（定案第 9 条）：有内容时必须让编排层看得见 ——
               # 预览稿能出图不等于能交付，这份名单就是「哪些句还被挂着」。
               "preview_unresolved": preview_unresolved_matches,
