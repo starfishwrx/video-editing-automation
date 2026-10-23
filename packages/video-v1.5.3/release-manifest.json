@@ -6,7 +6,7 @@
     "machine-specific paths",
     "knowledge-base bodies"
   ],
-  "file_count": 197,
+  "file_count": 199,
   "files": [
     {
       "path": ".gitignore",
@@ -74,7 +74,7 @@
     },
     {
       "path": "doubao-jianying-orchestrator/CHANGELOG.md",
-      "sha256": "c1a8e137c743c9070dec0d28585a2dfa6d9bbc5c62354ef0a47e1f2a1f7e9640"
+      "sha256": "6f1f2c4501c53d71ef14c8ae89665dfe07ad792ff2d76098ad98d766268cf46e"
     },
     {
       "path": "doubao-jianying-orchestrator/SKILL.md",
@@ -126,7 +126,7 @@
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/engine.py",
-      "sha256": "b920b396d93c953bf36c3c44959920f2425e2f014dbb4d152e342aba5cccf43e"
+      "sha256": "1228d17149aa84bd07909934117522ae3d863f34885a0980b949b17afec54028"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/feedback_policy.py",
@@ -215,6 +215,10 @@
     {
       "path": "doubao-jianying-orchestrator/orchestrator/stability.py",
       "sha256": "3475e9714bf6b69c84f9cc36e797cc5fcb250df315763b364fc2275d3c9ef8f6"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/subtitle_units.py",
+      "sha256": "41ea07543780dcb32d18670806bfa9cfdd34ac482ee4e34d4140a66bc1beda3d"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/task_log.py",
@@ -315,6 +319,10 @@
     {
       "path": "doubao-jianying-orchestrator/tests/test_stability_single_pass.py",
       "sha256": "3e38eacaf3ada6ae44b3b5383cd24eb55d1e0e2de42d69f1cdff866b98417b4b"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/tests/test_subtitle_units.py",
+      "sha256": "31ce59ed11a23e58cb6fbcaf75eb84a35681c8b813df356ff361c3832dbdf9ab"
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_task_control.py",
@@ -799,7 +807,7 @@
   ],
   "release_id": "video-v1.5.6",
   "schema_version": 1,
-  "source_sha256": "fba7f3bb8f8a43f144f66ba58225c0971119ba0cbab097637d5868d3810eada4",
+  "source_sha256": "2d34e71d418a6e32aec8669384bf8ed609c7a0bae84b125c3494c9bfd979bfbd",
   "tree_hash_algorithm": "video-release-tree-v1",
   "version": "1.5.6",
   "visual_policy_version": "1.4.1"
