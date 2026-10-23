@@ -206,6 +206,21 @@ def evaluate_segments(segments: list[dict[str, Any]], *, require_explicit: bool 
             continue
         text = str(item.get("text", item.get("caption", "")) or "")
         claim_text = str(item.get("claim_text", "") or "").strip()
+        from . import ai_editor_contract
+        if ai_editor_contract.is_ai_segment(item):
+            check = ai_editor_contract.validate_segment_receipt(item, text=text, index=index)
+            if not check["ok"]:
+                issues.append({"index": index, "type": "ai_selection_uncertified",
+                               "reasons": check["reasons"], "message": "AI选镜观察或素材窗口绑定无效"})
+            receipt = item.get("ai_selection") or {}
+            receipt = receipt if isinstance(receipt, dict) else {}
+            coverage.append({"index": index, "video": str(item.get("video") or ""),
+                "text": text, "claim_text": claim_text, "required": receipt.get("selling_points", []),
+                "matched": receipt.get("supported_point_ids", []), "missing": check["reasons"],
+                "negated": [], "evidence_basis": {"via": "ai_editor_pixel_review"},
+                "match_tier": "exact" if check["ok"] else "none", "degraded_claims": [],
+                "status": "matched" if check["ok"] else "blocked", "action_complete": check["ok"]})
+            continue
         if item.get("visual_missing"):
             # 预览缺画面由 visual_missing 与原报告机制承载，不重复判成合同缺口。
             coverage.append({

@@ -6,7 +6,7 @@
     "machine-specific paths",
     "knowledge-base bodies"
   ],
-  "file_count": 199,
+  "file_count": 205,
   "files": [
     {
       "path": ".gitignore",
@@ -26,7 +26,7 @@
     },
     {
       "path": "RULES.md",
-      "sha256": "4640e0c1adebde55e29e26ca2c46cfefa4b8e633060fd6520c828d366e8d03dc"
+      "sha256": "e967d9547cc5b363c298b0025bd5018c01f10bb6f0923179a2bb1357f81bf3a5"
     },
     {
       "path": "SKILL_PACKAGE.json",
@@ -42,11 +42,15 @@
     },
     {
       "path": "batch_worker.py",
-      "sha256": "474c80799d92a39176d8340ec1d01c1088355001da9061a6078ffb5e5d97aa5e"
+      "sha256": "17212bd682ad2a16a1397dbc8c0ac3c93d095b3c4d67195db537228483a42120"
     },
     {
       "path": "closed_loop.py",
       "sha256": "9fb8a5a2c58c68df774a6d5e66b9974ee4485407d2ed719faff07ad6b457a720"
+    },
+    {
+      "path": "docs/AI_EDITOR.md",
+      "sha256": "54ceedd86812cf210cbf4e2f6cf5f82f10298e5c935553c3475c3b645c97bbab"
     },
     {
       "path": "docs/NAS_DELIVERY_STABILITY.md",
@@ -74,11 +78,11 @@
     },
     {
       "path": "doubao-jianying-orchestrator/CHANGELOG.md",
-      "sha256": "6f1f2c4501c53d71ef14c8ae89665dfe07ad792ff2d76098ad98d766268cf46e"
+      "sha256": "50e0717064912184f2565e52d924b61abdb324132d9235d1d21329f0acf08682"
     },
     {
       "path": "doubao-jianying-orchestrator/SKILL.md",
-      "sha256": "8cdf397685e6d1814ecdefed6b536f1dc9665cd1e900c928c288092cd3d22ab7"
+      "sha256": "5972688deaa70cb2e661e8a7c49ec45e81a3cd6c0258209b827d409590fc8829"
     },
     {
       "path": "doubao-jianying-orchestrator/VERSION",
@@ -91,6 +95,18 @@
     {
       "path": "doubao-jianying-orchestrator/orchestrator/__init__.py",
       "sha256": "9641acb61339e450857e2d602111bdb3b7ff38a580d2fe7846831a1ce486cbd3"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/ai_editor.py",
+      "sha256": "9a39ef1cda5acbb9d8c8c9ff7d3a80945d87d24ba47c958a90c9072317239942"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/ai_editor_contract.py",
+      "sha256": "ce8ec919fbf87175c3e22e613d71373217ecfade061756085c13f9babb7bac21"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/ai_editor_qc.py",
+      "sha256": "d7da6f488e11aa2ec69ee841a9a2f32d219caee4af27fc599c1f34665e27e6a1"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/audio_loudness.py",
@@ -106,7 +122,7 @@
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/cli.py",
-      "sha256": "6baca9d4fe837f22f83b6b3a201767b57189abcf6c80ac2376b1f0351778d45c"
+      "sha256": "0d88300c94e6e88578251cc6e7cd48b437e6cc3adf52130cf6ce63bcb72c1f3d"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/demo_actions.py",
@@ -122,11 +138,11 @@
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/draft_visual_qc.py",
-      "sha256": "727ef9ebd64de280fc1724f5a65cb7c1bd6e3d63f6719d480361f348bcb36a80"
+      "sha256": "d8561bfc75a14b44dc6e52cad11a9b21c4c7f2d5000398f9d59abd18f9584ae6"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/engine.py",
-      "sha256": "1228d17149aa84bd07909934117522ae3d863f34885a0980b949b17afec54028"
+      "sha256": "e4906959ebeaddc49b69eff2b88593f66c8e08bd7d9c8964f46983a5a7b1c14c"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/feedback_policy.py",
@@ -198,7 +214,7 @@
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/semantic_gate.py",
-      "sha256": "cab74edbfd4fd1ee4b15fa9df78d32ff829721719d345427fbed28a9a54d508d"
+      "sha256": "f43199b59e07253991f5f26f2f776570347d0937dfa042b8d2a7447e84c4fb88"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/ship_distribute.py",
@@ -206,7 +222,7 @@
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/shot_analyzer.py",
-      "sha256": "e615018fb61942844a1b6ea61493b9aff98a7308738564fe79e7d08f1bdbb129"
+      "sha256": "222235b7df094661f89c835a5ad831515b42322249092130a86f77f8f4a07194"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/shot_notes.py",
@@ -242,7 +258,7 @@
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/vision_analyzer.py",
-      "sha256": "cc5646ecc2d0d68a2af9f95335456970a17f593da9a07217910a427214f8d970"
+      "sha256": "862530e0a688cff72723e8eaf50ada999b01502ffeae723eb1c004bc3c267779"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/visual_match.py",
@@ -250,7 +266,7 @@
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/visual_qc_contract.py",
-      "sha256": "e27b1095e0e928728d610870cda76abbb990f5e54dca9270504bdfae74f910a3"
+      "sha256": "3598ada93e25032f2c64492e8cdabf3235ff1dd2a7f055b9cb5b51801ae3928d"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/voice_catalog.py",
@@ -293,12 +309,20 @@
       "sha256": "f1172dbdd9343afb6024b3fe3bf20b3afe8d70599cc4027cad9501104cd7198b"
     },
     {
+      "path": "doubao-jianying-orchestrator/tests/test_ai_editor.py",
+      "sha256": "fa726dfa0eeb76d5ae3cbf64c5c70094bda3c91639034ef069049b3ef468a9ea"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/tests/test_ai_editor_qc.py",
+      "sha256": "809dc633eee26164a6aed0a82b6352bd80cf6487c3f18828dae1640b02a5ca97"
+    },
+    {
       "path": "doubao-jianying-orchestrator/tests/test_capacity_and_sync.py",
       "sha256": "3d597ca8f9b0a08619daec23ef017f5289268c9bb27a1f7a25fad4e7f5196a9f"
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_codex_invocation.py",
-      "sha256": "073ceae7dec0a20d04e2c044ecf0255e974f4e18a9c6f1024a02e27a006a5a56"
+      "sha256": "0259667a3096ea98ed076f97bb9f6be30aa76e51fe16f44708e2694584c4cc72"
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_file_safety.py",
@@ -678,7 +702,7 @@
     },
     {
       "path": "run_task.template.ps1",
-      "sha256": "1a98b2228cd0b1ce97b544df9511d1a7105b930b1508632c8c25a5e04a3ad2a3"
+      "sha256": "5ef2a2a36e8bf70508a23c7b43f384e59b2e15b6e862c100d5becddcb1bd479c"
     },
     {
       "path": "scripts/uv_sync.ps1",
@@ -790,7 +814,7 @@
     },
     {
       "path": "tools/production_eval.py",
-      "sha256": "ac57b1f480c86b18582167d02e037b5f3fdffacfa9846af4e0aacf6f0e917201"
+      "sha256": "345487b6ac7afba727f12d17c257d2cf2b9ced01e7415dab1b5285ebb4f6ca56"
     },
     {
       "path": "tools/release_package.py",
@@ -798,7 +822,7 @@
     },
     {
       "path": "tools/sentence_review.py",
-      "sha256": "665ee251acd4bbd1f3307c262e6e14210b85877126e2a8946ab02511eb7f98f1"
+      "sha256": "7c9abef7daf8fefe734db9e8456cf7b509aff1e4a17739458095cbf0dc92ce6b"
     },
     {
       "path": "uv.lock",
@@ -807,7 +831,7 @@
   ],
   "release_id": "video-v1.5.6",
   "schema_version": 1,
-  "source_sha256": "2d34e71d418a6e32aec8669384bf8ed609c7a0bae84b125c3494c9bfd979bfbd",
+  "source_sha256": "5ec8f592135f3ceac847589c9d32dc882840aeb69e71848f9b3ec7b4f127f505",
   "tree_hash_algorithm": "video-release-tree-v1",
   "version": "1.5.6",
   "visual_policy_version": "1.4.1"

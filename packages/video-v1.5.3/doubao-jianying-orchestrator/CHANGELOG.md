@@ -1,5 +1,11 @@
 ﻿# Changelog
 
+## Current candidate — selling-point-first AI editor
+
+- 默认实际看图选镜及整稿AI编排，卖点优先；普通介绍/钩子使用同商品包装或拆包是正常匹配。
+- 每轮8候选，保留成功观察，调用失败保持未知；缓存绑定实际输入，源窗与证据由程序重验。
+- 新模式用AI语义收据替代旧词表裁决，保留显式legacy回滚；独立QC v4及worker/Eval重验最终切片，旧报告不能认证。详见`docs/AI_EDITOR.md`。
+
 ## 1.5.6-2 (subtitle units) - 2026-10-23
 
 - 回灌流水线 HelloKitty 整词口径：新增 `subtitle_units.text_units`（`KEEP_WORDS` 内品牌/品类词只算 1 字）；引擎口播长度闸改为 15 字软目标、`text_units` >30 才硬拦，避免 `HelloKitty` 等整词被按字母切碎或误拦。

@@ -446,6 +446,30 @@ def validate_visual_match(report_dir: pathlib.Path) -> tuple[bool, str]:
         return False, "VISUAL_MATCH_BLOCKED: report unreadable: %s" % exc
 
     vision = analysis.get("vision_analysis") or {}
+    segments = match.get("segments") or []
+    if ((match.get("manifest") or {}).get("selection_mode") == "ai_editor"
+            or match.get("selection_mode") == "ai_editor"
+            or any(isinstance(s, dict) and "ai_selection" in s for s in segments)):
+        contract = production_eval.ai_editor_contract
+        if (match.get("ok") is not True or not isinstance(segments, list) or not segments
+                or match.get("selection_mode") != "ai_editor"
+                or contract.digest(segments) != contract.digest((match.get("manifest") or {}).get("segments"))):
+            return False, "VISUAL_MATCH_BLOCKED: AI selection report identity invalid"
+        candidates = {s.get("shot_id"): s for s in analysis.get("shots", []) if isinstance(s, dict)}
+        for index, segment in enumerate(segments, 1):
+            if not isinstance(segment, dict) or segment.get("selection_mode") != "ai_editor":
+                return False, "VISUAL_MATCH_BLOCKED: mixed AI/legacy segments"
+            check = contract.validate_segment_receipt(segment, index=index, verify_source=True)
+            if not check["ok"]:
+                return False, "VISUAL_MATCH_BLOCKED: " + ";".join(check["reasons"])
+            for part in segment.get("span_parts") or [segment]:
+                sid = part.get("shot_id") or part.get("temporary_shot_id")
+                if sid not in candidates or str(part.get("video")) != str(candidates[sid].get("video")):
+                    return False, "VISUAL_MATCH_BLOCKED: AI selection outside task source catalog"
+        sequence = contract.sequence_errors(segments)
+        if sequence:
+            return False, "VISUAL_MATCH_BLOCKED: " + ";".join(sequence)
+        return True, "ai_visual_match_valid_independent_qc_required"
     errors = vision.get("errors") or []
     shots = analysis.get("shots") or []
     ready = [row for row in shots
@@ -995,7 +1019,9 @@ def evaluate_task(task_dir: pathlib.Path, task: dict, drafts: list[str],
                                and status in {"PASS", "PASS_WITH_DEGRADED", "FAIL"}
                                for row, status in zip(qc_payloads, statuses)) else "UNCERTIFIED")
     qc = dict(binding, qc_status=qc_status, contract_status=contract_status,
-              response_version=production_eval.visual_qc_contract.RESPONSE_VERSION,
+              response_version=(qc_payloads[0].get("response_contract", {}).get("version")
+                                if qc_payloads and len({r.get("response_contract", {}).get("version") for r in qc_payloads}) == 1
+                                else "MIXED_OR_MISSING"),
               status="FAIL" if qc_status == "FAIL" else "PASS" if qc_status in {"PASS", "PASS_WITH_DEGRADED"} else "UNCERTIFIED",
               reports=[{"path": str(p), "sha256": production_eval.file_hash(p)} for p in qc_files if p.is_file()])
     qc_path = eval_dir / ("qc-" + production_eval.digest(qc) + ".json")

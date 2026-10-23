@@ -716,6 +716,10 @@ class OrchestrationEngine:
 
     def _visual_duplicate_gate(self, clips: list[Clip]) -> Optional[dict]:
         """阻止同一草稿复用同一视觉签名或同源同构图。"""
+        if self.m.get("selection_mode") == "ai_editor":
+            # Diversity is an editorial preference, not a second lexical gate.
+            # Final window identity/coverage and independent QC remain required.
+            return None
         parents = self._parent_clips(clips)
         records = []
 
@@ -902,7 +906,7 @@ class OrchestrationEngine:
                 solved_window=solution,
                 window_reason="",
                 visual_role=role,
-                time_sensitive=bool(raw.get("time_sensitive")),
+                time_sensitive=bool(part.get("time_sensitive", raw.get("time_sensitive"))),
                 speed_range_override=(part.get("speed_range_override")
                                       or raw.get("speed_range_override")),
                 raw_index=c.raw_index,
@@ -1113,6 +1117,14 @@ class OrchestrationEngine:
         report = semantic_gate.evaluate_segments(
             raw, require_explicit=require_explicit,
             category=str(self.m.get("category") or ""))
+        if self.m.get("selection_mode") == "ai_editor":
+            from . import ai_editor_contract
+            for index, item in enumerate(raw, 1):
+                check = ai_editor_contract.validate_segment_receipt(item, index=index, verify_source=True)
+                if not check["ok"]:
+                    report["ok"] = False
+                    report.setdefault("issues", []).append({"index": index,
+                        "type": "AI_SELECTION_SOURCE_UNCERTIFIED", "reasons": check["reasons"]})
         # Persist both passing and blocked reports.  A passing task must leave
         # an auditable claim-to-shot record for NAS/Feishu review; blocked tasks
         # keep the same artifact so operators can fix the exact pending items.
@@ -2642,6 +2654,13 @@ class OrchestrationEngine:
         if not draft_dir.is_dir():
             return {"status": "DRAFT_NOT_CREATED", "draft_path": str(draft_dir),
                     "reason": "保存后未在剪映当前草稿库发现新草稿目录。"}
+        if self.m.get("selection_mode") == "ai_editor":
+            from . import ai_editor_contract
+            (draft_dir / "ai_selection_identity.json").write_text(json.dumps({
+                "schema": "chatcut-ai-draft-v1", "selection_mode": "ai_editor",
+                "selection_sha256": ai_editor_contract.digest(self.m.get("segments", [])),
+                "policy_version": ai_editor_contract.POLICY_VERSION,
+            }, ensure_ascii=False, indent=2), encoding="utf-8")
         # 需求7：写后独立校验，不通过不上报成功
         #
         # 计数口径必须与**草稿里实际写了几条**一致（`post_write_validate` 是拿这些
