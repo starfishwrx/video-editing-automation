@@ -1,6 +1,6 @@
 # 子系统：队列与闭环工具（package-tools）
 
-- 代码：`packages/video-v1.5.1/{batch_worker.py, closed_loop.py, tools/*.py, run_task.template.ps1, jy_poll.ps1, gold-reference.json}`
+- 代码：`packages/video-v1.5.3/{batch_worker.py, closed_loop.py, tools/*.py, run_task.template.ps1, jy_poll.ps1, gold-reference.json}`
 
 ## 1. 队列与执行（`batch_worker.py`）
 - 工作根：`work/batch_queue.json`（记录列表）；每条任务落 `work/<record_id>/`
@@ -37,11 +37,11 @@
 - `jy_poll.ps1`：Windows 轮询与队列调度脚本
 
 ## 5. 测试
-- `packages/video-v1.5.1/tests/`：包级测试（评估/队列/守卫/索引）
+- `packages/video-v1.5.3/tests/`：包级测试（评估/队列/守卫/索引）
 - `doubao-jianying-orchestrator/tests/test_task_control.py`：done.json 合同/阶段路由/skip/hold 行为
 
 ## 6. 已知差异：两个 closed_loop.py 的关系
-- v1.5.1 下同时存在 `packages/video-v1.5.1/closed_loop.py` 与 `packages/video-v1.5.1/tools/closed_loop.py`
+- v1.5.1 下同时存在 `packages/video-v1.5.3/closed_loop.py` 与 `packages/video-v1.5.3/tools/closed_loop.py`
   - 前者为“精简版闭环 gate”，仅依赖 QC + Mac 审阅结果与包完整性；不引入生产评估/目录身份哈希
   - 后者为“评估闭环版”，在成功 gate 之外还核对 `production_eval` 合同、分发收据的哈希绑定等
   - 这两个脚本服务于不同的落地形态（Windows 本地工具链 vs. 带评估收据的产线），并不会在同一流程中同时调用

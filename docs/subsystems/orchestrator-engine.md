@@ -1,6 +1,6 @@
 # 子系统：编排引擎（orchestrator-engine）
 
-- 代码：`packages/video-v1.5.1/doubao-jianying-orchestrator/orchestrator/engine.py`
+- 代码：`packages/video-v1.5.3/doubao-jianying-orchestrator/orchestrator/engine.py`
 - 入口：`cli.build`/`cli.recover` → `OrchestrationEngine(manifest, base_dir, report_dir, ...).run()`
 - 相关：`RULES.md`（1.4.1）、`SKILL.md`、`references/*`、`timing_contract.py`
 
@@ -55,7 +55,7 @@
 `audio_loudness` `bgm_selector` `capacity` `draft_safety` `script_polish` `semantic_gate` `stability` `timing_contract` `voice_tts` `visual_match` `platform_env` `resource_profile` `video_encode` `voice_catalog`；草稿写入依赖 `jianying-editor/scripts/**`。
 
 ## 6. 测试
-`packages/video-v1.5.1/doubao-jianying-orchestrator/tests/`：`test_capacity_and_sync`、`test_task_control`、`test_timing_contract`、`test_video_decode`、`test_video_encode`、`test_visual_matching_governance`（时序/窗口/复用/预览语义覆盖）。
+`packages/video-v1.5.3/doubao-jianying-orchestrator/tests/`：`test_capacity_and_sync`、`test_task_control`、`test_timing_contract`、`test_video_decode`、`test_video_encode`、`test_visual_matching_governance`（时序/窗口/复用/预览语义覆盖）。
 
 ## 7. 改动检查单
 - [ ] 不改变闸门相对顺序；若调整，PR 必须说明理由与回归用例

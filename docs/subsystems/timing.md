@@ -1,6 +1,6 @@
 # 子系统：时序契约（timing）
 
-- 代码：`packages/video-v1.5.1/doubao-jianying-orchestrator/orchestrator/timing_contract.py`, `stability.py`
+- 代码：`packages/video-v1.5.3/doubao-jianying-orchestrator/orchestrator/timing_contract.py`, `stability.py`
 
 ## 1. 职责
 统一“够不够长”的唯一真时钟：以 µs 为单位，在规划与引擎两侧用同一套求解器/不变量，解决“估长/占位探针/最终裁决不一致”导致的整支拦截。

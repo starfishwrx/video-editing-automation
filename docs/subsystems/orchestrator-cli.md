@@ -1,6 +1,6 @@
 # 子系统：命令行（orchestrator-cli）
 
-- 代码：`packages/video-v1.5.1/doubao-jianying-orchestrator/orchestrator/cli.py`
+- 代码：`packages/video-v1.5.3/doubao-jianying-orchestrator/orchestrator/cli.py`
 - 运行：进入 `doubao-jianying-orchestrator` 后 `python -m orchestrator.cli <subcommand>`
 - 说明：stdout 仅输出机器可读 JSON；详细运行日志写入 `report/tasks/<run_id>/events.jsonl`
 
@@ -40,5 +40,5 @@
 - 旁白/TTS 批量合成缓存：`voice_tts` 的缓存键仅包含“文本+音色+后端+后处理版本”，与视频速度/窗口无关，命中即复用字节。
 
 ## 5. 测试与示例
-- 参见 `packages/video-v1.5.1/doubao-jianying-orchestrator/tests/test_task_control.py` 等，覆盖 `result_contract`、阶段路由、恢复阶段与错误路径。
+- 参见 `packages/video-v1.5.3/doubao-jianying-orchestrator/tests/test_task_control.py` 等，覆盖 `result_contract`、阶段路由、恢复阶段与错误路径。
 
