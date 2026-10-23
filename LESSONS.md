@@ -19,23 +19,14 @@
 
 ## 已有条目（从代码注释与 references 中回填的种子，hits 按已知次数）
 
-### L-20261022-02 新版本必须回收已验证的选镜热修
-- status: OPEN
+### L-20261023-03 配音不留气口是全局规则，不能只改卫品
+- status: PROMOTED(rules/global.json voice.max_gap_frames=1)
 - hits: 1
-- 模块: visual-matching
-- 现象: 新候选沿用旧规则，正确的抽数/层数候选被旧闸门挡住，开场展示提前消耗后续直证。
-- 根因: 工具包版本升级与业务规则回流分离；排序、复用、场景相位和最终语义门采用不同口径。
-- 以后怎么做: 发版对照人工审稿案例与已验证修复，冻结文案、观察、模型响应及真实音频回放；验证候选实际窗口，缺证不得靠抬分通过。多镜组合共享证据门，明确反证在所有兜底前排除。
-- 证据: `packages/video-v1.5.3/docs/SELECTION_REVIEW_20261022.md`、`test_v156_selection_feedback.py`、`test_v156_feedback_semantics.py`。
-
-### L-20261022-01 视觉默认直连后 Codex 单测必须显式钉 transport
-- status: OPEN
-- hits: 1
-- 模块: visual-matching
-- 现象: 默认 `volc_glm` 后，只 mock `_run_codex_file` 的匹配用例 call_count=0。
-- 根因: unset `JY_VISION_TRANSPORT` 已不再走 Codex。
-- 以后怎么做: Codex 回滚路径测试在 setUp 写 `JY_VISION_TRANSPORT=codex`；直连默认另开 `test_volc_glm_vision`。
-- 证据: `packages/video-v1.5.3/doubao-jianying-orchestrator/tests/test_codex_invocation.py`
+- 模块: audio-voice
+- 现象: 纸品成稿口播轨句间约 50ms 空段，卫品为 0；运营以为「不留空」已全品类生效。
+- 根因: 1.5.2 仅把卫品 `max_gap_frames` 改为 1，全局/纸品仍 5 帧。
+- 以后怎么做: 气口预算改 `rules/global.json`；品类包只叠加倍速等差异，不再各自保留更大气口。
+- 证据: 本 PR；抽检 zhipin 草稿 TTS gap≈50ms vs weipin gap=0
 
 ### L-20261016-01 副本哈希一致不代表媒体路径有效
 - status: OPEN

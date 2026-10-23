@@ -86,10 +86,16 @@ class RulepackTests(unittest.TestCase):
         self.assertEqual(zhipin["tail_pad_s"], 0.1)
         self.assertTrue(zhipin["auto_transition"])
 
-    def test_gap_budget_stays_within_five_frames(self):
-        pad = rulepack.gap_tail_pad_s(5, fps=30)
-        heard_gap = pad + 2 * rulepack.DEFAULT_EDGE_KEEP_S
-        self.assertLessEqual(heard_gap, 5 / 30.0)
+    def test_gap_budget_global_no_gap(self):
+        # max_gap_frames=1 → 句尾留白为 0，相邻配音时间线首尾相接
+        # （各句内部仍可保留 edge_keep 自然静音，那不是句间气口）
+        self.assertEqual(rulepack.gap_tail_pad_s(1, fps=30), 0.0)
+        zhipin = rulepack.apply_manifest_defaults({"product": "湿厕纸"})
+        self.assertEqual(zhipin["tail_pad_s"], 0.0)
+        self.assertEqual(zhipin["rulepack"]["voice_max_gap_frames"], 1)
+        weipin = rulepack.apply_manifest_defaults({"product": "夜用卫生巾"})
+        self.assertEqual(weipin["tail_pad_s"], 0.0)
+        self.assertEqual(weipin["rulepack"]["voice_max_gap_frames"], 1)
 
     def test_scene_needs_text_and_shot(self):
         rules = rulepack.load("weipin")
@@ -107,7 +113,7 @@ class RulepackTests(unittest.TestCase):
         self.assertEqual(rulepack.scene_for(rules, "这款很好用",
                                             {"pointing_to_text": True})["id"], "point_front")
         self.assertEqual([s["id"] for s in rulepack.load("zhipin")["scenes"]],
-                         ["stack_product", "show_product", "usage_action", "fluorescence"])
+                         ["stack_product", "show_product", "usage_action"])
 
 
 class WasteTrimTests(unittest.TestCase):
@@ -1002,7 +1008,7 @@ class ExperimentGroupChainTests(unittest.TestCase):
         self.assertEqual(row["status"], "applied")
         self.assertEqual(row["shot_id"], "pool1")
         self.assertEqual([(a["shot_id"], a["source"]) for a in row["attempts"]],
-                         [("pool1", "pool_search")])
+                         [("s1", "selected"), ("pool1", "pool_search")])
         first, second = matched["manifest"]["segments"][:2]
         self.assertEqual({first["video"], second["video"]}, {"D:/m/full.mp4"})
 

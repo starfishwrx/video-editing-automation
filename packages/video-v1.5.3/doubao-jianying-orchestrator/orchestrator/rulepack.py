@@ -120,7 +120,7 @@ def gap_tail_pad_s(max_gap_frames: Any, *, fps: Any = DEFAULT_FPS,
     try:
         frames = max(1, int(max_gap_frames))
     except (TypeError, ValueError):
-        frames = 5
+        frames = 1
     try:
         rate = float(fps) or DEFAULT_FPS
     except (TypeError, ValueError):
@@ -181,7 +181,7 @@ def apply_manifest_defaults(manifest: dict[str, Any]) -> dict[str, Any]:
     out.setdefault("avoid_similar_shots", rules.get("avoid_similar_shots", False))
     out.setdefault("voice_tempo", default_voice_tempo(rules, out.get("voice")))
     out.setdefault("voice_edge_trim", bool(voice.get("edge_trim", True)))
-    max_gap = os.environ.get("JY_VOICE_MAX_GAP_FRAMES") or voice.get("max_gap_frames", 5)
+    max_gap = os.environ.get("JY_VOICE_MAX_GAP_FRAMES") or voice.get("max_gap_frames", 1)
     if out.get("tail_pad_s") is None:
         out["tail_pad_s"] = gap_tail_pad_s(max_gap, fps=out.get("fps") or DEFAULT_FPS)
     out["rulepack"] = {
@@ -296,37 +296,12 @@ def shot_extends(scene: dict[str, Any], shot: dict[str, Any] | None) -> bool:
     return _hits(_scene_looks(scene, shot), scene.get("extend_keywords") or [])
 
 
-# 这些出现在 evidence/action 里时，包装多半只是背景，不能当成「又选中袋面」。
-_STATIC_PACK_BODY_MARKERS = (
-    "抚摸面层", "面层特写", "面层卖点", "完整展示巾体", "展开巾体", "翻面展示",
-    "荧光测试", "检测仪", "检测笔", "紫光", "倒水", "倾倒", "蓝水", "蓝色液体",
-    "吸水实验", "倒液", "擦拭", "对光展示", "光线透过", "按压面层", "拉伸腰",
-)
-
-
 def static_pack_shot(scene: dict[str, Any], shot: dict[str, Any] | None) -> bool:
-    """只拍了包装静态（袋面、未拆封展示），没有撕开、取出动作。
-
-    背景里提到「包装」、或巾体/面层/检测演示画面里顺带露出包装，都不算袋面连拍。
-    """
+    """只拍了包装静态（袋面、未拆封展示），没有撕开、取出动作。"""
     if not shot or not scene.get("static_keywords"):
         return False
-    if shot_has_visual(scene, shot):
-        return False
-    if not _hits(_haystack(shot, scene.get("shot_fields")), scene["static_keywords"]):
-        return False
-    focus = " ".join([
-        str(shot.get("action") or ""),
-        str(shot.get("object") or ""),
-        " ".join(str(v) for v in (shot.get("evidence_tags") or []) if v),
-        " ".join(str(v) for v in (shot.get("visual_tags") or []) if v),
-    ])
-    if any(marker in focus for marker in _STATIC_PACK_BODY_MARKERS):
-        return False
-    # 主语应是包装本身：evidence/action 里要有包装展示信号，避免只靠 description 里的背景词。
-    pack_subject = any(word in focus for word in (
-        "包装", "袋面", "未拆封", "外包装", "密封", "独立包装"))
-    return pack_subject
+    return (_hits(_haystack(shot, scene.get("shot_fields")), scene["static_keywords"])
+            and not shot_has_visual(scene, shot))
 
 
 def followup_scene(rules: dict[str, Any], text: str, previous_shot: dict[str, Any] | None,
@@ -433,20 +408,6 @@ def _pack_print_only(blob: str) -> bool:
     return not any(a in blob for a in _ACTION_EVIDENCE)
 
 
-def _fluorescence_observed(shot: dict[str, Any], blob: str) -> bool:
-    """设备名称只是线索；派生读数标签还须已有接触/照射与数值观察。"""
-    if shot.get("text_pass") in ("pending", "failed"):
-        return False
-    device = any(_keyword_affirmed(blob, word) for word in (
-        "荧光测试", "荧光检测", "检测笔", "紫光"))
-    contact = any(_keyword_affirmed(blob, word) for word in (
-        "贴着", "贴在", "贴近", "接触", "照着", "照射", "抵着", "压在"))
-    reading = any(_keyword_affirmed(blob, word) for word in ("读数", "数值", "数字"))
-    unreadable = any(word in blob for word in (
-        "读数不清", "读数不可见", "数值不清", "无法读取", "看不清读数", "读数未显示"))
-    return device and contact and reading and not unreadable
-
-
 def _strip_derived_labels(shot: dict[str, Any]) -> None:
     """撤回上次由规则派生的标签，再按当前规则重算（模型原事实保留）。"""
     sources = shot.get("shot_label_sources")
@@ -493,8 +454,6 @@ def annotate_shot_labels(shot: dict[str, Any], rules: dict[str, Any] | None = No
         if not isinstance(rule, dict):
             continue
         rule_id = str(rule.get("id") or "")
-        if rule_id == "fluorescence" and not _fluorescence_observed(shot, blob):
-            continue
         if pack_only and rule_id in _ACTION_LABEL_IDS:
             continue
         exclude = [str(w) for w in rule.get("exclude_any") or [] if w]
