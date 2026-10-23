@@ -1,5 +1,9 @@
 ﻿# Changelog
 
+## 1.5.6-2 (subtitle units) - 2026-10-23
+
+- 回灌流水线 HelloKitty 整词口径：新增 `subtitle_units.text_units`（`KEEP_WORDS` 内品牌/品类词只算 1 字）；引擎口播长度闸改为 15 字软目标、`text_units` >30 才硬拦，避免 `HelloKitty` 等整词被按字母切碎或误拦。
+
 ## 1.5.6-1 (rulepack global) - 2026-10-23
 
 - 配音轨不留气口升为**全局**规则：`rules/global.json` `voice.max_gap_frames=1` → 默认 `tail_pad_s=0`，纸品/卫品/通用相邻口播首尾相接（各句首尾仍保留 25 ms 自然静音）。卫品倍速仍 1.2；任务显式 `tail_pad_s` 或 `JY_VOICE_MAX_GAP_FRAMES` 仍可覆盖。

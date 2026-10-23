@@ -19,6 +19,15 @@
 
 ## 已有条目（从代码注释与 references 中回填的种子，hits 按已知次数）
 
+### L-20261023-04 整词字幕口径必须回灌技能包，不能只停在流水线机
+- status: OPEN
+- hits: 1
+- 模块: orchestrator-engine
+- 现象: 批次按 15 字硬切把 `HelloKitty` 从中间切开；实验包闸门仍用裸 `len(text)`，与流水线 `subtitle_units` 不一致。
+- 根因: 整词表与 `text_units` 只落在 `jy_pipeline` 部署，未进 `packages/video-v1.5.3`。
+- 以后怎么做: 口播计字/拆句改动先进包（`subtitle_units` + 引擎闸 + 单测），再部署流水线；交付脚本只消费包内口径。
+- 证据: 本变更；历史对话「Project scoring model」断句碎片 `HelloKitt`/`y`
+
 ### L-20261023-03 配音不留气口是全局规则，不能只改卫品
 - status: PROMOTED(rules/global.json voice.max_gap_frames=1)
 - hits: 1
@@ -57,4 +66,3 @@
 - 模块: orchestrator-cli / visual-matching
 - 现象: 选镜在引擎构造前就跑完，引擎里写回 manifest 的 `delivery_mode` 对它无效（engine.run 注释）。
 - 以后怎么做: 影响选镜的字段必须在 `cli.cmd_build` 侧先写入 manifest。
-
