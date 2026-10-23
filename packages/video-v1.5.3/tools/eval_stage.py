@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from tools import production_eval as pe
+from tools import sentence_review
 
 
 def _context(task_dir: Path, draft_root: Path) -> tuple[dict, dict, dict, list[str], list[Path], dict, list[str]]:
@@ -27,6 +28,8 @@ def _context(task_dir: Path, draft_root: Path) -> tuple[dict, dict, dict, list[s
     identity = pe.output_identity(outputs)
     if task.get('task_id') != contract.get('task_id'):
         raise ValueError('TASK_CONTRACT_IDENTITY_MISMATCH')
+    if pe.digest(task) != contract.get('task_sha256'):
+        raise ValueError('TASK_CONTRACT_CONTENT_MISMATCH')
     ids = []
     for output in outputs:
         info = pe.read(output / 'draft_info.json')
@@ -39,13 +42,14 @@ def _context(task_dir: Path, draft_root: Path) -> tuple[dict, dict, dict, list[s
 
 def _binding(contract: dict, output_sha256: str) -> dict:
     return {'task_id': contract['task_id'], 'run_id': contract['run_id'],
-            'contract_hash': contract['contract_hash'], 'output_sha256': output_sha256}
+            'contract_hash': contract['contract_hash'], 'task_sha256': contract['task_sha256'],
+            'output_sha256': output_sha256}
 
 
 def _input_once(path: Path, value: dict) -> None:
     if path.exists():
         existing = pe.read(path)
-        for key in ('task_id', 'run_id', 'contract_hash', 'output_sha256'):
+        for key in ('task_id', 'run_id', 'contract_hash', 'task_sha256', 'output_sha256'):
             if existing.get(key) != value.get(key):
                 raise ValueError('REVIEW_INPUT_CONTEXT_DRIFT:' + key)
         return
@@ -80,7 +84,7 @@ def prepare(task_dir: Path, draft_root: Path) -> dict:
                 reference_sources=[dict(source, reviewed=False, evidence=[])
                                    for source in contract['gold_reference']['sources']],
                 dimensions={name: {'status': 'UNCERTIFIED', 'notes': '', 'evidence': []}
-                            for name in pe.DIMENSIONS})
+                            for name in pe.DIMENSIONS}, sentence_reviews=[])
     mac = dict(binding, status='UNCERTIFIED', reviewed_by='', approved=False,
                review_surface='mac_jianying', editable_project_opened=False,
                draft_ids=draft_ids, reports=[])
@@ -90,7 +94,7 @@ def prepare(task_dir: Path, draft_root: Path) -> dict:
                    gold_review_input=str(gold_path), mac_review_input=str(mac_path),
                    required_gold_dimensions=list(pe.DIMENSIONS),
                    instructions={
-                       'gold': 'Compare the complete finished video with all 11 Gold references. Record PASS/FAIL/UNCERTIFIED for each dimension, concise notes, and hash-bound evidence files.',
+                       'gold': 'Compare the complete finished video with all 11 Gold references. Record PASS/FAIL/UNCERTIFIED for each dimension, concise notes, and hash-bound evidence files. Optional sentence_reviews records accepted/rejected source windows for offline evaluation only; missing labels remain unknown.',
                        'mac': 'Open every listed editable project in Jianying on Mac. Record reviewer, approval, and hash-bound screenshots or review evidence. Do not approve by filename alone.'})
     _input_once(gold_path, gold)
     _input_once(mac_path, mac)
@@ -146,7 +150,8 @@ def _review_stage_resolver(task_dir: Path, stage_root: Path, mac_root: str,
 
 def collect(task_dir: Path, draft_root: Path, gold_input: Path | None = None,
             mac_input: Path | None = None, *, review_stage_root: Path | None = None,
-            mac_root: str | None = None) -> dict:
+            mac_root: str | None = None, sentence_input: Path | None = None,
+            sentence_ledger: Path | None = None) -> dict:
     contract, task, done, names, outputs, identity, draft_ids = _context(task_dir, draft_root)
     binding = _binding(contract, identity['sha256'])
     eval_dir = task_dir / 'eval' / contract['run_id']
@@ -219,6 +224,15 @@ def collect(task_dir: Path, draft_root: Path, gold_input: Path | None = None,
                 sample_slots=contract['gold_reference']['sample_slots'],
                 reference_sources=normalized_sources,
                 dimensions=normalized_dimensions)
+    if sentence_input is not None and gold_raw.get('sentence_reviews'):
+        raise ValueError('SENTENCE_REVIEW_INPUT_AMBIGUOUS')
+    sentence_raw = pe.read(sentence_input) if sentence_input is not None else gold_raw
+    sentence_rows = sentence_review.normalize_reviews(
+        dict(sentence_raw, sentence_reviews=sentence_raw.get('sentence_reviews', [])), binding,
+        source_hashes={row['sha256'] for row in contract['inputs']},
+        resolver=resolve_path if sentence_input is None else None,
+        script_text=str(task.get('script') or ''))
+    gold['sentence_reviews'] = sentence_rows
 
     if mac_raw.get('review_surface') != 'mac_jianying':
         raise ValueError('MAC_REVIEW_SURFACE_INVALID')
@@ -236,6 +250,11 @@ def collect(task_dir: Path, draft_root: Path, gold_input: Path | None = None,
                approved=mac_approved, review_surface='mac_jianying',
                editable_project_opened=mac_raw.get('editable_project_opened') is True,
                draft_ids=draft_ids, reports=reports)
+    sentence_collection = None
+    if sentence_rows:
+        from tools.feedback_candidates import append_once
+        sentence_collection = append_once(sentence_ledger or task_dir / 'eval' / 'sentence_review.jsonl',
+                                          sentence_rows)
     gold_receipt = eval_dir / ('gold-quality-review-' + identity['sha256'] + '-' + pe.digest(gold)[:16] + '.json')
     mac_receipt = eval_dir / ('mac-review-' + identity['sha256'] + '-' + pe.digest(mac)[:16] + '.json')
     pe.write_once(gold_receipt, gold)
@@ -258,6 +277,7 @@ def collect(task_dir: Path, draft_root: Path, gold_input: Path | None = None,
     return {'status': 'REVIEWS_COLLECTED', 'gold_status': gold_status,
             'mac_status': mac_status, 'gold_receipt': str(gold_receipt),
             'mac_receipt': str(mac_receipt),
+            'sentence_review_collection': sentence_collection,
             'approval_file': str(approval_path) if mac_approved else None}
 
 
@@ -299,6 +319,10 @@ def main() -> int:
     parser.add_argument('--mac-input', type=Path)
     parser.add_argument('--review-stage-root', type=Path)
     parser.add_argument('--mac-root')
+    parser.add_argument('--sentence-input', type=Path,
+                        help='optional private sentence-review JSON, bound to this task/run/output')
+    parser.add_argument('--sentence-ledger', type=Path,
+                        help='private append-only sentence ledger; defaults to task eval directory')
     parser.add_argument('--deliver', action='store_true',
                         help='allow final NAS distribution and Feishu writeback after verified gates')
     args = parser.parse_args()
@@ -306,7 +330,8 @@ def main() -> int:
         result = prepare(args.task_dir, args.draft_root)
     elif args.command == 'collect':
         result = collect(args.task_dir, args.draft_root, args.gold_input, args.mac_input,
-                         review_stage_root=args.review_stage_root, mac_root=args.mac_root)
+                         review_stage_root=args.review_stage_root, mac_root=args.mac_root,
+                         sentence_input=args.sentence_input, sentence_ledger=args.sentence_ledger)
     else:
         result = finalize(args.task_dir, args.draft_root, deliver=args.deliver)
     print(json.dumps(result, ensure_ascii=False))

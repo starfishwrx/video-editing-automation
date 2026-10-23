@@ -7,12 +7,20 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import math
 import os
 import re
 from pathlib import Path
 from typing import Any
+
+# Load the bundled pure contract without importing an installed runtime or
+# changing sys.path: QC and receipt verification must use the same definition.
+_qc_contract_path = Path(__file__).resolve().parents[1] / "doubao-jianying-orchestrator" / "orchestrator" / "visual_qc_contract.py"
+_qc_contract_spec = importlib.util.spec_from_file_location("_production_visual_qc_contract", _qc_contract_path)
+visual_qc_contract = importlib.util.module_from_spec(_qc_contract_spec)
+_qc_contract_spec.loader.exec_module(visual_qc_contract)
 
 DIMENSIONS = (
     'visual_match_and_product_identity', 'claim_evidence_coverage',
@@ -254,8 +262,34 @@ def evaluate(contract: dict, task: dict, runtime: dict, outputs: list[Path],
             verdict = row.get('status', 'UNCERTIFIED')
             if verdict not in STATUSES:
                 verdict = 'UNCERTIFIED'
-            if name == 'VISUAL-QC' and row.get('qc_status') not in {'PASS', 'PASS_WITH_DEGRADED'}:
-                verdict = 'FAIL' if row.get('qc_status') == 'FAIL' else 'UNCERTIFIED'
+            if name == 'VISUAL-QC':
+                qc_status = row.get('qc_status')
+                if qc_status == 'FAIL':
+                    verdict = 'FAIL'
+                elif verdict != 'FAIL':
+                    reports = row.get('reports') or []
+                    report_statuses = [visual_qc_contract.report_status(read(Path(proof['path'])))
+                                       for proof in reports]
+                    report_payloads = [read(Path(proof['path'])) for proof in reports]
+                    matched_outputs = []
+                    for report in report_payloads:
+                        matches = [index for index, output_path in enumerate(outputs)
+                                   if visual_qc_contract.report_matches_draft(report, output_path)]
+                        if len(matches) == 1:
+                            matched_outputs.append(matches[0])
+                    report_identity_valid = (len(report_payloads) == len(outputs)
+                                             and len(matched_outputs) == len(outputs)
+                                             and sorted(matched_outputs) == list(range(len(outputs))))
+                    if 'FAIL' in report_statuses:
+                        verdict = 'FAIL'
+                    elif (qc_status not in {'PASS', 'PASS_WITH_DEGRADED'}
+                            or row.get('contract_status') != 'VALIDATED'
+                            or row.get('response_version') != visual_qc_contract.RESPONSE_VERSION
+                            or not report_statuses
+                            or not report_identity_valid
+                            or any(status not in {'PASS', 'PASS_WITH_DEGRADED'} for status in report_statuses)
+                            or (qc_status == 'PASS' and any(status != 'PASS' for status in report_statuses))):
+                        verdict = 'UNCERTIFIED'
             if verdict != 'FAIL' and name == 'DRAFT-PACKAGE' and not row.get('files_verified'):
                 verdict = 'UNCERTIFIED'
             if verdict != 'FAIL' and name == 'MAC-REVIEW' and not (
@@ -313,7 +347,7 @@ def evaluate(contract: dict, task: dict, runtime: dict, outputs: list[Path],
     status = ('FAIL' if 'FAIL' in statuses.values() else
               'PASS' if all(v == 'PASS' for v in statuses.values()) else 'UNCERTIFIED')
     qc = verified.get('VISUAL-QC', {}).get('qc_status')
-    accepted = (statuses['DRAFT-PACKAGE'] == statuses['MAC-REVIEW'] == 'PASS'
+    accepted = (statuses['DRAFT-PACKAGE'] == statuses['MAC-REVIEW'] == statuses['VISUAL-QC'] == 'PASS'
                 and statuses['INPUT-IDENTITY'] == statuses['RUNTIME-IDENTITY'] == 'PASS')
     acceptance = ('REJECTED' if status == 'FAIL' else
                   'ACCEPTED_DEGRADED' if accepted and qc == 'PASS_WITH_DEGRADED' else

@@ -191,10 +191,12 @@ class PreviewNarrowTests(unittest.TestCase):
 class AbsorbGroupShareTests(unittest.TestCase):
     def test_volume_sentences_share_one_experiment_shot(self):
         shot = _shot(
-            "exp", description="往卫生巾上倒蓝色液体，液体被吸收并锁在中央",
-            evidence_tags=["倒水", "吸收", "锁在中央"], visual_tags=["倒水", "吸收"],
+            "exp", description="往卫生巾上倾倒蓝色液体，快速吸水并锁在中央不扩散",
+            role="direct_evidence", evidence_strength="A", action="倾倒", object="液体+巾体",
+            result="液体被吸入，液体锁在中央不扩散",
+            evidence_tags=["倒水", "吸水", "锁在中央"], visual_tags=["倒水", "吸水"],
             evidence_intervals=[{"start": 1.0, "end": 2.2, "frame_time": 1.5}])
-        texts = ["内含高分子吸水因子", "吸收更快更干净", "量大的姐妹真的闭眼冲"]
+        texts = ["瞬吸吸水更快", "吸收速度快", "吸量大，液体锁在中央"]
         manifest = _manifest(
             texts[0], audio_s=1.2, category="weipin", product="小暖心", product_name="小暖心",
             delivery_mode="formal", max_source_reuse=1)

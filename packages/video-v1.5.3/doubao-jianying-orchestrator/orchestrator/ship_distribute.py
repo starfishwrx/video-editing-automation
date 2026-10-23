@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""定稿分发（ship & distribute）：一步完成
+r"""定稿分发（ship & distribute）：一步完成
   1. 素材路径可移植化改写（media/ 中真实存在的文件才改写）
   2. 注入带实际时间轴与文件校验的 NAS 往返工具（独立组件 v4）
   3. 复制到 NAS：测试产出\<草稿名> 与 测试产出\分发草稿\<草稿名>（--style unc 时）
@@ -11,7 +11,7 @@
   local 只改写为本机 media 绝对路径（不出货）
   mac   改写为 Mac 预览库路径（不出货）
 """
-import argparse, io, json, os, shutil, subprocess, sys
+import argparse, io, json, os, shutil, subprocess, sys, tempfile
 from pathlib import Path
 
 PIPE_ROOT = Path(__file__).resolve().parents[2]
@@ -19,6 +19,7 @@ if str(PIPE_ROOT) not in sys.path:
     sys.path.insert(0, str(PIPE_ROOT))
 from tools.delivery_identity import tree_identity
 from tools import nas_portable
+from tools.delivery_runtime import require_ship_dependencies
 
 NAS_SHARE_ENV = 'JY_NAS_SHARE'
 NAS_USER_ENV = 'JY_NAS_USER'
@@ -39,6 +40,11 @@ def rewrite(root, style):
     """改写 draft_info.json / draft_content.json 素材路径；返回改写条数。"""
     # Check the actual migrated timelines before touching any root sidecar.
     # An encrypted active timeline cannot be certified using old plaintext.
+    def document_snapshot():
+        return {str(path.relative_to(root)): nas_portable.digest(path)
+                for path in nas_portable.project_files(Path(root))
+                if path.suffix.lower() == '.json' and path.relative_to(root).parts[0] != 'media'}
+    before_documents = document_snapshot()
     verified_documents, verified_references = nas_portable.inspect(Path(root))
     base_name = os.path.basename(os.path.abspath(root))
     sep = '\\' if style != 'mac' else '/'
@@ -104,6 +110,8 @@ def rewrite(root, style):
                 platform = planned.get(filename, {}).get(key)
                 if isinstance(platform, dict):
                     platform['os'] = 'mac'
+    if document_snapshot() != before_documents:
+        raise RuntimeError('DRAFT_CHANGED_DURING_REWRITE')
     for filename, payload in planned.items():
         nas_portable.write_json(Path(root) / filename, payload)
     return len(mapping)
@@ -136,25 +144,28 @@ def mount_nas():
     if not password:
         raise RuntimeError(NAS_PASSWORD_ENV + '_MISSING')
     r = subprocess.run(['net', 'use', nas_share, password, '/user:' + nas_user],
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, timeout=30)
     return r.returncode
 
 
 def robocopy(src, dst):
-    r = subprocess.run(['robocopy', src, dst, '/E', '/NJH', '/NJS', '/NFL', '/NDL', '/NP',
+    r = subprocess.run(['robocopy', src, dst, '/E', '/R:3', '/W:2', '/NJH', '/NJS', '/NFL', '/NDL', '/NP',
                         '/XD', '.recycle_bin', '/XF', '*.source.sha256'],
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, timeout=240)
     return r.returncode  # 0-7 = 成功
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument('--draft', required=True)
-    ap.add_argument('--style', default='unc', choices=('unc', 'local', 'mac'))
-    ap.add_argument('--skip-dist', action='store_true')
-    args = ap.parse_args()
+def _ship_staged(args, root, original_source=None, original_identity=None):
+    # Resolve the dependency before modifying a staging draft or publishing any
+    # NAS directory. A partial installation must fail before copying files.
+    try:
+        require_ship_dependencies(PIPE_ROOT)
+        from tools.draft_delivery import publish_tree, verify_shared
+    except (ImportError, RuntimeError) as exc:
+        log(json.dumps({'status': 'FAIL', 'reason': str(exc)}, ensure_ascii=False))
+        return 11
 
-    root = os.path.abspath(args.draft)
+    root = os.path.abspath(root)
     if not os.path.isdir(os.path.join(root, 'media')):
         log(json.dumps({'status': 'FAIL', 'reason': 'media dir missing: ' + root}, ensure_ascii=False))
         return 2
@@ -177,46 +188,22 @@ def main():
         if mount_nas() != 0:
             log(json.dumps({'status': 'FAIL', 'reason': 'net use failed'}, ensure_ascii=False))
             return 3
-        existing_root = tree_identity(Path(nas_root)) if os.path.isdir(nas_root) else None
-        existing_dist = tree_identity(Path(nas_dist)) if os.path.isdir(nas_dist) else None
-        if existing_root and existing_root['sha256'] != staged_identity['sha256']:
-            log(json.dumps({'status': 'FAIL', 'reason': 'nas root identity conflict; existing target preserved'}, ensure_ascii=False))
-            return 6
-        if existing_dist and existing_dist['sha256'] != staged_identity['sha256']:
-            log(json.dumps({'status': 'FAIL', 'reason': 'distribution identity conflict; existing target preserved'}, ensure_ascii=False))
-            return 7
-        if existing_root:
-            nas_identity = existing_root
-        else:
-            rc = robocopy(root, nas_root)
-            if rc >= 8:
-                log(json.dumps({'status': 'FAIL', 'reason': 'robocopy root failed rc=%d' % rc}, ensure_ascii=False))
-                return 4
-            root_copied = True
-            nas_identity = tree_identity(Path(nas_root))
-            if staged_identity['sha256'] != nas_identity['sha256']:
-                log(json.dumps({'status': 'FAIL', 'reason': 'nas root readback hash mismatch'}, ensure_ascii=False))
-                return 8
-        if existing_dist:
-            dist_skipped = True
-            dist_identity = existing_dist
-        else:
-            rc = robocopy(root, nas_dist)
-            if rc >= 8:
-                log(json.dumps({'status': 'FAIL', 'reason': 'robocopy dist failed rc=%d' % rc}, ensure_ascii=False))
-                return 5
-            dist = True
-            dist_identity = tree_identity(Path(nas_dist))
-        if staged_identity['sha256'] != dist_identity['sha256']:
-            log(json.dumps({'status': 'FAIL', 'reason': 'distribution readback hash mismatch'}, ensure_ascii=False))
-            return 9
-        # Equal copies can still contain equally broken workstation/relative
-        # paths. Verify literal references in every active timeline after copy.
-        from tools.draft_delivery import verify_shared
         try:
+            # Preflight both existing targets before creating either new one.
+            for target in (nas_root, nas_dist):
+                if os.path.exists(target) and tree_identity(Path(target))['sha256'] != staged_identity['sha256']:
+                    raise RuntimeError('DELIVERY_TARGET_IDENTITY_CONFLICT: ' + target)
+            root_copied = publish_tree(Path(root), Path(nas_root), staged_identity, copier=robocopy)
             shared_check = verify_shared(Path(nas_root), Path(nas_root))
+            dist = publish_tree(Path(root), Path(nas_dist), staged_identity, copier=robocopy,
+                                reference_root=Path(nas_root))
+            dist_skipped = not dist
             verify_shared(Path(nas_dist), Path(nas_root))
-        except (RuntimeError, OSError, ValueError) as exc:
+            nas_identity = tree_identity(Path(nas_root))
+            dist_identity = tree_identity(Path(nas_dist))
+            if tree_identity(Path(root))['sha256'] != staged_identity['sha256']:
+                raise RuntimeError('STAGING_CHANGED_DURING_DELIVERY')
+        except (RuntimeError, OSError, ValueError, subprocess.TimeoutExpired) as exc:
             log(json.dumps({'status': 'FAIL', 'reason': str(exc)}, ensure_ascii=False))
             return 10
     else:
@@ -225,6 +212,9 @@ def main():
         dist_identity = None
         shared_check = None
 
+    if original_source is not None and tree_identity(original_source) != original_identity:
+        log(json.dumps({'status': 'FAIL', 'reason': 'SOURCE_CHANGED_DURING_DELIVERY'}))
+        return 12
     log(json.dumps({
         'status': 'OK',
         'draft': name,
@@ -244,6 +234,39 @@ def main():
         'dist_target': (os.environ.get(NAS_SHARE_ENV, '').rstrip('\\/') + '\\测试产出\\分发草稿\\' + name) if args.style == 'unc' else None,
     }, ensure_ascii=False))
     return 0
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--draft', required=True)
+    ap.add_argument('--style', default='unc', choices=('unc', 'local', 'mac'))
+    ap.add_argument('--skip-dist', action='store_true')
+    ap.add_argument('--work', type=Path, help='new private delivery evidence directory')
+    args = ap.parse_args()
+    try:
+        require_ship_dependencies(PIPE_ROOT)
+        from tools.draft_delivery import collect_delivery_stage
+        source = Path(args.draft).resolve()
+        if args.style != 'unc' or args.skip_dist:
+            return _ship_staged(args, str(source))
+        # The public UNC entrypoint also protects the original project. Only
+        # its newly collected private copy is ever rewritten.
+        before = tree_identity(source)
+        if args.work is None:
+            work = Path(tempfile.mkdtemp(prefix='jy-shipping-'))
+        else:
+            work = args.work.resolve()
+            if work.exists():
+                raise RuntimeError('DELIVERY_WORK_EXISTS')
+            if work.is_relative_to(source) or source.is_relative_to(work):
+                raise RuntimeError('SOURCE_DESTINATION_OVERLAP')
+            work.mkdir(parents=True, exist_ok=False)
+        staging = work / source.name
+        collect_delivery_stage(source, staging, work / 'transport')
+        return _ship_staged(args, str(staging), source, before)
+    except (ImportError, RuntimeError, OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        log(json.dumps({'status': 'FAIL', 'reason': str(exc)}, ensure_ascii=False))
+        return 11
 
 
 if __name__ == '__main__':

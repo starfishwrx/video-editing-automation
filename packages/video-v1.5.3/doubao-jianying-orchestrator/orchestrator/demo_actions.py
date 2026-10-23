@@ -28,6 +28,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from typing import Any
 
@@ -45,6 +46,10 @@ STRENGTH_RANK: dict[str, int] = {"C": 0, "B": 1, "A": 2}
 
 # 动作阶段（行动作阶段只用于反重复判定，不参与证据强度）
 ACTION_PHASES = ("prep", "perform", "result", "static")
+
+# 这是证据合同 schema 的版本，不是发布包版本。旧参考片结论只记录来源，
+# 不再决定新增素材是否可能满足卖点。
+EVIDENCE_CONTRACT_VERSION = "1"
 
 
 class Claim:
@@ -67,9 +72,26 @@ class Claim:
         self.keywords = keywords
 
     @property
-    def material_gap(self) -> bool:
-        """语料中不存在可证明该卖点的动作（无必须动作即缺口）。"""
-        return self.action is None
+    def contract_defined(self) -> bool:
+        """功能合同必须先定义动作、对象和结果；参考片未出现不等于缺素材。"""
+        return not self.evidence_required or bool(self.action and self.object and self.result)
+
+    @property
+    def material_gap(self) -> None:
+        """兼容旧读取方；静态卖点尚未检查当前素材，缺口状态只能是未知。"""
+        return None
+
+    @property
+    def contract_kind(self) -> str:
+        if not self.evidence_required:
+            return "contextual"
+        if not self.contract_defined:
+            return "undefined"
+        if self.claim_id == "C-GUARD-EXIST":
+            return "structural"
+        if self.evidence_status == "comparative":
+            return "comparative"
+        return "physical"
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -78,7 +100,11 @@ class Claim:
             "required_result": self.result, "required_role": self.role,
             "evidence_required": self.evidence_required,
             "evidence_status": self.evidence_status,
+            "reference_evidence_status": self.evidence_status,
             "material_gap": self.material_gap,
+            "evidence_contract": {"schema": "claim_evidence", "version": EVIDENCE_CONTRACT_VERSION,
+                                  "kind": self.contract_kind,
+                                  "status": "defined" if self.contract_defined else "undefined"},
         }
 
 
@@ -87,12 +113,9 @@ class Claim:
 #   direct      ref1–ref6 里有动作结果可见的镜头，可承担证明
 #   comparative 需要与参照物同框比较才成立（如薄度须与手指同框）
 #   metaphor    只有装置/道具示意，**不得**当事实证明
-#   none        语料里根本没有能证明它的动作 → 必然 MATERIAL_GAP
-# 由 §1 直接推得：以下 11 条一旦脚本写到就必须报缺口 ——
-#   C-LEAK-SIDE C-SOFT C-BREATHABLE C-WRAP C-FIT C-BOND
-#   C-EASY-WEAR C-NO-CHAFE C-COTTON C-MULTI-EQUIV C-SPEC
-# 这 11 条正是运营「关键卖点画面也没有展示」的可执行解释：不是剪得不好，
-# 是这些卖点在当前素材类型下**无法被画面证明**，只能靠口播断言。
+#   none        旧语料未拍到；不表示当前/未来素材永久无法证明。
+# 动作未定义的合同保持 CONTRACT_UNDEFINED，待定义可验证判据；不得冒充
+# 已检查素材后的 MATERIAL_GAP，也不得靠相关主题词直接认证。
 CLAIMS: tuple[Claim, ...] = (
     Claim("C-ABSORB-SPEED", "吸收速度（瞬吸）", "倾倒", "液体+巾体/裤体", "液体被吸入",
           "direct_evidence", True, "direct",
@@ -113,7 +136,7 @@ CLAIMS: tuple[Claim, ...] = (
           "direct_evidence", True, "none",
           # 不用单字「软」「舒服」：会把「不舒服」里的「舒服」误判成柔软。
           ("柔软", "超软", "软乎", "软软", "舒适", "亲肤感", "丝滑", "细腻")),
-    Claim("C-BREATHABLE", "透气", None, None, None,
+    Claim("C-BREATHABLE", "透气", "空气穿透", "巾体+气流装置", "气流穿透巾体可见",
           "direct_evidence", True, "metaphor",
           ("透气", "不闷", "闷闷", "闷热", "捂着", "闷得慌")),
     Claim("C-THIN", "薄", "捏/抚", "巾体+手指", "与手指同框厚度对比可见",
@@ -353,6 +376,9 @@ def sentence_contract(text: str, claim_text: str = "", *, category: str = "",
     return {
         "category": rulepack_category(category),
         "product": product,
+        "evidence_contract_version": EVIDENCE_CONTRACT_VERSION,
+        "claim_evidence_contracts": {c.claim_id: c.as_dict()["evidence_contract"]
+                                     for c in requirements_for(text, claim_text, category)},
         "intents": infer_intents(text, claim_text, category),
         "claims": [c.claim_id for c in requirements_for(text, claim_text, category)],
         "counts": count_mentions(blob),
@@ -708,9 +734,8 @@ _PACKAGING_CLAIMS: dict[str, tuple[str, ...]] = {
 }
 _POINTING_MARKERS = ("指向", "指着", "指到", "指给", "点到", "手指", "标注", "指示")
 _QUANTITY_MARKERS = (
-    "多包", "多提", "整箱", "纸箱", "成排", "一排", "排成", "堆叠", "堆放",
-    "一提", "几提", "一箱", "几箱", "多箱", "数量展示", "量感", "囤货", "库存",
-    "抛向", "扔进", "丢进", "行李箱", "手提袋", "装满", "摆满", "平铺",
+    "多包", "多提", "整箱", "成排", "一排", "堆叠", "堆放",
+    "一提", "几提", "一箱", "几箱", "多箱", "装满产品", "摆满产品",
 )
 
 
@@ -879,6 +904,57 @@ def _object_match(shot: dict[str, Any], claim: Claim) -> bool:
     return True
 
 
+def perception_reliability(shot: dict[str, Any]) -> dict[str, Any]:
+    """业务例外之前的观察门槛；缺字段的旧产物兼容，显式坏值不能变成缺字段。"""
+    if "analysis_confidence" not in shot or shot.get("analysis_confidence") is None:
+        return {"ok": True, "reason": "LEGACY_CONFIDENCE_UNSPECIFIED",
+                "basis": "legacy_observation"}
+    raw = shot.get("analysis_confidence")
+    try:
+        confidence = float(raw)
+    except (TypeError, ValueError):
+        return {"ok": False, "reason": "EVIDENCE_CONFIDENCE_INVALID"}
+    if isinstance(raw, bool) or not math.isfinite(confidence) or not 0 <= confidence <= 1:
+        return {"ok": False, "reason": "EVIDENCE_CONFIDENCE_INVALID"}
+    if confidence < 0.60:
+        return {"ok": False, "reason": "EVIDENCE_CONFIDENCE_LOW", "confidence": confidence}
+    return {"ok": True, "reason": "OBSERVATION_RELIABLE", "confidence": confidence,
+            "basis": "analysis_confidence"}
+
+
+_AIRFLOW_PRODUCT = r"(?:巾体|裤体|纸巾|面料|织物|产品本体)"
+_AIRFLOW_SIGNAL = r"(?:气流|空气|通气|气泵|风机|吹气)"
+_AIRFLOW_TRAVERSAL = re.compile(
+    rf"(?:气流|空气).{{0,8}}(?:穿过|穿透|透过).{{0,8}}{_AIRFLOW_PRODUCT}"
+    rf"|(?:气流|空气).{{0,6}}从{_AIRFLOW_PRODUCT}.{{0,6}}(?:穿过|穿透|透过)"
+    rf"|{_AIRFLOW_PRODUCT}.{{0,6}}(?:被气流穿透|被空气穿透)")
+
+
+def _positive_airflow(value: Any) -> bool:
+    for clause in _CLAUSE_BREAK.split(re.sub(r"\s+", "", str(value or ""))):
+        if not _AIRFLOW_TRAVERSAL.search(clause):
+            continue
+        if any(word in clause for word in (*_FIT_NEGATIONS, "并非", "不是", "无法", "不能", "未能",
+                                           "未穿", "不穿", "未透", "不透", "无气流", "无空气", "不曾")):
+            continue
+        if any(word in clause for word in (*_PRINTED_MARKERS, "示意", "声称", "据称")):
+            continue
+        return True
+    return False
+
+
+def _breathability_observation(shot: dict[str, Any]) -> tuple[bool, str]:
+    """只认可空气实际穿过产品的观察；透光、孔洞、标签或装置摆拍不是物理证明。"""
+    obj = str(shot.get("object") or shot.get("action_object") or "")
+    if not (re.search(_AIRFLOW_PRODUCT, obj) and re.search(_AIRFLOW_SIGNAL, obj)):
+        return False, "OBJECT_MISMATCH"
+    if not _positive_airflow(shot.get("action")):
+        return False, "ACTION_MISMATCH"
+    if not _positive_airflow(shot.get("result")):
+        return False, "RESULT_MISMATCH"
+    return True, "CLAIM_REQUIREMENT_MET"
+
+
 def judge_claim(shot: dict[str, Any], claim: Claim) -> tuple[bool, str]:
     """单个镜头能否承担**某一条**卖点。返回 (ok, reason)。
 
@@ -886,20 +962,16 @@ def judge_claim(shot: dict[str, Any], claim: Claim) -> tuple[bool, str]:
     （「…七度空间超薄萌睡裤」= 品牌 + 形态 + 超薄）。整句一起判会让一条
     好满足的卖点短路掉后面那条无法证明的，缺口就报不出来。
     """
-    if claim.material_gap:
-        # 缺少可证明动作仍是缺口，不能由主题词或排序偏好认证。
-        return False, "CLAIM_HAS_NO_DEMO_ACTION"
+    if not claim.contract_defined:
+        return False, "CONTRACT_UNDEFINED"
     role = _norm_role(shot)
     strength = _norm_strength(shot)
     if claim.evidence_required:
         # 视觉模型明确给出低置信度时，只能进入证据不足/降级路径，不能被
         # role=A 这类字段单独抬成直接证据。旧结果没有该字段时保持兼容。
-        try:
-            confidence = float(shot.get("analysis_confidence"))
-        except (TypeError, ValueError):
-            confidence = None
-        if confidence is not None and confidence < 0.60:
-            return False, "EVIDENCE_CONFIDENCE_LOW"
+        reliability = perception_reliability(shot)
+        if not reliability["ok"]:
+            return False, reliability["reason"]
         if ROLE_RANK.get(role, -1) < ROLE_RANK.get(claim.role, 3):
             return False, "ROLE_BELOW_REQUIRED"
         if STRENGTH_RANK.get(strength, -1) < STRENGTH_RANK["A"]:
@@ -915,6 +987,8 @@ def judge_claim(shot: dict[str, Any], claim: Claim) -> tuple[bool, str]:
         # 镜头看起来像在证明卖点，实际什么都没证明（DEMO_ACTIONS_V0.2 §2）。
         if is_visual_metaphor(shot):
             return False, "VISUAL_METAPHOR"
+        if claim.claim_id == "C-BREATHABLE":
+            return _breathability_observation(shot)
         # 对象必须对上：动作作用在别的东西上，就证明不了这条卖点
         # （规范 §6 的 `素材.object ⊇ required_object`）。
         if not _object_match(shot, claim):
@@ -932,10 +1006,10 @@ def judge_claim(shot: dict[str, Any], claim: Claim) -> tuple[bool, str]:
 
 
 def judge(shot: dict[str, Any], claims: list[Claim]) -> dict[str, Any]:
-    """判断一个镜头能否承担这句话的**任一**卖点（入池闸门）。
+    """功能卖点逐项通过；品牌、形态或容易满足的卖点不能短路其他功能。
 
     返回 `{status, ok, reason, claim_id, required, ...}`：
-      ok=True     通过（至少满足一条卖点）
+      ok=True     全部 evidence_required 卖点通过；纯展示句至少满足一条
       status="ungated"   旧分析结果没有 role/has_subject 字段，闸门不拦但要留痕
       status="blocked"   全部卖点都不满足，附 `reason` 与 `required`
     """
@@ -955,21 +1029,39 @@ def judge(shot: dict[str, Any], claims: list[Claim]) -> dict[str, Any]:
                 "detail": "视觉分析结果缺少 role/has_subject 字段（旧版本产物）",
                 "claim_id": claims[0].claim_id}
 
-    last_reason = "CLAIM_REQUIREMENT_UNMET"
-    for claim in claims:
+    required = [claim for claim in claims if claim.evidence_required] or claims
+    results = []
+    for claim in required:
         ok, reason = judge_claim(shot, claim)
-        if ok:
-            return {"status": "ok", "ok": True, "reason": reason,
-                    "claim_id": claim.claim_id, "required": claim.as_dict()}
-        last_reason = reason
-
-    return {"status": "blocked", "ok": False, "reason": last_reason,
-            "claim_id": claims[0].claim_id, "required": claims[0].as_dict(),
+        results.append({"claim_id": claim.claim_id, "ok": ok, "reason": reason,
+                        "required": claim.as_dict()})
+    failures = [row for row in results if not row["ok"]]
+    accepted = not failures if any(c.evidence_required for c in required) else any(row["ok"] for row in results)
+    selected = (failures or results)[0]
+    associations = []
+    for claim in required:
+        if claim.claim_id not in {row["claim_id"] for row in failures}:
+            continue
+        related, association_reason = fallback_match(shot, claim)
+        if related:
+            associations.append({"claim_id": claim.claim_id, "reason": association_reason,
+                "evidence_contract": {"schema": "claim_evidence", "version": EVIDENCE_CONTRACT_VERSION,
+                    "kind": "business_association", "status": "requires_review",
+                    "formal_status": "UNCERTIFIED"}})
+    payload = {"status": "ok" if accepted else "blocked", "ok": accepted,
+            "reason": "CLAIM_REQUIREMENT_MET" if accepted else selected["reason"],
+            "claim_id": selected["claim_id"], "required": selected["required"],
+            "contract_version": EVIDENCE_CONTRACT_VERSION,
+            "required_claim_ids": [c.claim_id for c in required],
+            "unmet_claim_ids": [row["claim_id"] for row in failures],
+            "claim_results": results,
+            "business_associations": associations,
             "observed": {"role": _norm_role(shot) or None,
                          "evidence_strength": _norm_strength(shot) or None,
                          "action": shot.get("action"), "object": shot.get("object"),
                          "result": shot.get("result"),
                          "action_phase": shot.get("action_phase")}}
+    return payload
 
 
 def unmet_claims(shots: list[dict[str, Any]], claims: list[Claim]) -> list[Claim]:
@@ -1000,10 +1092,9 @@ def material_gap(index: int, text: str, claim_text: str, claims: list[Claim],
     缺口镜头数 / 建议补拍动作，且**不得**被降级兜底吞掉。
     """
     claim = claims[0] if claims else None
-    gap_count = sum(1 for c in (available or []) if c.material_gap) if claim is None else (
-        1 if claim.material_gap else 0)
+    undefined = [c.claim_id for c in claims if not c.contract_defined]
     payload = {
-        "index": index, "type": "MATERIAL_GAP",
+        "index": index, "type": "CONTRACT_UNDEFINED" if undefined else "MATERIAL_GAP",
         "text": text, "claim_text": claim_text,
         "claim_id": claim.claim_id if claim else "",
         "claim_name": claim.name if claim else "",
@@ -1012,10 +1103,12 @@ def material_gap(index: int, text: str, claim_text: str, claims: list[Claim],
         "required_result": claim.result if claim else None,
         "required_role": claim.role if claim else None,
         "evidence_status": claim.evidence_status if claim else "",
-        "gap_shot_count": gap_count,
+        "gap_shot_count": None if undefined else len(claims),
+        "undefined_claim_ids": undefined,
+        "evidence_contract": claim.as_dict()["evidence_contract"] if claim else {},
         "suggested_shoot": _suggest_shoot(claim),
-        "message": ("该句没有直接证据，也没有与卖点/结构部位相关的实拍特写；"
-                    "相关特写可作为降级并留痕，禁止用无关包装展示或空镜充数"),
+        "message": ("该卖点尚未定义可验证的动作/对象/结果合同；先校准合同，不能据此判定需补拍"
+                    if undefined else "当前素材没有该句直接证据或相关产品特写；相关特写只可降级留痕，禁止无关画面充数"),
     }
     return payload
 
@@ -1023,8 +1116,8 @@ def material_gap(index: int, text: str, claim_text: str, claims: list[Claim],
 def _suggest_shoot(claim: Claim | None) -> str:
     if claim is None:
         return "补充可证明该句卖点的演示动作镜头"
-    if claim.material_gap:
-        return f"补拍「{claim.name}」的演示动作：需要一个动作能直接产生可见结果"
+    if not claim.contract_defined:
+        return f"先定义「{claim.name}」的动作/对象/可见结果验收合同，再检查当前素材"
     return f"补拍「{claim.name}」的直接证据镜头（当前语料只有演示/示意，无结果可见的镜头）"
 
 
@@ -1153,6 +1246,9 @@ def packaging_claim_direct(shot: dict[str, Any], claim_text: str) -> dict[str, A
         return {"ok": False, "reason": "NOT_PACKAGING_CLAIM"}
     if text_unverified(shot):
         return {"ok": False, "reason": "PACKAGING_TEXT_UNVERIFIED"}
+    reliability = perception_reliability(shot)
+    if not reliability["ok"] and reliability["reason"] != "EVIDENCE_CONFIDENCE_LOW":
+        return {"ok": False, "reason": reliability["reason"]}
     # 只减去这一个标称短语，再检查剩余功能要求。不能按 claim ID 豁免整句，
     # 否则「木浆又柔软」「纯棉吸收快」会因包装标称而被认证。
     residual = re.sub(rf"{_NUMBER_TOKEN}层加厚", "", spoken) if matched_key == "LAYERS" else spoken
@@ -1166,16 +1262,23 @@ def packaging_claim_direct(shot: dict[str, Any], claim_text: str) -> dict[str, A
                   "evidence_tags", "visual_tags", "frame_tags", "visual_description",
                   "description", "rationale"):
         observed_values.extend(_flatten_observation(shot.get(field)))
-    observed = _claim_compact(" ".join(observed_values))
-    readable = any(
-        any(_claim_compact(variant) in observed for variant in variants)
-        for key, variants in _PACKAGING_CLAIMS.items() if key == matched_key
+    def readable_in(values: list[str]) -> bool:
+        if matched_key == "LAYERS":
+            spoken_layers = {p for p in _number_units(spoken) if p[1] == "layer"}
+            # 保留各观察字段的边界，货号 DT55080 与下一条 4层不能拼成 550804层。
+            observed_units = set().union(*(_number_units(value) for value in values))
+            return bool(spoken_layers) and spoken_layers <= observed_units
+        observed = _claim_compact(" ".join(values))
+        return any(_claim_compact(variant) in observed for variant in _PACKAGING_CLAIMS[matched_key])
+
+    readable = readable_in(observed_values)
+    independent_text = (
+        shot.get("text_pass") == "hires"
+        and readable_in(_flatten_observation(shot.get("text_agreed")))
+        and readable_in(_flatten_observation(shot.get("pointed_agreed")))
     )
-    if matched_key == "LAYERS":
-        spoken_layers = {p for p in _number_units(spoken) if p[1] == "layer"}
-        # 保留各观察字段的边界，货号 DT55080 与下一条 4层不能拼成 550804层。
-        observed_units = set().union(*(_number_units(value) for value in observed_values))
-        readable = bool(spoken_layers) and spoken_layers <= observed_units
+    if not reliability["ok"] and not independent_text:
+        return {"ok": False, "reason": reliability["reason"]}
     action_values: list[str] = []
     for field in ("action", "pointing_action", "gesture", "visual_description", "rationale"):
         action_values.extend(_flatten_observation(shot.get(field)))
@@ -1199,31 +1302,64 @@ def packaging_claim_direct(shot: dict[str, Any], claim_text: str) -> dict[str, A
         "authenticity_not_verified": True,
         "observed_readable_claim": True,
         "explicit_pointing": True,
+        "perception_basis": "independent_text_review" if independent_text else reliability["basis"],
+        "evidence_contract": {"schema": "claim_evidence", "version": EVIDENCE_CONTRACT_VERSION,
+                              "kind": "packaging_label", "status": "defined"},
     }
+
+
+def absorb_quantity_context(text: str, category: str = "") -> bool:
+    """只消除吸收容量/经量的数量歧义，购买号召和包装数量仍须量感证据。"""
+    value = re.sub(r"\s+", "", str(text or ""))
+    if "cta" in infer_intents(value, category=category):
+        return False
+    if any(term in value for term in ("囤", "多包", "成排", "整箱", "成箱", "一提", "堆叠")):
+        return False
+    if re.search(rf"{_NUMBER_TOKEN}(?:包|提|箱|抽|张|片|卷|件|pcs)", value, re.IGNORECASE):
+        return False
+    from . import rulepack
+    return (any(term in value for term in ("吸水", "吸收", "吸量", "锁水", "经量"))
+            or (rulepack.normalize_category(category) == rulepack.CATEGORY_WEIPIN
+                and any(term in value for term in ("量大", "量多", "一整晚"))))
 
 
 def cta_quantity_eligible(shot: dict[str, Any], text: str = "",
                           category: str = "") -> tuple[bool, str]:
     """Require a quantity/scale cue for CTA and value language.
 
-    A single-pack beauty shot is not an acceptable CTA ending. A visible count
-    on the pack, a multi-pack/row/carton/stack, or an explicit quantity tag is
-    enough; otherwise the caller must keep the voice/subtitle and emit
-    MATERIAL_GAP instead of inserting unrelated B-roll.
+    CTA needs visible purchase units (multiple packs, a filled bundle/carton,
+    or a row/stack). Sheets/PCS inside one pack only support a matching content
+    specification sentence, never bulk purchase language.
     """
     intents = infer_intents(text, category=category)
     if "cta" not in intents and "quantity" not in intents:
         return True, "NOT_CTA_OR_QUANTITY"
     if is_empty_shot(shot) or is_visual_metaphor(shot):
         return False, "CTA_REQUIRES_QUANTITY_SHOT"
-    if "cta" not in intents and count_readable_rank(
-            shot, sentence_contract(text, category=category)) > 0:
+    contract = sentence_contract(text, category=category)
+    if ("cta" not in intents and any(unit == "sheet" for _, unit in _number_units(text))
+            and count_readable_rank(shot, contract) > 0):
         return True, "READABLE_PACK_CONTENT_COUNT"
     observed = _shot_search_text(shot)
-    if any(marker in observed for marker in _QUANTITY_MARKERS):
+    def quantity_observed(keyword: str) -> bool:
+        return any(_observed_keyword(keyword, clause)
+                   and not any(word in clause for word in ("可读", "规格"))
+                   for clause in _CLAUSE_BREAK.split(observed))
+
+    # 否定的观察不能被另一个字段复制的「多包/整箱」标签翻案。
+    negated = rf"(?:没有|未见|没见|并非|不是|并未|看不到|不见|无)(?:可见的?|任何)?(?:{'|'.join(_QUANTITY_MARKERS)})"
+    if re.search(negated, observed) or re.search(r"(?:空纸箱|空箱|箱内无产品|箱里没有产品)", observed):
+        return False, "QUANTITY_OBSERVATION_NEGATED"
+    if any(quantity_observed(marker) for marker in _QUANTITY_MARKERS):
         return True, "VISIBLE_MULTI_PACK_OR_QUANTITY"
-    if re.search(r"(?:^|[^0-9])\d+(?:\.\d+)?\s*(?:包|提|箱|抽|张|片|卷|件)(?:[^\d]|$)", observed):
-        return True, "VISIBLE_COUNT"
+    for match in re.finditer(rf"({_NUMBER_TOKEN})\s*(包|提|箱|卷|件)", observed):
+        count = _chinese_count_to_arabic(match.group(1))
+        if not count.isdigit() or not quantity_observed(match.group(0)):
+            continue
+        # 一箱/一提是外部组合包装；一包/一卷/一件仍是单件展示。
+        minimum = 1 if match.group(2) in ("箱", "提") else 2
+        if int(count) >= minimum:
+            return True, "VISIBLE_PURCHASE_UNIT_COUNT"
     # Explicit single-pack language without a count is exactly the failure mode
     # reported in the manual reviews; never let role preference override it.
     return False, "SINGLE_PACK_OR_NO_VISIBLE_QUANTITY"

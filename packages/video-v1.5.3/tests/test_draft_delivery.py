@@ -1,9 +1,12 @@
 import copy
+import contextlib
+import io
 import json
 from pathlib import Path
 import shutil
 import sys
 import tempfile
+import subprocess
 import unittest
 from unittest.mock import patch
 
@@ -134,6 +137,7 @@ class DeliveryTests(unittest.TestCase):
         share = self.base / 'nas'
         staging = self.base / 'staging' / self.source.name
         shutil.copytree(self.source, staging)
+        before = tree_identity(staging)
         def copy_to_nas(src, dst):
             shutil.copytree(src, dst)
             return 1
@@ -147,7 +151,8 @@ class DeliveryTests(unittest.TestCase):
         self.assertTrue(receipt['shared_media_references_verified'])
         self.assertTrue(receipt['nas_root_verified'])
         self.assertTrue(receipt['distribution_verified'])
-        self.assertEqual(receipt['staged_tree_sha256'], tree_identity(staging)['sha256'])
+        self.assertEqual(before, tree_identity(staging))
+        self.assertEqual(receipt['staged_tree_sha256'], tree_identity(Path(receipt['shared_reference_root']))['sha256'])
 
     def test_pipeline_fails_when_literal_verification_fails(self):
         ship = delivery.ship_module()
@@ -179,6 +184,163 @@ class DeliveryTests(unittest.TestCase):
             result = worker.finalize_closed_loop(task_dir, {}, [self.source.name], [])
         self.assertEqual(result['reason'], 'DISTRIBUTION_MEDIA_REFERENCE_INVALID')
         ship.assert_not_called()
+
+    def test_partial_copy_is_not_visible_as_final_delivery(self):
+        target = self.base / 'published' / 'final-draft'
+        def incomplete_copy(source, staging):
+            Path(staging).mkdir()
+            shutil.copy2(Path(source) / 'draft_info.json', Path(staging) / 'draft_info.json')
+            return 1  # A successful copy exit code is insufficient.
+        with self.assertRaisesRegex(RuntimeError, 'COPY_HASH_MISMATCH'):
+            delivery.publish_tree(self.source, target, tree_identity(self.source), copier=incomplete_copy)
+        self.assertFalse(target.exists())
+        self.assertEqual(len(list(target.parent.glob('.publishing-*'))), 1)
+
+    def test_existing_delivery_is_preserved_and_identical_retry_is_idempotent(self):
+        target = self.base / 'published' / 'final-draft'
+        identity = tree_identity(self.source)
+        self.assertTrue(delivery.publish_tree(self.source, target, identity))
+        self.assertFalse(delivery.publish_tree(self.source, target, identity))
+        (target / 'manual-edit.txt').write_text('keep edits')
+        before = tree_identity(target)
+        with self.assertRaisesRegex(RuntimeError, 'IDENTITY_CONFLICT'):
+            delivery.publish_tree(self.source, target, identity)
+        self.assertEqual(tree_identity(target), before)
+
+    def test_archive_rebases_every_timeline_and_survives_old_folder_move(self):
+        n.write_json(self.source / 'Timelines/project.json', {'main_timeline_id': 'active'})
+        n.write_json(self.source / 'Timelines/active/draft_content.json', self.payload)
+        target = self.base / 'archive' / '版本1'
+        before = tree_identity(self.source)
+        result = delivery.archive_shared_copy(self.source, target)
+        self.assertEqual(result['source_tree_sha256'], before['sha256'])
+        self.assertEqual(tree_identity(self.source), before)
+        self.source.rename(self.source.with_name('old-folder-moved'))
+        self.assertEqual(delivery.verify_shared(target, target)['status'], 'SHARED_MEDIA_VERIFIED')
+        self.assertEqual(n.read_json(target / 'Timelines/active/draft_content.json')['tracks'], self.payload['tracks'])
+        self.assertFalse(list(target.parent.glob('.nas-package-archive-*')))
+
+    def test_normal_worker_collects_external_same_name_media_before_real_ship(self):
+        import batch_worker as worker
+        ship = delivery.ship_module()
+        payload = copy.deepcopy(self.payload)
+        payload['materials']['audios'] = []
+        for index, content in enumerate((b'first narration', b'distinct music')):
+            path = self.base / str(index) / 'same-name.wav'
+            path.parent.mkdir()
+            path.write_bytes(content)
+            payload['materials']['audios'].append({'id': str(index), 'path': str(path)})
+        self.save(payload)
+        before = tree_identity(self.source)
+        share = self.base / 'nas'
+        def run_ship(command, **kwargs):
+            output = io.StringIO()
+            with patch.object(sys, 'argv', command[1:]), contextlib.redirect_stdout(output):
+                code = ship.main()
+            return subprocess.CompletedProcess(command, code, output.getvalue(), '')
+        with patch.object(worker, 'SKILL', delivery.PACKAGE_ROOT / 'doubao-jianying-orchestrator'), \
+                patch.dict(ship.os.environ, {'JY_NAS_SHARE': str(share)}), \
+                patch.object(ship, 'mount_nas', return_value=0), \
+                patch.object(ship, 'robocopy', side_effect=lambda a,b: (shutil.copytree(a,b),1)[1]), \
+                patch.object(worker.subprocess, 'run', side_effect=run_ship):
+            result = worker.ship_one(self.source, self.base / 'task')
+        self.assertEqual(result['rc'], 0, result.get('out'))
+        target = Path(result['receipt']['nas_target'])
+        _, references = n.inspect(target)
+        self.assertEqual({path.read_bytes() for path in references.values()},
+                         {b'first narration', b'distinct music'})
+        self.assertTrue(result['receipt']['shared_media_references_verified'])
+        self.assertEqual(tree_identity(self.source), before)
+
+    def test_missing_ship_dependency_blocks_before_any_mutation(self):
+        ship = delivery.ship_module()
+        before = tree_identity(self.source)
+        with patch.object(ship, 'PIPE_ROOT', self.base / 'partial-install'), \
+                patch.object(sys, 'argv', ['ship', '--draft', str(self.source)]), \
+                patch.object(ship, 'rewrite') as rewrite, patch.object(ship, 'mount_nas') as mount, \
+                patch('builtins.print'):
+            self.assertEqual(ship.main(), 11)
+        rewrite.assert_not_called()
+        mount.assert_not_called()
+        self.assertEqual(tree_identity(self.source), before)
+
+    def test_source_edit_during_direct_ship_is_preserved_and_blocks_success(self):
+        ship = delivery.ship_module()
+        def copy_and_edit(source, target):
+            shutil.copytree(source, target)
+            changed = n.read_json(self.source / 'draft_info.json')
+            changed['tracks'] = [{'id': 'new-user-edit'}]
+            n.write_json(self.source / 'draft_info.json', changed)
+            return 1
+        with patch.dict(ship.os.environ, {'JY_NAS_SHARE': str(self.base / 'nas')}), \
+                patch.object(ship, 'mount_nas', return_value=0), \
+                patch.object(ship, 'robocopy', side_effect=copy_and_edit), \
+                patch.object(sys, 'argv', ['ship', '--draft', str(self.source), '--work', str(self.base / 'private-work')]), \
+                patch('builtins.print') as output:
+            self.assertEqual(ship.main(), 12)
+        self.assertEqual(json.loads(output.call_args.args[0])['status'], 'FAIL')
+        self.assertEqual(n.read_json(self.source / 'draft_info.json')['tracks'], [{'id': 'new-user-edit'}])
+
+    def test_rewrite_rejects_document_drift_instead_of_restoring_old_snapshot(self):
+        ship = delivery.ship_module()
+        original_inspect = n.inspect
+        def changed_after_read(*args, **kwargs):
+            result = original_inspect(*args, **kwargs)
+            changed = copy.deepcopy(self.payload)
+            changed['tracks'] = [{'id': 'manual-change'}]
+            n.write_json(self.source / 'draft_info.json', changed)
+            return result
+        with patch.object(n, 'inspect', side_effect=changed_after_read):
+            with self.assertRaisesRegex(RuntimeError, 'DRAFT_CHANGED_DURING_REWRITE'):
+                ship.rewrite(str(self.source), 'local')
+        self.assertEqual(n.read_json(self.source / 'draft_info.json')['tracks'], [{'id': 'manual-change'}])
+
+    def test_both_archive_entrypoints_publish_independent_versions(self):
+        import closed_loop as lightweight
+        from tools import closed_loop as audited
+        second = self.source.with_name('second-draft')
+        shutil.copytree(self.source, second)
+        docs, _ = n.inspect(second)
+        n.set_registration(docs, second)
+        docs = {name: n.map_values(value, {n.normalized(str(self.media)): str(second / 'media' / self.media.name)})
+                for name, value in docs.items()}
+        for name, value in docs.items():
+            n.write_json(second / name, value)
+        policy = self.base / 'policy.json'
+        n.write_json(policy, {'policy_id': 'synthetic', 'policy_version': 'fixture'})
+        published = []
+        for index, module in enumerate((lightweight, audited)):
+            with self.subTest(entrypoint=module.__name__):
+                work = self.base / str(index) / 'task'
+                n.write_json(work / 'task.json', {'record_id': 'synthetic', 'title': 'synthetic'})
+                n.write_json(work / 'done.json', {'nas_links': [str(self.source), str(second)]})
+                with patch.dict(module.os.environ, {'JY_NAS_DISTRIBUTION_ROOT': str(work / 'nas')}):
+                    receipt = module.archive_parent(work / 'task.json', work / 'done.json', policy)
+                self.assertTrue(receipt['self_contained_versions'])
+                self.assertEqual(len(receipt['versions']), 2)
+                published.extend(Path(path) for path in receipt['versions'])
+        self.source.rename(self.source.with_name('original-moved'))
+        second.rename(second.with_name('second-moved'))
+        for target in published:
+            self.assertEqual(delivery.verify_shared(target, target)['status'], 'SHARED_MEDIA_VERIFIED')
+
+    def test_single_archive_cannot_certify_missing_literal_reference(self):
+        import closed_loop as lightweight
+        from tools import closed_loop as audited
+        wrong = copy.deepcopy(self.payload)
+        wrong['materials']['audios'][0]['path'] = str(self.base / 'missing' / self.media.name)
+        self.save(wrong)
+        ship = delivery.ship_module()
+        ship.inject_tools(str(self.source))
+        policy = self.base / 'policy.json'
+        n.write_json(policy, {'policy_id': 'synthetic', 'policy_version': 'fixture'})
+        for index, module in enumerate((lightweight, audited)):
+            work = self.base / str(index)
+            n.write_json(work / 'task.json', {'record_id': 'synthetic'})
+            n.write_json(work / 'done.json', {'nas_links': [str(self.source)]})
+            with self.assertRaisesRegex(RuntimeError, 'OUTSIDE_TARGET'):
+                module.archive_parent(work / 'task.json', work / 'done.json', policy)
+            self.assertNotIn('distribution_status', n.read_json(work / 'done.json'))
 
 
 if __name__ == '__main__':

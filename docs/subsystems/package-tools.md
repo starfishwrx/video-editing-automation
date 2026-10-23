@@ -13,6 +13,8 @@
 - 失败分类（`classify_build_failure`）：区分确定性/瞬时/提供商/环境，供上层回退与通知
 
 ## 2. 闭环与交付（`closed_loop.py` 与 tools）
+
+- 当前候选的 `ship_one` 与修复入口复用 `tools.draft_delivery.collect_delivery_stage` 收集实际引用；`publish_tree` 在同级隐藏目录读回核验后才重命名发布。两个归档入口通过官方导出/导入将每版素材绑定到最终目录，旧目录移动不影响归档稿。安装完整性用 `tools.delivery_runtime` 同时检查 pipeline 与 skills 执行位置；见当前包 `docs/NAS_DELIVERY_STABILITY.md`。
 - `audit`：读取 `task.json/done.json` 与 `report/draft_visual_qc.json`，按策略校验是否满足正式交付（QC=PASS、Mac 审阅绑定、包完整）
 - `archive-parent`：把多版本草稿归档到一个父目录（`版本1/版本2/...`），核验后回写收据
 - `table-update`：将“草稿目录/成片状态”等回写业务表（飞书 Base），使用 `LARK_BASE_TOKEN`
@@ -26,6 +28,8 @@
 - `eval_bootstrap.py/eval_stage.py/production_eval.py`：生产评估流程与证据（contract 与 receipt 校验）
 - `material_index.py/material_library.py`：素材索引/库工具（不在 v1.5.1 正常路径写入素材库）
 - `classify_feedback.py`：将业务反馈归类到可复用规则候选，产出可审计规则文本
+- `feedback_candidates.py`：只追加私有反馈候选与人工审核/回归/发布事件，不在运行中提升全局规则
+- `sentence_review.py`：从 `eval_stage.collect` 收集哈希绑定的句级人工审稿，并冻结输入、调用实际 matcher 离线回放和比较；命令见当前包 `docs/sentence-review.md`，人工标签不授予正式交付许可
 - `mac_review_handoff.py`：Mac 端人工审核交接脚本
 
 ## 4. Windows 脚本

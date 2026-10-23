@@ -12,8 +12,8 @@
 ## 2. 关键策略
 - 候选池：来自当前任务素材（`material_sources/videos/segments`），上限 24；每源视频默认最多复用 2 次；相邻分镜“有替代则禁同源”
 - 证据优先级：`DIRECT（有可见结果/动作） → ACCEPTABLE_DEGRADED（材质/结构类关联） → MATERIAL_GAP（只能补素材或改脚本）`
-- 包装直证：当且仅当“手指/手势明确指向可读包装文字或标识”且脚本卖点一致，才记 `PACKAGING_CLAIM_DIRECT`，不代表真实性或吸收/柔软等功能已验证
-- CTA/数量：需多包、成排、整箱、堆叠或可见数量；单包静态特写不得当作量感证据
+- 包装直证：当且仅当“手指/手势明确指向可读包装文字或标识”且脚本卖点一致，才记 `PACKAGING_CLAIM_DIRECT`，不代表真实性或吸收/柔软等功能已验证；显式低置信需独立高清文字和指向复核，非法置信不得认证
+- CTA/数量：需多包、成排、整箱、堆叠或对应购买量感；单包的抽数/片数/PCS或1包不能当作囤货量感，非CTA规格句仍按同数字同单位核验可读文字
 - 证据窗口：优先采用模型提供的时间段；缺少时按“审核帧邻域±w，夹在场景窗口内”，并作为证据来源写入
 - 预览（preview）：允许保留直证/降级/黑屏并在“超 3 句黑屏”处做图文/展示类补镜；所有未解与缺口都仅记“未认证”，不得当作正式证据
 
@@ -37,6 +37,8 @@
 ## 6. 后验 QC（`draft_visual_qc.py`）
 - 只读打开草稿 → 用 FFmpeg 抓取“最终源窗口”的 mid/end 帧 → 按批次送视觉模型独立判断每句 `DIRECT/ACCEPTABLE_DEGRADED/MISMATCH/INSUFFICIENT_EVIDENCE`
 - 合并 overall：`PASS` / `PASS_WITH_DEGRADED` / `PASS_WITH_GAPS` / `UNCERTIFIED` / `FAIL`；`UNCERTIFIED` 与 `DEGRADED` 不得自动升级为 PASS
+- 当前响应合同为 `chatcut-visual-qc-response-v3`：逐句完整观察、原因、有效置信和索引覆盖均须核验；worker/Eval重读哈希绑定原报告并核对当前草稿身份，历史无版本报告不自动认证
+- 换镜后以当前观察重新检查品类原子合同；未知判据进入 `contract_issues`，与当前输入实际缺素材的 `material_gaps` 分开，不能凭旧通过字段或旧参考片结论认证
 
 ## 7. 测试
 - `test_visual_matching_governance.py`：直证/降级/否定/缓存命中/关联证据/相邻同源/同机位同阶段/预览黑屏与补镜等

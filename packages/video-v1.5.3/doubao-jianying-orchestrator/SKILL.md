@@ -3,7 +3,7 @@ name: doubao-jianying-orchestrator
 description: Build and recover editable Jianying video drafts from task manifests using evidence-based shot matching, narration timing, visual QC, and human review gates. Use with the sibling jianying-editor skill for video automation.
 ---
 
-# Doubao/Jianying orchestrator v1.5.3
+# Doubao/Jianying orchestrator v1.5.6
 
 For new production tasks, freeze task-level Eval inputs and runtime identity
 before generation. Use the reviewed category/SKU material index when configured;
@@ -15,12 +15,21 @@ PASS and does not replace existing delivery gates.
 [references/production_quality_and_lessons.md](references/production_quality_and_lessons.md)。
 formal 不得用 settled/lead_in/黑屏冒充完整动作；派生卖点标签不是视觉重看。
 
+近期人工审稿对应的打分、选镜与实验组句行为见包根
+`docs/SELECTION_REVIEW_20261022.md`。语义观察和实际窗口先于去重；包装标称只支持对应标称，不替代功能实验。
+
+QC v3 响应、当前观察的证据合同、场景重排后复验与人工反馈回放见包根
+`docs/QUALITY_CONTRACT_FIXES.md` 和 `docs/sentence-review.md`。
+旧 QC 报告不能自动获得新合同认证；未定义合同先校准判据，不直接要求补拍。
+
 这是视频自动化执行引擎，不包含业务账号、机器路径或生产日志。
 
 草稿素材丢失、NAS/ZIP 交付或加密历史稿恢复，先读
 [草稿分发与生成版恢复](references/draft_delivery_and_recovery.md)。
 相对运输包需 import；共享交付必须检查实际绝对路径。加密时间轴不得自动换成旧明文，
 仅在用户确认恢复原始生成版后使用包内 `tools.draft_delivery restore-generated`。
+
+正常分发必须走 `ship_one` 的官方收集流程与授权 finalizer；多版本归档使用自身最终媒体路径。安装后运行 `tools.delivery_runtime` 对 pipeline 与 skills 两个执行面逐文件核对，不得仅凭 VERSION 或目录存在报告分发成功。行为和恢复边界见包根 `docs/NAS_DELIVERY_STABILITY.md`。
 
 用户确认修复有效并要求合入包时，读
 [已验证修复合入发布包](references/validated_fix_to_release.md)，
@@ -55,8 +64,10 @@ formal 不得用 settled/lead_in/黑屏冒充完整动作；派生卖点标签�
 - 环境失败只重做预检；语义失败只消费已有分析做匹配或人工确认；写稿和桌面验收
   分别从对应阶段恢复，不重新做视觉分析。
 - 视觉服务调用最多进行一次有限重试；凭据、路径、编码和余额错误直接停机。
-- 视觉子进程默认使用渲染机 `.codex/volc.config.toml` 的 `volc` profile 和火山
-  CodingPlan OpenAI-compatible 接口；CC Switch Anthropic env 文件只作为显式回滚路径。
+- 视觉默认直连火山 Ark `glm-5.3-flash`（`JY_VISION_TRANSPORT=volc_glm`），密钥放
+  `ARK_API_KEY`（或 `JY_VOLC_API_KEY`）。批次与槽位并发默认 20。`codex` /
+  `anthropic` 只作显式回滚；媒体解码默认全部走 GPU（`JY_GPU_DECODE_CODECS=*`，
+  单帧默认开启），显存不足或槽位超时仍回退 CPU。
 - `draft_write` 只接受 `semantic_match` 产生的成功嵌套结果；原始 manifest 或损坏缓存
   不得作为恢复输入。桌面诊断失败保持 `DESKTOP_IMPORT_BLOCKED` / `PACKAGE_NOT_ACTIVE`。
 - 批量跳过必须由操作者显式设置 `JY_TASK_SKIP_CURRENT=1`，并先写入

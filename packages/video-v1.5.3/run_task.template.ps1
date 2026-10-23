@@ -154,7 +154,7 @@ try {
 8. 最后一行输出 SUMMARY status=SUCCESS 或 status=FAILED 及原因
 失败路径：任何步骤失败 -> 生产日志写 FAILED，调用 tools\closed_loop.py failure-update 仅回写 任务状态=生成失败 + 问题反馈失败回执；不写草稿文件/成功状态，不进 NAS；若回写失败写 failure_notification_receipt.json 后继续队列。codex_done.json status=failed。不要反复重试 build 超过 1 次。
 9. 如果 task.json.rev 非空，这是轮B二次处理：必须先读取 task.json.issue、feedback_scope、feedback_category 和 draft_file。问题反馈是运营原文，禁止改写；先按问题反馈定位并只替换错误分镜，重新核对源窗口、字幕和视觉 QC，再生成新的 -rev / -rev2 包。新包未通过结构、视觉、路径、Mac 检查前不得删除旧包；通过后才替换旧交付包并按规则回写三字段。
-10. 如果 feedback_scope=generic，问题修复成功后在当前 work 目录写 feedback_resolution.json：status=resolved、rule_key、rule_text、evidence；如果没有真正完成修复，写 status=unresolved。不要直接改版本文件，父流程会在成功后做幂等版本沉淀。
+10. 如果 feedback_scope=generic，在当前 work 目录写 feedback_resolution.json：task_id/run_id 必须来自当前 active_contract.json，issue_sha256 必须是运营原文 UTF-8 字节的 SHA256；记录 status=resolved/unresolved、rule_key、proposed_rule、repair（修复前后候选/源窗口/理由）、evidence（实际文件 path/sha256 列表）。固定 category_guidance 只说明分类核对方向，不能当作运营的新规则；原意不明或相反要求须保留待审。父流程仅将候选追加到私有待审账本，不会自动改规则、改版本或认定人工已批准。后续只能由人工调用 feedback_candidates.py transition，按 needs_review → reviewed → regression_verified → released 逐步写入审核人和证据；resolved 不等于 reviewed，也不能跨 run 复用 resolution。没有真正完成修复时必须写 unresolved。
 
 '@
   $prompt = $prompt.Replace('__SKILL_VERSION__', $skillVer).Replace('__RULES_VERSION__', $rulesVer).Replace('__PIPE_ROOT__', $PIPE).Replace('__SKILL_ROOT__', $skillRoot).Replace('__DRAFT_ROOT__', $draftRoot)
@@ -230,6 +230,20 @@ try {
 
   # Rule promotion is intentionally not automatic. Resolved feedback stays a
   # candidate for human review and cannot mutate the released tool or policy.
+  $feedbackResolution = Join-Path $cdir 'feedback_resolution.json'
+  if (Test-Path -LiteralPath $feedbackResolution) {
+    $feedbackCollector = Join-Path $PIPE 'tools\feedback_candidates.py'
+    $feedbackLedger = [Environment]::GetEnvironmentVariable('JY_FEEDBACK_CANDIDATE_LEDGER', 'Process')
+    if ([string]::IsNullOrWhiteSpace($feedbackLedger)) { $feedbackLedger = Join-Path $STATE 'feedback_candidates.jsonl' }
+    try {
+      $feedbackResult = & uv run --frozen python -X utf8 $feedbackCollector collect --task-dir $cdir --ledger $feedbackLedger 2>&1 | Out-String
+      if ($LASTEXITCODE -ne 0) { throw $feedbackResult.Trim() }
+      Out-Log ('FEEDBACK_CANDIDATE ' + $feedbackResult.Trim())
+    } catch {
+      # A collection failure cannot be presented as a completed knowledge loop.
+      Out-Log ('FEEDBACK_CANDIDATE_PENDING ' + $_.Exception.Message)
+    }
+  }
 
   # ---- 更新 processed.json（防重）----
   $proc = @{}

@@ -427,6 +427,10 @@ def _temporary_match(manifest: dict, input_path: Path, report_dir: Path,
         json.dumps(matched, ensure_ascii=False, indent=2), encoding="utf-8")
     # DEMO_ACTIONS V0.2 §7（用户定案）：素材缺口单独落盘，交付前必须可见 ——
     # 不允许只躺在 shot_match_report.json 里等人翻。
+    if matched.get("contract_issues"):
+        (report_dir / "contract_issues.json").write_text(
+            json.dumps({"count": matched.get("contract_issue_count", 0),
+                        "issues": matched["contract_issues"]}, ensure_ascii=False, indent=2), encoding="utf-8")
     if matched.get("material_gaps"):
         (report_dir / "material_gaps.json").write_text(
             json.dumps({
