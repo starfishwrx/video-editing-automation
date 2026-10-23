@@ -1,5 +1,12 @@
 # Release archive notes
 
+## 1.5.6 — current source candidate (tree still named video-v1.5.3)
+
+- Source: `packages/video-v1.5.3/` with package `VERSION` **1.5.6**. Directory name stays historical; do not invent `packages/video-v1.5.6/`.
+- Scope on top of 1.5.3: shot-selection review feedback (2026-10-22), global zero TTS inter-clip gap (`rules/global.json` `voice.max_gap_frames=1`), plus follow-on quality/NAS contract work merged on main.
+- Visual policy remains independently versioned at 1.4.1.
+- Status: source candidate. Prefer reading `VERSION` and `release-manifest.json` over this note for exact file counts. No production deploy is implied. Published ZIP for 1.5.6 may lag the source tree; until a new release asset exists, use `tools.release_package` to rebuild from source.
+
 ## 1.5.3 — draft delivery and validated-fix release workflow
 
 - Source: `packages/video-v1.5.3/`. This PR adds the complete versioned candidate while preserving existing main-branch agent documentation and historical packages.

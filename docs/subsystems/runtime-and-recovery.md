@@ -1,6 +1,6 @@
 # 子系统：运行时与恢复（runtime-and-recovery）
 
-- 代码：`packages/video-v1.5.1/doubao-jianying-orchestrator/orchestrator/{capacity.py, resource_profile.py, task_log.py, diagnostics.py, migration.py, draft_safety.py}`
+- 代码：`packages/video-v1.5.3/doubao-jianying-orchestrator/orchestrator/{capacity.py, resource_profile.py, task_log.py, diagnostics.py, migration.py, draft_safety.py}`
 
 ## 1. 职责
 - 资源画像/容量标定/进程权重：避免与交互式剪映抢资源

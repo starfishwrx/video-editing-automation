@@ -1,6 +1,6 @@
 # 子系统：视觉匹配（visual-matching）
 
-- 代码：`packages/video-v1.5.1/doubao-jianying-orchestrator/orchestrator/{visual_match.py, shot_analyzer.py, vision_analyzer.py, semantic_gate.py, draft_visual_qc.py, feedback_policy.py}`，以及 `prompts/semantic_analysis.md`
+- 代码：`packages/video-v1.5.3/doubao-jianying-orchestrator/orchestrator/{visual_match.py, shot_analyzer.py, vision_analyzer.py, semantic_gate.py, draft_visual_qc.py, feedback_policy.py}`，以及 `prompts/semantic_analysis.md`
 
 ## 1. 职责
 在“当前任务素材”范围内，生成可审计的候选镜头并逐句匹配脚本：

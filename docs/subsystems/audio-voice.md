@@ -1,6 +1,6 @@
 # 子系统：音频与音色（audio-voice）
 
-- 代码：`packages/video-v1.5.1/doubao-jianying-orchestrator/orchestrator/{voice_tts.py, voice_catalog.py, voice_library.py, bgm_selector.py, audio_loudness.py, script_polish.py}`
+- 代码：`packages/video-v1.5.3/doubao-jianying-orchestrator/orchestrator/{voice_tts.py, voice_catalog.py, voice_library.py, bgm_selector.py, audio_loudness.py, script_polish.py}`
 
 ## 1. 职责
 - 口播音色解析/推荐/唯一决议，批量 TTS 合成与缓存，试听样本生成

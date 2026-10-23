@@ -1,6 +1,6 @@
 # 子系统：剪映草稿写入（jianying-editor）
 
-- 代码：`packages/video-v1.5.1/jianying-editor/scripts/**`
+- 代码：`packages/video-v1.5.3/jianying-editor/scripts/**`
   - 核心：`core/{media_ops.py,text_ops.py,vfx_ops.py,project_base.py}`
   - 工具：`utils/{formatters.py,media_normalizer.py,cli_protocol.py,...}`
   - 包装：`jy_wrapper.py`（供 orchestrator 动态导入）
@@ -23,7 +23,7 @@
 - Windows 场景：`uiautomation` 仅在 pyJianYingDraft 构造草稿时可能导入；macOS 不要求
 
 ## 4. 版本与兼容
-- `packages/video-v1.5.1/jianying-editor/VERSION`、`SKILL.md` 为本组件元数据；不绑定业务规则
+- `packages/video-v1.5.3/jianying-editor/VERSION`、`SKILL.md` 为本组件元数据；不绑定业务规则
 - 与 orchestrator 的“素材总长/µs 口径/速度吸附”严格对齐，避免写入后产生错位
 
 ## 5. 测试

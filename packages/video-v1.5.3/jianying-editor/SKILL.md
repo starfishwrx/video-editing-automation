@@ -41,7 +41,7 @@ matching successful run, and creates a new project through the bundled writer.
   orchestrator's generated drafts use the defaults and validate them after
   saving.
 
-For the end-to-end manifest workflow, use the sibling `doubao-jianying-orchestrator` skill. Read `rules/` or `references/` only for the specific advanced editor operation being requested.
+For the end-to-end manifest workflow, use the sibling `doubao-jianying-orchestrator` skill. Advanced delivery/recovery notes live under `../doubao-jianying-orchestrator/references/`; this editor package has no separate `rules/` or `references/` tree.
 
 When reviewing a generated draft, require a separate BGM audio track when BGM
 was selected, a narration track for generated/file voiceover, and a subtitle

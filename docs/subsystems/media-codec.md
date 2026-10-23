@@ -1,6 +1,6 @@
 # 子系统：媒体编解码（media-codec）
 
-- 代码：`packages/video-v1.5.1/doubao-jianying-orchestrator/orchestrator/{video_decode.py, video_encode.py, ffmpeg_bootstrap.py, platform_env.py}`
+- 代码：`packages/video-v1.5.3/doubao-jianying-orchestrator/orchestrator/{video_decode.py, video_encode.py, ffmpeg_bootstrap.py, platform_env.py}`
 
 ## 1. 职责
 - 统一/稳健的 FFmpeg 定位与绿色引导（macOS/Windows）
