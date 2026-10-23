@@ -21,6 +21,10 @@ _qc_contract_path = Path(__file__).resolve().parents[1] / "doubao-jianying-orche
 _qc_contract_spec = importlib.util.spec_from_file_location("_production_visual_qc_contract", _qc_contract_path)
 visual_qc_contract = importlib.util.module_from_spec(_qc_contract_spec)
 _qc_contract_spec.loader.exec_module(visual_qc_contract)
+_ai_contract_path = _qc_contract_path.with_name("ai_editor_contract.py")
+_ai_contract_spec = importlib.util.spec_from_file_location("_production_ai_editor_contract", _ai_contract_path)
+ai_editor_contract = importlib.util.module_from_spec(_ai_contract_spec)
+_ai_contract_spec.loader.exec_module(ai_editor_contract)
 
 DIMENSIONS = (
     'visual_match_and_product_identity', 'claim_evidence_coverage',
@@ -284,7 +288,8 @@ def evaluate(contract: dict, task: dict, runtime: dict, outputs: list[Path],
                         verdict = 'FAIL'
                     elif (qc_status not in {'PASS', 'PASS_WITH_DEGRADED'}
                             or row.get('contract_status') != 'VALIDATED'
-                            or row.get('response_version') != visual_qc_contract.RESPONSE_VERSION
+                            or row.get('response_version') not in {visual_qc_contract.RESPONSE_VERSION, 'chatcut-visual-qc-response-v4'}
+                            or any(r.get('response_contract', {}).get('version') != row.get('response_version') for r in report_payloads)
                             or not report_statuses
                             or not report_identity_valid
                             or any(status not in {'PASS', 'PASS_WITH_DEGRADED'} for status in report_statuses)

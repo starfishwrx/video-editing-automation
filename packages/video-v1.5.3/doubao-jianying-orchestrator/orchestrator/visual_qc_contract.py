@@ -15,13 +15,21 @@ MATCH_LEVELS = {"DIRECT", "ACCEPTABLE_DEGRADED", "MISMATCH", "INSUFFICIENT_EVIDE
 OVERALL_LEVELS = {"PASS", "PASS_WITH_DEGRADED", "PASS_WITH_GAPS", "FAIL", "UNCERTIFIED"}
 
 
+def _file_sha256(path: str) -> str:
+    value = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            value.update(block)
+    return value.hexdigest()
+
+
 def draft_metadata_fingerprint(draft: Path) -> str:
     """Hash JianYing timeline metadata only, never the referenced media tree."""
     root = Path(draft).resolve(strict=True)
     if not root.is_dir():
         raise ValueError("DRAFT_DIRECTORY_REQUIRED")
     rows = []
-    for name in ("draft_info.json", "draft_content.json"):
+    for name in ("draft_info.json", "draft_content.json", "ai_selection_identity.json"):
         path = root / name
         if path.is_symlink():
             raise ValueError("DRAFT_METADATA_SYMLINK_REJECTED")
@@ -77,9 +85,9 @@ def row_errors(row: Any) -> list[str]:
     return errors
 
 
-def response_errors(model: dict[str, Any], expected_count: int) -> list[str]:
+def response_errors(model: dict[str, Any], expected_count: int, *, expected_version: str = RESPONSE_VERSION) -> list[str]:
     errors = list(model.get("contract_errors") or [])
-    if model.get("response_version") != RESPONSE_VERSION:
+    if model.get("response_version") != expected_version:
         errors.append("RESPONSE_VERSION_UNSUPPORTED")
     if not isinstance(model.get("overall"), str) or model["overall"] not in OVERALL_LEVELS:
         errors.append("OVERALL_INVALID")
@@ -90,6 +98,10 @@ def response_errors(model: dict[str, Any], expected_count: int) -> list[str]:
     for row in rows:
         errors.extend(f"S{row.get('index', '?')}:{error}" if isinstance(row, dict) else error
                       for error in row_errors(row))
+        if (expected_version.endswith("-v4") and isinstance(row, dict)
+                and normalize_match_level(row) in {"DIRECT", "ACCEPTABLE_DEGRADED"}
+                and type(row.get("confidence")) in (int, float) and row["confidence"] < .6):
+            errors.append("AI_EDITOR_POSITIVE_CONFIDENCE_LOW")
         if isinstance(row, dict) and type(row.get("index")) is int:
             indices.append(row["index"])
     if sorted(indices) != list(range(1, expected_count + 1)):
@@ -111,11 +123,22 @@ def report_matches_draft(report: Any, draft: Path) -> bool:
     try:
         expected = Path(draft).resolve(strict=True)
         recorded = Path(report["draft"]).resolve(strict=True)
+        ai_identity = expected / "ai_selection_identity.json"
+        if ai_identity.exists() or report.get("selection_mode") == "ai_editor":
+            if not ai_identity.is_file() or report.get("selection_mode") != "ai_editor":
+                return False
+            identity = json.loads(ai_identity.read_text(encoding="utf-8"))
+            if (identity.get("selection_sha256") != report.get("selection_sha256")
+                    or report.get("response_contract", {}).get("version") != "chatcut-visual-qc-response-v4"):
+                return False
+            bindings = report.get("source_bindings")
+            if not isinstance(bindings, list) or not bindings or any(_file_sha256(b["path"]) != b["sha256"] for b in bindings):
+                return False
         return (expected.is_dir() and recorded.is_dir()
                 and os.path.normcase(str(expected)) == os.path.normcase(str(recorded))
                 and report.get("draft_metadata_sha256") == draft_metadata_fingerprint(expected)
                 and report.get("draft_metadata_sha256_final") == report.get("draft_metadata_sha256"))
-    except (OSError, RuntimeError, ValueError):
+    except (OSError, RuntimeError, ValueError, KeyError, TypeError, AttributeError):
         return False
 
 
@@ -131,8 +154,11 @@ def _report_status(report: Any) -> str:
     if status not in {"PASS", "PASS_WITH_DEGRADED", "PASS_WITH_GAPS"}:
         return "UNCERTIFIED"
     contract = report.get("response_contract") or {}
-    if (report.get("version") != REPORT_VERSION or not isinstance(contract, dict)
-            or contract.get("version") != RESPONSE_VERSION
+    ai_mode = report.get("selection_mode") == "ai_editor"
+    expected_report = "chatcut-visual-qc-v4" if ai_mode else REPORT_VERSION
+    expected_response = "chatcut-visual-qc-response-v4" if ai_mode else RESPONSE_VERSION
+    if (report.get("version") != expected_report or not isinstance(contract, dict)
+            or contract.get("version") != expected_response
             or contract.get("status") != "VALIDATED" or contract.get("errors") != []):
         return "UNCERTIFIED"
     metadata_hash = report.get("draft_metadata_sha256")
@@ -141,6 +167,12 @@ def _report_status(report: Any) -> str:
         return "UNCERTIFIED"
     if not isinstance(rows, list) or not rows or any(row_errors(row) for row in rows):
         return "UNCERTIFIED"
+    if ai_mode:
+        if (not re.fullmatch(r"[0-9a-f]{64}", str(report.get("selection_sha256") or ""))
+                or report.get("final_windows_verified") is not True
+                or report.get("issues")
+                or any(row.get("confidence", 0) < .6 for row in rows)):
+            return "UNCERTIFIED"
     indices = [row["index"] for row in rows]
     mapping = report.get("segment_map") or []
     batches = report.get("batch_results") or []

@@ -147,7 +147,7 @@ class TemporaryMatchBlockTests(unittest.TestCase):
                 mock.patch.object(cli, "_run_shot_analysis", return_value=analysis), \
                 mock.patch.object(vision_analyzer, "match_with_codex", side_effect=failed_match), \
                 mock.patch.object(cli.shot_analyzer, "match_manifest") as rule_match:
-            manifest, blocker = cli._temporary_match({"segments": []}, Path(raw) / "m.json", Path(raw))
+                manifest, blocker = cli._temporary_match({"segments": [], "selection_mode": "legacy"}, Path(raw) / "m.json", Path(raw))
         rule_match.assert_not_called()
         self.assertEqual(blocker["status"], "SHOT_MATCH_BLOCKED")
         self.assertIn("VISION_CALL_FAILED", blocker["message"])

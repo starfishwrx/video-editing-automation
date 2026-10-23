@@ -12,6 +12,7 @@ requirements.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -162,6 +163,9 @@ def _fit_speed_range(shot: dict[str, Any], *, manifest: dict[str, Any] | None,
     """画面角色的变速范围。正式稿的时间相关证据允许加速到 20 倍以罩住整段证据。"""
     speed_min, speed_max = timing_contract.speed_range_for_role(
         demo_actions.visual_role(shot), time_sensitive=time_sensitive)
+    if shot.get("selection_mode") == "ai_editor":
+        return timing_contract.effective_speed_range(demo_actions.visual_role(shot),
+            time_sensitive=time_sensitive, override=shot.get("speed_range_override"))
     if time_sensitive and not _preview_delivery(manifest):
         speed_max = max(speed_max, EVIDENCE_FIT_SPEED_MAX)
     return speed_min, speed_max
@@ -862,6 +866,12 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
     或独立调用）退化为按段落自带 ``audio_duration_us`` / 字符数估算，并在报告里
     标 ``timing_certainty="estimated"``，绝不冒充真值。
     """
+    # Normal CLI calls stamp the selected mode. Unstamped historical in-memory
+    # matcher inputs retain their old API semantics; never upgrade cached data.
+    mode = manifest.get("selection_mode") or os.environ.get("JY_SELECTION_MODE")
+    if mode == "ai_editor" or (not mode and "ai_editor_plan" in analysis):
+        from . import ai_editor
+        return ai_editor.match_manifest(manifest, analysis, narration_timing=narration_timing)
     shots = [s for s in analysis.get("shots", []) if isinstance(s, dict)]
     recommendations: list[dict[str, Any]] = []
     segments: list[dict[str, Any]] = []

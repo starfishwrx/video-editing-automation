@@ -15,6 +15,11 @@ PASS and does not replace existing delivery gates.
 [references/production_quality_and_lessons.md](references/production_quality_and_lessons.md)。
 formal 不得用 settled/lead_in/黑屏冒充完整动作；派生卖点标签不是视觉重看。
 
+新任务默认使用`ai_editor`：先安排具体卖点，再用同商品包装、拆包及本体展示承接
+普通介绍/钩子，后者正常匹配。体验表达允许贴切展示，明确性能结果及数值比较仍须
+画面支持。旧词表不裁决新模式语义，最终切片独立QC使用v4，旧报告不能自动认证。
+调用链、逐轮8候选、缓存及显式legacy回滚见包根`docs/AI_EDITOR.md`。
+
 近期人工审稿对应的打分、选镜与实验组句行为见包根
 `docs/SELECTION_REVIEW_20261022.md`。语义观察和实际窗口先于去重；包装标称只支持对应标称，不替代功能实验。
 

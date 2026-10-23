@@ -1205,6 +1205,7 @@ def _run_vision_with_retry(sheet: Path, prompt: str, output: Path, *,
                            workdir: Path | None = None,
                            schema: Path | None = None,
                            max_retries: int | None = None,
+                           require_slot: bool = False,
                            on_attempt: Any = None) -> tuple[bool, str]:
     """Retry transient provider failures with jittered exponential backoff.
 
@@ -1225,6 +1226,8 @@ def _run_vision_with_retry(sheet: Path, prompt: str, output: Path, *,
             on_attempt(attempt + 1, attempts, last[1][-300:] if attempt else "")
         with _vision_slot() as handle:
             if not handle.acquired:
+                if require_slot:
+                    return False, "VISION_SLOT_TIMEOUT"
                 print(f"[vision] slot wait {handle.waited:.0f}s timed out; calling without throttle",
                       file=sys.stderr, flush=True)
             ok, text = _run_vision(sheet, prompt, output, profile=profile, timeout=timeout,

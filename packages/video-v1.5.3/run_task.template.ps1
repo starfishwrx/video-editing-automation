@@ -106,6 +106,7 @@ try {
   $env:JY_VISION_MODEL = 'glm-5.3-flash'
   if (-not $env:JY_VISION_SLOTS) { $env:JY_VISION_SLOTS = '20' }
   if (-not $env:JY_VISION_BATCH_WORKERS) { $env:JY_VISION_BATCH_WORKERS = '20' }
+  if (-not $env:JY_SELECTION_MODE) { $env:JY_SELECTION_MODE = 'ai_editor' }
   Remove-Item Env:JY_VISION_ANTHROPIC_ENV -ErrorAction SilentlyContinue
 
   # 媒体路径默认走 GPU；显存不足 / 槽位超时仍回退 CPU。

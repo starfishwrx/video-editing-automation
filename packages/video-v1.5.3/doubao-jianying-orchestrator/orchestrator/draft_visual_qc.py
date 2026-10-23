@@ -63,6 +63,8 @@ def _hard_issue(issue: str) -> bool:
         "PLACEHOLDER_COUNT_MISMATCH",
         "MATCH_REPORT_MISSING_OR_EMPTY",
         "POST_DRAFT_VISUAL_MISMATCH",
+        "AI_QC_",
+        "AI_SELECTION_",
     ))
 
 
@@ -214,11 +216,17 @@ def _expected_claims(report_dir: pathlib.Path) -> list[dict[str, Any]]:
                              or row.get("preview_unresolved")),
             "visual_missing": bool(row.get("visual_missing")),
             "claim_gate": row.get("claim_gate") or {},
+            "sentence_kind": row.get("sentence_kind"),
+            "ai_segment": row if row.get("selection_mode") == "ai_editor" else None,
+            "product": (data.get("manifest") or {}).get("product", ""),
         })
     return result
 
 
 def _prompt(claims: list[dict[str, Any]], frame_count: int) -> str:
+    if any(c.get("selection_mode") == "ai_editor" for c in claims):
+        from orchestrator import ai_editor_qc
+        return ai_editor_qc.prompt(claims, frame_count)
     mapping = "\n".join(
         f"- S{local_index:02d}: claim={c['claim']}; expected_shot={c['shot_id']}; "
         f"selection={c['selection_mode']}; degraded={c['degraded']}; parts={c.get('slots', 1)}; "
@@ -313,7 +321,7 @@ def _parse_model(text: str) -> dict[str, Any]:
 
 def _call_qc_model(vision_analyzer: Any, sheet: pathlib.Path, prompt: str,
                    response: pathlib.Path, *, timeout: int,
-                   workdir: pathlib.Path) -> tuple[bool, str]:
+                   workdir: pathlib.Path, strict_slots: bool = False) -> tuple[bool, str]:
     """单批次视觉验收调用。空回复重试一次，仍为空就按调用失败处理（判 UNCERTIFIED，绝不 PASS）。"""
     ok, text = False, ""
     for _ in range(2):
@@ -321,6 +329,7 @@ def _call_qc_model(vision_analyzer: Any, sheet: pathlib.Path, prompt: str,
             sheet, prompt, response,
             profile=os.environ.get("JY_VISION_PROFILE", "volc").strip() or "volc",
             timeout=timeout, workdir=workdir, schema=None, max_retries=0,
+            **({"require_slot": True} if strict_slots else {}),
         )
         empty = (ok and is_blank(text)) or (not ok and vision_analyzer.is_empty_failure(text))
         if not empty:
@@ -355,6 +364,20 @@ def main() -> int:
         result["draft_metadata_sha256"] = draft_metadata_fingerprint(draft)
         info = _load_json(draft)
         claims = _expected_claims(report_dir)
+        ai_mode = any(c.get("selection_mode") == "ai_editor" for c in claims)
+        response_version = RESPONSE_VERSION
+        if ai_mode:
+            from orchestrator import ai_editor_qc, ai_editor_contract
+            result.update(version=ai_editor_qc.REPORT_VERSION, selection_mode="ai_editor")
+            response_version = ai_editor_qc.RESPONSE_VERSION
+            result["response_contract"]["version"] = response_version
+            match_data = json.loads((report_dir / "shot_match_report.json").read_text(encoding="utf-8-sig"))
+            result["selection_sha256"] = ai_editor_contract.digest(match_data.get("segments", []))
+            identity = json.loads((draft / "ai_selection_identity.json").read_text(encoding="utf-8-sig"))
+            if identity.get("selection_sha256") != result["selection_sha256"]:
+                raise ValueError("AI_SELECTION_DRAFT_IDENTITY_CHANGED")
+            if any(c.get("selection_mode") != "ai_editor" for c in claims):
+                raise ValueError("MIXED_SELECTION_MODES")
         result["preview_only_reasons"] = [
             f"UPSTREAM_PREVIEW:S{claim['index']:02d}" for claim in claims if claim["degraded"]]
         active_claims = [claim for claim in claims if not claim["visual_missing"]]
@@ -378,7 +401,7 @@ def main() -> int:
             issues.append("MATCH_REPORT_MISSING_OR_EMPTY")
         elif len(active_rows) != expected_rows:
             issues.append(f"SEGMENT_COUNT_MISMATCH:draft_active={len(active_rows)},expected_active={expected_rows},active_match={len(active_claims)},intentional_gaps={len(intentional_gaps)}")
-        if len(active_claims) > 1 and len({r["material_id"] for r in active_rows}) < 2:
+        if not ai_mode and len(active_claims) > 1 and len({r["material_id"] for r in active_rows}) < 2:
             issues.append("SINGLE_SOURCE_FOR_MULTI_SEGMENT_DRAFT")
         # 物理片段 → 原句：按时间线顺序，每句吃掉自己的 slots 个片段。数量对不上时不配对，免得错配。
         claim_rows: list[tuple[dict[str, Any], list[dict[str, Any]]]] = []
@@ -387,6 +410,14 @@ def main() -> int:
             for claim in active_claims:
                 claim_rows.append((claim, active_rows[cursor:cursor + claim["slots"]]))
                 cursor += claim["slots"]
+        if ai_mode:
+            cut_errors = [error for claim, cut_rows in claim_rows
+                          for error in ai_editor_qc.validate_cut(claim, cut_rows)]
+            issues.extend(cut_errors)
+            result["final_windows_verified"] = bool(claim_rows) and not cut_errors
+            result["uncertified"] = result["uncertified"] or bool(cut_errors)
+            result["source_bindings"] = [{"path": row["source"], "sha256": ai_editor_contract.file_sha256(row["source"])}
+                                         for _, cut_rows in claim_rows for row in cut_rows]
         result["segment_map"] = [
             {"claim_index": claim["index"], "draft_segments": [row["index"] for row in rows]}
             for claim, rows in claim_rows]
@@ -415,7 +446,9 @@ def main() -> int:
         claim_frames: dict[int, list[dict[str, Any]]] = {}
         expected_frames = 0
         for claim, rows in claim_rows:
-            if len(rows) == 1:
+            if ai_mode:
+                plan = ai_editor_qc.frame_plan(claim, rows)
+            elif len(rows) == 1:
                 plan = [(rows[0], "mid", 0.5), (rows[0], "end", 0.9)]
             else:
                 plan = [(row, f"p{n}", 0.5) for n, row in enumerate(rows, 1)]
@@ -460,13 +493,13 @@ def main() -> int:
             else:
                 # Keep the overall sheet as evidence, but send bounded
                 # semantic batches so one large prompt cannot block all QC.
-                batch_size = max(1, int(os.environ.get("JY_POST_QC_BATCH_CLAIMS", "4")))
+                batch_size = max(1, int(os.environ.get("JY_POST_QC_BATCH_CLAIMS", "2" if ai_mode else "4")))
                 timeout = int(os.environ.get("JY_POST_QC_TIMEOUT_S", "180"))
                 visual_rows = []
                 batch_count = (len(active_claims) + batch_size - 1) // batch_size
                 for batch_no, start in enumerate(range(0, len(active_claims), batch_size), 1):
                     claims = active_claims[start:start + batch_size]
-                    items = [dict(item, label=f"S{local:02d} {item['suffix']}")
+                    items = [dict(item, label=(f"S{local:02d} {item['suffix']} @{item['timestamp']:.3f}s" if ai_mode else f"S{local:02d} {item['suffix']}"))
                              for local, claim in enumerate(claims, 1)
                              for item in claim_frames.get(claim["index"], [])]
                     chunk_sheet = report_dir / f"draft_visual_qc_contact_sheet_{batch_no:02d}.jpg"
@@ -478,7 +511,7 @@ def main() -> int:
                     # sheet dense so every visible tile is evidence.
                     chunk_columns = min(4, max(2, len(items)))
                     if not vision_analyzer._write_sheet(items, chunk_sheet, columns=chunk_columns,
-                                                        tile_width=260, tile_height=190,
+                                                        tile_width=420 if ai_mode else 260, tile_height=300 if ai_mode else 190,
                                                         ffmpeg=ffmpeg):
                         result["warnings"].append(f"CONTACT_SHEET_FAILED:B{batch_no:02d}")
                         result["uncertified"] = True
@@ -489,11 +522,11 @@ def main() -> int:
                         "batch_no": batch_no,
                         "claim_indices": [claim["index"] for claim in claims],
                         "frame_labels": [item["label"] for item in items],
-                        "prompt_version": RESPONSE_VERSION,
+                        "prompt_version": response_version,
                     }, ensure_ascii=False, indent=2), encoding="utf-8")
                     ok, text = _call_qc_model(vision_analyzer, chunk_sheet,
                                               _prompt(claims, len(items)), response,
-                                              timeout=timeout, workdir=report_dir)
+                                              timeout=timeout, workdir=report_dir, strict_slots=ai_mode)
                     if not ok:
                         result["response_contract"]["errors"].append(f"B{batch_no:02d}:CALL_FAILED")
                         result["batch_results"].append({
@@ -508,7 +541,7 @@ def main() -> int:
                         continue
                     try:
                         model = _parse_model(text)
-                        contract_errors = response_errors(model, len(claims))
+                        contract_errors = response_errors(model, len(claims), expected_version=response_version)
                         if contract_errors:
                             result["response_contract"]["errors"].extend(
                                 f"B{batch_no:02d}:{error}" for error in contract_errors)
@@ -589,6 +622,9 @@ def main() -> int:
                     "batch_size_claims": batch_size,
                 })
         result["draft_metadata_sha256_final"] = draft_metadata_fingerprint(draft)
+        if ai_mode and any(ai_editor_contract.file_sha256(b["path"]) != b["sha256"] for b in result["source_bindings"]):
+            result["issues"].append("AI_QC_SOURCE_CHANGED_DURING_REVIEW")
+            result["uncertified"] = True
         if result["draft_metadata_sha256_final"] != result["draft_metadata_sha256"]:
             result["issues"].append("DRAFT_METADATA_CHANGED_DURING_QC")
             result["uncertified"] = True

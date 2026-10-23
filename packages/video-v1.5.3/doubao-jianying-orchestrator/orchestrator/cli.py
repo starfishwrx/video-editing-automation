@@ -394,6 +394,8 @@ def _pre_synthesize_narration(manifest: dict, report_dir: Path, preset) -> dict:
 
 def _temporary_match(manifest: dict, input_path: Path, report_dir: Path,
                      narration_timing: dict | None = None) -> tuple[dict, dict | None]:
+    from . import ai_editor, ai_editor_contract
+    manifest = {**manifest, "selection_mode": ai_editor_contract.selection_mode(manifest)}
     analysis = _run_shot_analysis(manifest, input_path, report_dir)
     if analysis.get("shots"):
         from . import material_corrections
@@ -405,7 +407,9 @@ def _temporary_match(manifest: dict, input_path: Path, report_dir: Path,
     from . import vision_analyzer
     vision_meta = analysis.get("vision_analysis")
     vision_meta = vision_meta if isinstance(vision_meta, dict) else {}
-    if not analysis.get("semantic_matches") and vision_meta.get("errors") == []:
+    if manifest["selection_mode"] == "ai_editor":
+        analysis = ai_editor.prepare(manifest, analysis, report_dir, narration_timing=narration_timing)
+    elif not analysis.get("semantic_matches") and vision_meta.get("errors") == []:
         analysis = vision_analyzer.match_with_codex(manifest, analysis, report_dir)
         if analysis.get("semantic_match_error"):
             # Rule-only matching cannot judge whether a shot shows what the
@@ -419,7 +423,7 @@ def _temporary_match(manifest: dict, input_path: Path, report_dir: Path,
         manifest, analysis, topk=int(manifest.get("shot_topk", 3) or 3),
         auto_accept_top1=bool(manifest.get("auto_accept_top1", True)),
         narration_timing=narration_timing)
-    if matched.get("ok"):
+    if matched.get("ok") and manifest["selection_mode"] != "ai_editor":
         scene_report = scene_rules.apply(manifest, matched, analysis, report_dir)
         matched["scene_rules"] = {k: scene_report.get(k) for k in
                                   ("category", "rulepacks", "versions", "applied", "partial", "unmet")}
@@ -618,6 +622,10 @@ def cmd_match_shots(args) -> int:
         analysis = _read(analysis_path)
     except (OSError, ValueError) as exc:
         return _emit({"status": "SHOT_ANALYSIS_FILE_INVALID", "message": str(exc)}, 1)
+    from . import ai_editor, ai_editor_contract
+    manifest = {**manifest, "selection_mode": ai_editor_contract.selection_mode(manifest)}
+    if manifest["selection_mode"] == "ai_editor":
+        analysis = ai_editor.prepare(manifest, analysis, report_dir)
     result = shot_analyzer.match_manifest(manifest, analysis, topk=args.topk,
                                           auto_accept_top1=not args.require_selection)
     report_dir.mkdir(parents=True, exist_ok=True)

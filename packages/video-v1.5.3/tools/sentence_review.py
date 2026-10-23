@@ -210,10 +210,12 @@ sys.path.insert(0, payload["skill_root"])
 from orchestrator import shot_analyzer
 bundle = payload["bundle"]
 manifest, analysis = bundle["inputs"]["manifest"], bundle["inputs"]["analysis"]
-analysis["semantic_matches"] = bundle["inputs"]["semantic"].get("matches", [])
+if manifest.get("selection_mode") != "ai_editor":
+    analysis["semantic_matches"] = bundle["inputs"]["semantic"].get("matches", [])
 ledger = tmp / "empty-usage.json"
 ledger.write_text(json.dumps({"schema":"shot-usage-v1","shots":{},"drafts":{}}), encoding="utf-8")
-manifest["usage_ledger_path"] = str(ledger)
+if manifest.get("selection_mode") != "ai_editor":
+    manifest["usage_ledger_path"] = str(ledger)
 result = shot_analyzer.match_manifest(manifest, analysis, topk=int(manifest.get("shot_topk",3) or 3), auto_accept_top1=bool(manifest.get("auto_accept_top1",True)), narration_timing=bundle["inputs"]["timing"])
 Path(payload["output"]).write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
 '''

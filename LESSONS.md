@@ -19,6 +19,15 @@
 
 ## 已有条目（从代码注释与 references 中回填的种子，hits 按已知次数）
 
+### L-20261023-07 AI选镜改造必须贯穿末端、队列和独立QC
+- status: OPEN
+- hits: 1
+- 模块: visual-matching
+- 现象: 模型推荐正确仍被旧词表否决；局部新输出又被worker旧字段合同阻断。
+- 根因: 推荐、实际分配、最终源窗和交付消费各自裁决；宽泛的观察区间也会使短口播无解。
+- 以后怎么做: 用正常入口验证统一收据，明确legacy优先级；AI给出最短必要证据，程序检查源窗及跨句重复，QC独立查看最终片段。
+- 证据: packages/video-v1.5.3/docs/AI_EDITOR.md；test_ai_editor.py；test_ai_editor_qc.py
+
 ### L-20261023-06 整词字幕口径必须回灌技能包，不能只停在流水线机
 - status: OPEN
 - hits: 1
