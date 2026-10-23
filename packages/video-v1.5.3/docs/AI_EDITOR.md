@@ -1,5 +1,8 @@
 # 卖点优先的 AI 选镜
 
+纸品专项规则和参数见[纸品生产规则](PAPER_PRODUCTION_RULES.md)。AI政策升级为
+`selling-points-first-v2`，计划、片段、草稿和独立QC绑定生效规则版本与SHA256；旧AI认证不能自动沿用。
+
 正常 CLI 和任务模板默认使用 `ai_editor`。manifest 的 `selection_mode: legacy`
 可显式回滚，其优先级高于 `JY_SELECTION_MODE`。未标模式的历史内存 matcher 输入
 维持旧 API，不自动升级缓存。

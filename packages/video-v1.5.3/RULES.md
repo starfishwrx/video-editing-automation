@@ -56,3 +56,9 @@ AI看图判断语义，程序检查素材与时间窗口，独立QC v4验收最�
 - 所有交付收据必须绑定 `run_id`、工具/规则版本、合同哈希和证据 SHA-256。
 - 剪映打开过的加密时间线不能出货。出货只用明文 `draft_info.json`，列表草稿 ID 必须和正文一致。
 - 成片编码优先 GPU。4K HEVC 的 CUDA 解码必须带 `-threads 1`，否则会以退出码 0 静默退回 CPU。
+
+## 纸品专项规则
+
+纸品13类画面合同及配音、字幕、气口参数以`doubao-jianying-orchestrator/orchestrator/rules/zhipin.json`为唯一规则源，
+详见`docs/PAPER_PRODUCTION_RULES.md`。新版AI选镜按语义读取规则，程序不另用关键词裁决。
+包装标称与功能检测按口播意图区分，规则更新后重新检查最终切片，不沿用旧认证。
