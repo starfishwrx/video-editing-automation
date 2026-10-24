@@ -1,11 +1,11 @@
-"""Automatic task-local visual analysis and script-to-shot matching.
+"""Task-local image understanding and legacy description-to-shot matching.
 
-The first implementation asked the outer Codex turn to inspect hundreds of
-frames manually.  That is not deterministic in a headless Windows run: the
-turn can create the schema while leaving placeholder labels such as
-``frame_visible``.  This module makes the visual step explicit.  It builds
-labelled contact sheets, sends them to ``codex exec --image`` and validates
-the returned JSON before the deterministic reuse/evidence gates run.
+Build labelled contact sheets and send actual image bytes to the configured
+vision backend. The default is Volcengine Ark GLM-5.3-Flash
+(``glm-5.3-flash``), not GLM-5.3 or ChatGLM3. Validate observations before
+downstream selection and evidence checks. The default ``ai_editor`` selector
+re-extracts candidate frames for its own pixel review; ``match_with_codex``
+retains its historical name for compatibility, regardless of transport.
 
 Only the current task's frames are sent.  Nothing is written to the reusable
 material library.  A failed vision call remains a hard blocker; it is never
@@ -1030,7 +1030,7 @@ _VOLC_TRANSPORTS = {"volc_glm", "glm", "volc"}
 
 
 def _vision_transport() -> str:
-    """Resolve the vision backend. Unset env means GLM 5.3 direct HTTP."""
+    """Resolve transport; unset env uses Ark GLM-5.3-Flash direct HTTP."""
     raw = os.environ.get("JY_VISION_TRANSPORT", "").strip().lower()
     if raw in _ANTHROPIC_TRANSPORTS:
         return "anthropic"
@@ -1498,7 +1498,7 @@ def _primary_interval(raw: dict[str, Any], row: dict[str, Any],
 def enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], report_dir: Path,
                       *, profile: str | None = None, batch_size: int = 12,
                       timeout: int | None = None, ffmpeg: str | None = None) -> dict[str, Any]:
-    """Use Codex image input to fill and validate every temporary shot row."""
+    """Use the configured image backend to fill and validate temporary shots."""
     if timeout is None:
         timeout = env_int("JY_VISION_TIMEOUT", 600, minimum=60)
     profile = _clean_profile(

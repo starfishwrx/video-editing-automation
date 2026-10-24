@@ -1061,7 +1061,7 @@ def main(argv=None) -> int:
     sc.add_argument("--report-dir", default=".jy_run")
     sc.set_defaults(func=cmd_scan)
 
-    sa = sub.add_parser("analyze-shots", help="只分析当前商品素材并生成临时镜头候选，不读取脚本文案")
+    sa = sub.add_parser("analyze-shots", help="对当前任务素材分镜抽帧，默认调用视觉模型补充观察")
     sa.add_argument("--input", required=True, help="含 material_sources/videos 的 manifest.json")
     sa.add_argument("--report-dir", default=".jy_run")
     sa.add_argument("--threshold", type=float, default=0.30, help="ffmpeg 场景切换阈值")
@@ -1070,11 +1070,11 @@ def main(argv=None) -> int:
                     help="仅生成原始抽帧清单，不调用自动视觉分析（仅诊断用）")
     sa.set_defaults(func=cmd_analyze_shots)
 
-    ms = sub.add_parser("match-shots", help="按脚本逐句给临时镜头推荐 Top3 并自动采用 Top1")
+    ms = sub.add_parser("match-shots", help="默认 AI 看图复审并整稿编排；legacy 使用 Top3/Top1")
     ms.add_argument("--input", required=True, help="含 full_script/segments 的 manifest.json")
     ms.add_argument("--analysis", required=True, help="analyze-shots 生成并经 AI 填写描述的 shot_candidates.json")
     ms.add_argument("--report-dir", default=".jy_run")
-    ms.add_argument("--topk", type=int, default=3)
+    ms.add_argument("--topk", type=int, default=3, help="legacy 路线的推荐镜头数")
     ms.add_argument("--require-selection", action="store_true", help=argparse.SUPPRESS)
     ms.set_defaults(func=cmd_match_shots)
 

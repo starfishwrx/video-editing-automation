@@ -1,57 +1,63 @@
 # 剪映自动化工具包
 
-面向视频生产团队的豆包与剪映自动化工具包。仓库按版本保存任务编排脚本、剪映工程辅助工具、视觉规则、环境说明和测试，便于团队阅读、评估、交接与下载。
+把商品视频素材与口播脚本整理成可编辑的剪映草稿，并保存选镜、音画时序、视觉复检和人工审阅所需的证据。适用于需要批量生产、审阅和交接视频的视频团队。
 
-> 当前源码候选：**工具包 VERSION = 1.5.6**，源码目录仍为 `packages/video-v1.5.3/`（历史代号，不随小版本改名）。编排器与剪映组件随 `VERSION`；视觉规则独立为 **1.4.1**。候选包和测试结果不代表渲染机已经升级或生产验收完成。
+**当前默认视觉模型是 GLM-5.3-Flash，API ID 为 `glm-5.3-flash`。** 通过火山方舟直接发送抽帧图片；GLM-5.3、GLM-5.3-Flash 和 ChatGLM3 是不同型号，不能混写。模型输入、配置覆盖与源码位置见[模型与视觉流程](docs/model-and-vision.md)。
 
-文档分层（对齐 [grapeot 项目脚手架](https://github.com/grapeot/context-infrastructure/blob/main/rules/skills/project_scaffold.md)）：先读 [`AGENTS.md`](AGENTS.md) 与 [`docs/README.md`](docs/README.md)，再按需打开 `docs/prd.md` / `rfc.md` / `working.md` / `test.md`。
+## 输入、流程与输出
 
-1.5.6 在 1.5.3 交付恢复与合包技能之上，纳入选镜审稿修订与全局配音无气口等规则；合包命令见[已验证修复合包技能](packages/video-v1.5.3/doubao-jianying-orchestrator/references/validated_fix_to_release.md)。
+- 输入：同一商品的素材视频、逐句口播及任务 `manifest.json`；运行账号和机器路径由本机配置提供。
+- 流程：FFmpeg 分镜/抽帧 → GLM-5.3-Flash 理解画面 → AI 复审候选并编排 → 程序校验源窗口与音频时长 → 剪映写稿 → 最终切片独立视觉 QC → 人工审阅。
+- 输出：剪映草稿、选镜计划、时间范围及 QC/任务结果 JSON。生成草稿与正式交付分别验收。
 
-## 下载与校验
+默认选镜模式为 `ai_editor`，最终视觉 QC 使用 v4 合同。旧选镜逻辑仅在显式选择 `legacy` 时使用；两条路线及报告不能混用。详见[架构](docs/architecture.md)和[选镜说明](packages/video-v1.5.3/docs/AI_EDITOR.md)。
 
-1. 打开 [GitHub Releases](https://github.com/starfishwrx/video-editing-automation/releases)。
-2. 选择需要的版本，下载对应 ZIP 和 `SHA256SUMS` 校验文件。
-3. 将 ZIP 和校验文件放在同一目录，先验证文件完整性，再解压阅读或部署。
-4. 部署前阅读该版本的 `ENVIRONMENT.md`、`RULES.md` 和 `README.md`，按目标机器准备环境与配置。
+## 快速开始
 
-也可以直接浏览 [`packages/`](packages/) 中的对应版本源码。当前主线以目录内 `VERSION` 为准。
+Windows + Python **3.11 或 3.12**，依赖统一用 [uv](https://docs.astral.sh/uv/)。从仓库根执行：
 
-## 使用流程
+```powershell
+cd packages/video-v1.5.3
+uv sync --frozen
+uv run --frozen python -X utf8 doubao-jianying-orchestrator/run.py --help
+```
 
-1. 根据版本表和 [`docs/RELEASES.md`](docs/RELEASES.md) 确认版本、来源和发布状态。
-2. 阅读版本目录中的环境约定、规则及编排器说明，确认操作系统、运行依赖和所需路径。
-3. 在渲染环境配置访问凭据与机器路径；这类配置不随源码包提供，也不要提交到仓库。
-4. 先运行该版本的自动化测试（见 [`docs/test.md`](docs/test.md)），再按部署流程进行真实任务观察和人工验收。
+接着按[快速开始](docs/quickstart.md)操作：先运行离线测试和合成视频抽帧，再配置真实素材、模型与剪映环境进行预览建稿。示例位于包内 [`examples/`](packages/video-v1.5.3/examples/)，不需要把账号或业务素材提交到 GitHub。
 
-不要覆盖正在运行的队列；真实任务观察和人工验收通过前，不应把候选版当作已上线版本。
+完整配置见 [`ENVIRONMENT.md`](packages/video-v1.5.3/ENVIRONMENT.md)。默认视觉通道为 `JY_VISION_TRANSPORT=volc_glm`，模型为 `JY_VISION_MODEL=glm-5.3-flash`，凭据读取 `ARK_API_KEY`，为空时读取 `JY_VOLC_API_KEY`。通用配置从进程环境变量读取；复制 `.env` 文件不会自动加载。
 
-## 使用要求
+## 版本与下载
 
-- 目标机器需满足对应版本 `ENVIRONMENT.md` 中列出的运行依赖（统一用 **uv**）。
-- 豆包、剪映及相关服务和素材路径需能从目标机器访问。
-- 将账号令牌、密码和机器专属路径保存在部署环境，不要写进源码或提交到 GitHub。
-- 使用前确认目标版本状态；下载、安装或测试通过都不能代替渲染机部署与生产验收。
+版本状态按 **2026-10-24** 核对；后续以包内 `VERSION` 和 [GitHub Releases](https://github.com/starfishwrx/video-editing-automation/releases) 的实际附件为准。
+
+- **当前维护主线**：[`packages/video-v1.5.3/`](packages/video-v1.5.3/)，`VERSION` 为 **1.5.6**。目录名是历史代号，升级时保留路径。
+- **已发布下载包**：本次核对只有 [video-v1.5.1 预发布版](https://github.com/starfishwrx/video-editing-automation/releases/tag/video-v1.5.1)。它与当前主线存在差异；仓库内的旧 ZIP 也不代表 1.5.6 已发布。
+- **实验路线**：`packages/video-v1.5.4/`、`packages/video-v1.5.5/` 是独立的索引/检索候选，后者声明为 experimental；不作为默认运行入口。
+- **生产安装**：由部署机器的 `ACTIVE_VIDEO_RUNTIME.json`、已安装技能和哈希确认。源码、下载包与生产版本分别记录。
+
+需要当前源码候选时，从主线检出后按[合包流程](docs/release-process.md)生成新包。候选测试通过后，仍需完成既定的真实任务观察和人工验收，才能发布或部署。
+
+下载已有发布包时，将对应 ZIP 与 `SHA256SUMS` 放在一起，核对文件名和哈希，再解压阅读该版本的环境与规则说明。完整历史收据见 [`docs/RELEASES.md`](docs/RELEASES.md)。
+
+## 阅读与开发入口
+
+- 初次使用：[快速开始](docs/quickstart.md)、[环境配置](packages/video-v1.5.3/ENVIRONMENT.md)、[模型与视觉流程](docs/model-and-vision.md)。
+- 了解实现：[文档索引](docs/README.md)、[架构](docs/architecture.md)、[产品目标](docs/prd.md)。
+- 修改项目：[贡献与分支约定](CONTRIBUTING.md)、[`AGENTS.md`](AGENTS.md)、[测试策略](docs/test.md)。
+- 打包交接：[发布流程](docs/release-process.md)、[版本记录](docs/RELEASES.md)。
+
+日常使用 `main + 短期功能分支 + PR`；发布版本用 tag/Release 标记。仓库内的离线 CI 验证代码合同，真实模型效果、剪映打开与人工成片验收分别留证。
 
 ## 项目结构
 
-- `AGENTS.md`：给 Agent 的路由表。
-- `LESSONS.md`：错题本。
-- `docs/`：PRD/RFC/working/test、体系结构、子系统与发版说明（见 [`docs/README.md`](docs/README.md)）。
-- `packages/video-v1.4.0/` … `video-v1.5.2/`：历史归档，禁止修改。
-- `packages/video-v1.5.3/`：当前活代码（`VERSION` = 1.5.6）。
-- `releases/`：各版本 ZIP 对应的 SHA-256 清单与候选 ZIP。
+- `docs/`：面向使用者和维护者的入口、架构、测试及发版说明。
+- `AGENTS.md` / `LESSONS.md`：Agent 路由与维护教训。
+- `packages/video-v1.5.3/`：当前维护代码、示例、依赖锁文件和两套测试。
+- `packages/video-v1.4.0/` … `video-v1.5.2/`：只读历史包。
+- `packages/video-v1.5.4/`、`video-v1.5.5/`：隔离实验路线，说明以各自 README 为准。
+- `releases/`：历史校验清单与候选 ZIP；正式可下载资产以 GitHub Release 页面为准。
+- `.github/`：离线 CI 与 PR 模板。
 
-## 版本记录
+## 使用边界与隐私
 
-| 版本 | 组件版本 | 说明 |
-|---|---|---|
-| **v1.5.6**（活代码在 `video-v1.5.3/`） | 工具包 / 编排器 / 剪映组件 1.5.6；视觉规则 1.4.1 | 选镜审稿修订；全局配音无气口；在 1.5.3 交付恢复与合包技能之上继续迭代。源码候选，部署另计。 |
-| **v1.5.3** | 工具包、编排器、剪映组件 1.5.3；视觉规则 1.4.1 | 共享交付检查实际素材路径；授权恢复原始生成版；修复合包技能与可重建 ZIP 验收工具。 |
-| **v1.5.1** | 工具包、编排器、剪映组件 1.5.1；视觉规则 1.4.1 | 预览黑屏补齐策略与 GPU/4K 解码说明。 |
-| **v1.5.0** | 工具包、编排器、剪映组件 1.5.0；视觉规则 1.4.1 | 评估与队列保护、素材索引和跨机器审阅。 |
-| **v1.4.0** | 工具包、编排器、剪映组件及视觉规则均为 1.4.0 | 历史归档版。 |
-
-## 发布验收
-
-发布前应从下载 ZIP 全新解压，核对 SHA-256 与包内文件清单，并运行包测试和编排器测试。完成这些检查只说明源码包通过了对应验证；渲染机部署还需单独备份、升级、运行真实任务并完成验收。详见 [`docs/release-process.md`](docs/release-process.md) 与 [`docs/RELEASES.md`](docs/RELEASES.md)。
+模型会接收任务抽帧和相关脚本文字；运行前确认这些素材适合发送到所配置的服务。源码示例不包含真实账号、生产日志或业务素材，私有配置和输出保留在本机。预览稿和模型调用失败保留未认证状态；正式交付仍需要真实视觉证据与人工审阅。

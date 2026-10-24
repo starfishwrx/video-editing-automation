@@ -14,7 +14,7 @@
 - `recommend-bgm [--script --mood --id --min-dur --topk]`：BGM 推荐与试听。
 - `scan --input --report-dir`：仅扫描素材元数据并落盘 `asset_metadata.json`。
 - `analyze-shots --input --report-dir [--threshold --min-shot-s --no-vision]`：仅做本批素材抽帧/描述/标签 → `shot_candidates.json`。
-- `match-shots --input --analysis --report-dir [--topk]`：按脚本/卖点对 `shot_candidates.json` 做逐句 Top3，写 `shot_match_report.json`。
+- `match-shots --input --analysis --report-dir [--topk]`：默认调用 `ai_editor` 重新看图并编排，写 `shot_match_report.json` 和成功时的 `matched_manifest.json`；显式 legacy 才按旧 Top3 策略。
 - `review-script --input --report-dir`：口播确认单（逐句字数/预估时长/衔接覆盖体检），并对有口播的分镜做一次“源证据闸门”体检。
 - `build --input --report-dir [--strict-script] [--delivery-mode formal|preview]`：生成草稿。0=SUCCESS，非 0=其他状态（JSON 内含 `terminal_state/next_action`）。
 - `diagnose-timeline --draft --report-dir [--expect-external-package]`：只读诊断草稿结构/媒体/导入状态（不驱动 UI）。
@@ -29,6 +29,7 @@
 - `recover` 的 stdout 是 `_compact_control_result(result)`：保留 `status/next_action/recovery_stage`、`matched_manifest(_sha256)`、`task_log`。
 
 ## 3. 关键约束与口径
+- 默认选镜模式为 `ai_editor`，优先级为 manifest 字段 → `JY_SELECTION_MODE` → 默认值；新模式要求 `volc_glm`。默认模型完整名称为 GLM-5.3-Flash（`glm-5.3-flash`），见[模型与视觉流程](../model-and-vision.md)。
 - `delivery_mode` 必须在选镜之前就写入 manifest（`cmd_build` 会归一化并注入）—— `match_manifest` 要用它决定预览黑屏/补镜与“未解出窗口”的处置；引擎仅读取并在结果里报告。
 - 音色仅在 `cmd_build` 里唯一决议并回写 manifest（`voice_catalog.resolve_voice_once`）；引擎后续只读锁定结果。
 - 选镜前的 `pre_synthesize_narration` 只用于拿逐句真实音频时长真值（命中同一缓存，不额外花钱），并据此跑候选窗口求解。
