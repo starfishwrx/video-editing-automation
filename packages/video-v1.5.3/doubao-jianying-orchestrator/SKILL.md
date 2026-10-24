@@ -23,7 +23,7 @@ formal 不得用 settled/lead_in/黑屏冒充完整动作；派生卖点标签�
 近期人工审稿对应的打分、选镜与实验组句行为见包根
 `docs/SELECTION_REVIEW_20261022.md`。语义观察和实际窗口先于去重；包装标称只支持对应标称，不替代功能实验。
 
-QC v3 响应、当前观察的证据合同、场景重排后复验与人工反馈回放见包根
+legacy 的 QC v3 响应、旧场景重排复验及历史人工反馈回放见包根
 `docs/QUALITY_CONTRACT_FIXES.md` 和 `docs/sentence-review.md`。
 旧 QC 报告不能自动获得新合同认证；未定义合同先校准判据，不直接要求补拍。
 
@@ -71,7 +71,7 @@ QC v3 响应、当前观察的证据合同、场景重排后复验与人工反�
 - 视觉服务调用最多进行一次有限重试；凭据、路径、编码和余额错误直接停机。
 - 视觉默认直连火山 Ark `glm-5.3-flash`（`JY_VISION_TRANSPORT=volc_glm`），密钥放
   `ARK_API_KEY`（或 `JY_VOLC_API_KEY`）。批次与槽位并发默认 20。`codex` /
-  `anthropic` 只作显式回滚；媒体解码默认全部走 GPU（`JY_GPU_DECODE_CODECS=*`，
+  `anthropic` 只作显式 legacy 回滚（需同时选择 legacy；AI editor 要求直连）；完整型号是 GLM-5.3-Flash，不是 GLM-5.3 或 ChatGLM3。媒体解码默认全部走 GPU（`JY_GPU_DECODE_CODECS=*`，
   单帧默认开启），显存不足或槽位超时仍回退 CPU。
 - `draft_write` 只接受 `semantic_match` 产生的成功嵌套结果；原始 manifest 或损坏缓存
   不得作为恢复输入。桌面诊断失败保持 `DESKTOP_IMPORT_BLOCKED` / `PACKAGE_NOT_ACTIVE`。
@@ -87,14 +87,14 @@ QC v3 响应、当前观察的证据合同、场景重排后复验与人工反�
 预览留空补镜和这次生产踩过的坑见 [references/preview_gap_and_pitfalls.md](references/preview_gap_and_pitfalls.md)。
 卫品 1.5.2 历史踩坑（含旧 preview/settled 口径）见包内 `docs/WEIPIN_1.5.2_PITFALLS.md`，仅作历史参考。
 
-剪辑规则（v1.5.3）：
+旧场景剪辑规则（legacy / v1.5.3；全局配音默认值仍适用）：
 
 - 规则分两层：`orchestrator/rules/global.json` 所有品类都守，`weipin.json` / `zhipin.json` 只放该品类自己的指令。品类按 `category` 字段，没有时按商品名识别。卫品指令只用于卫品。
 - 默认硬切、不加转场；配音去首尾静音，全局不留句间气口（`max_gap_frames=1` / `tail_pad_s=0`）；卫品配音 1.2 倍速。
 - 卫品场景（吸水实验、撕包装、透灯光、荧光测试、正面指产品、背标、面层）在选镜后按动作相位重新定窗，结果看 `scene_rules_report.json`。
 - 同一任务的不同版本尽量不用同一批镜头；台账在 `work/.cache/shot_usage_*.json`。
 
-预览降级（v1.5.1）：
+旧预览降级（legacy / v1.5.1）：
 
 - 正式模式仍按 `DIRECT → ACCEPTABLE_DEGRADED → MATERIAL_GAP`。降级镜不能抢走已有直证。棉、一条顶多片、侧漏、囤货量感这些硬口播没有直证就保持缺口，不能用包装特写冒充。
 - 预览可以先按规则留下最多 3 句黑屏。超出 3 句的，只用还没出现过的已就绪镜头补上。剩下的黑屏再用和图文相关的镜头或产品展示镜填上。没有未用过的源文件时，才允许重复最合适的那条，并标成 `REUSE`。这些补镜不是证据，草稿仍是未认证预览。

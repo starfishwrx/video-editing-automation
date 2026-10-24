@@ -9,7 +9,7 @@
 | 包布局 | `packages/video-v1.x.y/` 多版本并存 | 历史包与校验清单绑定；禁止改归档 |
 | 活代码目录名 | 固定 `packages/video-v1.5.3/` | 小版本升级只改 `VERSION`，避免整树改名与路径断裂 |
 | 真实版本 | 只读 `VERSION` / `release-manifest.json` | 禁止在提示词或代码里手写版本号做等值闸门 |
-| 生产真相 | `D:/jy_pipeline/ACTIVE_VIDEO_RUNTIME.json` + 已安装技能哈希 | 候选 worktree ≠ 已部署 |
+| 生产真相 | 部署机器的 `ACTIVE_VIDEO_RUNTIME.json` + 已安装技能哈希 | 候选 worktree ≠ 已部署 |
 | 开发入口 | 干净 worktree 跟踪 `origin/main` | 勿把带大量未提交覆盖的 fork 检出当主树 |
 
 ## 2. 端到端流水线
@@ -17,27 +17,30 @@
 ```
 环境注入 → manifest
   → shot_analyzer / vision_analyzer
-  → visual_match（Top3 + 窗口求解）
-  → scene_rules / phase_timing（品类规则包）
+  → ai_editor（描述召回 → 候选实际抽帧复审 → 整稿编排）
+  → shot_analyzer / timing_contract（实际源窗、证据与音频分配重验）
   → OrchestrationEngine 顺序闸门
   → jianying-editor 写草稿
-  → draft_visual_qc / diagnostics
+  → draft_visual_qc v4 / diagnostics
   → closed_loop / draft_delivery / NAS 分发
 ```
 
 引擎闸门形态统一为 `Optional[dict]`：`None` 放行，`dict` 终止并带原因。新增闸门必须带「必拦样例」测试。
+
+默认视觉后端为火山 Ark GLM-5.3-Flash（`glm-5.3-flash`）。模型名称与覆盖优先级见[模型说明](model-and-vision.md)。显式 `legacy` 才沿用旧 Top3、`scene_rules` / `phase_timing` 与 QC v3；`ai_editor` 不使用旧词表/旧换镜器裁决语义。QC v3 不能认证新模式草稿。
 
 ## 3. Formal vs Preview
 
 - **formal**：只接受完整证据与 `PASS`；动作放不下记 `unmet`，不得用 `settled` / `lead_in` / `pool_fill` 冒充正式完整动作。
 - **preview**：允许黑屏补位、证据收窄等到观察态，结果必须带未认证理由；禁止进入正式交付与表格「已完成」。
 
-视觉等级顺序不可放宽：`DIRECT → ACCEPTABLE_DEGRADED → MATERIAL_GAP`。
+视觉等级与证据闸门不可放宽。legacy 候选按 `DIRECT → ACCEPTABLE_DEGRADED → MATERIAL_GAP`；默认 AI 模式以当前像素观察与新收据判断，`DIRECT` 表示按本句用途正常匹配，不把体验展示解释成物理实验结论。
 
 ## 4. 规则分层
 
 - 视觉业务政策：`RULES.md` + `WINDOWS_VIDEO_CLOSED_LOOP_RULES_*.json`（版本 **1.4.1**）。
 - 品类剪辑规则：`orchestrator/rules/global.json` + `weipin.json` / `zhipin.json`。
+- 默认 AI 模式消费适用的全局默认值与实际证据合同；旧场景换镜/词表裁决只适用于 legacy。
 - 气口、字幕默认坐标等跨品类口径进 `global`；品类包只叠加倍速、场景词、卖点识别等差异。
 
 ## 5. 写稿与交付边界
@@ -70,6 +73,6 @@
 
 ## 8. 迁移与兼容
 
-- 外部 cron / `D:/jy_pipeline` 联接保留；升级先备份再换 ACTIVE 指针。
+- 外部调度与现有 pipeline 联接保留；升级先备份再换 ACTIVE 指针。
 - 分析缓存键变更（如 `product-visual-v2`）会触发素材重分析，属预期成本。
 - Mac 审阅路径与 Windows 分发路径指向同一共享文件的不同 OS 视图；暂存成功仍是 `AWAITING_MAC_REVIEW`，不是验收通过。

@@ -1,5 +1,10 @@
 # Runtime environment contract
 
+This contract applies to the maintained `video-v1.5.3` source tree; read its
+`VERSION` for the actual package version. The indexed 1.5.4/1.5.5 experiments
+have separate environment contracts. For a first local run, see the repository
+[quickstart](https://github.com/starfishwrx/video-editing-automation/blob/main/docs/quickstart.md).
+
 ## Python dependencies
 
 Use **uv** only (`uv sync` / `uv add` / `uv run`). Do not use `pip install`
@@ -8,6 +13,62 @@ against the system interpreter for this package or its deployment host.
 - Package project: `packages/video-v1.5.3/pyproject.toml`
 - Host project: the `pyproject.toml` under the configured `JY_PIPE_ROOT`
 - Helper: `scripts/uv_sync.ps1` (package)
+
+Python must be **>=3.11,<3.13**, as declared in `pyproject.toml`.
+
+## Vision and selection (current defaults)
+
+The exact default model is **GLM-5.3-Flash**, API ID `glm-5.3-flash`.
+GLM-5.3 and ChatGLM3 are different models. The implementation sends contact-sheet
+image bytes to Volcengine Ark; full video files are not sent by this transport.
+See [model and image-call details](https://github.com/starfishwrx/video-editing-automation/blob/main/docs/model-and-vision.md).
+
+| Variable | Default / precedence | Purpose |
+| --- | --- | --- |
+| `JY_SELECTION_MODE` | `ai_editor`; manifest `selection_mode` wins | Select `ai_editor` or explicit `legacy` |
+| `JY_VISION_TRANSPORT` | `volc_glm` | Direct Ark chat completions; `glm`/`volc` are aliases |
+| `JY_VISION_MODEL` | `glm-5.3-flash` | Exact model ID, shared by image review and text planning |
+| `ARK_API_KEY` | Required for direct calls | First credential source; process environment only |
+| `JY_VOLC_API_KEY` | Used only if `ARK_API_KEY` is empty | Alternative Ark credential; process environment only |
+| `JY_VOLC_BASE_URL` | `https://ark.cn-beijing.volces.com/api/plan/v3` | Base URL; code appends `/chat/completions` |
+| `JY_VISION_BATCH_WORKERS` | `20` for direct Ark | Concurrent material-understanding batches |
+| `JY_VISION_SLOTS` | `20` by default | Cross-process vision slots; AI editor also shares these slots |
+| `JY_VISION_TIMEOUT` | `600` seconds for enrichment; `180` for AI editor when unset | Per-call timeout; enrichment enforces a 60-second minimum |
+| `JY_AI_EDITOR_TIMEOUT_S` | `JY_VISION_TIMEOUT`, otherwise `180` | AI-editor-specific timeout |
+| `JY_VISION_THINKING` | enabled | Do not set `disabled` for GLM-5.3-Flash |
+| `JY_VISION_THINKING_BUDGET` | `2048` | Enabled-thinking budget for direct Ark calls |
+| `JY_VISION_MAX_TOKENS` | `8192` for direct Ark | Completion token cap |
+| `JY_VISION_CACHE_DIR` | Derived from task/report location | Optional private material-understanding cache root |
+| `JY_VISION_RECHECK` | `reuse` | `reuse`, `vision` or `off`; explicit recheck policy |
+
+Generic configuration is read from the **process environment**. There is no
+generic `.env` auto-loader. Copy `examples/config.example.ps1` to the ignored
+`work/config.local.ps1` and dot-source it in PowerShell; it preserves credentials
+already supplied to the process. Keep real media, prompts, responses and caches
+private. A local `env` report does not authenticate an Ark credential.
+
+The AI editor requires `volc_glm`. `codex` and `anthropic` are explicit legacy
+rollback transports, so also select `legacy` when using them. Codex uses
+`JY_VISION_PROFILE`, optional `JY_VISION_PROVIDER` and `JY_VISION_MODEL`.
+Anthropic uses `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN` and
+`JY_VISION_MODEL` (or `ANTHROPIC_MODEL`), with an optional dedicated
+`JY_VISION_ANTHROPIC_ENV` file loader. That backend-specific loader is not a
+general `.env` loader. Verify the chosen backend's image capability separately.
+
+## Local media and draft paths
+
+- `FFMPEG_BIN` / `FFPROBE_BIN`: optional full executable paths. Otherwise the
+  environment finder checks skill `bin/`, Jianying's bundled tools and PATH.
+  On Windows, `run.py setup-ffmpeg` can prepare local portable executables.
+- `JY_JIANYING_INSTALL_ROOT`: optional installed Jianying path used by the
+  environment finder; separate from the source package root.
+- `JY_SKILL_ROOT`: package root containing sibling `doubao-jianying-orchestrator`
+  and `jianying-editor` directories.
+- `JY_DRAFTS_ROOT` / `JY_PROJECTS_ROOT`: draft-library roots used by the engine.
+  The deployment worker also uses `JY_DRAFT_ROOT`; set all three to the same
+  isolated draft library when preparing a local preview or production launcher.
+
+## Production integrations
 
 The release has no embedded credentials or host paths. A deployment may set:
 

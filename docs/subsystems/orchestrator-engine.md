@@ -26,11 +26,12 @@
 - 口播段时间等式：`segment_us == audio_duration_us + tail_pad_us`（容差 ≤1 帧，`timing_contract.check_invariants`）
 - 源窗口几何链：`0 <= source_start < source_end <= material_duration_us`（零容差；与写入层同尺）
 - 最终切片必须覆盖证据区间；证据窗口来自 AI 明确时间段或“审核帧邻域”
-- 角色决定速度范围：与时间相关的直接证据（`time_sensitive=True`）锁 1.0，不得靠变速伪造
+- 默认 AI 模式按当前审核收据求解速度（最高 20 倍，尽量接近原速），完整覆盖关键动作和结果；legacy 保留按角色和 `time_sensitive` 决定的速度范围。变速范围须与最终窗口及 QC 同源，详见包内 `docs/AI_EDITOR.md`。
 - 预览稿：不得标成正式交付；结果中带 `coverage.certification != CERTIFIED` 与逐条未认证理由；成片打“未认证”标注
 
 ## 4. 输入/输出（字段与状态）
-- 输入 manifest（常用键，具体以 `visual_match.match_manifest` 产物为准）：
+- 输入 manifest（默认 AI 模式见 `ai_editor.match_manifest`，legacy 见旧 matcher；共同由 `shot_analyzer.match_manifest` 路由）：
+  - AI 模式：`selection_mode=ai_editor`、逐段 `ai_selection` 收据、实际源内容与窗口；引擎保存 `ai_selection_identity.json`，最终 QC v4 重新核对当前切片。
   - 全局：`delivery_mode`（formal/preview）、`temporary_material_analysis`、`preview_unresolved[]`、`visual_missing_matches[]`、`max_source_reuse`、`avoid_adjacent_source_repeat`
   - 段落 `segments[*]`（选镜产物会补齐）
     - 基本：`video` `source_start` `source_end` `duration` `text` `claim_text` `intent/intents`

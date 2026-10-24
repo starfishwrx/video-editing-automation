@@ -1,3 +1,29 @@
 __pycache__/
 *.pyc
 packages/video-v1.5.3/jianying-editor/data/
+
+# Local credentials and overrides. Public templates contain no credentials.
+.env
+.env.*
+!.env.example
+config.local.ps1
+
+# Python environments and tool caches.
+.venv/
+.uv-cache/
+.pytest_cache/
+*.pyo
+*.egg-info/
+
+# Private task inputs, observations and outputs; keep release-local data in work/.
+work/
+report/
+reports/
+logs/
+validation_runs/
+backups/
+.cache/
+.jy_run/
+dist/
+build/
+packages/video-v1.5.3/doubao-jianying-orchestrator/bin/
