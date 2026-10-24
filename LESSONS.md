@@ -19,6 +19,15 @@
 
 ## 已有条目（从代码注释与 references 中回填的种子，hits 按已知次数）
 
+### L-20261024-01 模型全名、默认流程与入口文档必须同步
+- status: OPEN
+- hits: 1
+- 模块: visual-matching / docs
+- 现象: 视觉配置实际为 `glm-5.3-flash`，注释却写 GLM 5.3，入口文档仍把旧 Top3/QC v3 当作默认；缺模型变量和可运行样例，版本目录也容易被当成真实版本。
+- 根因: 只更新实现和包内局部说明，没有同步首页、环境合同、架构与协作入口。
+- 以后怎么做: 型号保留 GLM-5.3-Flash 全名和 API ID；默认 transport/选镜/QC 变更同步模型、配置和架构文档。明确 legacy/实验范围，分别记录源码、发布附件和生产身份；用合成抽帧验证入门命令。
+- 证据: `docs/model-and-vision.md`、`docs/quickstart.md`、`CONTRIBUTING.md`、`.github/workflows/ci.yml`。
+
 ### L-20261023-07 AI选镜改造必须贯穿末端、队列和独立QC
 - status: OPEN
 - hits: 1
