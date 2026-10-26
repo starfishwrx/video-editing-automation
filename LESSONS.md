@@ -31,6 +31,15 @@
 
 ## 已有条目（从代码注释与 references 中回填的种子，hits 按已知次数）
 
+### L-20261026-04 写入参数要同源，批次身份要跨轮询
+- status: OPEN
+- hits: 1
+- 模块: captions / JyPoll
+- 现象: 纸品配置字幕坐标与写入默认值不同导致出稿失败；完成一条任务后剩余任务变成新BGM批次。
+- 根因: 配置未贯通实际写入器；用变化的查询快照替代持久批次状态。
+- 以后怎么做: 写入与回读使用同一坐标；尚有同批任务时沿用一个普通批次ID，排空或完全换批后再创建。
+- 证据: PR #22 独立代码审查、test_meeting_caption_integration.py、test_meeting_poll_fields.py。
+
 ### L-20261026-03 已知文案的 TTS 不应再由 ASR 重建字幕
 - status: OPEN
 - hits: 1

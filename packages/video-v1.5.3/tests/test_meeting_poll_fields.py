@@ -1,6 +1,6 @@
 """Offline regression coverage for optional JyPoll field mapping.
 
-Only the three pure field-normalization functions are evaluated by PowerShell;
+Only pure field-normalization and batch-identity functions are evaluated by PowerShell;
 the poller's API, queue, and process-dispatch code is never executed.
 """
 from __future__ import annotations
@@ -38,7 +38,7 @@ foreach ($path in @(__JY_POLL__, __RUN_TASK__)) {
 }
 $tokens = $null; $parseErrors = $null
 $ast = [System.Management.Automation.Language.Parser]::ParseFile(__JY_POLL__, [ref]$tokens, [ref]$parseErrors)
-$allowed = @('Convert-MeetingTempo','Resolve-MeetingOptionalFieldMap','Get-MeetingTaskInputs')
+$allowed = @('Convert-MeetingTempo','Resolve-MeetingOptionalFieldMap','Get-MeetingTaskInputs','Get-PollBatchState')
 $definitions = @($ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $allowed -contains $node.Name }, $true))
 foreach ($name in $allowed) {
   $definition = $definitions | Where-Object Name -eq $name | Select-Object -First 1
@@ -80,6 +80,16 @@ $row[13] = ''
 $row[14] = ''
 $invalid = Get-MeetingTaskInputs $row $map.indices $map.fields
 if ($invalid.voice_tempo_status -cne 'invalid' -or $null -ne $invalid.voice_tempo -or $invalid.voice_tempo_original -cne '快一点') { throw 'Invalid tempo must be retained and marked invalid' }
+$firstBatch = Get-PollBatchState @('task-a','task-b') @{}
+$remainingBatch = Get-PollBatchState @('task-b') $firstBatch
+if ($remainingBatch.batch_id -cne $firstBatch.batch_id) { throw 'Completed task reset BGM batch identity' }
+$joinedBatch = Get-PollBatchState @('task-b','task-c') $remainingBatch
+if ($joinedBatch.batch_id -cne $firstBatch.batch_id) { throw 'Outstanding cohort did not keep its identity' }
+$nextBatch = Get-PollBatchState @('task-d') $joinedBatch
+if ($nextBatch.batch_id -ceq $firstBatch.batch_id) { throw 'Disjoint cohort did not get a new batch identity' }
+$emptyBatch = Get-PollBatchState @() $nextBatch
+$afterEmpty = Get-PollBatchState @('task-d') $emptyBatch
+if ($afterEmpty.batch_id -ceq $emptyBatch.batch_id) { throw 'Drained cohort was reused' }
 Write-Output 'MEETING_POLL_FIELDS_FIXTURE_OK'
 '''.replace("__JY_POLL__", _ps_quote(jy_poll)).replace("__RUN_TASK__", _ps_quote(run_task))
 

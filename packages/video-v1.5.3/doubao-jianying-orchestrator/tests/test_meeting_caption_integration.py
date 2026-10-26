@@ -78,6 +78,7 @@ class CaptionIntegrationTests(unittest.TestCase):
             fake_wrapper.draft = SimpleNamespace()
             cues = [{"start_us": 100_000, "end_us": 800_000, "text": "口播连续字幕"}]
             instance = self._engine(root)
+            instance.m["subtitle_position_px"] = {"x": 0, "y": -800}
             instance.profile = SimpleNamespace(staging_workers=1, name="test")
             instance.total_us = 2_000_000
             instance.delivery_mode = "formal"
@@ -110,7 +111,8 @@ class CaptionIntegrationTests(unittest.TestCase):
                 result = instance.write_draft(clips, None)
 
             self.assertEqual(result["status"], "SUCCESS")
-            project.add_caption_cues.assert_called_once_with(cues, track_name="Subtitles")
+            project.add_caption_cues.assert_called_once_with(
+                cues, track_name="Subtitles", transform_x=0, transform_y=-800 / 960)
             project.add_text_simple.assert_not_called()
 
     def test_maintained_jyproject_writes_one_native_subtitle_track_and_roundtrips(self):
@@ -126,12 +128,12 @@ class CaptionIntegrationTests(unittest.TestCase):
             "bgm_required": False, "bgm_segments": 0,
             "subtitle_style_required": True, "subtitle_font_size": 8.0,
             "subtitle_bold": True, "subtitle_transform_x": 0.0,
-            "subtitle_transform_y": -0.55, "subtitle_strip_punctuation": True,
+            "subtitle_transform_y": -800 / 960, "subtitle_strip_punctuation": True,
             "native_subtitles_required": True, "subtitle_cues": [cue],
         }
         with tempfile.TemporaryDirectory() as tmp:
             project = JyProject("caption_roundtrip", drafts_root=tmp, overwrite=True)
-            project.add_caption_cues([cue], track_name="Subtitles")
+            project.add_caption_cues([cue], track_name="Subtitles", transform_y=-800 / 960)
             project.save()
             draft_dir = Path(project.draft_dir)
             document = json.loads((draft_dir / "draft_info.json").read_text(encoding="utf-8"))

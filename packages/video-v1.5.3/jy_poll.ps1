@@ -148,6 +148,16 @@ function Get-MeetingTaskInputs($row, $indices, $fields) {
   }
 }
 
+function Get-PollBatchState($parts, $previous) {
+  $members = @($parts | Sort-Object -Unique)
+  $overlap = @($members | Where-Object { @($previous.members) -contains $_ })
+  $id = [string]$previous.batch_id
+  if ([string]::IsNullOrWhiteSpace($id) -or $overlap.Count -eq 0) {
+    $id = 'poll-' + [guid]::NewGuid().ToString('N')
+  }
+  return [pscustomobject]@{ batch_id = $id; members = $members }
+}
+
 function Get-Sha256Text($value) {
   $sha = [System.Security.Cryptography.SHA256]::Create()
   try {
@@ -237,8 +247,8 @@ foreach ($fp in @(@($filterAFile,$outA,'A'), @($filterBFile,$outB,'B'))) {
 }
 if ($worksets.Count -eq 0) { exit 0 }
 
-# Stable across tasks selected from the same poll response; the same snapshot
-# identity keeps BGM de-duplication shared by the one-task-at-a-time dispatcher.
+# Keep a cohort identity while any of its tasks remain outstanding. A completed
+# task leaving the query must not reset BGM rotation for the remaining tasks.
 $batchParts = @()
 foreach ($set in $worksets) {
   for ($j = 0; $j -lt $set.rids.Count; $j++) {
@@ -249,7 +259,10 @@ foreach ($set in $worksets) {
     $batchParts += ([string]$set.mode + '|' + [string]$set.rids[$j] + '|' + $taskKey + '|' + $scriptHash + '|' + $issueHash)
   }
 }
-$batchId = 'poll-' + (Get-Sha256Text (($batchParts | Sort-Object) -join "`n")).Substring(0, 20)
+$batchFile = Join-Path $STATE 'bgm-poll-batch.json'
+$batchState = Get-PollBatchState $batchParts (Get-JsonHash $batchFile)
+$batchState | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $batchFile -Encoding UTF8
+$batchId = $batchState.batch_id
 $bgmStateDir = Join-Path $WORK 'bgm-selection'
 
 # 字段序：0 任务ID 1 视频标题 2 脚本文案 3 分镜素材 4 配音名称 5 BGM名称 6 生成条数 7 参考视频 8 草稿文件 9 问题反馈 10 成片状态 11 产品

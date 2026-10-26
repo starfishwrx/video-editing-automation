@@ -2637,7 +2637,9 @@ class OrchestrationEngine:
             prev_seg = vid
 
         if caption_result is not None:
-            project.add_caption_cues(caption_result["cues"], track_name="Subtitles")
+            project.add_caption_cues(caption_result["cues"], track_name="Subtitles",
+                                     transform_x=subtitle_position["x"],
+                                     transform_y=subtitle_position["y"])
 
         # ── 写入后不变量自检（定案第 7、8 条）────────────────────────────
         #

@@ -144,7 +144,9 @@ class TextOpsMixin:
         kwargs["rich_spans"] = spans
         return self.add_text_simple(text, start_time, duration, track_name, **kwargs)
 
-    def add_caption_cues(self, cues: list, track_name: str = "Subtitles"):
+    def add_caption_cues(self, cues: list, track_name: str = "Subtitles", *,
+                         transform_x: float = DEFAULT_SUBTITLE_X,
+                         transform_y: float = DEFAULT_SUBTITLE_Y):
         """Write narration-timed script cues on one editable Jianying subtitle track."""
         if not _is_subtitle_track(track_name):
             raise ValueError("caption cues must use the shared Subtitles track")
@@ -162,8 +164,8 @@ class TextOpsMixin:
                                       bold=DEFAULT_SUBTITLE_BOLD,
                                       auto_wrapping=True),
                 border=draft.TextBorder(color=(0.0, 0.0, 0.0), alpha=1.0, width=40.0),
-                clip_settings=draft.ClipSettings(transform_x=DEFAULT_SUBTITLE_X,
-                                                 transform_y=DEFAULT_SUBTITLE_Y),
+                clip_settings=draft.ClipSettings(transform_x=transform_x,
+                                                 transform_y=transform_y),
             ))
         return results
 
