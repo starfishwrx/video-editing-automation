@@ -515,7 +515,11 @@ def solve_window(req: WindowRequest) -> WindowSolution:
             place_hi = min(place_hi, ev_start)
         if place_lo > place_hi:
             continue
-        if span is not None:
+        if req.preferred_start_us is not None:
+            # A soft placement preference must stay inside the feasible interval,
+            # which already includes every required evidence instant.
+            start = max(place_lo, min(int(req.preferred_start_us), place_hi))
+        elif span is not None:
             center = int(round((ev_start + ev_end) / 2 - window_us / 2))
             start = max(place_lo, min(center, place_hi))
         else:

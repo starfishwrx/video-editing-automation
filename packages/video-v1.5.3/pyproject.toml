@@ -24,10 +24,15 @@ vision = [
   "opencv-python-headless>=4.8.0",
 ]
 dev = []
+# Default AI builds require final-narration ASR. Legacy-only installations may
+# explicitly exclude this group with uv sync --no-group asr.
+asr = [
+    "faster-whisper>=1.2,<2",
+]
 
 [tool.uv]
 package = false
-default-groups = ["recommended", "vision"]
+default-groups = ["recommended", "vision", "asr"]
 
 [tool.uv.pip]
 # 与本机已验证的 Python 3.11 对齐；用 `uv python pin` 写入 .python-version

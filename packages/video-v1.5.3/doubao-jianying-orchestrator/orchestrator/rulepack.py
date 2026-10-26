@@ -129,9 +129,6 @@ def gap_tail_pad_s(max_gap_frames: Any, *, fps: Any = DEFAULT_FPS,
     return round(max(0.0, frames * frame_s - 2 * edge_keep_s - frame_s), 3)
 
 
-_VOICE_SPEED_SUFFIX = re.compile(r"(?P<speed>\d+(?:\.\d+)?)\s*倍速\s*$")
-
-
 def voice_name_speed(voice: Any) -> Optional[float]:
     """从配音名称末尾解析运营写的倍速（「tvb女声1.2倍速」→ 1.2）。
 
@@ -140,21 +137,12 @@ def voice_name_speed(voice: Any) -> Optional[float]:
     """
     if isinstance(voice, dict):
         raw = voice.get("speed")
-        if raw in (None, "", 1, 1.0):
+        if raw in (None, ""):
             return None
-        try:
-            speed = float(raw)
-        except (TypeError, ValueError):
-            return None
-        return speed if 0.1 <= speed <= 10 else None
-    m = _VOICE_SPEED_SUFFIX.search(str(voice or ""))
-    if not m:
-        return None
-    try:
-        speed = float(m.group("speed"))
-    except (TypeError, ValueError):
-        return None
-    return speed if 0.1 <= speed <= 10 else None
+        from .voice_request import validate_tempo
+        return validate_tempo(raw)
+    from .voice_catalog import _split_speed
+    return _split_speed(str(voice or ""))[1]
 
 
 def voice_has_speed(voice: Any) -> bool:
@@ -164,10 +152,10 @@ def voice_has_speed(voice: Any) -> bool:
 
 def default_voice_tempo(rules: dict[str, Any], voice: Any) -> float:
     """口播后处理倍速：名称写了用名称的，否则用品类默认（卫品 1.2）。不叠加两次。"""
-    named = voice_name_speed(voice)
-    if named is not None:
-        return float(named)
-    return float((rules.get("voice") or {}).get("tempo", 1.0) or 1.0)
+    from .voice_request import select_voice_tempo
+    tempo, _, _ = select_voice_tempo(
+        voice, category_tempo=(rules.get("voice") or {}).get("tempo", 1.0))
+    return tempo
 
 
 def apply_manifest_defaults(manifest: dict[str, Any]) -> dict[str, Any]:
@@ -179,7 +167,13 @@ def apply_manifest_defaults(manifest: dict[str, Any]) -> dict[str, Any]:
     out["category"] = category
     out.setdefault("auto_transition", rules.get("auto_transition", False))
     out.setdefault("avoid_similar_shots", rules.get("avoid_similar_shots", False))
-    out.setdefault("voice_tempo", default_voice_tempo(rules, out.get("voice")))
+    from .voice_request import select_voice_tempo
+    tempo, _, _ = select_voice_tempo(
+        out.get("voice"), voice_tempo=out.get("voice_tempo"),
+        category_tempo=(rules.get("voice") or {}).get("tempo", 1.0))
+    # Queue adapters explicitly emit null for an absent optional field. A null
+    # must not suppress the selected suffix/category tempo before pre-synthesis.
+    out["voice_tempo"] = tempo
     out.setdefault("voice_edge_trim", bool(voice.get("edge_trim", True)))
     max_gap = os.environ.get("JY_VOICE_MAX_GAP_FRAMES") or voice.get("max_gap_frames", 1)
     if out.get("tail_pad_s") is None:

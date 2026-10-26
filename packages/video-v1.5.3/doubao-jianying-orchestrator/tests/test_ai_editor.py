@@ -38,6 +38,7 @@ class AIEditorTests(unittest.TestCase):
 
     def plan(self):
         return {"schema": contract.PLAN_SCHEMA, "ok": True, "sentences": [self.sentence],
+            "policy_version": contract.POLICY_VERSION,
             "reviews": {"1": [self.review]}, "display_reviews": [],
             "rows": [{"index": 1, "parts": [{"shot_id": "handfeel", "audio_duration_us": 2000000}], "reason": "先安排卖点"}],
             "identity": {"model": "synthetic-model", "manifest_sha256": contract.digest(self.manifest),
@@ -58,6 +59,44 @@ class AIEditorTests(unittest.TestCase):
         plan = self.plan()
         plan["rows"][0]["parts"][0]["shot_id"] = "wet-packaging"
         self.assertFalse(self.result(plan)["ok"])
+
+    def test_old_policy_plan_cannot_receive_new_certification(self):
+        plan = self.plan()
+        plan["policy_version"] = "selling-points-first-v1"
+        self.assertFalse(self.result(plan)["ok"])
+
+    def test_natural_speed_and_complete_start_evidence_remain_eligible(self):
+        self.review["evidence_intervals_us"] = [{"start": 0, "end": 1_000_000}]
+        segment = self.result()["segments"][0]
+        self.assertEqual(segment["video_speed"], 1.0)
+        self.assertEqual(segment["source_start"], 0)
+        self.assertGreaterEqual(segment["source_end"], 1)
+
+    def test_editor_receives_actual_speed_and_content_identity(self):
+        plan = self.plan()
+        with mock.patch.object(editor, "_call", return_value={"rows": plan["rows"]}) as call:
+            editor._edit_plan(self.manifest, {"shots": [self.shot]}, plan, self.root)
+        prompt = call.call_args.args[0]
+        self.assertIn('"within_preferred_speed": true', prompt)
+        self.assertIn(self.review["source_sha256"], prompt)
+        self.assertIn("最高20倍", prompt)
+
+    def test_mid_late_preference_preserves_correct_evidence_and_short_sources(self):
+        self.review["evidence_intervals_us"] = [{"start": 2_000_000, "end": 2_200_000}]
+        segment = self.result()["segments"][0]
+        self.assertEqual(segment["video_speed"], 1)
+        self.assertAlmostEqual(segment["source_start"], 2)
+        self.shot.update(source_end=2, material_duration_us=2_000_000)
+        self.review["evidence_intervals_us"] = [{"start": 0, "end": 1_000_000}]
+        self.assertTrue(self.result()["ok"])
+
+    def test_long_required_evidence_can_exceed_two_but_not_twenty(self):
+        self.shot.update(source_end=12, material_duration_us=12_000_000)
+        self.review["evidence_intervals_us"] = [{"start": 0, "end": 10_000_000}]
+        segment = self.result()["segments"][0]
+        self.assertGreater(segment["video_speed"], 2)
+        self.assertLessEqual(segment["video_speed"], 20)
+        self.assertGreaterEqual(segment["source_end"], 10)
 
     def test_correct_visual_can_speed_up_beyond_legacy_display_limit(self):
         self.review["evidence_intervals_us"] = [{"start": 2000000, "end": 4500000}]
@@ -186,6 +225,55 @@ class AIEditorTests(unittest.TestCase):
         later = copy.deepcopy(segment)
         later["ai_selection"]["window_us"] = {"start": 4000000, "end": 5000000}
         self.assertEqual(contract.sequence_errors([segment, later]), [])
+
+    def test_scarce_reuse_requires_explicit_reason_and_no_alternatives(self):
+        self.manifest["segments"].append(dict(self.manifest["segments"][0]))
+        plan = self.plan()
+        plan["sentences"].append({**self.sentence, "index": 2})
+        plan["reviews"]["2"] = [self.review]
+        plan["coverage"] = {"2": {"checked": 1, "total": 1, "exhausted": True,
+                                  "feasible": True, "failed_calls": 0, "uncertain": 0}}
+        plan["rows"].append({"index": 2, "parts": [{"shot_id": "handfeel", "audio_duration_us": 2_000_000}]})
+        self.assertFalse(self.result(plan)["ok"])
+        plan["rows"][1]["scarce_reuse_reason"] = "本句只有这一条实际支持轻薄手感的候选"
+        self.assertTrue(self.result(plan)["ok"])
+        plan["sentences"][1]["kind"] = "hook"
+        self.assertFalse(self.result(plan)["ok"])
+
+    def test_scarce_reuse_expands_unreviewed_batch_before_second_edit(self):
+        candidate_ids = [f"shot{i}" for i in range(1, 10)]
+        shots = [{**self.shot, "shot_id": sid} for sid in candidate_ids]
+        sentence = {**self.sentence, "candidate_ids": candidate_ids,
+                    "audio_durations_us": [2_000_000]}
+        first_review = {**self.review, "shot_id": "shot1"}
+        partial_reviews = [first_review] + [
+            {"shot_id": sid, "verdict": "mismatch"} for sid in candidate_ids[1:8]]
+        plan = {"sentences": [sentence], "reviews": {"1": partial_reviews},
+            "display_reviews": [], "coverage": {"1": {"checked": 8, "total": 9,
+                "exhausted": False, "feasible": True, "failed_calls": 0, "uncertain": 0}},
+            "identity": {"model": "synthetic-model", "manifest_sha256": "a" * 64,
+                "timing_sha256": "b" * 64, "analysis_sha256": "c" * 64,
+                "prompt_sha256": "d" * 64}}
+        responses = [
+            {"rows": [{"index": 1, "parts": [{"shot_id": "shot1", "audio_duration_us": 2_000_000}],
+                       "scarce_reuse_reason": "首批只有一个支持候选"}]},
+            {"rows": [{"index": 1, "parts": [{"shot_id": "shot9", "audio_duration_us": 2_000_000}]}]},
+        ]
+
+        def review(_manifest, _sentence, shot, _directory):
+            self.assertEqual(shot["shot_id"], "shot9")
+            return {**self.review, "shot_id": "shot9"}
+
+        with mock.patch.object(editor, "_call", side_effect=responses) as call, \
+             mock.patch.object(editor, "_review", side_effect=review):
+            editor._edit_plan(self.manifest, {"shots": shots}, plan, self.root)
+
+        self.assertEqual(call.call_count, 2)
+        self.assertIn('"shot_id": "shot9"', call.call_args_list[1].args[0])
+        self.assertTrue(plan["coverage"]["1"]["exhausted"])
+        self.assertEqual(plan["coverage"]["1"]["checked"], 9)
+        self.assertEqual(plan["rows"][0]["parts"][0]["shot_id"], "shot9")
+        self.assertTrue(plan["ok"])
 
     def test_adjacent_physical_experiment_cannot_run_backwards(self):
         early = self.result()["segments"][0]

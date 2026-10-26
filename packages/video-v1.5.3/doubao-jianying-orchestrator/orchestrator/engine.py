@@ -25,6 +25,8 @@ from . import (audio_loudness, bgm_selector, capacity, draft_safety, gpu_runtime
 from .platform_env import (bootstrap_path, environment_report, find_drafts_root,
                            find_ffmpeg, find_jianying_editor_root)
 from .resource_profile import FRIENDLY_PROFILES, apply_process_priority, choose_profile
+from . import rulepack
+from .voice_request import select_voice_tempo
 from .video_encode import run_h264_encode
 from .voice_catalog import recommend_voices, resolve_voice
 from .subtitle_units import text_units
@@ -219,14 +221,25 @@ class OrchestrationEngine:
     def __init__(self, manifest: dict, base_dir: Path, report_dir: Path, *,
                  editor_root: Optional[Path] = None, strict_script: bool = False,
                  logger=None, capacity_guard: bool = True):
-        self.m = manifest
+        normalized = dict(manifest)
+        voice = normalized.get("voice")
+        if voice is None or (isinstance(voice, str) and not voice.strip()):
+            env_voice = os.environ.get("JY_OPERATOR_VOICE", "").strip()
+            if env_voice:
+                normalized["voice"] = env_voice
+        voice_rules = rulepack.for_manifest(normalized)
+        normalized["voice_tempo"], _, _ = select_voice_tempo(
+            normalized.get("voice"),
+            voice_tempo=normalized.get("voice_tempo"),
+            category_tempo=(voice_rules.get("voice") or {}).get("tempo", 1.0))
+        self.m = normalized
         self.base_dir = base_dir
         self.report_dir = report_dir
         self.editor_root = editor_root or find_jianying_editor_root()
         self.strict_script = strict_script
         self.logger = logger
         self.capacity_guard = capacity_guard
-        self.profile = choose_profile(manifest)
+        self.profile = choose_profile(self.m)
         self.priority_applied = apply_process_priority(self.profile)
         self._resource_degraded = False
         self._probe_cache: dict[str, dict] = {}
@@ -684,6 +697,10 @@ class OrchestrationEngine:
 
     def _script_segment_length_gate(self, clips: list[Clip]) -> Optional[dict]:
         """15 字是软目标。只拦住完全没按词拆开、长到硬上限的口播。"""
+        if self.m.get("selection_mode") == "ai_editor" or self.m.get("caption_source") == "audio":
+            # Narration sentences are no longer the display subtitle units.
+            # Word-timed ASR cues apply their own readable-length validation.
+            return None
         offenders = []
         for index, clip in enumerate(self._parent_clips(clips), 1):
             text = re.sub(r"\s+", "", str(getattr(clip, "text", "") or ""))
@@ -1272,7 +1289,7 @@ class OrchestrationEngine:
         # The Windows poller exports the original Feishu label in
         # JY_OPERATOR_VOICE.  Treat it as the source of truth even if an LLM
         # manifest already contains a guessed fallback speaker id.
-        v = os.environ.get("JY_OPERATOR_VOICE", "").strip() or self.m.get("voice")
+        v = self.m.get("voice")
         intelligent = self.intelligent_mode_authorized()
         if intelligent and v is None:
             full = self.m.get("full_script", "") + " " + " ".join(c.text for c in self._clips)
@@ -1394,7 +1411,7 @@ class OrchestrationEngine:
         # A voice supplied by the Feishu task is an operator decision.  Keep
         # it locked for every narrated segment so an LLM-produced per-shot
         # ``voice`` field cannot make the formal draft differ from audition.
-        operator_voice = os.environ.get("JY_OPERATOR_VOICE", "").strip() or self.m.get("voice")
+        operator_voice = self.m.get("voice")
         # 多镜摊平后同一句旁白挂在 N 个子段上。这里按**父段落**建组、按父段落合成
         # 一次，再把结果回写给它的每个子段 —— 逐子段各跑一次虽然会命中 TTS 缓存
         # 不重复花钱，但会把一条配音数成 N 条（报告与日志都会脏），而且一旦缓存
@@ -2251,6 +2268,7 @@ class OrchestrationEngine:
         src: Optional[Path] = None
         if isinstance(spec, dict) and spec.get("path"):
             src = self.resolve(spec["path"])
+            self._bgm_choice = {"path": str(src), "selection_mode": "explicit_path"}
         elif isinstance(spec, dict) and (spec.get("music_id") or spec.get("mood") or
                                          spec.get("auto", True) or self.m.get("full_script")):
             # 默认基于脚本/剧情对曲库相关性排序；显式 mood/music_id 优先
@@ -2261,7 +2279,20 @@ class OrchestrationEngine:
             if not cands:
                 self._warn("bgm_not_found", f"未找到匹配BGM: {spec}")
                 return None
-            chosen = cands[0]
+            task_identity = {"task_id": self.m.get("task_id") or self.m.get("record_id") or
+                             self.m.get("draft_name"),
+                             "script_sha256": hashlib.sha256(str(self.m.get("full_script") or
+                                 [c.get("text", "") for c in self.m.get("segments", [])]).encode()).hexdigest()}
+            state_dir = (self.resolve(self.m["bgm_state_dir"]) if self.m.get("bgm_state_dir") else
+                         self.report_dir / "bgm_selection")
+            requested_bgm = str(spec.get("music_id") or "")
+            resolved_music_id = (str(cands[0].get("music_id") or requested_bgm)
+                                 if requested_bgm else "")
+            chosen = bgm_selector.select_bgm_for_task(cands, task_identity=task_identity,
+                batch_identity=self.m.get("batch_id") or self.m.get("batch_identity") or task_identity,
+                state_dir=state_dir, explicit_music_id=resolved_music_id)
+            if requested_bgm and resolved_music_id and requested_bgm != resolved_music_id:
+                chosen["requested_label"] = requested_bgm
             self._bgm_choice = chosen
             if chosen.get("url"):
                 src = bgm_selector.download_track(chosen, bgm_dir)
@@ -2427,17 +2458,30 @@ class OrchestrationEngine:
             return {"status": verdict.status if verdict.status != "BLOCKED" else "BLOCKED",
                     "reason": verdict.message}
 
+        # Caption timing follows exactly the processed narration that will be
+        # staged below. Fail before allocating a new draft on recognition errors.
+        loudness_overrides = self._normalize_narrations(clips)
+        caption_source = str(self.m.get("caption_source") or
+                             ("audio" if self.m.get("selection_mode") == "ai_editor" else "legacy"))
+        if caption_source not in {"audio", "legacy"}:
+            return {"status": "CAPTION_CONFIG_INVALID", "reason": "caption_source must be audio or legacy"}
+        if caption_source == "legacy" and self.m.get("selection_mode") == "ai_editor":
+            return {"status": "CAPTION_CONFIG_INVALID", "reason": "AI editor requires final-audio captions"}
+        caption_result = None
+        if caption_source == "audio":
+            from . import audio_captions
+            caption_result = audio_captions.build_captions(self.m, clips, self.report_dir / "captions",
+                str(self.ffmpeg or "ffmpeg"), audio_overrides=loudness_overrides)
+            if not caption_result.get("ok"):
+                return {"status": "CAPTION_ASR_UNCERTIFIED", "draft_path": None,
+                        "formal_delivery_allowed": False, "issues": caption_result.get("issues", []),
+                        "caption_report": str(self.report_dir / "captions" / "audio_captions.json")}
         w, h = (1080, 1920) if str(self.m.get("aspect_ratio", "9:16")) == "9:16" else (1920, 1080)
         # ``find_drafts_root`` may resolve JianYing's Windows custom library
         # from the client registry.  Pass it through explicitly: the wrapper's
         # legacy default resolver otherwise falls back to LOCALAPPDATA.
         project = JyProject(name, width=w, height=h, drafts_root=str(drafts_root), overwrite=True)
         media_dir = Path(project.draft_dir) / "media"
-
-        # 旁白响度归一（通用规则）：先产出归一成品，再让它替身进 stage 与写入。
-        # 必须**先于** sources 收集 —— 否则 stage 的还是原始 TTS，草稿里写进去的
-        # 也就还是忽大忽小的那批。
-        loudness_overrides = self._normalize_narrations(clips)
 
         sources = []
         for c in clips:
@@ -2557,11 +2601,9 @@ class OrchestrationEngine:
                     track_name="Narration")
                 if a is None:
                     raise RuntimeError(f"旁白添加失败: {narration}")
-            # 字幕：多镜的子段**照常各出一条字幕**（各自的时间区间、各自的时长），
-            # 这是摊平带来的必然结果 —— 中间若切成新的镜头，字幕条跟着走。同一句
-            # 文本铺在 N 段上，视觉上就是一句话横跨 N 个镜头。判据仍与原版一致
-            # （有文本才有字幕），只是现在按摊平后的段逐条走。
-            if c.text:
+            # Explicit legacy retains clip-timed text. Audio captions are written
+            # once from word timestamps after the video loop, across shot cuts.
+            if c.text and caption_source == "legacy":
                 project.add_text_simple(
                     c.text, start_time=c.start_us, duration=to_us(c.duration),
                     track_name="Subtitles")
@@ -2580,6 +2622,9 @@ class OrchestrationEngine:
                           "visual_missing": bool(c.visual_missing),
                           "operator_note": c.visual_missing_note})
             prev_seg = vid
+
+        if caption_result is not None:
+            project.add_caption_cues(caption_result["cues"], track_name="Subtitles")
 
         # ── 写入后不变量自检（定案第 7、8 条）────────────────────────────
         #
@@ -2669,14 +2714,13 @@ class OrchestrationEngine:
         #   · 旁白轨：多镜的同一句配音虽然加了 N 条 `AudioSegment`（每段取一片），
         #     但**计数按 clips 走**才与写入一致 —— 每条 clip 只要挂了 tts/audio
         #     就加一条，没有去重；
-        #   · 字幕轨：同样按 `clips` 逐条，同句多镜会出 N 条。
-        # 所以三类都保持 `clips` 口径。曾经想把旁白/字幕改成「父段落去重」，
-        # 那会与写入循环（按 clips）对不上，反而制造 DRAFT_INVALID 假阳性。
+        #   · 字幕轨：audio 按实际 ASR cues 计数；legacy 才按有文本的 clips。
         narration_expected = sum(
             1 for c in clips
             if c.tts_path or (c.audio_mode == "file" and c.audio)
         )
-        subtitle_expected = sum(1 for c in clips if c.text.strip())
+        subtitle_expected = (len(caption_result["cues"]) if caption_result is not None else
+                             sum(1 for c in clips if c.text.strip()))
         expected_tracks = {
             "video_segments": len(clips),
             "narration_segments": narration_expected,
@@ -2693,11 +2737,18 @@ class OrchestrationEngine:
             "subtitle_transform_x": 0.0,
             "subtitle_transform_y": -0.55,
             "subtitle_strip_punctuation": True,
+            "native_subtitles_required": caption_result is not None,
+            "subtitle_cues": caption_result["cues"] if caption_result is not None else None,
         }
         issues = draft_safety.post_write_validate(
             draft_dir, expected_tracks=expected_tracks)
         if issues:
             return {"status": "DRAFT_INVALID", "draft_path": str(draft_dir), "issues": issues}
+        if caption_result is not None:
+            (draft_dir / "caption_identity.json").write_text(json.dumps({
+                "schema": "chatcut-audio-captions-v1", "identity": caption_result["identity"],
+                "cue_count": subtitle_expected, "ui_acceptance": "UNKNOWN",
+            }, ensure_ascii=False, indent=2), encoding="utf-8")
         draft_safety.sync_root_meta(Path(drafts_root), name, duration_us=self.total_us)
         actual_total_us = project.get_track_duration("Video_BRoll") or self.total_us
         intelligent = self.intelligent_mode_authorized()
@@ -2707,7 +2758,7 @@ class OrchestrationEngine:
             selected_preset = resolve_voice(selected_voice)
             selected_data = selected_preset.to_dict()
             voice_used = {
-                "input": os.environ.get("JY_OPERATOR_VOICE", "").strip() or self.m.get("voice"),
+                "input": self.m.get("voice"),
                 "normalized_name": selected_data.get("label"),
                 "speaker_id": selected_data.get("sami"),
                 "display_name": selected_data.get("label"),
@@ -2716,8 +2767,8 @@ class OrchestrationEngine:
             if any(c.tts_path for c in clips):
                 voice_used["backend"] = "sami"
         except (TypeError, ValueError):
-            voice_used = {"input": os.environ.get("JY_OPERATOR_VOICE", "").strip() or self.m.get("voice"), "speaker_id": str(selected_voice)}
-        operator_voice_input = os.environ.get("JY_OPERATOR_VOICE", "").strip() or self.m.get("voice")
+            voice_used = {"input": self.m.get("voice"), "speaker_id": str(selected_voice)}
+        operator_voice_input = self.m.get("voice")
         if voice_rec:
             voice_selection = {
                 "mode": "intelligent_recommended" if intelligent else "recommended",
@@ -2762,6 +2813,9 @@ class OrchestrationEngine:
                 "voice_used": voice_used,
                 "bgm_choice": bgm_choice,
                 "audio_selection": audio_guidance,
+                "caption_source": caption_source,
+                "caption_identity": caption_result["identity"] if caption_result else None,
+                "subtitle_ui_acceptance": "UNKNOWN" if caption_result else None,
                 "visual_evidence": getattr(self, "_visual_evidence_report", None),
                 # 闸门认证状态透到运营侧（定案第 10 条）。键名用 ``coverage`` ——
                 # `cli._compact_build_result` 的非 SUCCESS 白名单已含该键，改别的

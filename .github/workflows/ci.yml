@@ -42,6 +42,16 @@ jobs:
         run: uv run --frozen python -X utf8 doubao-jianying-orchestrator/run.py --help
       - name: Check example JSON
         run: uv run --frozen python -X utf8 -m json.tool examples/manifest.preview.json
+      - name: Prepare portable FFmpeg for media fixtures
+        run: |
+          $setupJson = uv run --frozen python -X utf8 doubao-jianying-orchestrator/run.py setup-ffmpeg
+          if ($LASTEXITCODE -ne 0) { throw "FFmpeg preparation failed: $setupJson" }
+          $setup = $setupJson | ConvertFrom-Json
+          if (-not $setup.ffmpeg -or -not $setup.ffprobe) { throw "FFmpeg and ffprobe are required for media fixtures" }
+          if (-not (Test-Path -LiteralPath $setup.ffmpeg) -or -not (Test-Path -LiteralPath $setup.ffprobe)) { throw "Prepared media binaries are missing" }
+          (Split-Path -Parent $setup.ffmpeg) | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "FFMPEG_BIN=$($setup.ffmpeg)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "FFPROBE_BIN=$($setup.ffprobe)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Package tests
         run: uv run --frozen python -X utf8 -m unittest discover -s tests -q
       - name: Orchestrator tests

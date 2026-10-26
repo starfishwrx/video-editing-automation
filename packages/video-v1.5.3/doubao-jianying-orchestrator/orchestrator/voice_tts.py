@@ -16,6 +16,7 @@ from typing import Optional
 from .platform_env import find_ffmpeg, find_jianying_editor_root
 from .timing_contract import AUDIO_PIPELINE_VERSION
 from .voice_catalog import VoicePreset, resolve_voice
+from .voice_request import resolve_voice_request, validate_tempo
 
 
 @contextlib.asynccontextmanager
@@ -246,13 +247,7 @@ VOICE_TEMPO_RANGE = (0.5, 2.0)
 
 
 def normalize_tempo(value) -> float:
-    try:
-        tempo = float(value)
-    except (TypeError, ValueError):
-        return 1.0
-    if not tempo or tempo <= 0:
-        return 1.0
-    return round(min(VOICE_TEMPO_RANGE[1], max(VOICE_TEMPO_RANGE[0], tempo)), 3)
+    return validate_tempo(value)
 
 
 def _post_name(src: Path, tempo: float, keep_ms: int, trim: bool) -> Path:
@@ -284,6 +279,13 @@ def postprocess_voice(path, *, tempo=1.0, edge_trim: bool = True,
     """
     src = Path(path)
     tempo = normalize_tempo(tempo)
+    # A caller may resume from a previously returned derived path. Always restart
+    # from the original cache entry; never chain atempo over a .p1_* artifact.
+    while derived := re.match(r"^(?P<raw>.+)\.p\d+_(?:k\d+|raw)_t\d+$", src.stem):
+        raw = src.with_name(derived.group("raw") + src.suffix)
+        if not raw.is_file() or not _audio_cache_is_usable(raw):
+            raise RuntimeError(f"原始配音缓存不存在，拒绝对已处理音频再次变速: {src}")
+        src = raw
     if not edge_trim and abs(tempo - 1.0) < 1e-6:
         return str(src)
     ffmpeg = find_ffmpeg()[0]
@@ -331,11 +333,7 @@ def _postprocess_all(paths: dict, *, tempo: float, edge_trim: bool) -> dict:
     keys = list(paths)
 
     def one(key):
-        try:
-            return postprocess_voice(paths[key], tempo=tempo, edge_trim=edge_trim)
-        except Exception as exc:  # noqa: BLE001
-            print(f"[voice_tts] {exc}；本句使用未处理的原始配音", file=sys.stderr)
-            return paths[key]
+        return postprocess_voice(paths[key], tempo=tempo, edge_trim=edge_trim)
 
     with ThreadPoolExecutor(max_workers=min(4, max(1, len(keys)))) as pool:
         processed = list(pool.map(one, keys))
@@ -357,7 +355,8 @@ def generate_batch(items: list[dict], out_dir: Path, voice_spec=None, *,
     if concurrency is None:
         from .proc_slots import env_int
         concurrency = env_int("JY_TTS_CONCURRENCY", 3, minimum=1)
-    preset = resolve_voice(voice_spec)
+    request = resolve_voice_request(voice_spec, voice_tempo=tempo)
+    preset = request.preset
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
@@ -366,7 +365,7 @@ def generate_batch(items: list[dict], out_dir: Path, voice_spec=None, *,
         # 调用方已在事件循环中时，返回协程由其 await（少见）；不做后处理
         return preset, _gather(items, out_dir, preset, concurrency)
     paths = _quiet_async_run(_gather(items, out_dir, preset, concurrency))
-    tempo = normalize_tempo(tempo if tempo is not None else 1.0)
+    tempo = request.tempo
     if edge_trim or abs(tempo - 1.0) >= 1e-6:
         paths = _postprocess_all(paths, tempo=tempo, edge_trim=edge_trim)
     return preset, paths
