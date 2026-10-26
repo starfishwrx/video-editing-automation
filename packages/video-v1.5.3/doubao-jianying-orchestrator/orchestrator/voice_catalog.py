@@ -179,11 +179,15 @@ def recommend_voices(script_text: str = "", *, style: str = "", persona: str = "
 
 
 # 运营把语速写在音色名末尾：「猴哥1.6倍速」「真人播客女1.2倍速」。
-_SPEED_RE = re.compile(r"^\s*(?P<name>.*?)[\s·]*?(?P<speed>\d+(?:\.\d+)?)\s*倍速\s*$")
+_SPEED_RE = re.compile(
+    r"^\s*(?P<name>.*?)[\s·]*?(?P<speed>\d+\.\d+|\d+(?=\s*倍速))\s*(?:倍速)?\s*$")
 
 
 def _split_speed(spec: str) -> tuple[str, Optional[float]]:
-    """拆出末尾倍速：「猴哥1.6倍速」-> ("猴哥", 1.6)；没有倍速时原样返回。"""
+    """Split an explicit speed suffix, including the table's bare decimal form.
+
+    An integer alone remains part of the voice identity (for example 熊二2).
+    """
     raw = str(spec or "").strip()
     m = _SPEED_RE.match(raw)
     if not m:

@@ -3,12 +3,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
-import re
 from typing import Any
 
-from .voice_catalog import VoicePreset, resolve_voice
-
-_SUFFIX = re.compile(r"^(?P<name>.*?)[\s·]*(?P<tempo>\d+(?:\.\d+)?)\s*倍速\s*$")
+from .voice_catalog import VoicePreset, resolve_voice, _split_speed
 
 
 def validate_tempo(value: Any) -> float:
@@ -29,11 +26,7 @@ def select_voice_tempo(voice: Any, *, voice_tempo: Any = None,
     """Select tempo without resolving the catalog identity (useful for defaults)."""
     name_tempo = None
     if isinstance(voice, str):
-        match = _SUFFIX.match(voice.strip())
-        if match:
-            if not match.group("name").strip():
-                raise ValueError("倍速后缀缺少音色名称")
-            name_tempo = validate_tempo(match.group("tempo"))
+        _, name_tempo = _split_speed(voice)
     elif isinstance(voice, dict) and voice.get("speed") not in (None, ""):
         name_tempo = validate_tempo(voice["speed"])
     if voice_tempo is not None:
@@ -59,12 +52,7 @@ def resolve_voice_request(voice: Any, *, voice_tempo: Any = None,
     name = voice
     named_tempo = None
     if isinstance(voice, str):
-        match = _SUFFIX.match(voice.strip())
-        if match:
-            name = match.group("name").strip()
-            if not name:
-                raise ValueError("倍速后缀缺少音色名称")
-            named_tempo = validate_tempo(match.group("tempo"))
+        name, named_tempo = _split_speed(voice)
     elif isinstance(voice, dict):
         name = dict(voice)
         if "speed" in voice and voice["speed"] not in (None, ""):

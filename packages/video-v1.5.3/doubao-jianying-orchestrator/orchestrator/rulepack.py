@@ -129,9 +129,6 @@ def gap_tail_pad_s(max_gap_frames: Any, *, fps: Any = DEFAULT_FPS,
     return round(max(0.0, frames * frame_s - 2 * edge_keep_s - frame_s), 3)
 
 
-_VOICE_SPEED_SUFFIX = re.compile(r"(?P<speed>\d+(?:\.\d+)?)\s*倍速\s*$")
-
-
 def voice_name_speed(voice: Any) -> Optional[float]:
     """从配音名称末尾解析运营写的倍速（「tvb女声1.2倍速」→ 1.2）。
 
@@ -144,11 +141,8 @@ def voice_name_speed(voice: Any) -> Optional[float]:
             return None
         from .voice_request import validate_tempo
         return validate_tempo(raw)
-    m = _VOICE_SPEED_SUFFIX.search(str(voice or ""))
-    if not m:
-        return None
-    from .voice_request import validate_tempo
-    return validate_tempo(m.group("speed"))
+    from .voice_catalog import _split_speed
+    return _split_speed(str(voice or ""))[1]
 
 
 def voice_has_speed(voice: Any) -> bool:

@@ -19,6 +19,27 @@ class MeetingVoiceRequestTests(unittest.TestCase):
         self.assertEqual(req.tempo, 1.3)
         self.assertEqual(req.tempo_source, "voice_name")
 
+    def test_live_table_bare_decimal_suffix_uses_shared_parser(self):
+        req = voice_request.resolve_voice_request("甜美年轻女声1.2")
+        self.assertEqual(req.original_voice, "甜美年轻女声1.2")
+        self.assertEqual(req.preset.sami, "zh_female_xiaopengyou")
+        self.assertEqual(req.tempo, 1.2)
+        self.assertEqual(rulepack.voice_name_speed("甜美年轻女声1.2"), 1.2)
+        out = rulepack.apply_manifest_defaults({"voice":"甜美年轻女声1.2"})
+        preset, blocker = cli._lock_voice_once(out)
+        self.assertIsNone(blocker)
+        self.assertEqual(preset.sami, req.preset.sami)
+        self.assertEqual(out["voice_tempo"], 1.2)
+        self.assertEqual(voice_request.resolve_voice_request(
+            "甜美年轻女声1.2", voice_tempo=1.0).tempo, 1.0)
+
+    def test_integer_voice_name_is_not_treated_as_bare_tempo(self):
+        from orchestrator.voice_catalog import _split_speed
+        self.assertEqual(_split_speed("熊二2"), ("熊二2", None))
+        self.assertEqual(_split_speed("female_sweet2倍速"), ("female_sweet", 2.0))
+        with self.assertRaises(ValueError):
+            voice_request.resolve_voice_request("female_sweet9.0")
+
     def test_explicit_tempo_overrides_suffix_without_mutating_voice(self):
         spec = "甜美年轻女声1.3倍速"
         req = voice_request.resolve_voice_request(spec, voice_tempo="1.4", category_tempo=1.1)
