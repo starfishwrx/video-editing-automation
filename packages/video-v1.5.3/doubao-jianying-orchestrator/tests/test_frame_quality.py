@@ -137,6 +137,37 @@ class SelectFrameTests(unittest.TestCase):
         self.assertEqual(calls, [2.0])
         self.assertFalse(picked["replaced"])
         self.assertAlmostEqual(picked["timestamp"], 2.0)
+        # Escape hatch: quality off still reports extract success, even for black.
+        self.assertTrue(picked["ok"])
+
+    def test_all_hard_reject_is_not_ok(self):
+        def extract(video, timestamp, output, ffmpeg=None):
+            name = Path(output).name
+            if name.startswith("white"):
+                color = (255, 255, 255)
+            elif name.startswith("flat"):
+                color = (128, 128, 128)
+            else:
+                color = (0, 0, 0)
+            _save(Path(output), color)
+            return True
+
+        jobs = [
+            {"center": 1.0, "output": self.root / "black.jpg", "start": 0.0,
+             "end": 3.0, "half_width": 1.0},
+            {"center": 1.0, "output": self.root / "white.jpg", "start": 0.0,
+             "end": 3.0, "half_width": 1.0},
+            {"center": 1.0, "output": self.root / "flat.jpg", "start": 0.0,
+             "end": 3.0, "half_width": 1.0},
+        ]
+        picked = frame_quality.select_frames(
+            Path("video.mp4"), jobs, extract=extract)
+        self.assertEqual(
+            [row["quality"].get("reject_reason") for row in picked],
+            ["black", "overexposed", "flat"])
+        self.assertTrue(all(not row["ok"] for row in picked))
+        # Callers that only check outer ok must not treat these as success frames.
+        self.assertEqual([row for row in picked if row.get("ok")], [])
 
 
 class VisionWiringTests(unittest.TestCase):
@@ -172,6 +203,29 @@ class VisionWiringTests(unittest.TestCase):
         os.environ["JY_FRAME_QUALITY"] = "0"
         key_off = vision_analyzer._vision_cache_key(manifest, shot, "volc")
         self.assertNotEqual(key_on, key_off)
+        self.assertEqual(frame_quality.FRAME_QUALITY_VERSION, "frame-quality-v2")
+
+    def test_sample_frames_drops_all_hard_rejected(self):
+        video = self.root / "clip.mp4"
+        video.write_bytes(b"x")
+        frame_dir = self.root / "frames"
+        frame_dir.mkdir()
+
+        def extract(path, timestamp, output, ffmpeg=None):
+            _save(Path(output), (0, 0, 0))
+            return True
+
+        def extract_batch(path, requests, ffmpeg=None):
+            return [extract(path, ts, out, ffmpeg=ffmpeg) for ts, out in requests]
+
+        shot = {"shot_id": "s1", "video": str(video),
+                "source_start": 0.0, "source_end": 3.0}
+        with mock.patch("orchestrator.shot_analyzer.extract_frame", side_effect=extract), \
+             mock.patch("orchestrator.shot_analyzer.extract_frames_batch",
+                        side_effect=extract_batch):
+            frames = vision_analyzer._sample_frames(shot, frame_dir, ffmpeg=None)
+        self.assertEqual(frames, [])
+        self.assertTrue(any(frame_dir.glob("*.jpg")))
 
     def test_sample_frames_records_quality_and_uses_actual_timestamp(self):
         video = self.root / "clip.mp4"
@@ -216,6 +270,38 @@ class PhaseWiringTests(unittest.TestCase):
         self.assertTrue(key_on)
         self.assertNotEqual(key_on, key_off)
         self.assertEqual(phase_timing.PHASE_TIMING_VERSION, "phase-timing-v3")
+        self.assertEqual(frame_quality.FRAME_QUALITY_VERSION, "frame-quality-v2")
+
+    def test_locate_all_hard_reject_does_not_build_sheet(self):
+        video = self.root / "clip.mp4"
+        video.write_bytes(b"abc")
+        report = self.root / "report"
+        report.mkdir()
+
+        def extract(path, timestamp, output, ffmpeg=None):
+            _save(Path(output), (255, 255, 255))
+            return True
+
+        def extract_batch(path, requests, ffmpeg=None):
+            return [extract(path, ts, out, ffmpeg=ffmpeg) for ts, out in requests]
+
+        runner = mock.Mock(return_value=(True, "{}"))
+        shot = {"video": str(video), "source_start": 1.0, "source_end": 4.0}
+        scene = {
+            "id": "absorb", "label": "吸水",
+            "phases": [
+                {"name": "prep", "label": "准备", "describe": "准备"},
+                {"name": "result", "label": "结果", "describe": "结果"},
+            ],
+        }
+        with mock.patch("orchestrator.shot_analyzer.extract_frame", side_effect=extract), \
+             mock.patch("orchestrator.shot_analyzer.extract_frames_batch",
+                        side_effect=extract_batch):
+            result = phase_timing.locate(
+                shot, scene, report, profile="volc", runner=runner)
+        self.assertFalse(result.get("ok"))
+        self.assertEqual(result.get("reason"), "PHASE_FRAME_EXTRACT_FAILED")
+        runner.assert_not_called()
 
     def test_locate_swaps_within_half_step_and_stays_monotonic(self):
         video = self.root / "clip.mp4"

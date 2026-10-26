@@ -6,6 +6,10 @@
 
 ### 2026-10-26
 
+- 跟进已合入的 #19（环审 https://github.com/starfishwrx/video-editing-automation/pull/19#pullrequestreview-5648674977）：候选帧全部硬拒（黑场 / 过曝 / 纯色）时 `select_frames` 外层 `ok=False`。视觉 `_sample_frames` 与相位 `locate` 只收 `ok` 的帧，坏帧不再进入 contact sheet；相位样本不足 2 张返回 `PHASE_FRAME_EXTRACT_FAILED`，不调用视觉模型。质量协议升为 `frame-quality-v2`（`FRAME_QUALITY_VERSION`）。视觉缓存键的 `frame_protocol.quality` 与 `phase-timing-v3` 缓存键里的 `quality` 都引用该字符串，因此 v1 观察不会被复用；相位版本号本身仍是 `phase-timing-v3`。`JY_FRAME_QUALITY=0` 仍只按抽帧成败，黑场也可以 `ok=True`。软模糊仍只标注、不硬拒。
+- 批量抽帧：`Path.glob` 在 Python 3.11+ 返回生成器，布尔值恒为真，`-fps_mode` 失败且工作目录没有 `f_*.jpg` 时会跳过 `-vsync` 重试。改为 `any(work.glob(...))`：空目录改试 `-vsync vfr`，已有输出则保留第一次结果。两次都没有输出再逐帧 `extract_frame`。`JY_FRAME_BATCH=0` 或单帧请求仍走逐帧抽取。
+- 长镜头 `SAMPLE_MAX` 仍为 12，与 `SHEET_TILES` 对齐（#19 已改，本轮不改数值）。覆盖用 `JY_VISION_SAMPLE_MAX`。
+- 验证边界：uv 0.13.5 / Python 3.11.17 上 `test_frame_quality.py` 与 `test_frame_batch.py` 共 21 项通过。编排器 discover 跑了 628 项（1 项跳过）；4 项失败是 Linux 上 Windows/Mac 路径语义（品类探测、usage ledger、两则 ship rewrite），不在本次 diff。包级 99 项里另有 4 项同类路径失败。这些单测不是真实视觉观察或剪映成片验收。未改 `VERSION`，未部署。质量门打开且合格帧不足 2 张时，视觉分析仍可能回落到镜头自带 `frame_paths`（该回落不经过硬门）；没有自带帧则样本为空。单测通过不等于生产通过。
 - 根据10月26日会议及用户后续确认新增[功能计划](plans/20261026_feature_plan.md)，明确先匹配音色再处理一次TTS倍速、音频驱动字幕及剪映批量调整、BGM随机与去前导空白、纸品减少重复、单稿单视频和人工成品参考。
 - 记录用户确认的画面口径：2倍为偏好，最高仍允许20倍；将纸品PR #15列为待验收依赖。本次仅计划入库，运行逻辑、发布包及生产配置未改。
 - 文档本地链接核对32项无缺失；沿用冻结依赖运行包级99项与编排器607项离线测试，均通过。这些检查不作为新增功能或真实成片效果的验收结论。
@@ -47,3 +51,4 @@
 - 4K HEVC CUDA 解码必须带 `-threads 1`，只看 ffmpeg 退出码会静默退回 CPU。
 - 影响选镜的字段（如 `delivery_mode`）必须在 `cli.cmd_build` 侧先写入 manifest，引擎内归一化对 shot_analyzer 无效。
 - 气口等跨品类口径改 `global.json`；不要只改卫品包然后以为全品类生效。
+- 抽帧硬门全拒时外层 `ok` 必须为假；只看 `ok` 的调用方不得把坏帧送进接触表。逃生阀是 `JY_FRAME_QUALITY=0` / `JY_FRAME_BATCH=0`。判断目录里有没有输出要用 `any(path.glob(...))`，不要对 `Path.glob` 取布尔值。协议变更升 `FRAME_QUALITY_VERSION`，否则视觉 / 相位缓存会复用旧观察。
