@@ -218,6 +218,10 @@ def candidate_window(shot: dict[str, Any], *, audio_duration_us: int,
         # 补黑屏不是在证明这句。审核帧落在头尾保护区外时，仍允许用这段画面的长度。
         evidence_start_us = None
         evidence_end_us = None
+    # Original-source timestamps, never a new three-second trim per scene.
+    # The solver clamps this preference to the complete-evidence feasible range.
+    preferred_start_us = (max(3_000_000, int(material_us) // 2)
+                          if shot.get("selection_mode") == "ai_editor" else None)
     return timing_contract.solve_window_waste_aware(timing_contract.WindowRequest(
         source_in_us=_us(shot.get("source_start")),
         source_out_us=_us(shot.get("source_end"), _number(shot.get("source_start"))),
@@ -227,6 +231,7 @@ def candidate_window(shot: dict[str, Any], *, audio_duration_us: int,
         tail_guard_us=_us(source.get("tail_trim_s"), DEFAULT_TAIL_TRIM_S),
         evidence_start_us=evidence_start_us, evidence_end_us=evidence_end_us,
         speed_min=speed_min, speed_max=speed_max,
+        preferred_start_us=preferred_start_us,
         video_duration_us=int(round(material_us)),
         fps=(frm or timing_contract.DEFAULT_FPS)),
         shot.get("head_waste"), shot.get("tail_waste"))

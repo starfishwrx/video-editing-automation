@@ -5,7 +5,19 @@
 - `hits >= 3` → 开 PR 升级为硬规则（AGENTS.md / docs/code-standards.md / 测试），条目状态改 `PROMOTED`，写明落点。
 - 只写“下次怎么避免”，不写长篇过程。不写任何凭据、NAS 路径、业务表链接。
 
+## 新增条目
+
+### L-20261026-01 配音身份和最终字幕时间必须共用同一输入
+- status: OPEN
+- hits: 1
+- 模块: audio-voice / orchestrator-engine
+- 现象: 预合成与最终合成分别读取任务和环境音色，会用另一说话人的时长选镜；按视频段写整句字幕会在换镜时重播文本。
+- 根因: 音色/倍速解析分散，字幕依赖画面片段而非最终旁白。
+- 以后怎么做: 显式任务音色先锁一次，倍速只处理原始缓存一次；字幕取最终纯旁白词时间，品牌和内容不符保持待审。结构回读与剪映批量编辑验收分开，CUDA视频可用也不代表ASR所需DLL齐全。
+- 证据: `docs/meeting-features-20261026.md`、`test_meeting_voice.py`、`test_audio_captions.py`、`test_meeting_caption_integration.py`。
+
 ## 条目模板
+
 ```
 ### L-YYYYMMDD-NN 一句话标题
 - status: OPEN | PROMOTED(<落点>) | OBSOLETE

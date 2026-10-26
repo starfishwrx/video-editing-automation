@@ -9,7 +9,9 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
+import random
 import re
 import shutil
 import subprocess
@@ -20,7 +22,113 @@ from pathlib import Path
 from typing import Optional
 
 from . import audio_loudness
+from .file_safety import atomic_write_text, file_lock
 from .platform_env import find_jianying_editor_root
+
+
+def _stable_json(value: object) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _candidate_identity(candidate: dict) -> str:
+    """Hash stable track identity, ignoring mutable ranking/score metadata."""
+    music_id = str(candidate.get("music_id") or "").strip()
+    if music_id:
+        identity = {"music_id": music_id}
+    else:
+        path = next((str(candidate.get(key) or "").strip()
+                     for key in ("path", "file", "source_path", "local_path")
+                     if str(candidate.get(key) or "").strip()), "")
+        url = str(candidate.get("url") or "").strip()
+        identity = {"path": path} if path else {"url": url} if url else candidate
+    return hashlib.sha256(_stable_json(identity).encode("utf-8")).hexdigest()
+
+
+def _leading_silence_end(log: str, *, onset_tolerance_s: float = 0.08) -> float | None:
+    """Return the end of silence only when detection begins at timeline zero.
+
+    FFmpeg may report a tiny negative start (or scientific notation) for a
+    one-sample onset. A later silence must not be mistaken for leading silence.
+    """
+    number = r"(-?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)"
+    match = re.search(r"silence_start:\s*(invalid param|" + number[1:-1] +
+                      r")[\s\S]*?silence_end:\s*" + number,
+                      log or "")
+    if not match:
+        return None
+    try:
+        start_s = 0.0 if match.group(1) == "invalid param" else float(match.group(1))
+        end_s = float(match.group(2))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if abs(start_s) > onset_tolerance_s or end_s <= 0:
+        return None
+    return end_s
+
+
+def _atomic_json(path: Path, value: object) -> None:
+    atomic_write_text(path, json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2))
+
+
+def select_bgm_for_task(candidates: list[dict], *, task_identity: object,
+                        batch_identity: object, state_dir: Path,
+                        explicit_path: str = "", explicit_music_id: str = "") -> dict:
+    """Choose and receipt one adapted candidate for a task.
+
+    `task_identity` must be stable across retries (e.g. record_id/task_id plus
+    immutable script identity); `batch_identity` groups the current batch.
+    `state_dir` is deliberately mandatory so selection state never writes to a
+    global or guessed location. Explicit path/id bypasses random selection.
+    """
+    if explicit_path:
+        return {"path": explicit_path, "selection_mode": "explicit_path"}
+    if explicit_music_id:
+        hit = next((c for c in candidates if str(c.get("music_id")) == str(explicit_music_id)), None)
+        return dict(hit, selection_mode="explicit_music_id") if hit else {
+            "music_id": str(explicit_music_id), "selection_mode": "explicit_music_id",
+            "available": False,
+        }
+    if not candidates:
+        return {"available": False, "selection_mode": "random_pool"}
+    state_dir = Path(state_dir)
+    state_dir.mkdir(parents=True, exist_ok=True)
+    task_key = hashlib.sha256(_stable_json(task_identity).encode("utf-8")).hexdigest()
+    batch_key = hashlib.sha256(_stable_json(batch_identity).encode("utf-8")).hexdigest()
+    pool = {_candidate_identity(c): dict(c) for c in candidates}
+    receipt_path = state_dir / ("task-" + task_key + ".json")
+    batch_path = state_dir / ("batch-" + batch_key + ".json")
+    with file_lock(state_dir / ".selection", timeout=15):
+        if receipt_path.is_file():
+            try:
+                old = json.loads(receipt_path.read_text(encoding="utf-8"))
+                if old.get("task_identity_sha256") == task_key:
+                    selected = old.get("selected")
+                    if isinstance(selected, dict):
+                        return dict(selected, selection_receipt=str(receipt_path), reused=True)
+            except (OSError, ValueError, TypeError):
+                pass
+        try:
+            batch = json.loads(batch_path.read_text(encoding="utf-8")) if batch_path.is_file() else {}
+        except (OSError, ValueError, TypeError):
+            batch = {}
+        # Keep history even for tracks outside this task's candidate pool. A
+        # later task may return to an earlier pool, and must still avoid its
+        # already selected tracks until that pool has cycled through them.
+        used = list(dict.fromkeys(str(x) for x in batch.get("used_candidate_hashes", [])))
+        remaining = [key for key in pool if key not in used]
+        if not remaining:  # a full cycle is exhausted; begin a new rotation
+            used = [key for key in used if key not in pool]
+            remaining = list(pool)
+        picked_key = random.SystemRandom().choice(remaining)
+        selected = dict(pool[picked_key], selection_mode="random_pool")
+        _atomic_json(receipt_path, {"schema_version": 1,
+            "task_identity_sha256": task_key, "batch_identity_sha256": batch_key,
+            "candidate_pool_sha256": hashlib.sha256("".join(sorted(pool)).encode()).hexdigest(),
+            "selected_candidate_sha256": picked_key, "selected": selected})
+        _atomic_json(batch_path, {"schema_version": 1,
+            "batch_identity_sha256": batch_key,
+            "used_candidate_hashes": [*used, picked_key]})
+        return dict(selected, selection_receipt=str(receipt_path), reused=False)
 
 
 # 情绪/风格关键词 → 曲库分类/标题匹配词
@@ -225,11 +333,19 @@ def recommend_bgm(script: str = "", *, mood: str = "", topn: int = 5,
 
 def select_bgm(mood: str = "", *, music_id: str = "", topk: int = 5,
                min_duration: float = 0.0, script: str = "") -> list[dict]:
-    """选曲入口（保持引擎兼容）：music_id 精确 > 剧情/情绪相关性排序 > 通用兜底。"""
+    """Select a track; explicit IDs/titles fail closed and never fall back to auto."""
     lib = load_library()
     if music_id:
         hit = [t for t in lib if t.music_id == music_id]
-        return [t.to_dict() for t in hit[:topk]]
+        if hit:
+            return [t.to_dict() for t in hit[:topk]]
+        # JyPoll's existing "BGM名称" entry is a displayed official title in
+        # some task sources, while other callers provide music_id. Resolve only
+        # an exact normalized title and require it to identify one unique track.
+        requested_title = re.sub(r"\s+", " ", str(music_id).strip()).casefold()
+        title_hits = [t for t in lib if re.sub(r"\s+", " ", t.title.strip()).casefold()
+                      == requested_title]
+        return [title_hits[0].to_dict()] if len(title_hits) == 1 else []
     rec = recommend_bgm(script, mood=mood, topn=topk, min_duration=min_duration)
     if rec:
         return rec
@@ -369,21 +485,42 @@ def prepare_bgm_track(src: Path, out_path: Path, total_duration: float, *,
     """
     if total_duration <= 0:
         raise ValueError("total_duration must be positive")
+    src = Path(src)
+    # Detect and skip only leading silence in the source, so the prepared BGM
+    # begins at timeline zero with audible content. A wholly silent or unreadable
+    # source is an error; it must never produce a success-shaped silent track.
+    detect = subprocess.run([ffmpeg, "-i", str(src), "-vn", "-af",
+        "silencedetect=noise=-45dB:d=0.08", "-f", "null", "-"],
+        capture_output=True, text=True)
+    leading_silence_end = _leading_silence_end(detect.stderr or "")
+    if leading_silence_end is not None and "silence_start: invalid param" in (detect.stderr or ""):
+        # Some bundled FFmpeg builds print this instead of a near-zero start
+        # value. Only trust it when the opening window independently measures
+        # as silent; a later pause must not be cut as an intro.
+        opening_mean = _mean_volume(ffmpeg, src, start=0.0, duration=0.08)
+        if opening_mean is not None and opening_mean > -45.0:
+            leading_silence_end = None
+    source_start = max(0.0, float(start))
+    if leading_silence_end is not None:
+        source_start = max(source_start, leading_silence_end)
+    source_mean = _mean_volume(ffmpeg, src, start=source_start, duration=total_duration)
+    if source_mean is None or source_mean <= -65.0:
+        raise ValueError("BGM source has no audible music in the requested window")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fade_out_start = max(0.0, total_duration - fade_out)
     limit = 10 ** (audio_loudness.TP_LIMIT_DB / 20.0)
 
     # 1) 测所选窗口真实响度（不含淡变），据此定初始增益
-    window_lufs = _integrated_lufs(ffmpeg, src, start=start, duration=total_duration)
+    window_lufs = _integrated_lufs(ffmpeg, src, start=source_start, duration=total_duration)
     if window_lufs is None:
         # 测不出就退回 mean_volume 估算，至少不把增益留成 1.0 静默放行
-        window_mean = _mean_volume(ffmpeg, src, start=start, duration=total_duration)
+        window_mean = source_mean
         gain_db = (target_lufs - window_mean) if window_mean is not None else 0.0
     else:
         gain_db = target_lufs - window_lufs
 
     def _render(g_db: float, dst: Path) -> None:
-        af = (f"atrim=start={start}:duration={total_duration},"
+        af = (f"atrim=start={source_start}:duration={total_duration},asetpts=PTS-STARTPTS,"
               f"volume={g_db:.3f}dB,"
               f"alimiter=limit={limit:.6f}:level=disabled,"
               f"afade=t=in:st=0:d={fade_in},"
@@ -394,6 +531,9 @@ def prepare_bgm_track(src: Path, out_path: Path, total_duration: float, *,
         subprocess.run(cmd, check=True, capture_output=True, text=True)
 
     _render(gain_db, out_path)
+    rendered_mean = _mean_volume(ffmpeg, out_path)
+    if rendered_mean is None or rendered_mean <= -65.0:
+        raise ValueError("prepared BGM contains no audible music")
     # 2) 成品复测，偏差过大则二次纯增益校正
     final_lufs = _integrated_lufs(ffmpeg, out_path)
     if final_lufs is not None and abs(final_lufs - target_lufs) > tolerance_lu:

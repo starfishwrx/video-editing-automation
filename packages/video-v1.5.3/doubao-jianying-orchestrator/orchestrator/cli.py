@@ -59,7 +59,8 @@ def _compact_build_result(result: dict) -> dict:
                 "retryable", "safe_to_continue", "next_action", "run_id",
                 "pipeline_version", "message", "problems", "reason", "error", "missing",
                 "voice_input", "voice_candidates", "voice_auditions", "bgm_candidates", "bgm_auditions",
-                "pending_items", "coverage", "report", "confirmation", "task_id", "task_log")
+                "pending_items", "coverage", "report", "confirmation", "task_id", "task_log",
+                "issues", "caption_report")
         return {k: result[k] for k in keys if k in result}
     draft_path = result.get("draft_path")
     artifacts = []
@@ -316,6 +317,17 @@ def _audio_probe():
     return probe
 
 
+def _apply_operator_voice_input(manifest: dict) -> dict:
+    """Choose one voice input: an explicit manifest value wins over the env override."""
+    out = dict(manifest)
+    voice = out.get("voice")
+    if voice is None or (isinstance(voice, str) and not voice.strip()):
+        env_voice = os.environ.get("JY_OPERATOR_VOICE", "").strip()
+        if env_voice:
+            out["voice"] = env_voice
+    return out
+
+
 def _lock_voice_once(manifest: dict) -> tuple[object | None, dict | None]:
     """全流程唯一的音色决议（用户 2026-09-16 定案第 1 条）。
 
@@ -323,6 +335,7 @@ def _lock_voice_once(manifest: dict) -> tuple[object | None, dict | None]:
     结果回写锁定到 manifest。解析失败**不静默换音色**，返回
     ``VOICE_SELECTION_REQUIRED`` 候选清单交运营选择。
     """
+    manifest = _apply_operator_voice_input(manifest)
     sentences = timing_contract.split_sentences(manifest)
     script = " ".join(timing_contract.sentence_text(s) for s in sentences).strip()
     try:
@@ -470,10 +483,15 @@ def cmd_build(args) -> int:
     # 引擎构造之后才注入就晚了 —— 那时整句已经被判成 SHOT_TIMING_INFEASIBLE，
     # 草稿层根本没有机会出图。这里是唯一入口，引擎侧只做归一化与读取。
     mode = str(getattr(args, "delivery_mode", "") or "formal").strip().lower()
-    manifest = dict(manifest)
+    manifest = _apply_operator_voice_input(manifest)
     manifest["delivery_mode"] = "preview" if mode == "preview" else "formal"
     # 品类规则（转场、配音倍速、句间气口）同样要在 TTS 与选镜之前定下来。
-    manifest = rulepack.apply_manifest_defaults(manifest)
+    try:
+        manifest = rulepack.apply_manifest_defaults(manifest)
+    except (ValueError, TypeError) as exc:
+        return _emit({"status": "VOICE_INPUT_INVALID", "terminal_state": "BLOCKED",
+                      "failure_class": "environment", "retryable": False,
+                      "safe_to_continue": False, "message": str(exc)}, 1)
     manifest = shot_notes.apply(manifest)
     ledger = usage_ledger.ledger_path(manifest, report_dir)
     if ledger is not None and not manifest.get("usage_ledger_path"):

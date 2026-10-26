@@ -144,6 +144,29 @@ class TextOpsMixin:
         kwargs["rich_spans"] = spans
         return self.add_text_simple(text, start_time, duration, track_name, **kwargs)
 
+    def add_caption_cues(self, cues: list, track_name: str = "Subtitles"):
+        """Write ASR-timed cues on one editable Jianying subtitle track."""
+        if not _is_subtitle_track(track_name):
+            raise ValueError("caption cues must use the shared Subtitles track")
+        self._ensure_track(draft.TrackType.text, track_name)
+        results = []
+        for cue in cues:
+            start_us = int(cue["start_us"])
+            end_us = int(cue["end_us"])
+            if start_us < 0 or end_us <= start_us or not str(cue.get("text", "")).strip():
+                raise ValueError(f"invalid caption cue: {cue!r}")
+            results.append(self.add_text_simple(
+                cue["text"], start_time=start_us, duration=end_us - start_us,
+                track_name=track_name,
+                style=draft.TextStyle(size=DEFAULT_SUBTITLE_FONT_SIZE,
+                                      bold=DEFAULT_SUBTITLE_BOLD,
+                                      auto_wrapping=True),
+                border=draft.TextBorder(color=(0.0, 0.0, 0.0), alpha=1.0, width=40.0),
+                clip_settings=draft.ClipSettings(transform_x=DEFAULT_SUBTITLE_X,
+                                                 transform_y=DEFAULT_SUBTITLE_Y),
+            ))
+        return results
+
     def set_subtitle_keywords(self, keywords_config: dict):
         """设置字幕关键词高亮配置，注入 draft_info.json 的 config 节点"""
         self.script.subtitle_keywords_config = keywords_config

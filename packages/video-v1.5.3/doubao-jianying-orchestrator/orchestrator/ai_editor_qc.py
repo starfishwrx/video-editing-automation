@@ -64,7 +64,7 @@ def frame_plan(claim: dict, rows: list[dict]) -> list[tuple]:
     plan = []
     expected = claim["ai_segment"].get("span_parts") if claim["ai_segment"].get("multi_shot") else [claim["ai_segment"]]
     for n, (row, part) in enumerate(zip(rows, expected), 1):
-        for j, fraction in enumerate((0, .2, .4, .6, .8, .98)):
+        for j, fraction in enumerate((0, .14, .28, .42, .56, .70, .84, .98)):
             plan.append((row, f"p{n}_t{j}", fraction))
         for k, ev in enumerate((part.get("ai_selection") or {}).get("evidence_intervals_us", [])):
             for label, timestamp in (("begin", ev["start"]), ("result", max(ev["start"], ev["end"] - 40000))):

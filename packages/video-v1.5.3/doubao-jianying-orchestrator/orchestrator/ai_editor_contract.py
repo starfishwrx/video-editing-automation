@@ -14,7 +14,7 @@ from typing import Any
 
 PLAN_SCHEMA = "chatcut-ai-selection-v1"
 RECEIPT_SCHEMA = "chatcut-ai-selection-evidence-v1"
-POLICY_VERSION = "selling-points-first-v1"
+POLICY_VERSION = "selling-points-first-meeting-v1"
 KINDS = {"selling_point", "product_intro", "hook"}
 BASES = {"editorial_fit", "visible_result", "readable_label", "product_display"}
 AI_SPEED_MAX = 20.0
@@ -25,7 +25,9 @@ POLICY = """先通读整稿，先安排具体卖点，再安排产品介绍和�
 产品介绍和无具体卖点的钩子可用同商品包装、手持、拆包、取出和本体展示，属于正常匹配。
 具体卖点不能用普通包装展示替代。看不到、只有口播、对象错误和不确定不得假装支持。
 相关实验按前后语义连续播放，不反复从头播放；匹配先于去重与机位变化。
-画面贴切优先，允许按配音时长变速并完整保留必要动作与结果；尽量接近原速，最高20倍。
+画面贴切优先，允许按配音时长变速并完整保留必要动作与结果；质量相近时优先2倍以内，原速适合就用原速，必要时仍允许最高20倍。
+优先原素材时间轴的中后段、尽量避开原素材前三秒；这是偏好，不是每个切分镜头再减三秒，短素材和开头唯一正确证据仍可用。
+奶被纸、棉柔巾、厨房纸、湿厕纸按口播匹配卖点及同商品展示；根据实际可见动作、机位和源区间减少近重复，不按文件名判断。
 素材描述仅供召回，最终判断必须依据本次提供的真实画面。不得修改口播或虚构素材。"""
 
 
@@ -68,7 +70,10 @@ def sequence_errors(segments: list[dict]) -> list[str]:
                 return ["AI_EDITOR_SEQUENCE_RECEIPT_INVALID"]
             sensitive = receipt.get("time_sensitive") is True
             for previous, a, b, was_sensitive in used.get(sha, []):
-                if min(end, b) - max(start, a) > 40000:
+                scarce_reuse = (receipt.get("sentence_kind") == "selling_point"
+                                and bool(receipt.get("scarce_reuse_reason"))
+                                and not (sensitive and was_sensitive and index <= previous + 1))
+                if min(end, b) - max(start, a) > 40000 and not scarce_reuse:
                     return [f"AI_EDITOR_REPEATED_SOURCE_WINDOW:{previous}:{index}"]
                 if sensitive and was_sensitive and index <= previous + 1 and start < a - 40000:
                     return [f"AI_EDITOR_EXPERIMENT_TIME_REVERSED:{previous}:{index}"]
@@ -98,6 +103,7 @@ def seal_receipt(segment: dict, *, index: int, sentence: dict, observation: dict
         "reason": observation["reason"], "confidence": observation["confidence"],
         "time_sensitive": observation["time_sensitive"],
         "supported_point_ids": observation.get("supported_point_ids", []),
+        "scarce_reuse_reason": observation.get("scarce_reuse_reason", ""),
         "video": str(segment["video"]), "shot_id": segment["temporary_shot_id"],
         "source_sha256": source_sha256, "window_us": _window(segment),
         "video_speed": segment.get("video_speed"),

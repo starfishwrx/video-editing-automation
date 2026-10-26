@@ -1,5 +1,13 @@
 ﻿# Changelog
 
+## Meeting feature candidate - 2026-10-26
+
+- 音色与倍速统一解析，先锁定官方 speaker 再处理一次倍速；独立1.0有效，空值不吞名称后缀，错误及后处理失败明确阻断。
+- 新AI草稿采用最终纯旁白词时间ASR字幕、统一原生字幕轨；内容/品牌/数字检查、180秒超时及草稿回读，失败不回退字数字幕。需 `uv sync --frozen --group asr`。
+- BGM适配池随机与批次去重、稳定任务收据及源前导静音处理；2倍/中后段为选镜偏好，完整卖点先于去重，必要时最高20倍。
+- JyPoll和worker保存倍速与修改稿参考，标准任务一文案一视频，显式legacy保留旧count；未标注参考评价unknown，不修改飞书表结构。
+- 源码候选不代表部署或成片已验收。详细状态见仓库 `docs/meeting-features-20261026.md`；纸品13类规则仍跟踪PR #15。
+
 ## Current candidate — selling-point-first AI editor
 
 - 默认实际看图选镜及整稿AI编排，卖点优先；普通介绍/钩子使用同商品包装或拆包是正常匹配。

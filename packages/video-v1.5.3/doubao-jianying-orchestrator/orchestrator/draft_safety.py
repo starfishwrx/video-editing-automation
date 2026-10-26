@@ -285,6 +285,10 @@ def _expected_track_issues(draft: dict, expected_tracks: dict) -> list[str]:
                               required=bgm_required)
 
     if subtitle_track:
+        if expected_tracks.get("native_subtitles_required"):
+            text_tracks = [t for t in draft.get("tracks", []) if t.get("type") == "text" and t.get("segments")]
+            if len(text_tracks) != 1:
+                issues.append("音频字幕必须位于唯一统一字幕轨，不能叠加中间文案")
         materials = draft.get("materials", {}).get("texts", [])
         text_by_id = {str(m.get("id")): m for m in materials if isinstance(m, dict)}
         for idx, segment in enumerate(subtitle_track.get("segments", []), 1):
@@ -293,6 +297,19 @@ def _expected_track_issues(draft: dict, expected_tracks: dict) -> list[str]:
                 continue  # missing reference is reported by the generic pass
             if material.get("type") not in {"text", "subtitle"}:
                 issues.append(f"字幕第 {idx} 条素材类型不是标准 text/subtitle")
+            if expected_tracks.get("native_subtitles_required") and material.get("type") != "subtitle":
+                issues.append(f"字幕第 {idx} 条未写为原生 subtitle")
+            cues = expected_tracks.get("subtitle_cues")
+            if cues is not None and idx <= len(cues):
+                cue = cues[idx - 1]
+                import re
+                normalize = lambda value: re.sub(r"[^\w\u3400-\u9fff]+", "", str(value or ""))
+                if normalize(_text_from_material(material)) != normalize(cue["text"]):
+                    issues.append(f"字幕第 {idx} 条与音频识别文本不一致")
+                target = segment.get("target_timerange") or {}
+                if (target.get("start") != cue["start_us"] or
+                        target.get("duration") != cue["end_us"] - cue["start_us"]):
+                    issues.append(f"字幕第 {idx} 条与音频识别时间不一致")
             if not _text_from_material(material):
                 issues.append(f"字幕第 {idx} 条缺少可解析的 content.text")
             issues.extend(_subtitle_style_issues(material, segment, idx, expected_tracks))

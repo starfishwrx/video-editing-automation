@@ -193,9 +193,11 @@ def _split_speed(spec: str) -> tuple[str, Optional[float]]:
         speed = float(m.group("speed"))
     except ValueError:
         return raw, None
-    # 离谱的数值当没写，别把一个打错的速度当真
-    if not name or not 0.1 <= speed <= 10:
-        return raw, None
+    if not name:
+        raise ValueError("倍速后缀缺少音色名称")
+    # Keep voice identification and tempo validation on the shared F01 contract.
+    from .voice_request import validate_tempo
+    speed = validate_tempo(speed)
     return name, speed
 
 
@@ -267,6 +269,12 @@ def resolve_voice(spec=None) -> VoicePreset:
             voice_input=s, candidates=candidates)
 
     if isinstance(spec, dict):
+        if "speed" in spec and spec["speed"] not in (None, ""):
+            from .voice_request import validate_tempo
+            speed = validate_tempo(spec["speed"])
+            identity = dict(spec)
+            identity.pop("speed", None)
+            return replace(resolve_voice(identity), speed=speed)
         if spec.get("speaker"):
             speaker = str(spec["speaker"]).strip()
             if speaker in _BY_SAMI:

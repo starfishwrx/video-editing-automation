@@ -70,6 +70,25 @@ general `.env` loader. Verify the chosen backend's image capability separately.
 
 ## Production integrations
 
+Final-audio captions for the meeting feature candidate require
+`uv sync --frozen --group asr`; run builds with `uv run --frozen --group asr`.
+The ASR group is included in the default sync for the new AI workflow; a
+legacy-only installation can explicitly use `uv sync --no-group asr`.
+`JY_ASR_MODEL` (or manifest `asr_model`) selects faster-whisper `small` by default
+or a prepared local model directory. First use downloads model weights.
+`asr_language` is optional; `asr_timeout_s` defaults to 180 seconds and bounds
+loading/download/inference in a child process. CUDA runtime failures retry CPU
+int8 once and are recorded. `HF_HUB_DOWNLOAD_TIMEOUT` configures the model
+download HTTP timeout in the launch environment. These ASR options do not change
+the video's GPU/queue/GLM configuration. Recognition failure stays uncertified.
+
+`JY_MEETING_OPTIONAL_FIELDS_JSON` optionally maps **existing** Feishu fields to
+`voice_tempo`, `modified_reference_links` and `modified_reference_attachments`.
+See [the placeholder mapping](examples/meeting_optional_fields.example.json).
+Fill each exact field name and field id from the table metadata; no columns are
+created. Unconfigured references remain unknown. Invalid supplied mappings or
+tempo must be corrected before dispatch. Keep the configured JSON private.
+
 The release has no embedded credentials or host paths. A deployment may set:
 
 | Variable | Purpose |

@@ -912,7 +912,9 @@ class VoicePostTests(unittest.TestCase):
     def test_tempo_normalize(self):
         self.assertEqual(voice_tts.normalize_tempo(None), 1.0)
         self.assertEqual(voice_tts.normalize_tempo("1.2"), 1.2)
-        self.assertEqual(voice_tts.normalize_tempo(9), 2.0)
+        # Operator input must not silently become a different requested tempo.
+        with self.assertRaises(ValueError):
+            voice_tts.normalize_tempo(9)
         name = voice_tts._post_name(Path("tts_abc.ogg"), 1.2, 25, True)
         self.assertEqual(name.name, "tts_abc.p1_k25_t120.ogg")
 
