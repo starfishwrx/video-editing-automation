@@ -159,7 +159,7 @@ class CaptionIntegrationTests(unittest.TestCase):
                 segment = track["segments"][0]
                 material = next(item for item in corrupted["materials"]["texts"]
                                 if item["id"] == segment["material_id"])
-                if "文本" in expected_issue:
+                if "原文" in expected_issue:
                     content = json.loads(material["content"])
                     content["text"] = "错误文本"
                     material["content"] = json.dumps(content, ensure_ascii=False)

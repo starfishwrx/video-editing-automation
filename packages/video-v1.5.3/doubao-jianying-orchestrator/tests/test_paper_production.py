@@ -90,6 +90,12 @@ class PaperProductionTests(unittest.TestCase):
         item = result["segments"][0]
         self.assertAlmostEqual(item["video_speed"], 1.3, places=3)
         self.assertEqual(item["ai_selection"]["preferred_speed"], 1.3)
+        plan = fixture.plan()
+        inventory = editor._build_edit_inventory(fixture.manifest, {"shots": [fixture.shot]}, plan, None)
+        self.assertAlmostEqual(inventory[0]["candidates"][0]["technical_option"]["speed"], 1.3, places=3)
+        with mock.patch.object(editor, "_call", return_value={"rows": plan["rows"]}) as call:
+            editor._edit_plan(fixture.manifest, {"shots": [fixture.shot]}, plan, fixture.root)
+        self.assertIn("cleaning_wipe", call.call_args.args[0])
         engine = OrchestrationEngine.__new__(OrchestrationEngine)
         engine.m = fixture.manifest
         clip = Clip(str(fixture.video), item["source_start"], 2, preferred_speed=1.3,
