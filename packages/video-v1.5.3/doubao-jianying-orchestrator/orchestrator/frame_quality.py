@@ -2,7 +2,8 @@
 
 设计来自开源调研（findit-keyframe / framewise）：亮度均值 / 方差做硬门控，
 Laplacian 锐度在桶内候选间择优。只用 Pillow，缺依赖时自动关闭。
-开关：``JY_FRAME_QUALITY=0`` 关闭。
+开关：``JY_FRAME_QUALITY=0`` 关闭（只按抽帧成败，不跑硬门）。
+候选全部硬拒时外层 ``ok=False``，调用方不得把这些帧送进接触表。
 """
 from __future__ import annotations
 
@@ -10,7 +11,9 @@ import os
 from pathlib import Path
 from typing import Any, Callable, Optional, Sequence
 
-FRAME_QUALITY_VERSION = "frame-quality-v1"
+# v2：候选全部硬拒时外层 ok=False，接触表不再收下这些帧。
+# 视觉 / 相位缓存键引用本字符串；改准入口径必须升版本，避免复用 v1 观察。
+FRAME_QUALITY_VERSION = "frame-quality-v2"
 DISABLE_ENV = "JY_FRAME_QUALITY"
 
 # findit-keyframe 同族阈值：偏保守，避免误杀柔焦产品特写。
@@ -92,17 +95,22 @@ def alternate_times(center: float, start: float, end: float, *,
     return candidates
 
 
+def _hard_reject_reason(row: dict[str, Any]) -> str:
+    reason = str((row.get("quality") or {}).get("reject_reason") or "")
+    return reason if reason in HARD_REJECTS else ""
+
+
 def pick_best(candidates: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
-    """优先通过硬门的帧；同档取锐度最高。空列表返回 None。"""
+    """优先通过硬门的帧；同档取锐度最高。空列表返回 None。
+
+    全部硬拒时仍返回锐度最高的一帧，供诊断 reject_reason。
+    是否当成成功帧由 ``_finalize_choice`` 决定（外层 ok=False）。
+    """
     usable = [c for c in candidates if c.get("path")]
     if not usable:
         return None
 
-    def hard_rejected(row: dict[str, Any]) -> bool:
-        reason = str((row.get("quality") or {}).get("reject_reason") or "")
-        return reason in HARD_REJECTS
-
-    passed = [c for c in usable if not hard_rejected(c)]
+    passed = [c for c in usable if not _hard_reject_reason(c)]
     pool = passed or usable
     return max(pool, key=lambda c: float((c.get("quality") or {}).get("sharpness") or 0.0))
 
@@ -137,12 +145,15 @@ def _finalize_choice(
                     other_file.unlink()
             except OSError:
                 pass
+    # 只看外层 ok 的调用方（视觉拼图、相位打点）不得把硬拒帧送进接触表。
+    # 路径和质量仍留下，方便日志看到是黑场 / 过曝 / 纯色，而不是抽帧失败。
+    admitted = not _hard_reject_reason(best)
     return {
         "path": str(final_out),
         "timestamp": float(best["timestamp"]),
         "quality": best.get("quality") or {},
         "replaced": abs(float(best["timestamp"]) - center) >= 1e-3,
-        "ok": True,
+        "ok": admitted,
     }
 
 

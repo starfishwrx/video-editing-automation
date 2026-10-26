@@ -95,6 +95,82 @@ class ExtractFramesBatchTests(unittest.TestCase):
         self.assertTrue(any("select=" in str(part) for part in calls[0]))
 
 
+class BatchVsyncRetryTests(unittest.TestCase):
+    """Older ffmpeg rejects ``-fps_mode``. An empty work dir must still retry ``-vsync``."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="frame_vsync_")
+        self.root = Path(self.tmp.name)
+        self.video = self.root / "clip.mp4"
+        self.video.write_bytes(b"not-a-real-video")
+        self.env = mock.patch.dict(os.environ, {"JY_FRAME_BATCH": "1"}, clear=False)
+        self.env.start()
+
+    def tearDown(self):
+        self.env.stop()
+        self.tmp.cleanup()
+
+    def _run(self, reqs, fake_run):
+        with mock.patch.object(shot_analyzer, "run_ffmpeg_decode", side_effect=fake_run):
+            return shot_analyzer.extract_frames_batch(self.video, reqs)
+
+    def test_fps_mode_failure_with_no_outputs_retries_vsync(self):
+        out_dir = self.root / "retry"
+        out_dir.mkdir()
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(list(cmd))
+            if "-fps_mode" in cmd:
+                # No frames and a non-zero exit. The retry must not depend on
+                # a particular stderr phrase: bool(Path.glob) used to skip it.
+                return subprocess.CompletedProcess(
+                    cmd, 1, stdout="", stderr="Conversion failed\n")
+            if "-vsync" in cmd:
+                work = Path(cmd[-1]).parent
+                (work / "f_0001.jpg").write_bytes(b"\xff\xd8")
+                (work / "f_0002.jpg").write_bytes(b"\xff\xd8")
+                return subprocess.CompletedProcess(
+                    cmd, 0, stdout="", stderr="pts_time:0.4\npts_time:1.6\n")
+            Path(cmd[-1]).write_bytes(b"\xff\xd8")
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        reqs = [(0.4, out_dir / "a.jpg"), (1.6, out_dir / "b.jpg")]
+        flags = self._run(reqs, fake_run)
+        self.assertEqual(flags, [True, True])
+        vfr = []
+        for cmd in calls:
+            if "-fps_mode" in cmd:
+                vfr.append("fps_mode")
+            elif "-vsync" in cmd:
+                vfr.append("vsync")
+            else:
+                vfr.append("other")
+        self.assertEqual(vfr, ["fps_mode", "vsync"])
+        for _, path in reqs:
+            self.assertTrue(path.is_file() and path.stat().st_size > 0)
+
+    def test_fps_mode_with_outputs_does_not_retry_vsync(self):
+        out_dir = self.root / "keep"
+        out_dir.mkdir()
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(list(cmd))
+            work = Path(cmd[-1]).parent
+            (work / "f_0001.jpg").write_bytes(b"\xff\xd8")
+            (work / "f_0002.jpg").write_bytes(b"\xff\xd8")
+            return subprocess.CompletedProcess(
+                cmd, 1, stdout="", stderr="pts_time:0.4\npts_time:1.6\n")
+
+        reqs = [(0.4, out_dir / "a.jpg"), (1.6, out_dir / "b.jpg")]
+        flags = self._run(reqs, fake_run)
+        self.assertEqual(flags, [True, True])
+        self.assertEqual(len(calls), 1)
+        self.assertIn("-fps_mode", calls[0])
+        self.assertNotIn("-vsync", calls[0])
+
+
 class SelectFramesBatchWiringTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="select_batch_")

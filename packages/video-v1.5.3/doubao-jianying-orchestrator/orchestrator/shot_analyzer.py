@@ -526,6 +526,8 @@ def extract_frames_batch(
     再靠 showinfo 的 pts_time 对齐输出文件。对不上的时刻回退单点 ``extract_frame``。
 
     关闭：``JY_FRAME_BATCH=0``。单帧请求直接走 ``extract_frame``。
+    ``-fps_mode vfr`` 失败且工作目录没有输出时，改试旧版 ``-vsync vfr``，
+    仍失败再逐帧回退。
     """
     items = [(round(max(0.0, float(ts)), 3), Path(out)) for ts, out in requests]
     if not items:
@@ -567,19 +569,21 @@ def extract_frames_batch(
         proc = None
         last_exc: Exception | None = None
         for vfr_flag in (["-fps_mode", "vfr"], ["-vsync", "vfr"]):
+            # 上一次失败留下的半成品不能算「已经抽出」，否则会跳过下一条旗标。
+            for stale in list(work.glob("f_*.jpg")):
+                try:
+                    stale.unlink()
+                except OSError:
+                    pass
             try:
                 proc = run_ffmpeg_decode(
                     base_cmd + vfr_flag + ["-q:v", "2", str(pattern)],
                     capture_output=True, text=True, encoding="utf-8",
                     errors="replace", timeout=wait)
-                stderr = proc.stderr or ""
-                if proc.returncode == 0 or work.glob("f_*.jpg"):
+                # Path.glob 返回生成器，布尔值恒为真。空目录必须用 any()
+                # 才会改试下一条 vfr 旗标（新 ffmpeg 的 -fps_mode，旧版的 -vsync）。
+                if proc.returncode == 0 or any(work.glob("f_*.jpg")):
                     break
-                if "Unrecognized option" in stderr and "vsync" in stderr:
-                    continue
-                if "Unrecognized option" in stderr and "fps_mode" in stderr:
-                    continue
-                break
             except (OSError, subprocess.SubprocessError, ValueError) as exc:
                 last_exc = exc
                 proc = None
