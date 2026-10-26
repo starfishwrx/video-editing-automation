@@ -6,6 +6,7 @@ It is an observation receipt, not an independent-QC or delivery permission.
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -14,7 +15,7 @@ from typing import Any
 
 PLAN_SCHEMA = "chatcut-ai-selection-v1"
 RECEIPT_SCHEMA = "chatcut-ai-selection-evidence-v1"
-POLICY_VERSION = "selling-points-first-meeting-v1"
+POLICY_VERSION = "selling-points-first-meeting-paper-v1"
 KINDS = {"selling_point", "product_intro", "hook"}
 BASES = {"editorial_fit", "visible_result", "readable_label", "product_display"}
 AI_SPEED_MAX = 20.0
@@ -42,6 +43,30 @@ def file_sha256(path: str | Path) -> str:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             value.update(block)
     return value.hexdigest()
+
+
+def editorial_context(manifest: dict | None = None) -> dict:
+    # production_eval loads this contract as a standalone file. Load the sibling
+    # rulepack from the same runtime, never an unrelated installed package.
+    if __package__:
+        from . import rulepack
+    else:
+        spec = importlib.util.spec_from_file_location("_chatcut_editorial_rules", Path(__file__).with_name("rulepack.py"))
+        rulepack = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(rulepack)
+    return rulepack.editorial_context(manifest)
+
+
+def rules_identity(manifest: dict | None = None) -> dict:
+    context = editorial_context(manifest)
+    return {key: context[key] for key in ("category", "versions", "sha256")}
+
+
+def policy_prompt(manifest: dict) -> str:
+    if editorial_context(manifest)["category"] != "zhipin":
+        return POLICY
+    return POLICY + "\n本任务生效的品类制作与选镜合同（按口播含义适用，不能据此虚构画面）：\n" + json.dumps(
+        editorial_context(manifest), ensure_ascii=False, sort_keys=True)
 
 
 def selection_mode(manifest: dict | None = None) -> str:
@@ -108,6 +133,8 @@ def seal_receipt(segment: dict, *, index: int, sentence: dict, observation: dict
         "source_sha256": source_sha256, "window_us": _window(segment),
         "video_speed": segment.get("video_speed"),
         "speed_range_override": segment.get("speed_range_override"),
+        "preferred_speed": segment.get("preferred_speed", 1.0),
+        "scene_ids": observation.get("scene_ids", []), "sentence_scene_ids": sentence.get("scene_ids", []),
         "review_prompt_sha256": observation["review_prompt_sha256"],
         "frame_sheet_sha256": observation["frame_sheet_sha256"],
         "evidence_intervals_us": observation["evidence_intervals_us"],
@@ -121,7 +148,8 @@ def seal_receipt(segment: dict, *, index: int, sentence: dict, observation: dict
 
 
 def validate_segment_receipt(item: dict, *, text: str | None = None,
-                             index: int | None = None, verify_source: bool = False) -> dict:
+                             index: int | None = None, verify_source: bool = False,
+                             manifest: dict | None = None) -> dict:
     reasons: list[str] = []
     receipt = item.get("ai_selection")
     if not isinstance(receipt, dict):
@@ -153,6 +181,10 @@ def validate_segment_receipt(item: dict, *, text: str | None = None,
             reasons.append("AI_SELECTION_SPEED_INVALID")
         if receipt.get("video_speed") != speed or receipt.get("speed_range_override") != bounds:
             reasons.append("AI_SELECTION_SPEED_CHANGED")
+        preferred = item.get("preferred_speed", 1.0)
+        if (type(preferred) not in (int, float) or not math.isfinite(preferred) or preferred <= 0
+                or receipt.get("preferred_speed") != preferred):
+            reasons.append("AI_SELECTION_SPEED_PREFERENCE_CHANGED")
         for key in ("source_start", "source_end", "duration"):
             value = item.get(key)
             if type(value) not in (int, float) or not math.isfinite(value) or value < 0 or (key == "duration" and value <= 0):
@@ -175,7 +207,7 @@ def validate_segment_receipt(item: dict, *, text: str | None = None,
                 for part in parts:
                     check = validate_segment_receipt({**part, "text": item.get("text"),
                         "temporary_shot_id": part.get("shot_id"), "window_solution": part},
-                        text=text, index=index, verify_source=verify_source)
+                        text=text, index=index, verify_source=verify_source, manifest=manifest)
                     reasons.extend(check["reasons"])
         confidence = receipt.get("confidence")
         if isinstance(confidence, bool) or not isinstance(confidence, (int, float)) or not math.isfinite(confidence) or not .6 <= confidence <= 1:
@@ -192,6 +224,19 @@ def validate_segment_receipt(item: dict, *, text: str | None = None,
         identity = receipt.get("identity") or {}
         if not all(identity.get(k) for k in ("model", "manifest_sha256", "prompt_sha256")):
             reasons.append("AI_SELECTION_IDENTITY_MISSING")
+        recorded_rules = identity.get("editorial_rules")
+        context_manifest = manifest if manifest is not None else {"category": (recorded_rules or {}).get("category")}
+        if not isinstance(recorded_rules, dict) or recorded_rules != rules_identity(context_manifest):
+            reasons.append("AI_SELECTION_RULES_CHANGED")
+        scenes = editorial_context(context_manifest)["rules"].get("semantic_contracts", [])
+        known_scenes = {scene["id"] for scene in scenes}
+        if any(not isinstance(receipt.get(key), list) or any(sid not in known_scenes for sid in receipt[key])
+               for key in ("scene_ids", "sentence_scene_ids")):
+            reasons.append("AI_SELECTION_SCENE_INVALID")
+        common = set(receipt.get("scene_ids", [])) & set(receipt.get("sentence_scene_ids", []))
+        expected_speed = max((float(scene.get("preferred_speed", 1)) for scene in scenes if scene["id"] in common), default=1.0)
+        if preferred != expected_speed:
+            reasons.append("AI_SELECTION_SCENE_PREFERENCE_CHANGED")
         points = receipt.get("selling_points")
         if not isinstance(points, list):
             reasons.append("AI_SELECTION_POINTS_INVALID")

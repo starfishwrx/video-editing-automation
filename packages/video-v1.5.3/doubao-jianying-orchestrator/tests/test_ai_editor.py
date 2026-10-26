@@ -43,7 +43,8 @@ class AIEditorTests(unittest.TestCase):
             "rows": [{"index": 1, "parts": [{"shot_id": "handfeel", "audio_duration_us": 2000000}], "reason": "先安排卖点"}],
             "identity": {"model": "synthetic-model", "manifest_sha256": contract.digest(self.manifest),
                 "analysis_sha256": contract.digest({"shots": [self.shot]}),
-                "timing_sha256": contract.digest(None), "prompt_sha256": contract.digest(contract.POLICY)}}
+                "timing_sha256": contract.digest(None), "prompt_sha256": contract.digest(contract.POLICY),
+                "editorial_rules": contract.rules_identity(self.manifest)}}
 
     def result(self, plan=None):
         return editor.match_manifest(self.manifest, {"shots": [self.shot], "ai_editor_plan": plan or self.plan()})
@@ -178,7 +179,7 @@ class AIEditorTests(unittest.TestCase):
             "claim_gate": {"reason": "SECRET_PASS"}, "selection_score": 99}], 8)
         self.assertNotIn("SECRET_PASS", prompt)
         self.assertNotIn("SECRET_SHOT", prompt)
-        self.assertNotIn("99", prompt)
+        self.assertNotIn("selection_score", prompt)
         self.assertIn(ai_editor_qc.RESPONSE_VERSION, prompt)
 
     def test_qc_v3_response_cannot_certify_ai_editor(self):

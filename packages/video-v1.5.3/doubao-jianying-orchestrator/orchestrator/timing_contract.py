@@ -325,6 +325,7 @@ class WindowRequest:
     preferred_start_us: Optional[int] = None
     video_duration_us: Optional[int] = None
     fps: float = DEFAULT_FPS
+    preferred_speed: float = 1.0
 
     @property
     def timeline_us(self) -> int:
@@ -417,7 +418,11 @@ def _candidate_speeds(req: WindowRequest, usable_us: int, timeline_us: int,
     if hi < lo:
         lo, hi = hi, lo
     frame = frame_us(req.fps)
-    values: set[float] = {1.0, lo, hi}
+    try:
+        preference = float(req.preferred_speed)
+    except (TypeError, ValueError):
+        preference = 1.0
+    values: set[float] = {preference, lo, hi}
 
     if timeline_us > 0:
         values.add(usable_us / timeline_us)                     # 恰好铺满可用素材
@@ -445,8 +450,16 @@ def solve_window(req: WindowRequest) -> WindowSolution:
        ``speed_range_for_role``）；
     4. **时长严格**：时间线占位恒等于 ``音频 + tail_pad``，与音频误差恒为 tail_pad。
 
-    目标：在可行集里选 ``|v − 1.0|`` 最小者；并列时选窗口更小的（少动素材）。
+    目标：在可行集里选距 ``preferred_speed`` 最近的倍率；并列时选窗口更小者。
     """
+    try:
+        preferred_speed = float(req.preferred_speed)
+    except (TypeError, ValueError):
+        preferred_speed = math.nan
+    if not math.isfinite(preferred_speed) or not 0.05 <= preferred_speed <= 20.0:
+        return _fail(REASON_SPEED_OUT_OF_RANGE, preferred_speed=req.preferred_speed,
+                     allowed_preference=[0.05, 20.0])
+
     timeline_us = req.timeline_us
     if timeline_us <= 0:
         return _fail(REASON_NO_AUDIO, audio_duration_us=req.audio_duration_us)
@@ -526,7 +539,7 @@ def solve_window(req: WindowRequest) -> WindowSolution:
             preferred = req.preferred_start_us
             preferred = place_lo if preferred is None else int(preferred)
             start = max(place_lo, min(preferred, place_hi))
-        feasible.append((abs(speed - 1.0), window_us, speed, start))
+        feasible.append((abs(speed - preferred_speed), window_us, speed, start))
 
     if not feasible:
         if span is not None and span > int(round(speed_max * timeline_us)):
@@ -654,6 +667,7 @@ class SpanSegment:
     speed_max: float = 1.0
     video: str = ""
     shot_id: str = ""
+    preferred_speed: float = 1.0
 
     @property
     def lo_bound_us(self) -> int:
@@ -686,7 +700,8 @@ class SpanSegment:
             transition_in_handle_us=int(self.transition_in_handle_us),
             transition_out_handle_us=int(self.transition_out_handle_us),
             evidence_start_us=self.evidence_start_us, evidence_end_us=self.evidence_end_us,
-            speed_min=float(self.speed_min), speed_max=float(self.speed_max), fps=fps)
+            speed_min=float(self.speed_min), speed_max=float(self.speed_max),
+            preferred_speed=self.preferred_speed, fps=fps)
 
 
 @dataclass(frozen=True)

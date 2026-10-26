@@ -67,16 +67,17 @@ def _inventory(manifest: dict, shots: list[dict], directory: Path) -> list[dict]
     catalog = [{"shot_id": s["shot_id"], "description": s.get("visual_description") or s.get("description"),
                 "action": s.get("action"), "object": s.get("object"), "result": s.get("result"),
                 "duration_us": round((float(s["source_end"]) - float(s["source_start"])) * 1e6)} for s in shots]
-    prompt = contract.POLICY + "\n你负责整稿用途分类和宽召回，本轮描述只是索引，不是画面证据。\n" + json.dumps({
+    prompt = contract.policy_prompt(manifest) + "\n你负责整稿用途分类和宽召回，本轮描述只是索引，不是画面证据。\n" + json.dumps({
         "product": manifest.get("product"), "category": manifest.get("category"),
         "general_notes": manifest.get("shot_notes_general", []),
         "sentences": [{"index": i, "text": timing_contract.sentence_text(s),
                        "notes": s.get("shot_note") or s.get("visual_requirements")} for i, s in enumerate(rows, 1)],
         "catalog": catalog}, ensure_ascii=False) + """
 输出JSON对象 {"sentences":[{"index":1,"kind":"selling_point|product_intro|hook",
-"selling_points":[{"id":"p1","text":"本句具体卖点"}],"candidate_ids":["最相关shot_id", "其余候选"]}],
+"selling_points":[{"id":"p1","text":"本句具体卖点"}],"candidate_ids":["最相关shot_id", "其余候选"],"scene_ids":[]}],
 "display_pool_ids":["适合包装/拆包/产品展示的shot_id"]}。
 每句恰好一行，不改变原文。selling_point列出本句全部具体卖点，其他kind的selling_points为空。
+纸品scene_ids必须给出本句语义适用的semantic_contracts场景id，不适用时为空；不能只因某候选有擦拭就把包装抽数句判为清洁。
 每句candidate_ids只返回最相关的前8个，display_pool_ids也只返回前8个，避免响应被整库ID挤满。
 程序会把未列出的镜头加入后续逐轮扩展。不能因描述不确定就宣布无素材，不用A/B强度或旧合同词表淘汰。
 """
@@ -91,6 +92,11 @@ def _inventory(manifest: dict, shots: list[dict], directory: Path) -> list[dict]
         if type(index) is not int or not 1 <= index <= len(rows) or index in by_index or row.get("kind") not in contract.KINDS:
             raise ValueError("AI_EDITOR_CLASSIFICATION_INVALID")
         points = row.get("selling_points")
+        known_scenes = {scene["id"] for scene in contract.editorial_context(manifest)["rules"].get("semantic_contracts", [])}
+        scene_ids = row.get("scene_ids", [] if not known_scenes else None)
+        if not isinstance(scene_ids, list) or any(scene not in known_scenes for scene in scene_ids):
+            raise ValueError("AI_EDITOR_SENTENCE_SCENE_INVALID")
+        row["scene_ids"] = scene_ids
         if not isinstance(points, list) or any(not isinstance(p, dict) or not p.get("id") or not p.get("text") for p in points):
             raise ValueError("AI_EDITOR_POINTS_INVALID")
         if len({p["id"] for p in points}) != len(points) or (row["kind"] == "selling_point") != bool(points):
@@ -138,7 +144,7 @@ def _review(manifest: dict, sentence: dict, shot: dict, directory: Path, *, dens
         raise ValueError("AI_EDITOR_CONTACT_SHEET_FAILED")
     if before != contract.file_sha256(source):
         raise ValueError("AI_EDITOR_SOURCE_CHANGED_DURING_REVIEW")
-    prompt = contract.POLICY + "\n只根据附图判断，所有时间戳均为原素材秒数。\n" + json.dumps({
+    prompt = contract.policy_prompt(manifest) + "\n只根据附图判断，所有时间戳均为原素材秒数。\n" + json.dumps({
         "product": manifest.get("product"), "category": manifest.get("category"),
         "sentence": sentence, "shot_id": shot["shot_id"],
         "whole_script": [timing_contract.sentence_text(s) for s in timing_contract.split_sentences(manifest)],
@@ -146,7 +152,8 @@ def _review(manifest: dict, sentence: dict, shot: dict, directory: Path, *, dens
 输出JSON对象：{"verdict":"matched|mismatch|uncertain", "same_product":true,
 "basis":"editorial_fit|visible_result|readable_label|product_display", "observation":"实际可见事实",
 "reason":"为什么适合或不适合", "confidence":0.8, "supported_point_ids":["p1"],
-"evidence_intervals_us":[{"start":1000000,"end":2000000}], "time_sensitive":false}。
+"evidence_intervals_us":[{"start":1000000,"end":2000000}], "time_sensitive":false, "scene_ids":[]}。
+scene_ids只列出本句语义适用且本镜实际支持的纸品semantic_contracts场景id；不支持或本句不涉及的场景不能列入，不适用时为空。
 共享展示池句子index=0时，判断是否为同商品包装/拆包/取出/手持或本体展示，不承担功能证明。
 卖点可以只支持其中几项，必须如实返回支持的id，不能凭口播推断。区间必须在提供的scene_us内，
 包含支持判断必需的完整动作和结果；感受性展示按实际贴切区间。看不清返回uncertain，不能凭模型强度标签推断。
@@ -170,6 +177,13 @@ evidence_intervals_us内各区间会被当作全部必须保留，不能把多�
     if not result["same_product"] or confidence < .6:
         result["verdict"] = "uncertain" if result["same_product"] else "mismatch"
     if result["verdict"] == "matched":
+        context = contract.editorial_context(manifest)
+        scenes = context["rules"].get("semantic_contracts", [])
+        known_scenes = {scene["id"] for scene in scenes}
+        scene_ids = result.get("scene_ids", [] if not known_scenes else None)
+        if not isinstance(scene_ids, list) or any(scene not in known_scenes for scene in scene_ids):
+            raise ValueError("AI_EDITOR_SCENE_INVALID")
+        result["preferred_speed"] = _scene_preference(manifest, sentence, result)
         ids = result.get("supported_point_ids")
         allowed = {p["id"] for p in sentence.get("selling_points", [])}
         if (not isinstance(ids, list) or any(p not in allowed for p in ids)
@@ -255,6 +269,12 @@ def _review_pool(manifest: dict, sentence: dict, shots: dict, directory: Path, a
                       "uncertain": sum(r["verdict"] == "uncertain" for r in reviewed)}
 
 
+def _scene_preference(manifest: dict, sentence: dict, review: dict) -> float:
+    common = set(sentence.get("scene_ids", [])) & set(review.get("scene_ids", []))
+    return max((float(scene.get("preferred_speed", 1.0)) for scene in
+        contract.editorial_context(manifest)["rules"].get("semantic_contracts", []) if scene["id"] in common), default=1.0)
+
+
 def _observed_shot(shot: dict, review: dict) -> dict:
     evidence = [{"start": ev["start"] / 1e6, "end": ev["end"] / 1e6,
                  "claim": review["observation"], "evidence_source": "ai_editor_pixel_review"}
@@ -263,6 +283,7 @@ def _observed_shot(shot: dict, review: dict) -> dict:
     minimum, _ = timing_contract.speed_range_for_role(role, time_sensitive=review.get("time_sensitive", False))
     return {**shot, "evidence_intervals": evidence,
             "selection_mode": "ai_editor", "speed_range_override": [minimum, contract.AI_SPEED_MAX],
+            "preferred_speed": review.get("preferred_speed", 1.0),
             "role": "direct_evidence" if review.get("time_sensitive") else "product_display",
             "visual_role": "direct_evidence" if review.get("time_sensitive") else "product_display",
             "action_complete": True, "head_waste": 0, "tail_waste": 0}
@@ -271,6 +292,8 @@ def _observed_shot(shot: dict, review: dict) -> dict:
 def _assemble(manifest: dict, analysis: dict, plan: dict, *, narration_timing: dict | None,
               verify_sources: bool = False) -> dict:
     from . import shot_analyzer
+    if plan.get("identity", {}).get("editorial_rules") != contract.rules_identity(manifest):
+        raise ValueError("AI_EDITOR_RULES_CHANGED")
     shots = {str(s["shot_id"]): s for s in analysis.get("shots", [])}
     sentences = plan["sentences"]
     rows = plan.get("rows")
@@ -311,6 +334,7 @@ def _assemble(manifest: dict, analysis: dict, plan: dict, *, narration_timing: d
             if sid not in good or sid not in shots:
                 raise ValueError(f"AI_EDITOR_UNREVIEWED_SELECTION:{index}")
             review, shot = {**good[sid], "scarce_reuse_reason": reuse_reason}, shots[sid]
+            review = {**review, "preferred_speed": _scene_preference(manifest, sentence, review)}
             if verify_sources and review["source_sha256"] != contract.file_sha256(shot["video"]):
                 raise ValueError("AI_EDITOR_SOURCE_CONTENT_CHANGED")
             observed = _observed_shot(shot, review)
@@ -330,6 +354,7 @@ def _assemble(manifest: dict, analysis: dict, plan: dict, *, narration_timing: d
                     "source_end": solution.source_end_us / 1e6, "duration": solution.material_us / 1e6,
                     "video_speed": solution.speed, "visual_role": observed["visual_role"],
                     "speed_range_override": observed["speed_range_override"],
+                    "preferred_speed": observed["preferred_speed"],
                     "time_sensitive": review["time_sensitive"],
                     "scene_source_start": shot["source_start"], "scene_source_end": shot["source_end"],
                     "evidence_intervals": observed["evidence_intervals"], "text": sentence["text"]}
@@ -356,7 +381,7 @@ def _assemble(manifest: dict, analysis: dict, plan: dict, *, narration_timing: d
         segment["time_sensitive"] = overall_review["time_sensitive"]
         segment["ai_selection"] = contract.seal_receipt(segment, index=index, sentence=sentence,
             observation=overall_review, source_sha256=good[first["shot_id"]]["source_sha256"], identity=plan["identity"])
-        check = contract.validate_segment_receipt(segment, index=index)
+        check = contract.validate_segment_receipt(segment, index=index, manifest=manifest)
         if not check["ok"]:
             raise ValueError(";".join(check["reasons"]))
         output.append(segment)
@@ -482,7 +507,8 @@ def prepare(manifest: dict, analysis: dict, report_dir: Path, *, narration_timin
         plan["identity"] = {"model": os.environ.get("JY_VISION_MODEL") or "glm-5.3-flash",
             "manifest_sha256": contract.digest(manifest), "timing_sha256": contract.digest(narration_timing),
             "analysis_sha256": contract.digest({k: v for k, v in analysis.items() if k != "ai_editor_plan"}),
-            "prompt_sha256": contract.digest(contract.POLICY), "policy_version": contract.POLICY_VERSION}
+            "prompt_sha256": contract.digest(contract.policy_prompt(manifest)), "policy_version": contract.POLICY_VERSION,
+            "editorial_rules": contract.rules_identity(manifest)}
         original = timing_contract.split_sentences(manifest)
         for sentence in plan["sentences"]:
             sentence["audio_durations_us"] = [timing_contract.duration_for(narration_timing,

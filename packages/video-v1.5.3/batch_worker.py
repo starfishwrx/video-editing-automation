@@ -476,7 +476,7 @@ def validate_visual_match(report_dir: pathlib.Path) -> tuple[bool, str]:
         for index, segment in enumerate(segments, 1):
             if not isinstance(segment, dict) or segment.get("selection_mode") != "ai_editor":
                 return False, "VISUAL_MATCH_BLOCKED: mixed AI/legacy segments"
-            check = contract.validate_segment_receipt(segment, index=index, verify_source=True)
+            check = contract.validate_segment_receipt(segment, index=index, verify_source=True, manifest=match.get("manifest"))
             if not check["ok"]:
                 return False, "VISUAL_MATCH_BLOCKED: " + ";".join(check["reasons"])
             for part in segment.get("span_parts") or [segment]:

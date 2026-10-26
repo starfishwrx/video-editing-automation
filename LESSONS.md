@@ -57,6 +57,14 @@
 - 根因: 只更新实现和包内局部说明，没有同步首页、环境合同、架构与协作入口。
 - 以后怎么做: 型号保留 GLM-5.3-Flash 全名和 API ID；默认 transport/选镜/QC 变更同步模型、配置和架构文档。明确 legacy/实验范围，分别记录源码、发布附件和生产身份；用合成抽帧验证入门命令。
 - 证据: `docs/model-and-vision.md`、`docs/quickstart.md`、`CONTRIBUTING.md`、`.github/workflows/ci.yml`。
+### L-20261023-08 品类规则要到达看图与最终写入，配置值不能代替成片验证
+- status: OPEN
+- hits: 1
+- 模块: visual-matching / orchestrator-engine
+- 现象: 品类已有规则但AI入口未读取；固定字幕坐标与写后检查不能支持像素位置；只看时间轴相接仍可能漏掉音频内静音或提前结束后的空白。
+- 根因: 规则、规划、写入和验收各用一套口径。
+- 以后怎么做: 使用同一生效规则身份；规划偏好传到engine；字幕统一换算；按实际音频切片测量句间空白；未认证不得当成正式通过。
+- 证据: 活包纸品规则、production_parameters与纸品回归测试。
 
 ### L-20261023-07 AI选镜改造必须贯穿末端、队列和独立QC
 - status: OPEN

@@ -159,6 +159,7 @@ class Clip:
     time_sensitive: bool = False
     # v1.5.2 场景规则（卫品指令）显式给出的变速范围，优先于画面角色的范围。
     speed_range_override: Any = None
+    preferred_speed: float = 1.0
     # 场景规则按动作相位定窗时的头尾保护区（秒），优先于 manifest 的 head/tail_trim_s。
     guard_override: Any = None
     # 转场把手（定案第 5 条：与首尾废料保护区**分开**扣）。转场会吃掉紧邻切点的
@@ -565,6 +566,7 @@ class OrchestrationEngine:
                     visual_role=str(it.get("visual_role", "") or "").strip(),
                     time_sensitive=bool(it.get("time_sensitive")),
                     speed_range_override=it.get("speed_range_override"),
+                    preferred_speed=it.get("preferred_speed", 1.0),
                     guard_override=it.get("guard_override"),
                     raw_index=i - 1,
                 )
@@ -926,6 +928,7 @@ class OrchestrationEngine:
                 time_sensitive=bool(part.get("time_sensitive", raw.get("time_sensitive"))),
                 speed_range_override=(part.get("speed_range_override")
                                       or raw.get("speed_range_override")),
+                preferred_speed=part.get("preferred_speed", raw.get("preferred_speed", 1.0)),
                 raw_index=c.raw_index,
             )
             if sub.audio_mode == "file":
@@ -1137,7 +1140,7 @@ class OrchestrationEngine:
         if self.m.get("selection_mode") == "ai_editor":
             from . import ai_editor_contract
             for index, item in enumerate(raw, 1):
-                check = ai_editor_contract.validate_segment_receipt(item, index=index, verify_source=True)
+                check = ai_editor_contract.validate_segment_receipt(item, index=index, verify_source=True, manifest=self.m)
                 if not check["ok"]:
                     report["ok"] = False
                     report.setdefault("issues", []).append({"index": index,
@@ -1545,6 +1548,7 @@ class OrchestrationEngine:
             evidence_start_us=None if span is None else int(round(span[0] * US)),
             evidence_end_us=None if span is None else int(round(span[1] * US)),
             speed_min=speed_min, speed_max=speed_max,
+            preferred_speed=clip.preferred_speed,
             preferred_start_us=preferred_us,
             video_duration_us=int(round(float(clip.video_duration) * US)), fps=frm)
 
@@ -2249,6 +2253,12 @@ class OrchestrationEngine:
         v1.5.2 起默认关闭（2026-10-12 会议：叠化会在下一镜开头带出上一镜的残影）。
         只有 manifest 显式 ``auto_transition: true`` 才走自动转场。
         """
+        from . import rulepack
+        if rulepack.detect_category(self.m)[0] == "zhipin":
+            for clip in clips:
+                clip.transition = None
+                clip.transition_in_handle_us = clip.transition_out_handle_us = 0
+            return
         if not self.m.get("auto_transition", False):
             return
         for i in range(1, len(clips)):
@@ -2477,6 +2487,11 @@ class OrchestrationEngine:
                         "formal_delivery_allowed": False, "issues": caption_result.get("issues", []),
                         "caption_report": str(self.report_dir / "captions" / "audio_captions.json")}
         w, h = (1080, 1920) if str(self.m.get("aspect_ratio", "9:16")) == "9:16" else (1920, 1080)
+        from .production_parameters import subtitle_transform
+        try:
+            subtitle_position = subtitle_transform(self.m, w, h)
+        except ValueError as exc:
+            return {"status": "SUBTITLE_CONFIGURATION_INVALID", "reason": str(exc)}
         # ``find_drafts_root`` may resolve JianYing's Windows custom library
         # from the client registry.  Pass it through explicitly: the wrapper's
         # legacy default resolver otherwise falls back to LOCALAPPDATA.
@@ -2606,7 +2621,9 @@ class OrchestrationEngine:
             if c.text and caption_source == "legacy":
                 project.add_text_simple(
                     c.text, start_time=c.start_us, duration=to_us(c.duration),
-                    track_name="Subtitles")
+                    track_name="Subtitles", **({"clip_settings": draft.ClipSettings(
+                        transform_x=subtitle_position["x"], transform_y=subtitle_position["y"])}
+                        if self.m.get("subtitle_position_px") is not None else {}))
             # 画面标注（【素材待补】/【本批未认证】）已按用户 2026-09-17 定案
             # **停止写入草稿**：交付画面必须干净。降级段与未认证状态继续在
             # `built`/报告/事件里如实上报（`c.degraded`、`_uncertified_coverage`、
@@ -2705,6 +2722,7 @@ class OrchestrationEngine:
                 "schema": "chatcut-ai-draft-v1", "selection_mode": "ai_editor",
                 "selection_sha256": ai_editor_contract.digest(self.m.get("segments", [])),
                 "policy_version": ai_editor_contract.POLICY_VERSION,
+                "editorial_rules": ai_editor_contract.rules_identity(self.m),
             }, ensure_ascii=False, indent=2), encoding="utf-8")
         # 需求7：写后独立校验，不通过不上报成功
         #
@@ -2734,8 +2752,8 @@ class OrchestrationEngine:
             # 成片里看不见 —— 见 text_ops 的常量注释。
             "subtitle_font_size": 8.0,
             "subtitle_bold": True,
-            "subtitle_transform_x": 0.0,
-            "subtitle_transform_y": -0.55,
+            "subtitle_transform_x": subtitle_position["x"],
+            "subtitle_transform_y": subtitle_position["y"],
             "subtitle_strip_punctuation": True,
             "native_subtitles_required": caption_result is not None,
             "subtitle_cues": caption_result["cues"] if caption_result is not None else None,
@@ -2829,6 +2847,33 @@ class OrchestrationEngine:
                 "storyboard_scores": getattr(self, "_storyboard_scores", [])}
 
     # ---------- 主流水线 ----------
+    def _narration_gap_gate(self, clips: list[Clip]) -> Optional[dict]:
+        from . import rulepack
+        from .production_parameters import silence_edges, gap_errors
+        rules = rulepack.for_manifest(self.m)
+        maximum = (rules.get("voice") or {}).get("acceptance_max_gap_frames")
+        if rules.get("category") != "zhipin" or maximum is None:
+            return None
+        rows = []
+        try:
+            for c in clips:
+                narration = c.tts_path if c.audio_mode == "tts" else (c.audio if c.audio_mode == "file" else None)
+                if not narration:
+                    continue
+                edges = silence_edges(narration, start_s=self._audio_slice_us(c) / US,
+                    duration_s=c.duration, ffmpeg=str(self.ffmpeg))
+                rows.append({**edges, "sentence": c.raw_index, "start_s": c.start_us / US,
+                    "end_s": c.start_us / US + c.duration})
+            issues = gap_errors(rows, fps=self._fps(), max_frames=int(maximum))
+        except (ValueError, OSError, subprocess.TimeoutExpired) as exc:
+            issues = [{"code": "NARRATION_GAP_UNVERIFIED", "reason": str(exc)}]
+        report = {"status": "PASS" if not issues else "UNCERTIFIED", "rows": rows,
+            "max_gap_frames": maximum, "issues": issues}
+        (self.report_dir / "narration_gap_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        if issues:
+            return {"status": "NARRATION_GAP_UNVERIFIED", "narration_gap": report}
+        return None
+
     def run(self) -> dict:
         """跑一次构建；无论走到哪个出口，都把本次 GPU 用量写进事件和结果。"""
         gpu_runtime.reset_stats()
@@ -2954,6 +2999,9 @@ class OrchestrationEngine:
         sync_err = self.validate_audio_video_sync(clips)
         if sync_err:
             return sync_err
+        gap_err = self._narration_gap_gate(clips)
+        if gap_err:
+            return gap_err
         # 1.3.27.1 执行位①：计划解算完成后、写草稿前，跑一次不变量校验。
         plan_gate = self._invariant_gate(clips, stage="plan_complete")
         if plan_gate:

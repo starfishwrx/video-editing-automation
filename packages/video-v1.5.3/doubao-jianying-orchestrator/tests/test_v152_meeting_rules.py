@@ -82,7 +82,7 @@ class RulepackTests(unittest.TestCase):
         self.assertEqual(explicit["voice_tempo"], 1.1)
         zhipin = rulepack.apply_manifest_defaults({"product": "湿厕纸", "tail_pad_s": 0.1,
                                                   "auto_transition": True})
-        self.assertEqual(zhipin["voice_tempo"], 1.0)
+        self.assertEqual(zhipin["voice_tempo"], 1.3)
         self.assertEqual(zhipin["tail_pad_s"], 0.1)
         self.assertTrue(zhipin["auto_transition"])
 

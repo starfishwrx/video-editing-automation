@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -13,6 +14,18 @@ REPORT_VERSION = "chatcut-visual-qc-v3"
 RESPONSE_VERSION = "chatcut-visual-qc-response-v3"
 MATCH_LEVELS = {"DIRECT", "ACCEPTABLE_DEGRADED", "MISMATCH", "INSUFFICIENT_EVIDENCE"}
 OVERALL_LEVELS = {"PASS", "PASS_WITH_DEGRADED", "PASS_WITH_GAPS", "FAIL", "UNCERTIFIED"}
+
+
+def _current_editorial_rules(report: dict) -> bool:
+    if __package__:
+        from . import ai_editor_contract as contract
+    else:
+        spec = importlib.util.spec_from_file_location("_chatcut_ai_contract", Path(__file__).with_name("ai_editor_contract.py"))
+        contract = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(contract)
+    recorded = report.get("editorial_rules")
+    return (isinstance(recorded, dict) and report.get("policy_version") == contract.POLICY_VERSION
+        and recorded == contract.rules_identity({"category": recorded.get("category")}))
 
 
 def _file_sha256(path: str) -> str:
@@ -131,6 +144,9 @@ def report_matches_draft(report: Any, draft: Path) -> bool:
             if (identity.get("selection_sha256") != report.get("selection_sha256")
                     or report.get("response_contract", {}).get("version") != "chatcut-visual-qc-response-v4"):
                 return False
+            if (not _current_editorial_rules(report) or identity.get("editorial_rules") != report.get("editorial_rules")
+                    or identity.get("policy_version") != report.get("policy_version")):
+                return False
             bindings = report.get("source_bindings")
             if not isinstance(bindings, list) or not bindings or any(_file_sha256(b["path"]) != b["sha256"] for b in bindings):
                 return False
@@ -168,7 +184,8 @@ def _report_status(report: Any) -> str:
     if not isinstance(rows, list) or not rows or any(row_errors(row) for row in rows):
         return "UNCERTIFIED"
     if ai_mode:
-        if (not re.fullmatch(r"[0-9a-f]{64}", str(report.get("selection_sha256") or ""))
+        if (not _current_editorial_rules(report)
+                or not re.fullmatch(r"[0-9a-f]{64}", str(report.get("selection_sha256") or ""))
                 or report.get("final_windows_verified") is not True
                 or report.get("issues")
                 or any(row.get("confidence", 0) < .6 for row in rows)):
