@@ -149,12 +149,19 @@ def locate(shot: dict[str, Any], scene: dict[str, Any], report_dir: Path, *,
     half_width = MIN_STEP_S / 2.0
     with private_temp_dir(prefix="jy_phase_", dir=report_dir) as temp:
         temp_dir = Path(temp)
+        jobs = [
+            {"center": t, "output": temp_dir / f"f_{index:03d}.jpg",
+             "start": start, "end": end, "half_width": half_width}
+            for index, t in enumerate(times, 1)
+        ]
+        picked_list = frame_quality.select_frames(
+            video, jobs,
+            extract=shot_analyzer.extract_frame,
+            extract_batch=shot_analyzer.extract_frames_batch,
+            ffmpeg=ffmpeg,
+        )
         items = []
-        for index, t in enumerate(times, 1):
-            frame = temp_dir / f"f_{index:03d}.jpg"
-            picked = frame_quality.select_frame(
-                video, t, frame, start=start, end=end, half_width=half_width,
-                extract=shot_analyzer.extract_frame, ffmpeg=ffmpeg)
+        for picked in picked_list:
             if not picked.get("ok"):
                 continue
             stamp = float(picked["timestamp"])

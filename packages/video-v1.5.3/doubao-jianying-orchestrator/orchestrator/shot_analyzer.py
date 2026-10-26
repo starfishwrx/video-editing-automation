@@ -507,6 +507,142 @@ def extract_frame(path: Path, timestamp: float, output: Path, *,
     return output.is_file() and output.stat().st_size > 0
 
 
+def batch_extract_enabled() -> bool:
+    return str(os.environ.get("JY_FRAME_BATCH", "1")).strip() != "0"
+
+
+def extract_frames_batch(
+    path: Path,
+    requests: Iterable[tuple[float, Path]],
+    *,
+    ffmpeg: str | None = None,
+    timeout: float | None = None,
+    match_tol_s: float = 0.20,
+) -> list[bool]:
+    """一次解码抽出多个时刻的 jpeg。
+
+    ``requests`` 是 ``(timestamp_sec, output_path)`` 列表，返回与之等长的成功标志。
+    用 ``select=lt(prev_pts*TB\,T)*gte(pts*TB\,T)`` 在每个目标时刻取第一帧，
+    再靠 showinfo 的 pts_time 对齐输出文件。对不上的时刻回退单点 ``extract_frame``。
+
+    关闭：``JY_FRAME_BATCH=0``。单帧请求直接走 ``extract_frame``。
+    """
+    items = [(round(max(0.0, float(ts)), 3), Path(out)) for ts, out in requests]
+    if not items:
+        return []
+    if len(items) == 1 or not batch_extract_enabled():
+        return [extract_frame(path, ts, out, ffmpeg=ffmpeg) for ts, out in items]
+
+    # De-dupe identical timestamps while keeping first output as canonical.
+    unique: list[tuple[float, Path]] = []
+    seen: set[float] = set()
+    for ts, out in items:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        if ts in seen:
+            continue
+        seen.add(ts)
+        unique.append((ts, out))
+    unique.sort(key=lambda row: row[0])
+
+    command = str(ffmpeg or "ffmpeg")
+    select = "+".join(
+        f"lt(prev_pts*TB\\,{ts:.3f})*gte(pts*TB\\,{ts:.3f})" for ts, _ in unique
+    )
+    work = unique[0][1].parent / f".batch_{os.getpid()}_{unique[0][1].stem}"
+    try:
+        if work.exists():
+            for stale in work.glob("*"):
+                try:
+                    stale.unlink()
+                except OSError:
+                    pass
+        work.mkdir(parents=True, exist_ok=True)
+        pattern = work / "f_%04d.jpg"
+        wait = float(timeout) if timeout is not None else max(60.0, 12.0 * len(unique))
+        # FFmpeg 9 dropped ``-vsync``; ``-fps_mode vfr`` is the replacement.
+        # Older builds still accept ``-vsync`` — try modern flag first.
+        base_cmd = [command, "-y", "-hide_banner", "-nostdin",
+                    "-i", str(path),
+                    "-vf", f"select='{select}',showinfo"]
+        proc = None
+        last_exc: Exception | None = None
+        for vfr_flag in (["-fps_mode", "vfr"], ["-vsync", "vfr"]):
+            try:
+                proc = run_ffmpeg_decode(
+                    base_cmd + vfr_flag + ["-q:v", "2", str(pattern)],
+                    capture_output=True, text=True, encoding="utf-8",
+                    errors="replace", timeout=wait)
+                stderr = proc.stderr or ""
+                if proc.returncode == 0 or work.glob("f_*.jpg"):
+                    break
+                if "Unrecognized option" in stderr and "vsync" in stderr:
+                    continue
+                if "Unrecognized option" in stderr and "fps_mode" in stderr:
+                    continue
+                break
+            except (OSError, subprocess.SubprocessError, ValueError) as exc:
+                last_exc = exc
+                proc = None
+                continue
+        if proc is None:
+            if last_exc is not None:
+                raise last_exc
+            return [extract_frame(path, ts, out, ffmpeg=ffmpeg) for ts, out in items]
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return [extract_frame(path, ts, out, ffmpeg=ffmpeg) for ts, out in items]
+
+    written = sorted(work.glob("f_*.jpg"))
+    pts = [round(float(v), 3) for v in _PTS_TIME_RE.findall(proc.stderr or "")]
+    # showinfo may emit more lines than files if some encodes failed; zip tightly.
+    produced = list(zip(pts, written))
+    assigned: dict[float, Path] = {}
+    used_files: set[Path] = set()
+    for ts, _canonical in unique:
+        best = None
+        best_delta = None
+        for pts_t, file_path in produced:
+            if file_path in used_files:
+                continue
+            delta = abs(pts_t - ts)
+            if delta > match_tol_s:
+                continue
+            if best_delta is None or delta < best_delta:
+                best = file_path
+                best_delta = delta
+        if best is None:
+            continue
+        used_files.add(best)
+        assigned[ts] = best
+
+    # Map unique timestamps back onto every request (including duplicates).
+    ok_flags: list[bool] = []
+    for ts, out in items:
+        src = assigned.get(ts)
+        if src is None:
+            ok_flags.append(extract_frame(path, ts, out, ffmpeg=ffmpeg))
+            continue
+        try:
+            if out.exists() and out.resolve() != src.resolve():
+                out.unlink()
+            if src.resolve() != out.resolve():
+                # Copy rather than rename so duplicate timestamps can share source.
+                out.write_bytes(src.read_bytes())
+            ok_flags.append(out.is_file() and out.stat().st_size > 0)
+        except OSError:
+            ok_flags.append(extract_frame(path, ts, out, ffmpeg=ffmpeg))
+
+    try:
+        for leftover in work.glob("*"):
+            try:
+                leftover.unlink()
+            except OSError:
+                pass
+        work.rmdir()
+    except OSError:
+        pass
+    return ok_flags
+
+
 def _boundaries_us(duration_us: int, scene_times: Iterable[float], *,
                    min_shot_s: float) -> list[tuple[int, int]]:
     """场景窗口切分（整数 µs，**只向下取整，绝不上舍**）。

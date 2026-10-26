@@ -1295,20 +1295,35 @@ def _sample_frames(shot: dict[str, Any], frame_dir: Path,
     end = _number(shot.get("source_end"), start)
     if not str(shot.get("video") or "").strip() or not video.is_file() or end <= start:
         return _shot_frames(shot)
-    from .shot_analyzer import extract_frame
+    from .shot_analyzer import extract_frame, extract_frames_batch
     from . import frame_quality
     times = sample_times(start, end)
     # Bucket half-width: distance from a sample to the midpoint between neighbors.
     half_width = (end - start) / (2.0 * max(1, len(times)))
-    frames: list[dict[str, Any]] = []
+    jobs = []
+    reuse: list[dict[str, Any] | None] = []
     for index, timestamp in enumerate(times, 1):
         path = frame_dir / f"{shot['shot_id']}_{int(round(timestamp * 1000)):07d}.jpg"
         if path.is_file() and path.stat().st_size > 0 and not frame_quality.enabled():
-            frames.append({"path": str(path), "timestamp": timestamp, "suffix": f"t{index}"})
+            reuse.append({"path": str(path), "timestamp": timestamp, "suffix": f"t{index}"})
             continue
-        picked = frame_quality.select_frame(
-            video, timestamp, path, start=start, end=end, half_width=half_width,
-            extract=extract_frame, ffmpeg=ffmpeg)
+        reuse.append(None)
+        jobs.append({
+            "center": timestamp, "output": path, "start": start, "end": end,
+            "half_width": half_width, "suffix": f"t{index}",
+        })
+    picked_list = frame_quality.select_frames(
+        video, [{k: v for k, v in job.items() if k != "suffix"} for job in jobs],
+        extract=extract_frame, extract_batch=extract_frames_batch, ffmpeg=ffmpeg,
+    ) if jobs else []
+    frames: list[dict[str, Any]] = []
+    job_i = 0
+    for index, cached in enumerate(reuse, 1):
+        if cached is not None:
+            frames.append(cached)
+            continue
+        picked = picked_list[job_i]
+        job_i += 1
         if not picked.get("ok"):
             continue
         frames.append({
