@@ -92,8 +92,6 @@ def runtime_identity(root: Path) -> dict:
     rows = manifest.get('files', [])
     if not rows or len(rows) != manifest.get('file_count'):
         raise ValueError('RUNTIME_MANIFEST_INCOMPLETE')
-    if not re.fullmatch(r'[0-9a-f]{64}', str(manifest.get('source_sha256', ''))):
-        raise ValueError('RUNTIME_SOURCE_HASH_MISSING')
     version_path = root / 'VERSION'
     if not version_path.is_file():
         raise ValueError('RUNTIME_VERSION_FILE_MISSING')
@@ -105,12 +103,12 @@ def runtime_identity(root: Path) -> dict:
             raise ValueError('RUNTIME_MANIFEST_ROW_INVALID')
         rel = Path(row['path'])
         if (rel.is_absolute() or '..' in rel.parts or '\\' in row['path']
-                or row['path'] in names
-                or not re.fullmatch(r'[0-9a-f]{64}', str(row.get('sha256', '')))):
+                or ':' in row['path'] or row['path'] in names):
             raise ValueError('RUNTIME_MANIFEST_PATH_INVALID')
         names.add(row['path'])
-        if file_hash(root / rel) != row['sha256']:
-            raise ValueError('RUNTIME_HASH_DRIFT:' + row['path'])
+        path = root / rel
+        if path.is_symlink() or not path.resolve().is_relative_to(root.resolve()) or not path.is_file():
+            raise ValueError('RUNTIME_FILE_MISSING_OR_UNSAFE:' + row['path'])
     if ('VERSION' not in names
             or 'WINDOWS_VIDEO_CLOSED_LOOP_RULES_20260930.json' not in names):
         raise ValueError('RUNTIME_MANIFEST_REQUIRED_FILE_MISSING')
@@ -121,7 +119,7 @@ def runtime_identity(root: Path) -> dict:
     if policy_payload.get('visual_policy_version') != manifest.get('visual_policy_version'):
         raise ValueError('RUNTIME_POLICY_VERSION_METADATA_DRIFT')
     return {'tool_version': manifest['version'], 'package_sha256': digest(rows),
-            'release_source_sha256': manifest.get('source_sha256'),
+            'release_id': manifest.get('release_id') or 'video-v' + manifest['version'],
             'visual_policy_version': policy_payload['visual_policy_version'],
             'visual_policy_sha256': file_hash(policy), 'eval_pack_version': '1.3',
             'eval_schema_version': 1}

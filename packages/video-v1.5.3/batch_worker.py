@@ -94,6 +94,23 @@ def _payload_sha256(payload: object) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _meeting_bgm_spec(value: object) -> dict:
+    """Preserve an explicit worker BGM choice; strings never become random auto."""
+    if isinstance(value, dict):
+        return dict(value) if value else {"auto": True}
+    text = str(value or "").strip()
+    if not text:
+        return {"auto": True}
+    path_like = (pathlib.Path(text).is_absolute()
+                 or bool(re.match(r"^[A-Za-z]:[\\/]", text))
+                 or text.startswith("\\\\")
+                 or ("/" in text or "\\" in text)
+                 or pathlib.Path(text).suffix.lower() in {".mp3", ".m4a", ".wav", ".aac", ".flac"})
+    if path_like:
+        return {"path": text}
+    return {"music_id": text}
+
+
 def _batch_result_contract(status: str, *, run_id: str, failures: list[dict] | None = None,
                            error: str = "", parent_run_id: str | None = None,
                            task_id: str | None = None,
@@ -459,7 +476,7 @@ def validate_visual_match(report_dir: pathlib.Path) -> tuple[bool, str]:
         for index, segment in enumerate(segments, 1):
             if not isinstance(segment, dict) or segment.get("selection_mode") != "ai_editor":
                 return False, "VISUAL_MATCH_BLOCKED: mixed AI/legacy segments"
-            check = contract.validate_segment_receipt(segment, index=index, verify_source=True)
+            check = contract.validate_segment_receipt(segment, index=index, verify_source=True, manifest=match.get("manifest"))
             if not check["ok"]:
                 return False, "VISUAL_MATCH_BLOCKED: " + ";".join(check["reasons"])
             for part in segment.get("span_parts") or [segment]:
@@ -1213,6 +1230,10 @@ def prior_draft_requires_recheck(task_dir: pathlib.Path, index: int,
 def process_task(task: dict, *, retry_partial: bool = False,
                  retry_error: bool = False) -> None:
     global ACTIVE_RECORD_ID
+    if str(SKILL) not in sys.path:
+        sys.path.insert(0, str(SKILL))
+    from orchestrator.task_inputs import normalize_meeting_task, manifest_meeting_fields
+    task = normalize_meeting_task(task)
     rid = task["record_id"]
     run_id = "%s-%s-%s" % (rid, time.strftime("%Y%m%d%H%M%S"), uuid.uuid4().hex[:8])
     parent_run_id = str(task.get("parent_run_id") or "").strip() or None
@@ -1298,6 +1319,8 @@ def process_task(task: dict, *, retry_partial: bool = False,
         except (OSError, ValueError):
             pass
     try:
+        if str(task.get("voice_tempo_status") or "").lower() == "invalid":
+            raise RuntimeError("VOICE_TEMPO_INVALID: refusing category-default fallback")
         if not mount_nas():
             raise RuntimeError("NAS mount failed")
         mdir = str(task.get("material_dir") or "").strip()
@@ -1329,7 +1352,12 @@ def process_task(task: dict, *, retry_partial: bool = False,
             "parent_run_id": parent_run_id,
             "full_script": str(task.get("script") or "").strip(),
             "voice": str(task.get("voice") or "").strip(),
-            "bgm": {"auto": True},
+            "voice_tempo": task.get("voice_tempo"),
+            **manifest_meeting_fields(task),
+            "bgm": _meeting_bgm_spec(task.get("bgm")),
+            "bgm_state_dir": str(WORK / "bgm-selection"),
+            "batch_id": str(task.get("batch_id") or task.get("batch_identity")
+                             or task.get("worker_batch_identity") or task.get("task_id") or rid),
             # 音色/BGM 已由飞书表格给定（运营已选定），等于运营侧确认，必须显式
             # 声明 —— 否则引擎会进 audio_selection_gate，要求可播放的试听候选，
             # 批量环境下会直接 BGM_PREVIEW_UNAVAILABLE。与 R3 可跑通稿口径一致。
@@ -1845,6 +1873,8 @@ def process_task(task: dict, *, retry_partial: bool = False,
                     failures[0]["index"], count + 1)) if failures and "index" in failures[0] else []),
                 "finished_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             }
+            from orchestrator.task_inputs import done_meeting_fields
+            payload.update(done_meeting_fields(task))
             payload.update(contract(status, failures=all_issues))
             if drafts:
                 payload["eval_receipt"] = evaluate_task(tdir, task, drafts, qc_reports, frozen)
@@ -1897,6 +1927,8 @@ def process_task(task: dict, *, retry_partial: bool = False,
             "nas_links": existing_done.get("nas_links", []),
             "finished_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         }
+        from orchestrator.task_inputs import done_meeting_fields
+        done_payload.update(done_meeting_fields(task))
         done_payload.update(contract("OK"))
         for key in ("nas_parent_folder", "distribution_status", "distribution_receipt",
                     "table_update_receipt", "closed_loop_receipts", "eval_receipt",
@@ -1923,6 +1955,8 @@ def process_task(task: dict, *, retry_partial: bool = False,
                                         if previous_drafts else []),
             "finished_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         }
+        from orchestrator.task_inputs import done_meeting_fields
+        error_payload.update(done_meeting_fields(task))
         error_payload.update(contract(preserved_status, failures=failure_rows, error=str(exc)))
         done.write_text(json.dumps(error_payload, ensure_ascii=False, indent=2), encoding="utf-8")
         notification = publish_failure_notification(tdir)
@@ -2226,6 +2260,19 @@ def main():
     if not preflight.get("ok"):
         _record_queue_preflight_block(queue[0], prior, preflight)
         return
+    if not (queue[0].get("batch_id") or queue[0].get("batch_identity")):
+        # All tasks read from the same queue snapshot share one durable BGM
+        # de-duplication cycle, including a selected task retried later.
+        queue_identity = sorted(({
+            "record_id": str(item.get("record_id") or ""),
+            "task_id": str(item.get("task_id") or ""),
+            "proc_key": str(item.get("proc_key") or ""),
+            "script_sha256": hashlib.sha256(
+                str(item.get("script") or "").encode("utf-8")).hexdigest(),
+        } for item in all_tasks), key=lambda item: (
+            item["record_id"], item["task_id"], item["proc_key"],
+            item["script_sha256"]))
+        queue[0]["worker_batch_identity"] = _payload_sha256(queue_identity)
     _run_task(queue[0])
     log("BATCH FINISHED")
 

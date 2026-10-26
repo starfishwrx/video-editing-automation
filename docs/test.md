@@ -24,6 +24,8 @@ uv run --frozen python -X utf8 -m unittest discover -s doubao-jianying-orchestra
 
 `.github/workflows/ci.yml` 在 PR、`main` push 和手动触发时使用 Windows / Python 3.11、uv 与冻结锁文件运行上述两套测试，另核对 CLI `--help` 与 `examples/manifest.preview.json` 的 JSON 语法。CI 不注入生产密钥，不执行真实模型/TTS、NAS/飞书或生产部署。workflow 文件不等于仓库已开启必须通过检查的分支保护，维护者需在 Settings 中单独设置。
 
+媒体测试前使用已有 `run.py setup-ffmpeg` 准备绿色 FFmpeg/ffprobe，并将路径传入 runner 后续步骤。依赖准备允许下载可执行文件；离线回归指不调用业务模型/服务，不表示 runner 已预装媒体工具。字幕 ASR 为显式注入，模型权重和真实任务数据不进 CI。
+
 文档中的合成视频/`analyze-shots --no-vision` 示例见 `docs/quickstart.md`，可在准备 FFmpeg 后本地验证；它验证素材解析与抽帧，不作为视觉效果验收。模型、prompt 或选镜逻辑变更还需单独记录真实图片观察和人工审阅。
 
 ## 2. 局部迭代（可缩小）
@@ -34,7 +36,7 @@ uv run --frozen python -X utf8 -m unittest discover -s doubao-jianying-orchestra
 | NAS 往返 | `test_nas_portable.py` |
 | 单一闸门 | 对应 `test_*gate*` / 模块测试，且必须含「该拦的输入被拦住」 |
 
-局部绿 ≠ 可合并发版。准备发版 PR 时回到第 1 节或第 3 节。
+普通源码 PR 依据适用离线回归、代码审查与目标 Windows CI 合并；真实成片、GUI 编辑及生产安装另行验收，不要求每次源码修复都先出两条成片。准备发版时才运行第 3 节。
 
 ## 3. 发版验收（合包命令）
 

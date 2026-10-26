@@ -24,7 +24,6 @@ vision = [
   "opencv-python-headless>=4.8.0",
 ]
 dev = []
-
 [tool.uv]
 package = false
 default-groups = ["recommended", "vision"]

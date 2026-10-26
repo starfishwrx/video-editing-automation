@@ -1,0 +1,14 @@
+{
+  "voice_tempo": {
+    "field_name": "<exact existing Feishu field name for TTS tempo>",
+    "field_id": "fldExampleTempo000"
+  },
+  "modified_reference_links": {
+    "field_name": "<exact existing Feishu field name for modified final links>",
+    "field_id": "fldExampleLink000"
+  },
+  "modified_reference_attachments": {
+    "field_name": "<exact existing Feishu field name for modified final attachments>",
+    "field_id": "fldExampleFile000"
+  }
+}

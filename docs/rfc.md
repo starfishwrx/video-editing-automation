@@ -9,7 +9,7 @@
 | 包布局 | `packages/video-v1.x.y/` 多版本并存 | 历史包与校验清单绑定；禁止改归档 |
 | 活代码目录名 | 固定 `packages/video-v1.5.3/` | 小版本升级只改 `VERSION`，避免整树改名与路径断裂 |
 | 真实版本 | 只读 `VERSION` / `release-manifest.json` | 禁止在提示词或代码里手写版本号做等值闸门 |
-| 生产真相 | 部署机器的 `ACTIVE_VIDEO_RUNTIME.json` + 已安装技能哈希 | 候选 worktree ≠ 已部署 |
+| 生产真相 | 部署机器的 `ACTIVE_VIDEO_RUNTIME.json` + 实际安装文件 | 候选 worktree ≠ 已部署 |
 | 开发入口 | 干净 worktree 跟踪 `origin/main` | 勿把带大量未提交覆盖的 fork 检出当主树 |
 
 ## 2. 端到端流水线

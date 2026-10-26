@@ -18,7 +18,7 @@ matching successful run, and creates a new project through the bundled writer.
 
 - Preserve source media and write to a new draft. Do not close, switch, or overwrite a draft while Jianying is running.
 - Keep audio inside its matching video/full-timeline boundary; never leave trailing narration after the picture ends.
-- Validate the saved draft independently before reporting success.
+- Check the saved draft for readable media, valid timing and visible subtitles before reporting success. Source hashes or receipt signatures do not prove these results.
 - Prefer cached metadata and generated assets; do not repeat expensive probes or TTS synthesis unnecessarily.
 - For end-to-end generation, always hand the manifest to the sibling
   `doubao-jianying-orchestrator` and run `run.py build`. This skill supplies

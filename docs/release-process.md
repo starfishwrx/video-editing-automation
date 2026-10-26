@@ -18,9 +18,8 @@ uv run --frozen python -X utf8 -m tools.release_package build --output $delivery
 uv run --frozen python -X utf8 -m tools.release_package build --output $releaseOutput --checks full
 ```
 
-命令生成 ZIP、SHA256SUMS、逐文件校验、测试日志和发布收据，不部署、不推送、不开队列。
-`verify --package $unpackedPackage` 可只读核验已有包；清单漏项、损坏或版本不一致会失败。
-已有输出目录不覆盖；失败后先查日志，使用新的输出目录再验证。
+命令生成单份文件路径清单、ZIP、测试日志与发布收据。解压检查使用 ZIP CRC，保留一份 ZIP SHA256 供下载时核对；不再生成逐文件 SHA 清单、源码树哈希或重复对照元数据哈希。
+`verify --package $unpackedPackage` 检查版本、必需文件、目录清单与路径边界；它不认证源码字节或成片质量。已有输出目录不覆盖。
 以下为各历史版本通用说明；当前包不再使用下述手工 PowerShell 清单命令。
 
 前置条件

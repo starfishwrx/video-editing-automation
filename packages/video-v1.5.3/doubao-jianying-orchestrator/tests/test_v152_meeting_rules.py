@@ -82,7 +82,7 @@ class RulepackTests(unittest.TestCase):
         self.assertEqual(explicit["voice_tempo"], 1.1)
         zhipin = rulepack.apply_manifest_defaults({"product": "湿厕纸", "tail_pad_s": 0.1,
                                                   "auto_transition": True})
-        self.assertEqual(zhipin["voice_tempo"], 1.0)
+        self.assertEqual(zhipin["voice_tempo"], 1.3)
         self.assertEqual(zhipin["tail_pad_s"], 0.1)
         self.assertTrue(zhipin["auto_transition"])
 
@@ -912,7 +912,9 @@ class VoicePostTests(unittest.TestCase):
     def test_tempo_normalize(self):
         self.assertEqual(voice_tts.normalize_tempo(None), 1.0)
         self.assertEqual(voice_tts.normalize_tempo("1.2"), 1.2)
-        self.assertEqual(voice_tts.normalize_tempo(9), 2.0)
+        # Operator input must not silently become a different requested tempo.
+        with self.assertRaises(ValueError):
+            voice_tts.normalize_tempo(9)
         name = voice_tts._post_name(Path("tts_abc.ogg"), 1.2, 25, True)
         self.assertEqual(name.name, "tts_abc.p1_k25_t120.ogg")
 

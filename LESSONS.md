@@ -5,7 +5,19 @@
 - `hits >= 3` → 开 PR 升级为硬规则（AGENTS.md / docs/code-standards.md / 测试），条目状态改 `PROMOTED`，写明落点。
 - 只写“下次怎么避免”，不写长篇过程。不写任何凭据、NAS 路径、业务表链接。
 
+## 新增条目
+
+### L-20261026-01 配音身份和最终字幕时间必须共用同一输入
+- status: OPEN
+- hits: 1
+- 模块: audio-voice / orchestrator-engine
+- 现象: 预合成与最终合成分别读取任务和环境音色，会用另一说话人的时长选镜；按视频段写整句字幕会在换镜时重播文本。
+- 根因: 音色/倍速解析分散，字幕依赖画面片段而非最终旁白。
+- 以后怎么做: 显式任务音色先锁一次，倍速只处理原始缓存一次；名称与品类默认共用拆解入口，覆盖表格裸小数和“倍速”尾缀。字幕取最终纯旁白词时间，品牌和内容不符保持待审。结构回读与剪映批量编辑验收分开，CUDA视频可用也不代表ASR所需DLL齐全。
+- 证据: `docs/meeting-features-20261026.md`、`test_meeting_voice.py`、`test_audio_captions.py`、`test_meeting_caption_integration.py`。
+
 ## 条目模板
+
 ```
 ### L-YYYYMMDD-NN 一句话标题
 - status: OPEN | PROMOTED(<落点>) | OBSOLETE
@@ -18,6 +30,34 @@
 ```
 
 ## 已有条目（从代码注释与 references 中回填的种子，hits 按已知次数）
+
+### L-20261026-04 写入参数要同源，批次身份要跨轮询
+- status: OPEN
+- hits: 1
+- 模块: captions / JyPoll
+- 现象: 纸品配置字幕坐标与写入默认值不同导致出稿失败；完成一条任务后剩余任务变成新BGM批次。
+- 根因: 配置未贯通实际写入器；用变化的查询快照替代持久批次状态。
+- 以后怎么做: 写入与回读使用同一坐标；尚有同批任务时沿用一个普通批次ID，排空或完全换批后再创建。
+- 证据: PR #22 独立代码审查、test_meeting_caption_integration.py、test_meeting_poll_fields.py。
+
+### L-20261026-03 已知文案的 TTS 不应再由 ASR 重建字幕
+- status: OPEN
+- hits: 1
+- 模块: audio-voice / validation
+- 现象: 已知原文生成的 TTS 又经过识别，错字与模型依赖变成阻断出稿的主要原因。
+- 根因: 把字幕时间需求扩大为重新识别内容，并用哈希账代替实际输出判断。
+- 以后怎么做: 原文直接作为字幕正文，最终 TTS 真实时长决定每句区间；一句多镜统一字幕。检查实际媒体、窗口、文字和时间；不要求源码、提示词、拼图与收据逐层签名。
+- 证据: docs/reviews/20261026-simplification.md、test_audio_captions.py。
+
+
+### L-20261026-01 API 槽位不是工作线程，媒体与请求阶段独立控制
+- status: OPEN
+- hits: 1
+- 模块: visual-matching / runtime-and-recovery
+- 现象: 放宽视觉槽位仍没有体感提速；进度字段也可能沿用上一轮的并发数。
+- 根因: 槽位只限流，不创建请求；媒体准备占用请求工作线程会压低吞吐，整批收集返回值又推迟断点保存。跨进程槽位与每任务工作线程不是同一预算。
+- 以后怎么做: 媒体准备先独立限流并完成，再启动请求池；请求按完成顺序校验并持久化，归并时按批次及镜头身份绑定。提交前记录实际并发配置，分阶段计时；不以离线模拟宣称生产加速。
+- 证据: `test_vision_stage_concurrency.py`、`test_visual_qc_response_contract.py` 与包内 `ENVIRONMENT.md`。
 
 ### L-20261026-01 硬拒帧不能报成功；Path.glob 不能当布尔值
 - status: OPEN
@@ -36,6 +76,14 @@
 - 根因: 只更新实现和包内局部说明，没有同步首页、环境合同、架构与协作入口。
 - 以后怎么做: 型号保留 GLM-5.3-Flash 全名和 API ID；默认 transport/选镜/QC 变更同步模型、配置和架构文档。明确 legacy/实验范围，分别记录源码、发布附件和生产身份；用合成抽帧验证入门命令。
 - 证据: `docs/model-and-vision.md`、`docs/quickstart.md`、`CONTRIBUTING.md`、`.github/workflows/ci.yml`。
+### L-20261023-08 品类规则要到达看图与最终写入，配置值不能代替成片验证
+- status: OPEN
+- hits: 1
+- 模块: visual-matching / orchestrator-engine
+- 现象: 品类已有规则但AI入口未读取；固定字幕坐标与写后检查不能支持像素位置；只看时间轴相接仍可能漏掉音频内静音或提前结束后的空白。
+- 根因: 规则、规划、写入和验收各用一套口径。
+- 以后怎么做: 使用同一生效规则身份；规划偏好传到engine；字幕统一换算；按实际音频切片测量句间空白；未认证不得当成正式通过。
+- 证据: 活包纸品规则、production_parameters与纸品回归测试。
 
 ### L-20261023-07 AI选镜改造必须贯穿末端、队列和独立QC
 - status: OPEN

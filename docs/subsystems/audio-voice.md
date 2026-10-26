@@ -6,6 +6,7 @@
 - 口播音色解析/推荐/唯一决议，批量 TTS 合成与缓存，试听样本生成
 - 旁白响度归一（-16 LUFS，纯增益 + 真峰值限幅，固定输出时长）
 - BGM 推荐/下载/铺底处理（整体响度 -28 LUFS，首尾淡变，APAD 对齐）
+- 会议候选的统一音色/倍速输入、原文与最终 TTS 音频时长驱动的字幕、BGM任务收据见[实现记录](../meeting-features-20261026.md)。入口增加 `voice_request.py`、`audio_captions.py`；先锁音色再处理一次倍速，空独立字段不屏蔽名称后缀，失败不假装已生效。
 
 ## 2. 音色解析与歧义处理
 - 统一入口：`voice_catalog.resolve_voice_once(spec, script, manifest, persist=True)`

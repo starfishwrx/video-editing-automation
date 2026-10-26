@@ -1,4 +1,3 @@
-import hashlib
 import json
 from pathlib import Path
 import tempfile
@@ -28,7 +27,7 @@ class DeliveryRuntimeTests(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             content = ("candidate:" + relative).encode("utf-8")
             path.write_bytes(content)
-            files.append({"path": relative, "sha256": hashlib.sha256(content).hexdigest()})
+            files.append({"path": relative, "size": len(content)})
         (self.package / "release-manifest.json").write_text(
             json.dumps({"version": "1.5.6", "files": files}), encoding="utf-8")
 
@@ -40,7 +39,7 @@ class DeliveryRuntimeTests(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(("candidate:" + relative).encode("utf-8"))
 
-    def test_all_required_files_and_hashes_match(self):
+    def test_all_required_files_match(self):
         result = runtime.diagnose(self.package, self.pipeline, self.skills)
         self.assertEqual(result["status"], "OK")
         self.assertEqual(result["issues"], [])
@@ -51,21 +50,21 @@ class DeliveryRuntimeTests(unittest.TestCase):
         self.assertEqual(result["status"], "BLOCKED")
         self.assertIn("PIPELINE_MISSING:tools/draft_delivery.py", result["issues"])
 
-    def test_old_same_version_hash_is_reported_as_drift(self):
+    def test_old_same_version_source_is_reported_as_drift(self):
         path = self.skills / "tools" / "draft_delivery.py"
         path.write_bytes(b"old implementation, same VERSION")
         result = runtime.diagnose(self.package, self.pipeline, self.skills)
         self.assertEqual(result["runtimes"]["skills"]["version"], "1.5.6")
-        self.assertIn("SKILLS_HASH_MISMATCH:tools/draft_delivery.py", result["issues"])
+        self.assertIn("SKILLS_CONTENT_MISMATCH:tools/draft_delivery.py", result["issues"])
 
-    def test_candidate_source_drift_blocks_runtime_comparison(self):
+    def test_runtime_comparison_uses_current_source_without_frozen_hashes(self):
         path = self.package / "tools" / "draft_delivery.py"
         path.write_bytes(b"candidate modified after manifest")
         result = runtime.diagnose(self.package, self.pipeline, self.skills)
         self.assertEqual(result["status"], "BLOCKED")
-        self.assertIn("PACKAGE_HASH_MISMATCH:tools/draft_delivery.py", result["issues"])
-        self.assertIn("PIPELINE_PACKAGE_SOURCE_DRIFT:tools/draft_delivery.py", result["issues"])
-        self.assertIn("SKILLS_PACKAGE_SOURCE_DRIFT:tools/draft_delivery.py", result["issues"])
+        self.assertNotIn("PACKAGE_CONTENT_MISMATCH:tools/draft_delivery.py", result["issues"])
+        self.assertIn("PIPELINE_CONTENT_MISMATCH:tools/draft_delivery.py", result["issues"])
+        self.assertIn("SKILLS_CONTENT_MISMATCH:tools/draft_delivery.py", result["issues"])
 
     def test_ship_dependency_guard_uses_only_the_requested_root(self):
         runtime.require_ship_dependencies(self.skills)

@@ -69,6 +69,101 @@ function Get-JsonHash($path) {
   } catch { $h = @{} }
   return $h
 }
+
+function Convert-MeetingTempo($value) {
+  if ($null -eq $value) { return $null }
+  if ($value -is [int] -or $value -is [long] -or $value -is [double] -or $value -is [decimal]) {
+    return [double]$value
+  }
+  $text = ([string]$value).Trim()
+  if ($text -match '^(?:x|×)?\s*(\d+(?:\.\d+)?)\s*(?:(?:倍)(?:速)?|[xX×])?$') {
+    try { return [double]::Parse($Matches[1], [System.Globalization.CultureInfo]::InvariantCulture) } catch {}
+  }
+  return $null
+}
+
+function Resolve-MeetingOptionalFieldMap($json, $baseIds, $slots) {
+  $fields = @{}
+  $indices = @{}
+  $issues = @()
+  if (-not [string]::IsNullOrWhiteSpace([string]$json)) {
+    try {
+      $config = ConvertFrom-Json -InputObject $json
+      foreach ($property in $config.PSObject.Properties) {
+        if ($property.Name -notin $slots) { $issues += ('unknown:' + $property.Name) }
+      }
+      foreach ($slot in $slots) {
+        $property = $config.PSObject.Properties[$slot]
+        $entry = if ($property) { $property.Value } else { $null }
+        if ($entry -and -not [string]::IsNullOrWhiteSpace([string]$entry.field_name) -and
+            [string]$entry.field_id -match '^fld[A-Za-z0-9]+$') {
+          $fields[$slot] = [ordered]@{
+            field_name = [string]$entry.field_name
+            field_id = [string]$entry.field_id
+          }
+          $indices[$slot] = $baseIds.Count + $fields.Count - 1
+        } elseif ($entry) {
+          $issues += $slot
+        }
+      }
+    } catch { $issues += 'parse' }
+  }
+  $ordered = @($slots | Where-Object { $fields.ContainsKey($_) })
+  $ids = @($baseIds) + @($ordered | ForEach-Object { $fields[$_].field_id })
+  return [pscustomobject]@{
+    fields = $fields; indices = $indices; ids = $ids; ordered_slots = $ordered; issues = $issues
+  }
+}
+
+function Get-MeetingTaskInputs($row, $indices, $fields) {
+  $voiceOriginal = if ($row.Count -gt 4) { $row[4] } else { '' }
+  $tempo = $null
+  $tempoOriginal = $null
+  $tempoStatus = 'unknown'
+  $referenceLinks = @()
+  $referenceAttachments = @()
+  foreach ($slot in @('voice_tempo','modified_reference_links','modified_reference_attachments')) {
+    if (-not $indices.ContainsKey($slot)) { continue }
+    $index = [int]$indices[$slot]
+    $value = if ($row.Count -gt $index) { $row[$index] } else { $null }
+    if ($null -eq $value -or ($value -is [string] -and [string]::IsNullOrWhiteSpace($value))) { continue }
+    switch ($slot) {
+      'voice_tempo' {
+        $tempoOriginal = $value
+        $tempo = Convert-MeetingTempo $value
+        $tempoStatus = if ($null -eq $tempo) { 'invalid' } else { 'explicit' }
+      }
+      'modified_reference_links' { $referenceLinks = $value }
+      'modified_reference_attachments' { $referenceAttachments = $value }
+    }
+  }
+  return [pscustomobject]@{
+    voice_original = $voiceOriginal
+    voice_tempo = $tempo
+    voice_tempo_original = $tempoOriginal
+    voice_tempo_status = $tempoStatus
+    modified_reference_links = $referenceLinks
+    modified_reference_attachments = $referenceAttachments
+    reference_status = 'unknown'
+  }
+}
+
+function Get-PollBatchState($parts, $previous) {
+  $members = @($parts | Sort-Object -Unique)
+  $overlap = @($members | Where-Object { @($previous.members) -contains $_ })
+  $id = [string]$previous.batch_id
+  if ([string]::IsNullOrWhiteSpace($id) -or $overlap.Count -eq 0) {
+    $id = 'poll-' + [guid]::NewGuid().ToString('N')
+  }
+  return [pscustomobject]@{ batch_id = $id; members = $members }
+}
+
+function Get-Sha256Text($value) {
+  $sha = [System.Security.Cryptography.SHA256]::Create()
+  try {
+    return [BitConverter]::ToString($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes([string]$value))).Replace('-','').ToLowerInvariant()
+  } finally { $sha.Dispose() }
+}
 $processed = @{}
 if (Test-Path -LiteralPath (Join-Path $STATE 'processed.json')) {
   $processed = Get-JsonHash (Join-Path $STATE 'processed.json')
@@ -114,7 +209,22 @@ $filterAFile = Join-Path $STATE 'filterA.json'
 $filterBFile = Join-Path $STATE 'filterB.json'
 [System.IO.File]::WriteAllText($filterAFile, '{"logic":"and","conditions":[["fldxNNEXlA","==","待完成"],["fldyPLziiz","!=","验收通过"],["fldyPLziiz","!=","已二次修改"],["fldyPLziiz","!=","废弃"]]}', (New-Object System.Text.UTF8Encoding($false)))
 [System.IO.File]::WriteAllText($filterBFile, '{"logic":"and","conditions":[["fldxNNEXlA","==","已完成"],["fldailz4cg","!=",""],["fldr3pwQM8","!=",""],["fldyPLziiz","!=","验收通过"],["fldyPLziiz","!=","已二次修改"],["fldyPLziiz","!=","废弃"]]}', (New-Object System.Text.UTF8Encoding($false)))
-$fieldArgs = '--field-id fldt6jXRlr --field-id fldMONH983 --field-id fld2QJuihE --field-id fldzk6X37A --field-id fldWjlEsvJ --field-id fldzFjx4Ge --field-id fldX6TFNA9 --field-id fldzmyPErU --field-id fldr3pwQM8 --field-id fldailz4cg --field-id fldyPLziiz --field-id flditUJwm3'
+$baseFieldIds = @('fldt6jXRlr','fldMONH983','fld2QJuihE','fldzk6X37A','fldWjlEsvJ','fldzFjx4Ge','fldX6TFNA9','fldzmyPErU','fldr3pwQM8','fldailz4cg','fldyPLziiz','flditUJwm3')
+$optionalSlots = @('voice_tempo','modified_reference_links','modified_reference_attachments')
+# Optional, already-existing Feishu fields are configured by their exact
+# field_name from table metadata and field_id; this does not add table columns.
+# Example shape (copy each exact name/id pair from existing API metadata):
+# {"voice_tempo":{"field_name":"<tempo label>","field_id":"fld..."},"modified_reference_links":{"field_name":"<final link label>","field_id":"fld..."},"modified_reference_attachments":{"field_name":"<final attachment label>","field_id":"fld..."}}
+$optionalJson = [Environment]::GetEnvironmentVariable('JY_MEETING_OPTIONAL_FIELDS_JSON', 'Process')
+$optionalMap = Resolve-MeetingOptionalFieldMap $optionalJson $baseFieldIds $optionalSlots
+$optionalFields = $optionalMap.fields
+$optionalIndex = $optionalMap.indices
+foreach ($issue in $optionalMap.issues) {
+  if ($issue -eq 'parse') { Out-Log 'MEETING_OPTIONAL_FIELD_CONFIG_PARSE_FAIL' }
+  else { Out-Log ('MEETING_OPTIONAL_FIELD_CONFIG_INVALID slot=' + $issue) }
+}
+if ($optionalMap.issues.Count -gt 0) { Out-Log 'MEETING_OPTIONAL_FIELD_CONFIG_BLOCKED'; exit 2 }
+$fieldArgs = (($optionalMap.ids | ForEach-Object { '--field-id ' + $_ }) -join ' ')
 $outA = Join-Path $STATE 'larkA.json'
 $outB = Join-Path $STATE 'larkB.json'
 $worksets = @()
@@ -136,6 +246,24 @@ foreach ($fp in @(@($filterAFile,$outA,'A'), @($filterBFile,$outB,'B'))) {
   $worksets += [pscustomobject]@{ mode = $mode; rids = @($d.data.record_id_list); rows = @($d.data.data) }
 }
 if ($worksets.Count -eq 0) { exit 0 }
+
+# Keep a cohort identity while any of its tasks remain outstanding. A completed
+# task leaving the query must not reset BGM rotation for the remaining tasks.
+$batchParts = @()
+foreach ($set in $worksets) {
+  for ($j = 0; $j -lt $set.rids.Count; $j++) {
+    $row = @($set.rows[$j])
+    $taskKey = if ($row.Count -gt 0) { [string]$row[0] } else { '' }
+    $scriptHash = if ($row.Count -gt 2) { Get-Sha256Text ([string]$row[2]) } else { '' }
+    $issueHash = if ($row.Count -gt 9) { Get-Sha256Text ([string]$row[9]) } else { '' }
+    $batchParts += ([string]$set.mode + '|' + [string]$set.rids[$j] + '|' + $taskKey + '|' + $scriptHash + '|' + $issueHash)
+  }
+}
+$batchFile = Join-Path $STATE 'bgm-poll-batch.json'
+$batchState = Get-PollBatchState $batchParts (Get-JsonHash $batchFile)
+$batchState | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $batchFile -Encoding UTF8
+$batchId = $batchState.batch_id
+$bgmStateDir = Join-Path $WORK 'bgm-selection'
 
 # 字段序：0 任务ID 1 视频标题 2 脚本文案 3 分镜素材 4 配音名称 5 BGM名称 6 生成条数 7 参考视频 8 草稿文件 9 问题反馈 10 成片状态 11 产品
 # 优先处理二次修改；即使 A 有记录，也必须检查 B，避免返工队列长期饥饿。
@@ -230,8 +358,7 @@ for ($i = 0; $i -lt $rids.Count; $i++) {
   $title  = if ($r.Count -gt 1) { [string]$r[1] } else { '' }
   $voice  = if ($r.Count -gt 4) { [string]$r[4] } else { '' }
   $bgm    = if ($r.Count -gt 5) { [string]$r[5] } else { '' }
-  $count  = 1
-  if ($r.Count -gt 6) { try { $count = [int]$r[6] } catch {} ; if ($count -lt 1) { $count = 1 } }
+  $count  = 1 # 当前会议 profile 每条文案只生成一条；legacy 由显式 profile 调用方承担。
   # 素材字段是 markdown link：[UNC](http://UNC) -> 取 UNC
   $matDir = $mat
   if ($mat -match '^\[([^\]]+)\]') { $matDir = $Matches[1] }
@@ -256,17 +383,29 @@ for ($i = 0; $i -lt $rids.Count; $i++) {
   $matZ = 'Z:\' + (($matDir.Substring(2)) -split '\\', 2)[1]
 
   $refVid = if ($r.Count -gt 7) { [string]$r[7] } else { '' }
+  $meetingInputs = Get-MeetingTaskInputs $r $optionalIndex $optionalFields
+  if ($meetingInputs.voice_tempo_status -eq 'invalid') {
+    Out-Log ('MEETING_TEMPO_UNPARSED field=' + $optionalFields.voice_tempo.field_name + ' record=' + $rid)
+  }
   $taskDir = Join-Path $WORK $rid
   New-Item -ItemType Directory -Path $taskDir -Force | Out-Null
   $taskObj = [ordered]@{
     record_id = $rid; task_id = $taskId; title = $title; script = $script
     material_dir = $matDir; material_dir_z = $matZ; voice = $voice; bgm = $bgm; count = $count
+    meeting_profile = 'meeting'; voice_original = $meetingInputs.voice_original
+    bgm_state_dir = $bgmStateDir; batch_id = $batchId
+    voice_tempo = $meetingInputs.voice_tempo
+    voice_tempo_original = $meetingInputs.voice_tempo_original
+    voice_tempo_status = $meetingInputs.voice_tempo_status
+    modified_reference_links = $meetingInputs.modified_reference_links
+    modified_reference_attachments = $meetingInputs.modified_reference_attachments
+    meeting_reference_evaluation = 'unknown'
     reference_video = $refVid; rev = $revVal; issue = $issue; draft_file = $draftFile; proc_key = $key; product = $product
     category = [string]$identityRow.category; sku = [string]$identityRow.sku
     material_index_file = $materialIndexFile
     film_status = $filmStatus; feedback_scope = $feedbackScope; feedback_category = $feedbackCategory; feedback_rule_key = $feedbackRuleKey; feedback_rule_text = $feedbackRuleText; feedback_classification = $feedbackClassification
   }
-  $taskObj | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $taskDir 'task.json') -Encoding UTF8
+  $taskObj | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath (Join-Path $taskDir 'task.json') -Encoding UTF8
 
   # ---- 生成一次性 run 脚本（凭据只从进程环境读取，自我删除）----
   $runSrc = Join-Path $PIPE 'run_task.template.ps1'

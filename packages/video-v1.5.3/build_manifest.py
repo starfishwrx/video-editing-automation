@@ -2,9 +2,7 @@
 """Build a deterministic manifest for the version declared by this package."""
 from __future__ import annotations
 
-import hashlib
 import json
-import os
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -33,52 +31,31 @@ def files() -> list[Path]:
     return sorted(values, key=lambda item: item.relative_to(ROOT).as_posix().encode("utf-8"))
 
 
-def sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
-def tree_hash(items: list[Path]) -> str:
-    digest = hashlib.sha256(b"video-release-tree-v1\0")
-    for path in items:
-        rel = path.relative_to(ROOT).as_posix()
-        mode = format(os.stat(path).st_mode & 0o7777, "04o")
-        digest.update(rel.encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(mode.encode("ascii"))
-        digest.update(b"\0")
-        digest.update(bytes.fromhex(sha256(path)))
-    return digest.hexdigest()
-
-
 def main() -> int:
     version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
     if not version:
         raise ValueError("PACKAGE_VERSION_MISSING")
     items = files()
-    lines = [f"{sha256(path)}  {path.relative_to(ROOT).as_posix()}" for path in items]
-    (ROOT / "PACKAGE_CONTENTS.sha256").write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
     old = {}
     if (ROOT / "release-manifest.json").is_file():
         old = json.loads((ROOT / "release-manifest.json").read_text(encoding="utf-8"))
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "release_id": "video-v" + version,
         "version": version,
-        "tree_hash_algorithm": "video-release-tree-v1",
-        "source_sha256": tree_hash(items),
         "file_count": len(items),
         "excluded": old.get("excluded") or [
             "media", "credentials", "production logs",
             "machine-specific paths", "knowledge-base bodies",
         ],
-        "files": [{"path": path.relative_to(ROOT).as_posix(), "sha256": sha256(path)}
+        "files": [{"path": path.relative_to(ROOT).as_posix()}
                   for path in items],
         "visual_policy_version": old.get("visual_policy_version") or "1.4.1",
     }
     (ROOT / "release-manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         encoding="utf-8", newline="\n")
-    print(manifest["source_sha256"])
+    print(manifest["release_id"])
     print(f"file_count={manifest['file_count']}")
     return 0
 

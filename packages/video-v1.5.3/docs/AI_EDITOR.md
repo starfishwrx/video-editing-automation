@@ -1,5 +1,8 @@
 # 卖点优先的 AI 选镜
 
+纸品专项规则和参数见[纸品生产规则](PAPER_PRODUCTION_RULES.md)。AI政策升级为
+`selling-points-first-meeting-paper-v1`，计划、片段、草稿和独立QC记录生效规则版本；不要求规则内容哈希或收据自签。
+
 正常 CLI 和任务模板默认使用 `ai_editor`。manifest 的 `selection_mode: legacy`
 可显式回滚，其优先级高于 `JY_SELECTION_MODE`。未标模式的历史内存 matcher 输入
 维持旧 API，不自动升级缓存。
@@ -35,7 +38,7 @@ AI 通读整稿，按内容区分具体卖点、产品介绍、无具体卖点�
 - `ai_editor/plan.json`采用`chatcut-ai-selection-v1`，记录用途、卖点、候选观察、
   检查范围、编排和待审项；原响应、提示词与帧单独保存。
 - 每段`ai_selection`采用`chatcut-ai-selection-evidence-v1`，绑定原文、段号、
-  素材SHA256、源窗口、证据区间、拼图和提示词身份；多镜逐段绑定。
+  素材路径/大小/修改时间、源窗口与证据区间；多镜逐段记录，不要求拼图或提示词哈希。
 - 末端语义检查与worker重验收据；引擎继续核验实际素材及最终窗口。
   新模式不用旧场景换镜器和词表裁决，不因多样性要求挤掉卖点画面。
 - 引擎保存`ai_selection_identity.json`。独立QC核对实际草稿片段和源内容，

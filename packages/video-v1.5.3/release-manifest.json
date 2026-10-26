@@ -6,833 +6,692 @@
     "machine-specific paths",
     "knowledge-base bodies"
   ],
-  "file_count": 205,
+  "file_count": 227,
   "files": [
     {
-      "path": ".gitignore",
-      "sha256": "d924e57766700e2252b89b459aab07006ccfaac56e541b39db43ac446558823d"
+      "path": ".gitignore"
     },
     {
-      "path": ".python-version",
-      "sha256": "49a506dd32096b010d75205acf3430c9ae6c40351888129499e5a5e487126c93"
+      "path": ".python-version"
     },
     {
-      "path": "ENVIRONMENT.md",
-      "sha256": "9e4c93d3f2c9621246f245b61439e02f607864115f6ffe5a42596ca5a5a15c88"
+      "path": "ENVIRONMENT.md"
     },
     {
-      "path": "README.md",
-      "sha256": "16d2f9ab41f6006e036b609c2d8f713a25cf3e50beb991a0f2ce8276ef27a120"
+      "path": "README.md"
     },
     {
-      "path": "RULES.md",
-      "sha256": "e967d9547cc5b363c298b0025bd5018c01f10bb6f0923179a2bb1357f81bf3a5"
+      "path": "RULES.md"
     },
     {
-      "path": "SKILL_PACKAGE.json",
-      "sha256": "7caed89c291abf5e2ca81548bb282574df5d2f34274634d6aa75f432648e2a36"
+      "path": "SKILL_PACKAGE.json"
     },
     {
-      "path": "VERSION",
-      "sha256": "dab64e06c0817d77b4f887261832cbb34ba023cac7c74d72d81068553652d0c5"
+      "path": "VERSION"
     },
     {
-      "path": "WINDOWS_VIDEO_CLOSED_LOOP_RULES_20260930.json",
-      "sha256": "75902be5bcbe8219571386f12cda370b5b8a0d732cd6efa2a4e4f3c23cda0abf"
+      "path": "WINDOWS_VIDEO_CLOSED_LOOP_RULES_20260930.json"
     },
     {
-      "path": "batch_worker.py",
-      "sha256": "17212bd682ad2a16a1397dbc8c0ac3c93d095b3c4d67195db537228483a42120"
+      "path": "batch_worker.py"
     },
     {
-      "path": "closed_loop.py",
-      "sha256": "9fb8a5a2c58c68df774a6d5e66b9974ee4485407d2ed719faff07ad6b457a720"
+      "path": "closed_loop.py"
     },
     {
-      "path": "docs/AI_EDITOR.md",
-      "sha256": "54ceedd86812cf210cbf4e2f6cf5f82f10298e5c935553c3475c3b645c97bbab"
+      "path": "docs/AI_EDITOR.md"
     },
     {
-      "path": "docs/NAS_DELIVERY_STABILITY.md",
-      "sha256": "6ed02a47723158f78949002fa9bc014193a171b6a77e52593f7b2d8dfd728ddf"
+      "path": "docs/NAS_DELIVERY_STABILITY.md"
     },
     {
-      "path": "docs/QUALITY_CONTRACT_FIXES.md",
-      "sha256": "bf7ea03a8719971d2e9f9e7711eca65e09e14436a71c144fa2be472bb2d49a70"
+      "path": "docs/PAPER_PRODUCTION_RULES.md"
     },
     {
-      "path": "docs/SELECTION_REVIEW_20261022.md",
-      "sha256": "a4d26afd8d6c0d7588760397773891af38a93751be4d07843e7b5026f4fb222c"
+      "path": "docs/QUALITY_CONTRACT_FIXES.md"
     },
     {
-      "path": "docs/UPDATES_20261013-16.md",
-      "sha256": "a4fd13b5552f34574997bd1df67306644da42adfe61e53ba4c8bf6e21dfa20fd"
+      "path": "docs/SELECTION_REVIEW_20261022.md"
     },
     {
-      "path": "docs/WEIPIN_1.5.2_PITFALLS.md",
-      "sha256": "aad16473c4343664649f9e5370d05933d8e28c1bac5e724fa691ef9bb3d992a2"
+      "path": "docs/UPDATES_20261013-16.md"
     },
     {
-      "path": "docs/sentence-review.md",
-      "sha256": "4b689b5b5ac0a61d9547f9715ab0c098dbef3c8261d05f8f5764229a12ac520e"
+      "path": "docs/WEIPIN_1.5.2_PITFALLS.md"
     },
     {
-      "path": "doubao-jianying-orchestrator/CHANGELOG.md",
-      "sha256": "50e0717064912184f2565e52d924b61abdb324132d9235d1d21329f0acf08682"
+      "path": "docs/sentence-review.md"
     },
     {
-      "path": "doubao-jianying-orchestrator/SKILL.md",
-      "sha256": "5972688deaa70cb2e661e8a7c49ec45e81a3cd6c0258209b827d409590fc8829"
+      "path": "doubao-jianying-orchestrator/CHANGELOG.md"
     },
     {
-      "path": "doubao-jianying-orchestrator/VERSION",
-      "sha256": "dab64e06c0817d77b4f887261832cbb34ba023cac7c74d72d81068553652d0c5"
+      "path": "doubao-jianying-orchestrator/SKILL.md"
     },
     {
-      "path": "doubao-jianying-orchestrator/orchestrator/VERSION",
-      "sha256": "dab64e06c0817d77b4f887261832cbb34ba023cac7c74d72d81068553652d0c5"
+      "path": "doubao-jianying-orchestrator/VERSION"
     },
     {
-      "path": "doubao-jianying-orchestrator/orchestrator/__init__.py",
-      "sha256": "9641acb61339e450857e2d602111bdb3b7ff38a580d2fe7846831a1ce486cbd3"
+      "path": "doubao-jianying-orchestrator/orchestrator/VERSION"
     },
     {
-      "path": "doubao-jianying-orchestrator/orchestrator/ai_editor.py",
-      "sha256": "9a39ef1cda5acbb9d8c8c9ff7d3a80945d87d24ba47c958a90c9072317239942"
+      "path": "doubao-jianying-orchestrator/orchestrator/__init__.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/orchestrator/ai_editor_contract.py",
-      "sha256": "ce8ec919fbf87175c3e22e613d71373217ecfade061756085c13f9babb7bac21"
+      "path": "doubao-jianying-orchestrator/orchestrator/ai_editor.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/orchestrator/ai_editor_qc.py",
-      "sha256": "d7da6f488e11aa2ec69ee841a9a2f32d219caee4af27fc599c1f34665e27e6a1"
+      "path": "doubao-jianying-orchestrator/orchestrator/ai_editor_contract.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/orchestrator/audio_loudness.py",
-      "sha256": "fa2890902dd73f30fa35caa906146089f5fb8974fe1e636f3ac328e21b1206c2"
+      "path": "doubao-jianying-orchestrator/orchestrator/ai_editor_qc.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/orchestrator/bgm_selector.py",
-      "sha256": "be3d4610158ef3a804208103996d7ece05dd67272d09b165856c3901fd21407b"
+      "path": "doubao-jianying-orchestrator/orchestrator/audio_captions.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/orchestrator/capacity.py",
-      "sha256": "77dd6e43a66fe531d074c827562981355f0e77b24726cb4e94d9f1869f910baf"
+      "path": "doubao-jianying-orchestrator/orchestrator/audio_loudness.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/orchestrator/cli.py",
-      "sha256": "0d88300c94e6e88578251cc6e7cd48b437e6cc3adf52130cf6ce63bcb72c1f3d"
+      "path": "doubao-jianying-orchestrator/orchestrator/bgm_selector.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/orchestrator/demo_actions.py",
-      "sha256": "324d9a144b7e1ab5c5ece0e5caa7782362ea496e4ed39ad8e18c9fd8bec385dc"
+      "path": "doubao-jianying-orchestrator/orchestrator/capacity.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/orchestrator/diagnostics.py",
-      "sha256": "130e88a5267030cd27c8c69ed864b51fb2fd89680b081b6065b8291687399db7"
+      "path": "doubao-jianying-orchestrator/orchestrator/cli.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/orchestrator/draft_safety.py",
-      "sha256": "3583822093ad588160b164b5e500e499f7c7bff65ed7f6338be34ed11b3a5ff8"
+      "path": "doubao-jianying-orchestrator/orchestrator/demo_actions.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/orchestrator/draft_visual_qc.py",
-      "sha256": "d8561bfc75a14b44dc6e52cad11a9b21c4c7f2d5000398f9d59abd18f9584ae6"
+      "path": "doubao-jianying-orchestrator/orchestrator/diagnostics.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/orchestrator/engine.py",
-      "sha256": "e4906959ebeaddc49b69eff2b88593f66c8e08bd7d9c8964f46983a5a7b1c14c"
+      "path": "doubao-jianying-orchestrator/orchestrator/draft_safety.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/orchestrator/feedback_policy.py",
-      "sha256": "5fb27760316d010ad716797af648e7494daea9581336eb4432623ddb7987eee8"
+      "path": "doubao-jianying-orchestrator/orchestrator/draft_visual_qc.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/orchestrator/ffmpeg_bootstrap.py",
-      "sha256": "29230a203cf1477824d18b60ce27b21b1ea91f8a7e15093dbd24517baec45e00"
+      "path": "doubao-jianying-orchestrator/orchestrator/engine.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/orchestrator/file_safety.py",
-      "sha256": "cfca508ed82eb44e6e214ec7d095b78d3329241ffca9ae65ed31422824dc8df8"
+      "path": "doubao-jianying-orchestrator/orchestrator/feedback_policy.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/orchestrator/gpu_runtime.py",
-      "sha256": "a81905bb00c7416e91235d69ed987bc916c1716704687925f39c6f1bed51ef01"
+      "path": "doubao-jianying-orchestrator/orchestrator/ffmpeg_bootstrap.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/orchestrator/json_extract.py",
-      "sha256": "86fce82c1a06c32f1b094b85514f152f32a383c61ded0ca998ba7ed411f77ece"
+      "path": "doubao-jianying-orchestrator/orchestrator/file_safety.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/orchestrator/material_corrections.py",
-      "sha256": "3b894f75e426ca246bf36091fbc1d1c6dab6ac4fad0837234a80657b7ab1aec6"
+      "path": "doubao-jianying-orchestrator/orchestrator/frame_quality.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/orchestrator/migration.py",
-      "sha256": "6e8c8dd8f2693785502e15c09cc3b30d85b7be52a9800b007da3591d5487407f"
+      "path": "doubao-jianying-orchestrator/orchestrator/gpu_runtime.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/orchestrator/phase_timing.py",
-      "sha256": "da5c5f123147d171646b9cd24df0be2c0f92b78f32bf051a357ee526e8db1ee4"
+      "path": "doubao-jianying-orchestrator/orchestrator/json_extract.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/orchestrator/platform_env.py",
-      "sha256": "6946ed5132033d906600c415b1160e564c9c298182bda2fc661b15c6a95782a1"
+      "path": "doubao-jianying-orchestrator/orchestrator/material_corrections.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/orchestrator/proc_slots.py",
-      "sha256": "bc7462f46c03f97ffb0407dde2fdbbaac833f06b885cf0d8bbb6b4d47c1409a4"
+      "path": "doubao-jianying-orchestrator/orchestrator/migration.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/orchestrator/resource_profile.py",
-      "sha256": "e2f8e99252deff933aeca108b5332b457f164216badd82c0008608b287b19aaa"
+      "path": "doubao-jianying-orchestrator/orchestrator/phase_timing.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/orchestrator/rulepack.py",
-      "sha256": "5b3e03970a1ec82cf2aaef1a06e63606d008989fef146c47ce28cc0c5b49f984"
+      "path": "doubao-jianying-orchestrator/orchestrator/platform_env.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/orchestrator/rules/global.json",
-      "sha256": "f0966059b40c94d7380979ffb0b8c5ee1fc6a9f73f9f4c9531b5d1935f53d306"
+      "path": "doubao-jianying-orchestrator/orchestrator/proc_slots.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/orchestrator/rules/weipin.json",
-      "sha256": "3b84519df21e9b262f5e16002f71b27041ae6c3c0fc57142d1a908a795408287"
+      "path": "doubao-jianying-orchestrator/orchestrator/production_parameters.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/orchestrator/rules/zhipin.json",
-      "sha256": "da6f178f466bb367a0d4c62cbac86dd5ca0db70430bafe3ec768a27abbd95258"
+      "path": "doubao-jianying-orchestrator/orchestrator/resource_profile.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/orchestrator/scene_rules.py",
-      "sha256": "29899279fc787be615abbd0366c9a34190210c3eb160aedb57ee9862ba9cc5c7"
+      "path": "doubao-jianying-orchestrator/orchestrator/rulepack.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/orchestrator/script_polish.py",
-      "sha256": "e2b95216b1c9595ebcb4d021f522e490aeb0630a6a87d771748e6261558beb55"
+      "path": "doubao-jianying-orchestrator/orchestrator/rules/global.json"
     },
     {
-      "path": "doubao-jianying-orchestrator/orchestrator/semantic_gate.py",
-      "sha256": "f43199b59e07253991f5f26f2f776570347d0937dfa042b8d2a7447e84c4fb88"
+      "path": "doubao-jianying-orchestrator/orchestrator/rules/weipin.json"
     },
     {
-      "path": "doubao-jianying-orchestrator/orchestrator/ship_distribute.py",
-      "sha256": "004bcc54f55c4b647b46930e92d4aae3c79c069190e3cbd25043bad28f9b2628"
+      "path": "doubao-jianying-orchestrator/orchestrator/rules/zhipin.json"
     },
     {
-      "path": "doubao-jianying-orchestrator/orchestrator/shot_analyzer.py",
-      "sha256": "222235b7df094661f89c835a5ad831515b42322249092130a86f77f8f4a07194"
+      "path": "doubao-jianying-orchestrator/orchestrator/scene_rules.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/orchestrator/shot_notes.py",
-      "sha256": "7747b34cfad3324f566a221dac037148dfb288554346bb345e09ac2c02ee5277"
+      "path": "doubao-jianying-orchestrator/orchestrator/script_polish.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/orchestrator/stability.py",
-      "sha256": "3475e9714bf6b69c84f9cc36e797cc5fcb250df315763b364fc2275d3c9ef8f6"
+      "path": "doubao-jianying-orchestrator/orchestrator/semantic_gate.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/orchestrator/subtitle_units.py",
-      "sha256": "41ea07543780dcb32d18670806bfa9cfdd34ac482ee4e34d4140a66bc1beda3d"
+      "path": "doubao-jianying-orchestrator/orchestrator/ship_distribute.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/orchestrator/task_log.py",
-      "sha256": "f44866b80f759a0c7d74cf4a4d48129ded596a7aed3edd0fb780662a9f46c6cb"
+      "path": "doubao-jianying-orchestrator/orchestrator/shot_analyzer.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/orchestrator/timing_contract.py",
-      "sha256": "cc8ca02e78e509b62c4ec314e1628d22612554b608685ac8ae8e159cd56ae3e9"
+      "path": "doubao-jianying-orchestrator/orchestrator/shot_notes.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/orchestrator/usage_ledger.py",
-      "sha256": "d65c9834dc3f8d1ec82a9e30610a2c44b79b613c7bf12e95815d15785f8e8e82"
+      "path": "doubao-jianying-orchestrator/orchestrator/stability.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/orchestrator/video_decode.py",
-      "sha256": "fecf1ead19dcd68089058ecf6c0cee4414107e612ff71165cc0499dbb91dbe8a"
+      "path": "doubao-jianying-orchestrator/orchestrator/subtitle_units.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/orchestrator/video_encode.py",
-      "sha256": "ed6d9aa1fc6678406316bd2286772484d19edf95eea7819a56a450d05b9064cf"
+      "path": "doubao-jianying-orchestrator/orchestrator/task_inputs.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/orchestrator/vision_analyzer.py",
-      "sha256": "862530e0a688cff72723e8eaf50ada999b01502ffeae723eb1c004bc3c267779"
+      "path": "doubao-jianying-orchestrator/orchestrator/task_log.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/orchestrator/visual_match.py",
-      "sha256": "e9f1aa3150c84af44124ebf4ab2283fbb642ca0ae2f0c4262040c387dee72744"
+      "path": "doubao-jianying-orchestrator/orchestrator/timing_contract.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/orchestrator/visual_qc_contract.py",
-      "sha256": "3598ada93e25032f2c64492e8cdabf3235ff1dd2a7f055b9cb5b51801ae3928d"
+      "path": "doubao-jianying-orchestrator/orchestrator/usage_ledger.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/orchestrator/voice_catalog.py",
-      "sha256": "c421a8471e818001750a509402535acecf38285e604201c438434c378d542efa"
+      "path": "doubao-jianying-orchestrator/orchestrator/video_decode.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/orchestrator/voice_library.py",
-      "sha256": "94c6c234f96c23b1ab3b2c7c189d2cc78596829a48111027f9fe4ae8e0677868"
+      "path": "doubao-jianying-orchestrator/orchestrator/video_encode.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/orchestrator/voice_tts.py",
-      "sha256": "945fcfaa1126f615f2cbe9e86316020ea0f2febcb548ca2229ddd5c8798c5b24"
+      "path": "doubao-jianying-orchestrator/orchestrator/vision_analyzer.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/prompts/semantic_analysis.md",
-      "sha256": "e5b652b9418d86c8891204edec1a51aff4fe60fdc979b9e8363676bf4c82b9fa"
+      "path": "doubao-jianying-orchestrator/orchestrator/visual_match.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/references/draft_delivery_and_recovery.md",
-      "sha256": "00ba9f53cfd135fa783b7531861837cdd6946c706b930a0622a2e8bbf64641a9"
+      "path": "doubao-jianying-orchestrator/orchestrator/visual_qc_contract.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/references/preview_gap_and_pitfalls.md",
-      "sha256": "b6d60194bb6c0be41ed0fdcfb218968ef754eb0ec7c12d10417e5f6c744135e8"
+      "path": "doubao-jianying-orchestrator/orchestrator/voice_catalog.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/references/production_quality_and_lessons.md",
-      "sha256": "097630022bee7c66c5f83b66ef4b014be99be186b7db7d5f1769bbb1efaa1bb7"
+      "path": "doubao-jianying-orchestrator/orchestrator/voice_library.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/references/runtime_contract.md",
-      "sha256": "4c5f65048f4689821a0c701c5e9256821c6c156d204ce4906217813b22bee44b"
+      "path": "doubao-jianying-orchestrator/orchestrator/voice_request.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/references/validated_fix_to_release.md",
-      "sha256": "9a0395504f56595068eaff2eacc8197bc7b74e82e65b6eda220880f16aa34456"
+      "path": "doubao-jianying-orchestrator/orchestrator/voice_tts.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/run.py",
-      "sha256": "f1172dbdd9343afb6024b3fe3bf20b3afe8d70599cc4027cad9501104cd7198b"
+      "path": "doubao-jianying-orchestrator/prompts/semantic_analysis.md"
     },
     {
-      "path": "doubao-jianying-orchestrator/tests/test_ai_editor.py",
-      "sha256": "fa726dfa0eeb76d5ae3cbf64c5c70094bda3c91639034ef069049b3ef468a9ea"
+      "path": "doubao-jianying-orchestrator/references/draft_delivery_and_recovery.md"
     },
     {
-      "path": "doubao-jianying-orchestrator/tests/test_ai_editor_qc.py",
-      "sha256": "809dc633eee26164a6aed0a82b6352bd80cf6487c3f18828dae1640b02a5ca97"
+      "path": "doubao-jianying-orchestrator/references/preview_gap_and_pitfalls.md"
     },
     {
-      "path": "doubao-jianying-orchestrator/tests/test_capacity_and_sync.py",
-      "sha256": "3d597ca8f9b0a08619daec23ef017f5289268c9bb27a1f7a25fad4e7f5196a9f"
+      "path": "doubao-jianying-orchestrator/references/production_quality_and_lessons.md"
     },
     {
-      "path": "doubao-jianying-orchestrator/tests/test_codex_invocation.py",
-      "sha256": "0259667a3096ea98ed076f97bb9f6be30aa76e51fe16f44708e2694584c4cc72"
+      "path": "doubao-jianying-orchestrator/references/runtime_contract.md"
     },
     {
-      "path": "doubao-jianying-orchestrator/tests/test_file_safety.py",
-      "sha256": "91f8d8641e0b8079d56981b954101bc189536eee09929ccd5a9dab23fd25056c"
+      "path": "doubao-jianying-orchestrator/references/validated_fix_to_release.md"
     },
     {
-      "path": "doubao-jianying-orchestrator/tests/test_gpu_runtime.py",
-      "sha256": "14f44d9d6d64ef317458592e63db5cb830debe58f183b51fdc618edaeedc3abf"
+      "path": "doubao-jianying-orchestrator/run.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/tests/test_resource_profile.py",
-      "sha256": "4e63e3755e4905e036924a8e970bba79a8e8fcac28a337e9c39ac34fa60c6ada"
+      "path": "doubao-jianying-orchestrator/tests/test_ai_editor.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/tests/test_scene_evidence_contracts.py",
-      "sha256": "a8b09239454ef50f6230d4658f1ac1ea9f6865bcdff22d07f09f3c02ad487b0f"
+      "path": "doubao-jianying-orchestrator/tests/test_ai_editor_qc.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/tests/test_stability_single_pass.py",
-      "sha256": "3e38eacaf3ada6ae44b3b5383cd24eb55d1e0e2de42d69f1cdff866b98417b4b"
+      "path": "doubao-jianying-orchestrator/tests/test_audio_captions.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/tests/test_subtitle_units.py",
-      "sha256": "31ce59ed11a23e58cb6fbcaf75eb84a35681c8b813df356ff361c3832dbdf9ab"
+      "path": "doubao-jianying-orchestrator/tests/test_capacity_and_sync.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/tests/test_task_control.py",
-      "sha256": "148b5782b5ebd33a1897e587695fb63e9aa13fc30317f3439e124a396a6a2c9f"
+      "path": "doubao-jianying-orchestrator/tests/test_codex_invocation.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/tests/test_timing_contract.py",
-      "sha256": "18312cf633ada44ddb4366b37d8f440cd5f27f50f6a7f6a662bc164cea0643f4"
+      "path": "doubao-jianying-orchestrator/tests/test_file_safety.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/tests/test_v152_meeting_rules.py",
-      "sha256": "7b1f558f4d948aa97a7b5efa01417a0c4fe429c0a671a84109970ae3b0aeb474"
+      "path": "doubao-jianying-orchestrator/tests/test_frame_batch.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/tests/test_v152_r18_review.py",
-      "sha256": "eaf4daafc3c6876b59362e28ed529496edf0fd7626d5d32a61efe221aeba94b3"
+      "path": "doubao-jianying-orchestrator/tests/test_frame_quality.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/tests/test_v152_resume_integrity.py",
-      "sha256": "5752a9eb7ce804075aa915013d177c3be9d0f80bcc3c888623681206f657e2c4"
+      "path": "doubao-jianying-orchestrator/tests/test_gpu_runtime.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/tests/test_v152_vision_v3.py",
-      "sha256": "29cb838c77039798928f74e2cf58f561c83d2748a4d2c2f15a26993710699c35"
+      "path": "doubao-jianying-orchestrator/tests/test_meeting_bgm.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/tests/test_v152_weipin_feedback.py",
-      "sha256": "073410a266b82e55e88e7d669f09403ffc4bd0777891941306a79677ad525365"
+      "path": "doubao-jianying-orchestrator/tests/test_meeting_caption_integration.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/tests/test_v156_evidence_contracts.py",
-      "sha256": "b20b6fab2c92ad1355e7e07fbba2f26714aa6d886d23bfc68f192a7ad186d82e"
+      "path": "doubao-jianying-orchestrator/tests/test_meeting_voice.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/tests/test_v156_feedback_semantics.py",
-      "sha256": "8ea3a2d8610ebb97b2220f8c1c11237e154e9fcff0c18463e32e5f8796b87beb"
+      "path": "doubao-jianying-orchestrator/tests/test_paper_production.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/tests/test_v156_quality_ranking.py",
-      "sha256": "1f0aff4d3bb6319a23ce4ea580e7cb3e219ad6598aaff1a71a56d8fae50db2c0"
+      "path": "doubao-jianying-orchestrator/tests/test_paper_rulepack.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/tests/test_v156_selection_feedback.py",
-      "sha256": "7ac5853ab60b1b53f117170e3c35abf2c4b0f818e43856807dff07a6d8cde359"
+      "path": "doubao-jianying-orchestrator/tests/test_paper_visual_cases.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/tests/test_video_decode.py",
-      "sha256": "d7f7abc159e45e2f7e4faa0d922e04e832cced7cae3daebf85aba874653c084d"
+      "path": "doubao-jianying-orchestrator/tests/test_preferred_speed.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/tests/test_video_encode.py",
-      "sha256": "f891cbf5d544bf7a24d201f15e0a8c58d72ca8fc9e3bae3a1668e03f9397f6e2"
+      "path": "doubao-jianying-orchestrator/tests/test_resource_profile.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/tests/test_vision_retry.py",
-      "sha256": "ae994edcdec2bf644483538d3ffc9c54b02c3f33d78ce05af4037eec039485ef"
+      "path": "doubao-jianying-orchestrator/tests/test_scene_evidence_contracts.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/tests/test_visual_matching_governance.py",
-      "sha256": "48816c77a4d95e66c9235e9995dbe74b2779d91611dd1f7f2bf86a5361d97e56"
+      "path": "doubao-jianying-orchestrator/tests/test_stability_single_pass.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/tests/test_visual_qc_response_contract.py",
-      "sha256": "32bf1aabce560d3dc2c6031c0671f8d9835a29cf17d26a38a8c30d8bd7149ce8"
+      "path": "doubao-jianying-orchestrator/tests/test_subtitle_units.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/tests/test_volc_glm_vision.py",
-      "sha256": "d1935f1cd63c6fbb3f66b45348f79af4aa9cc8d61b9175c2abfbd59360e70300"
+      "path": "doubao-jianying-orchestrator/tests/test_task_control.py"
     },
     {
-      "path": "gold-reference.json",
-      "sha256": "8051496bbd34e2b2d6658d1be0d1734248bf2ad3fc7df4e5bc6924b8a2c212d5"
+      "path": "doubao-jianying-orchestrator/tests/test_timing_contract.py"
     },
     {
-      "path": "jianying-editor/SKILL.md",
-      "sha256": "5f680d2cacb2984fd21e1bf2f0c021e740bea66de52b3f30c7ca747d44b33420"
+      "path": "doubao-jianying-orchestrator/tests/test_v152_meeting_rules.py"
     },
     {
-      "path": "jianying-editor/VERSION",
-      "sha256": "dab64e06c0817d77b4f887261832cbb34ba023cac7c74d72d81068553652d0c5"
+      "path": "doubao-jianying-orchestrator/tests/test_v152_r18_review.py"
     },
     {
-      "path": "jianying-editor/scripts/cloud_manager.py",
-      "sha256": "6be2ff431e45bed4d7c2ad524cb999726705d7514b974ffcc85ec99e715c7c88"
+      "path": "doubao-jianying-orchestrator/tests/test_v152_resume_integrity.py"
     },
     {
-      "path": "jianying-editor/scripts/core/media_ops.py",
-      "sha256": "b74f13faad3e90db4107a4b8f12532bec9c2bf55e35916a5e133a6f9c778d101"
+      "path": "doubao-jianying-orchestrator/tests/test_v152_vision_v3.py"
     },
     {
-      "path": "jianying-editor/scripts/core/mocking_ops.py",
-      "sha256": "02a3a45631c7b6cdee9604e9f95d9a316d5d1f0b54f1d676c7f6563508d6bccf"
+      "path": "doubao-jianying-orchestrator/tests/test_v152_weipin_feedback.py"
     },
     {
-      "path": "jianying-editor/scripts/core/project_base.py",
-      "sha256": "fee7383f82fa7d3ae73881dcb31cef2e5550539f87a8d182fce5e54f84db17cb"
+      "path": "doubao-jianying-orchestrator/tests/test_v156_evidence_contracts.py"
     },
     {
-      "path": "jianying-editor/scripts/core/text_ops.py",
-      "sha256": "7c0307b60c91a79df1e8b84809ed9a1b5e0d6dcaa298581f2498497386b6d5e8"
+      "path": "doubao-jianying-orchestrator/tests/test_v156_feedback_semantics.py"
     },
     {
-      "path": "jianying-editor/scripts/core/vfx_ops.py",
-      "sha256": "58c4af7908e76d255742f8324e0121547b27cffafba8c4934511fa5635ecc583"
+      "path": "doubao-jianying-orchestrator/tests/test_v156_quality_ranking.py"
     },
     {
-      "path": "jianying-editor/scripts/draft_inspector.py",
-      "sha256": "12b28410b3d053b773f893a516eaed782ec2bfdc5c02a6aefa045a850dd8bfcb"
+      "path": "doubao-jianying-orchestrator/tests/test_v156_selection_feedback.py"
     },
     {
-      "path": "jianying-editor/scripts/jy_wrapper.py",
-      "sha256": "b6887c82bbf4505a68e6459dd8fafec3a9e5fcc96631c751201cc43e43a1e8bd"
+      "path": "doubao-jianying-orchestrator/tests/test_video_decode.py"
     },
     {
-      "path": "jianying-editor/scripts/universal_tts.py",
-      "sha256": "389ae2708354bc3733a7e4511850d688b238830265254822528a7b8f26a2636f"
+      "path": "doubao-jianying-orchestrator/tests/test_video_encode.py"
     },
     {
-      "path": "jianying-editor/scripts/utils/cli_protocol.py",
-      "sha256": "b96810850e167db8fb9a8da69eba324e1a3f67f634aedfb30fbe54a6c26e3dd7"
+      "path": "doubao-jianying-orchestrator/tests/test_vision_retry.py"
     },
     {
-      "path": "jianying-editor/scripts/utils/config.py",
-      "sha256": "dea96f94aa641a1c4b55a8d759989a4a7ce278020800e9592b1917f062f44f82"
+      "path": "doubao-jianying-orchestrator/tests/test_vision_stage_concurrency.py"
     },
     {
-      "path": "jianying-editor/scripts/utils/constants.py",
-      "sha256": "45044b2744836e41e955f9f69db03a6b1676db98e12985665a0667da18dc887e"
+      "path": "doubao-jianying-orchestrator/tests/test_visual_matching_governance.py"
     },
     {
-      "path": "jianying-editor/scripts/utils/env_setup.py",
-      "sha256": "bad425a8a547ed0fc39debef3d540c4aa166b432e6c0271285e57a75ed197ed4"
+      "path": "doubao-jianying-orchestrator/tests/test_visual_qc_response_contract.py"
     },
     {
-      "path": "jianying-editor/scripts/utils/errors.py",
-      "sha256": "e0c6fde0f2036bba2c71446ab0fb910936f9edec6a23c5704bb974585c905a09"
+      "path": "doubao-jianying-orchestrator/tests/test_volc_glm_vision.py"
     },
     {
-      "path": "jianying-editor/scripts/utils/formatters.py",
-      "sha256": "7a767b63db4d83dce7c03100067c74177573753a675c83f99dbb61e91427d68d"
+      "path": "examples/config.example.ps1"
     },
     {
-      "path": "jianying-editor/scripts/utils/logging_utils.py",
-      "sha256": "1a5695aa24c86cb2e5c0717573e0c4b2314646c9fd47f7bd50390eced05c133d"
+      "path": "examples/manifest.preview.json"
     },
     {
-      "path": "jianying-editor/scripts/utils/media_normalizer.py",
-      "sha256": "8449e8d5299cb7d8babd8561743b9288bbcb46a02d5d860057ebcfaf95ffe041"
+      "path": "examples/meeting_optional_fields.example.json"
     },
     {
-      "path": "jianying-editor/scripts/utils/skill_path.py",
-      "sha256": "6ec2aca5e455c3afbfa5b03d8abe39a6c6d2e7debb5bcef770150de14ab9310b"
+      "path": "gold-reference.json"
     },
     {
-      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/__init__.py",
-      "sha256": "cef25a9be74bf4db664fd550eabebd560a41f47e9c4f095f2f942bb50099a21c"
+      "path": "jianying-editor/SKILL.md"
     },
     {
-      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/animation.py",
-      "sha256": "ba169593216caa056096d021bf632270bf75bafa8d3d6feb342bd5fe98d69921"
+      "path": "jianying-editor/VERSION"
     },
     {
-      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/assets/__init__.py",
-      "sha256": "78ce24a5b227584b40847d082f3f8f85cc9b8ce272e45a11eced61e2f1f3de93"
+      "path": "jianying-editor/scripts/cloud_manager.py"
     },
     {
-      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/assets/draft_info_template.json",
-      "sha256": "c9af954419291599e3b6c8e260f1850c8ad866822fd2de6005cb72b5c4178ec1"
+      "path": "jianying-editor/scripts/core/media_ops.py"
     },
     {
-      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/assets/draft_meta_info.json",
-      "sha256": "8bbc602f00a61a31ee16059a7a4525aa5d97a06cde509930a159f0f5ed1a77f6"
+      "path": "jianying-editor/scripts/core/mocking_ops.py"
     },
     {
-      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/assets/draft_settings_template",
-      "sha256": "b8aaf2253f1c6272358c81a7a8283cfaab1e0faa4ab47a6207b2d20d39e0b8cf"
+      "path": "jianying-editor/scripts/core/project_base.py"
     },
     {
-      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/assets/key_value_template.json",
-      "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356"
+      "path": "jianying-editor/scripts/core/text_ops.py"
     },
     {
-      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/audio_segment.py",
-      "sha256": "35d888cacbc37d33e7021241e9ada7b0fe9990a8ae2ba9a2eeb63f433c605ca1"
+      "path": "jianying-editor/scripts/core/vfx_ops.py"
     },
     {
-      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/draft_folder.py",
-      "sha256": "bcd22d9cde3c347fdaadd39a00d8d35a855cb272f2e4666a1f3e6e48f8f90da1"
+      "path": "jianying-editor/scripts/draft_inspector.py"
     },
     {
-      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/effect_segment.py",
-      "sha256": "3b8d65fdaf8295eaa9f4ef6f75d5caaa01ba792de2d14af87a22d0d0c33599ea"
+      "path": "jianying-editor/scripts/jy_wrapper.py"
     },
     {
-      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/exceptions.py",
-      "sha256": "628ef579690b4cd15f67d0463f05c3b2533fbc4df6552db6fb06cfffaf3e4444"
+      "path": "jianying-editor/scripts/universal_tts.py"
     },
     {
-      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/jianying_controller.py",
-      "sha256": "376f57aa83cf087a7a9384cd0386779c4bff08edce3ff3bec92acc4211ef1716"
+      "path": "jianying-editor/scripts/utils/cli_protocol.py"
     },
     {
-      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/keyframe.py",
-      "sha256": "62a31e6dcca2f0c69ce45d1cb4583c176833a4f8293a48f2be5187c8567e49a9"
+      "path": "jianying-editor/scripts/utils/config.py"
     },
     {
-      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/local_materials.py",
-      "sha256": "95e264dcc4c3965a362fa0ff0fe952f89aefa0e3370250ce26f696e1979fd50e"
+      "path": "jianying-editor/scripts/utils/constants.py"
     },
     {
-      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/metadata/__init__.py",
-      "sha256": "948db9b69e4e395854d1fac349ca3d3f2c984df3d52a21183e5997ec657186dd"
+      "path": "jianying-editor/scripts/utils/env_setup.py"
     },
     {
-      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/metadata/audio_scene_effect.py",
-      "sha256": "9bb31ad9a373645d2a912d8727f16cf8ef2f5cfb1b9d922fee2baa7fffaed7b4"
+      "path": "jianying-editor/scripts/utils/errors.py"
     },
     {
-      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/metadata/effect_meta.py",
-      "sha256": "6176b52d02b8469144da2efcd3479244e06a6419ede5cb91a939b61a2fca97fd"
+      "path": "jianying-editor/scripts/utils/formatters.py"
     },
     {
-      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/metadata/filter_meta.py",
-      "sha256": "606134523c222569e686b2428b1f5728f95619ad62ee8809657e3f7c0365c062"
+      "path": "jianying-editor/scripts/utils/logging_utils.py"
     },
     {
-      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/metadata/font_meta.py",
-      "sha256": "f39fb94d357a28b7c228867ccedff73d1b4fe9d368bb482ef9c2ef35016b6a5f"
+      "path": "jianying-editor/scripts/utils/media_normalizer.py"
     },
     {
-      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/metadata/mask_meta.py",
-      "sha256": "e136e86ed84b8a824cfe6f0c9e7625b484b24d2682d5121c80223371119c327a"
+      "path": "jianying-editor/scripts/utils/skill_path.py"
     },
     {
-      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/metadata/speech_to_song.py",
-      "sha256": "a9e58d00d7cc6f286eeb4305a210f4961b4872a8f005b17ad6a0921dd99a7707"
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/__init__.py"
     },
     {
-      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/metadata/text_intro.py",
-      "sha256": "ce9440559ce5fbf29b2d6155a5abfc73570964e7c9a7e2ab7d2f55a7d0347291"
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/animation.py"
     },
     {
-      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/metadata/text_loop.py",
-      "sha256": "5a750aed6470638fe7bde033b0d0fb1461de419db915f4512e01ed9bc3021a12"
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/assets/__init__.py"
     },
     {
-      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/metadata/text_outro.py",
-      "sha256": "54d41312d732ba777f322d4071702f3cdf0f5f44056c37d6776b42af7e7bf836"
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/assets/draft_info_template.json"
     },
     {
-      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/metadata/tone_effect.py",
-      "sha256": "5ddadb9943d9bfce6e84246af8fe5aff185bb49c5a86cbed328a5e7fa4ee5317"
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/assets/draft_meta_info.json"
     },
     {
-      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/metadata/transition_meta.py",
-      "sha256": "afde773d341f2bc6c7b303d02cd8d805cab416c52fa46a9e91576d304397f9e9"
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/assets/draft_settings_template"
     },
     {
-      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/metadata/video_character_effect.py",
-      "sha256": "e5657b0db2ddfda2f00d97e02ab6a7385c22c5060436c65a90ec2c54762e2817"
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/assets/key_value_template.json"
     },
     {
-      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/metadata/video_group_animation.py",
-      "sha256": "47efa5990d5fef743954d7e17ce03c3b8e712f5872350230bd89ca3351e028b4"
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/audio_segment.py"
     },
     {
-      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/metadata/video_intro.py",
-      "sha256": "5913fa37aac6caef5a5bd5719dd19f9563debbc835c4963e40b245f9fe7c5101"
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/draft_folder.py"
     },
     {
-      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/metadata/video_outro.py",
-      "sha256": "e12b9727d3945fd1d86a77180c1ad826cdc63ff21da57f4b4afbc508a59cb2d8"
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/effect_segment.py"
     },
     {
-      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/metadata/video_scene_effect.py",
-      "sha256": "cb0d3591b883bf9b4a3f21474741fe4b73a42dffc1ccd02afc6aefde8d239427"
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/exceptions.py"
     },
     {
-      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/script_file.py",
-      "sha256": "c6eac2e30b15708e5672f541198258434777526dc762d9c61575b9e5f37b6355"
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/jianying_controller.py"
     },
     {
-      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/segment.py",
-      "sha256": "69385917fcea38bb9b3cbe079f54fd04ac23572720d9e35c6e9c8978e571828b"
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/keyframe.py"
     },
     {
-      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/template_mode.py",
-      "sha256": "489ec9a610dd0be62609c71504734bdc0492d6796e9b4c37f9d58883c193ea26"
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/local_materials.py"
     },
     {
-      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/text_segment.py",
-      "sha256": "edce730a840f310fb58975cabc32d9a048b5e4bb06cc410d8d75eb888e989f3b"
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/metadata/__init__.py"
     },
     {
-      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/time_util.py",
-      "sha256": "346e9784f824ebd8e7dcb6210c222a7ce75c274931c6507d2c8a44579e4f343e"
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/metadata/audio_scene_effect.py"
     },
     {
-      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/track.py",
-      "sha256": "e3c88d10bbcb6d52ee7adc27f1f94b284e27b748b09f19cae21876f24ce20dd1"
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/metadata/effect_meta.py"
     },
     {
-      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/util.py",
-      "sha256": "32880a93fac8f9fa472f115f59004efb5e403dede888f59102b97dadf77e8ea7"
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/metadata/filter_meta.py"
     },
     {
-      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/video_segment.py",
-      "sha256": "d32e0bb79173bc82cd3627ee5fbe395865b86e795f0de797c86aaee95f6e4d9d"
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/metadata/font_meta.py"
     },
     {
-      "path": "jy_poll.ps1",
-      "sha256": "9e77c7ecd2e3fa36ebcb850826a1551dfdf92e2928963954850d56c68a18171b"
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/metadata/mask_meta.py"
     },
     {
-      "path": "nas-tools/fix_local.ps1",
-      "sha256": "a7971ac0cf12a65b377fec0aebc69d48fb07c12269cf8787218709c664f6e910"
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/metadata/speech_to_song.py"
     },
     {
-      "path": "nas-tools/nas-tool.ps1",
-      "sha256": "a2d0071503158369cb04be5eaabc201f8deffe385af052c39fa27d36dc41f728"
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/metadata/text_intro.py"
     },
     {
-      "path": "nas-tools/sync.ps1",
-      "sha256": "1719069a2cfdb978769c4e6d2cd8b468485e242b45650514b1dcf81018088bc4"
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/metadata/text_loop.py"
     },
     {
-      "path": "nas-tools/一键取稿.bat",
-      "sha256": "0d6159b01de7b2b2f2d5a0df325d5e7735a569ae5c96d3b99f68e24018c90564"
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/metadata/text_outro.py"
     },
     {
-      "path": "nas-tools/上传草稿.bat",
-      "sha256": "86e8877bb3ab54e887bab8e78a212613404093b21f861b7c49c3ce718cd40b65"
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/metadata/tone_effect.py"
     },
     {
-      "path": "nas-tools/使用说明.md",
-      "sha256": "5e958ec7c1cef2f74feec7ec45c71faf73f3bb4da7ee786d4da1f218a4de2509"
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/metadata/transition_meta.py"
     },
     {
-      "path": "nas-tools/安装草稿自动同步.bat",
-      "sha256": "fba91a2e95079d2bc7c246b25332bd16d517b737a580fc17e052b1f1d1ea0483"
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/metadata/video_character_effect.py"
     },
     {
-      "path": "nas-tools/素材本地化修复.bat",
-      "sha256": "ebbaeeb2158ca907ec22c7e88313ed202c60e5c756cc072a939bd55b2673dd47"
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/metadata/video_group_animation.py"
     },
     {
-      "path": "nas-transport-hotfix.json",
-      "sha256": "126a30c5eb276752e6d8bf53cc145207e8a9b90635e0b837f40899313d161f12"
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/metadata/video_intro.py"
     },
     {
-      "path": "pyproject.toml",
-      "sha256": "427064a722daad6bbacdd749dec76590b424ab66b2e105c1d21d41fc13b6b779"
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/metadata/video_outro.py"
     },
     {
-      "path": "run_task.template.ps1",
-      "sha256": "5ef2a2a36e8bf70508a23c7b43f384e59b2e15b6e862c100d5becddcb1bd479c"
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/metadata/video_scene_effect.py"
     },
     {
-      "path": "scripts/uv_sync.ps1",
-      "sha256": "99c19758dff7208612c9f3e44b2203ee859d126c5caffe93be0b6cdaa7e1ff59"
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/script_file.py"
     },
     {
-      "path": "tests/test_delivery_runtime.py",
-      "sha256": "4dd1e6c5919d1813e70432c8c602a5caa063cd0d473f9e3bbce8cb710ffeda9b"
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/segment.py"
     },
     {
-      "path": "tests/test_draft_delivery.py",
-      "sha256": "f6f4f82142fe491262a7076dbd41f1127d15f108d0a14ac328a1e4dd7d6ab750"
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/template_mode.py"
     },
     {
-      "path": "tests/test_eval_bootstrap.py",
-      "sha256": "6f5361bcee2f3130330101fc412cba1cca676ec16d0587b5ce8ab41438ca227d"
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/text_segment.py"
     },
     {
-      "path": "tests/test_feedback_candidates.py",
-      "sha256": "0a985dca1d9966955ffbc676d00046b0bd1df9d74a9bebaff9599b2f76d9d447"
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/time_util.py"
     },
     {
-      "path": "tests/test_mac_review_handoff.py",
-      "sha256": "b628f797fa28107b9fa04063c2a23da5a496e12799b8152684fdc3929d22322d"
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/track.py"
     },
     {
-      "path": "tests/test_nas_portable.py",
-      "sha256": "88bb9699d4b71efe0688860ec16e4278e454386232da3a4fda51b356a6cbe48f"
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/util.py"
     },
     {
-      "path": "tests/test_queue_guardrails.py",
-      "sha256": "e0b57fd275abe86d472feaeaef16c7bd33ad3913d803e04d003f7ee031ffe696"
+      "path": "jianying-editor/scripts/vendor/pyJianYingDraft/video_segment.py"
     },
     {
-      "path": "tests/test_release_1_4_0.py",
-      "sha256": "38e1192e70cd860a277f046cabbd2af25e9dfee103e5695ae5a4013b1157fd3e"
+      "path": "jy_poll.ps1"
     },
     {
-      "path": "tests/test_release_version.py",
-      "sha256": "0c6c0ef7884311405a29b9c532f6858a8fe0fa5bfe0efc9159890354b1ee5acc"
+      "path": "nas-tools/fix_local.ps1"
     },
     {
-      "path": "tests/test_sentence_review.py",
-      "sha256": "6387dc6e59f76eaabf3d5751042174bcc7b380c24f90794cdc02706f95759d06"
+      "path": "nas-tools/nas-tool.ps1"
     },
     {
-      "path": "tests/test_visual_governance_rules.py",
-      "sha256": "7c71798c33ae4bd510aff5cefc4423206dd1731182b5db3f8edb85a9d3354fa2"
+      "path": "nas-tools/sync.ps1"
     },
     {
-      "path": "tests/test_visual_qc_delivery_contract.py",
-      "sha256": "d8572a71d185fca455da2b5906ee868c467a1521ea14a8b4841007350a68ebd4"
+      "path": "nas-tools/一键取稿.bat"
     },
     {
-      "path": "tools/ab_stability_single_pass.py",
-      "sha256": "4df78f4a29b5e5407ea4b17fea5d3199796c7b94e84f011f231c75d50ad76a07"
+      "path": "nas-tools/上传草稿.bat"
     },
     {
-      "path": "tools/bench_gpu_decode.py",
-      "sha256": "0dbee65753a564611d8b745facb7fc29c6cb31f679326617d890eecd74235533"
+      "path": "nas-tools/使用说明.md"
     },
     {
-      "path": "tools/classify_feedback.py",
-      "sha256": "fa91eaec72c767454b7e19f1497854fbe07f6ade8172a6bac138003f56f9ab16"
+      "path": "nas-tools/安装草稿自动同步.bat"
     },
     {
-      "path": "tools/closed_loop.py",
-      "sha256": "5bad94b8b0bdda40f9f8d3a5742b4cd42a0df9e66dadf6b2f1cdd1206034faca"
+      "path": "nas-tools/素材本地化修复.bat"
     },
     {
-      "path": "tools/delivery_identity.py",
-      "sha256": "37adc03f3f47e12e5c008a57b9cd004c7d6e4a4909f2087a5789f6e1c14d86e5"
+      "path": "nas-transport-hotfix.json"
     },
     {
-      "path": "tools/delivery_runtime.py",
-      "sha256": "dd6067ca0157e7b4137c2c783776b58b35eadf124421b6747475f377140ac0d6"
+      "path": "pyproject.toml"
     },
     {
-      "path": "tools/draft_delivery.py",
-      "sha256": "114d9f745b15efc1ed3b86d586141a506236f9326fc009519655d09d1e66b7d7"
+      "path": "run_task.template.ps1"
     },
     {
-      "path": "tools/eval_bootstrap.py",
-      "sha256": "a294709671c4652f2962a8463d319b3d3b3c4faa9a2b3d1e6b27494570ff6195"
+      "path": "scripts/uv_sync.ps1"
     },
     {
-      "path": "tools/eval_stage.py",
-      "sha256": "94c0988cee1cf8e31563547c0f5ec34131bacbec657ff48737237429e74bcac9"
+      "path": "tests/test_delivery_runtime.py"
     },
     {
-      "path": "tools/feedback_candidates.py",
-      "sha256": "d25a6c48fc13b39c495b69e9c84b85e2bc8fb0a6082417538a6df7bbd682c85b"
+      "path": "tests/test_draft_delivery.py"
     },
     {
-      "path": "tools/mac_review_handoff.py",
-      "sha256": "48ff97176a53f41faa05215f336f35c8dc84b36d56142efd99cebe4b098a9015"
+      "path": "tests/test_eval_bootstrap.py"
     },
     {
-      "path": "tools/material_index.py",
-      "sha256": "936df516e4f7662853d6458abf63084a627d71b9d259267ad164aa360caf956a"
+      "path": "tests/test_feedback_candidates.py"
     },
     {
-      "path": "tools/material_library.py",
-      "sha256": "447ca25c798cf5e1381f5a603844a232012cb5566b2a25738b10cb2b29951756"
+      "path": "tests/test_mac_review_handoff.py"
     },
     {
-      "path": "tools/nas_portable.py",
-      "sha256": "a6c9041ec465db286c54e9c55dcbaa93e6bd23943dd08b478ebba71446839d6f"
+      "path": "tests/test_meeting_poll_fields.py"
     },
     {
-      "path": "tools/production_eval.py",
-      "sha256": "345487b6ac7afba727f12d17c257d2cf2b9ced01e7415dab1b5285ebb4f6ca56"
+      "path": "tests/test_meeting_task_inputs.py"
     },
     {
-      "path": "tools/release_package.py",
-      "sha256": "dca41cbbf7b31d4030be8839e7a4c16788d9a46a48f8cb723f8153e6beadc369"
+      "path": "tests/test_nas_portable.py"
     },
     {
-      "path": "tools/sentence_review.py",
-      "sha256": "7c9abef7daf8fefe734db9e8456cf7b509aff1e4a17739458095cbf0dc92ce6b"
+      "path": "tests/test_queue_guardrails.py"
     },
     {
-      "path": "uv.lock",
-      "sha256": "fbf91e728d899ae5ea11a92a87f7e9372db3d1e4d70d6c92daeb380f452a7778"
+      "path": "tests/test_release_1_4_0.py"
+    },
+    {
+      "path": "tests/test_release_version.py"
+    },
+    {
+      "path": "tests/test_sentence_review.py"
+    },
+    {
+      "path": "tests/test_visual_governance_rules.py"
+    },
+    {
+      "path": "tests/test_visual_qc_delivery_contract.py"
+    },
+    {
+      "path": "tools/ab_stability_single_pass.py"
+    },
+    {
+      "path": "tools/bench_gpu_decode.py"
+    },
+    {
+      "path": "tools/classify_feedback.py"
+    },
+    {
+      "path": "tools/closed_loop.py"
+    },
+    {
+      "path": "tools/delivery_identity.py"
+    },
+    {
+      "path": "tools/delivery_runtime.py"
+    },
+    {
+      "path": "tools/draft_delivery.py"
+    },
+    {
+      "path": "tools/eval_bootstrap.py"
+    },
+    {
+      "path": "tools/eval_stage.py"
+    },
+    {
+      "path": "tools/feedback_candidates.py"
+    },
+    {
+      "path": "tools/mac_review_handoff.py"
+    },
+    {
+      "path": "tools/material_index.py"
+    },
+    {
+      "path": "tools/material_library.py"
+    },
+    {
+      "path": "tools/nas_portable.py"
+    },
+    {
+      "path": "tools/production_eval.py"
+    },
+    {
+      "path": "tools/release_package.py"
+    },
+    {
+      "path": "tools/sentence_review.py"
+    },
+    {
+      "path": "uv.lock"
     }
   ],
   "release_id": "video-v1.5.6",
-  "schema_version": 1,
-  "source_sha256": "5ec8f592135f3ceac847589c9d32dc882840aeb69e71848f9b3ec7b4f127f505",
-  "tree_hash_algorithm": "video-release-tree-v1",
+  "schema_version": 2,
   "version": "1.5.6",
   "visual_policy_version": "1.4.1"
 }

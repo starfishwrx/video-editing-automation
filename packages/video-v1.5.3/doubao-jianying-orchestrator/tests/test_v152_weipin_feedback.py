@@ -415,7 +415,9 @@ class SubtitleDefaultTests(unittest.TestCase):
     def test_engine_and_validator_agree(self):
         engine = (PACKAGE_ROOT / "doubao-jianying-orchestrator/orchestrator/engine.py").read_text(
             encoding="utf-8")
-        self.assertIn('"subtitle_transform_y": -0.55,', engine)
+        from orchestrator.production_parameters import subtitle_transform
+        self.assertEqual(subtitle_transform({"category": "weipin"}, 1080, 1920)["y"], -0.55)
+        self.assertIn('"subtitle_transform_y": subtitle_position["y"],', engine)
         self.assertNotRegex(engine, r'"subtitle_transform_y":\s*-(0\.8|1000)')
         material = {"content": '{"text": "字幕", "styles": [{"size": 8.0, "bold": true}]}'}
         expected = {"subtitle_style_required": True}

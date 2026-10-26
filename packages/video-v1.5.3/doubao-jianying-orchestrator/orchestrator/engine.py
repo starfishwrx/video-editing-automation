@@ -25,6 +25,8 @@ from . import (audio_loudness, bgm_selector, capacity, draft_safety, gpu_runtime
 from .platform_env import (bootstrap_path, environment_report, find_drafts_root,
                            find_ffmpeg, find_jianying_editor_root)
 from .resource_profile import FRIENDLY_PROFILES, apply_process_priority, choose_profile
+from . import rulepack
+from .voice_request import select_voice_tempo
 from .video_encode import run_h264_encode
 from .voice_catalog import recommend_voices, resolve_voice
 from .subtitle_units import text_units
@@ -157,6 +159,7 @@ class Clip:
     time_sensitive: bool = False
     # v1.5.2 场景规则（卫品指令）显式给出的变速范围，优先于画面角色的范围。
     speed_range_override: Any = None
+    preferred_speed: float = 1.0
     # 场景规则按动作相位定窗时的头尾保护区（秒），优先于 manifest 的 head/tail_trim_s。
     guard_override: Any = None
     # 转场把手（定案第 5 条：与首尾废料保护区**分开**扣）。转场会吃掉紧邻切点的
@@ -219,14 +222,25 @@ class OrchestrationEngine:
     def __init__(self, manifest: dict, base_dir: Path, report_dir: Path, *,
                  editor_root: Optional[Path] = None, strict_script: bool = False,
                  logger=None, capacity_guard: bool = True):
-        self.m = manifest
+        normalized = dict(manifest)
+        voice = normalized.get("voice")
+        if voice is None or (isinstance(voice, str) and not voice.strip()):
+            env_voice = os.environ.get("JY_OPERATOR_VOICE", "").strip()
+            if env_voice:
+                normalized["voice"] = env_voice
+        voice_rules = rulepack.for_manifest(normalized)
+        normalized["voice_tempo"], _, _ = select_voice_tempo(
+            normalized.get("voice"),
+            voice_tempo=normalized.get("voice_tempo"),
+            category_tempo=(voice_rules.get("voice") or {}).get("tempo", 1.0))
+        self.m = normalized
         self.base_dir = base_dir
         self.report_dir = report_dir
         self.editor_root = editor_root or find_jianying_editor_root()
         self.strict_script = strict_script
         self.logger = logger
         self.capacity_guard = capacity_guard
-        self.profile = choose_profile(manifest)
+        self.profile = choose_profile(self.m)
         self.priority_applied = apply_process_priority(self.profile)
         self._resource_degraded = False
         self._probe_cache: dict[str, dict] = {}
@@ -552,6 +566,7 @@ class OrchestrationEngine:
                     visual_role=str(it.get("visual_role", "") or "").strip(),
                     time_sensitive=bool(it.get("time_sensitive")),
                     speed_range_override=it.get("speed_range_override"),
+                    preferred_speed=it.get("preferred_speed", 1.0),
                     guard_override=it.get("guard_override"),
                     raw_index=i - 1,
                 )
@@ -909,6 +924,7 @@ class OrchestrationEngine:
                 time_sensitive=bool(part.get("time_sensitive", raw.get("time_sensitive"))),
                 speed_range_override=(part.get("speed_range_override")
                                       or raw.get("speed_range_override")),
+                preferred_speed=part.get("preferred_speed", raw.get("preferred_speed", 1.0)),
                 raw_index=c.raw_index,
             )
             if sub.audio_mode == "file":
@@ -1120,7 +1136,7 @@ class OrchestrationEngine:
         if self.m.get("selection_mode") == "ai_editor":
             from . import ai_editor_contract
             for index, item in enumerate(raw, 1):
-                check = ai_editor_contract.validate_segment_receipt(item, index=index, verify_source=True)
+                check = ai_editor_contract.validate_segment_receipt(item, index=index, verify_source=True, manifest=self.m)
                 if not check["ok"]:
                     report["ok"] = False
                     report.setdefault("issues", []).append({"index": index,
@@ -1272,7 +1288,7 @@ class OrchestrationEngine:
         # The Windows poller exports the original Feishu label in
         # JY_OPERATOR_VOICE.  Treat it as the source of truth even if an LLM
         # manifest already contains a guessed fallback speaker id.
-        v = os.environ.get("JY_OPERATOR_VOICE", "").strip() or self.m.get("voice")
+        v = self.m.get("voice")
         intelligent = self.intelligent_mode_authorized()
         if intelligent and v is None:
             full = self.m.get("full_script", "") + " " + " ".join(c.text for c in self._clips)
@@ -1394,7 +1410,7 @@ class OrchestrationEngine:
         # A voice supplied by the Feishu task is an operator decision.  Keep
         # it locked for every narrated segment so an LLM-produced per-shot
         # ``voice`` field cannot make the formal draft differ from audition.
-        operator_voice = os.environ.get("JY_OPERATOR_VOICE", "").strip() or self.m.get("voice")
+        operator_voice = self.m.get("voice")
         # 多镜摊平后同一句旁白挂在 N 个子段上。这里按**父段落**建组、按父段落合成
         # 一次，再把结果回写给它的每个子段 —— 逐子段各跑一次虽然会命中 TTS 缓存
         # 不重复花钱，但会把一条配音数成 N 条（报告与日志都会脏），而且一旦缓存
@@ -1528,6 +1544,7 @@ class OrchestrationEngine:
             evidence_start_us=None if span is None else int(round(span[0] * US)),
             evidence_end_us=None if span is None else int(round(span[1] * US)),
             speed_min=speed_min, speed_max=speed_max,
+            preferred_speed=clip.preferred_speed,
             preferred_start_us=preferred_us,
             video_duration_us=int(round(float(clip.video_duration) * US)), fps=frm)
 
@@ -2232,6 +2249,12 @@ class OrchestrationEngine:
         v1.5.2 起默认关闭（2026-10-12 会议：叠化会在下一镜开头带出上一镜的残影）。
         只有 manifest 显式 ``auto_transition: true`` 才走自动转场。
         """
+        from . import rulepack
+        if rulepack.detect_category(self.m)[0] == "zhipin":
+            for clip in clips:
+                clip.transition = None
+                clip.transition_in_handle_us = clip.transition_out_handle_us = 0
+            return
         if not self.m.get("auto_transition", False):
             return
         for i in range(1, len(clips)):
@@ -2251,6 +2274,7 @@ class OrchestrationEngine:
         src: Optional[Path] = None
         if isinstance(spec, dict) and spec.get("path"):
             src = self.resolve(spec["path"])
+            self._bgm_choice = {"path": str(src), "selection_mode": "explicit_path"}
         elif isinstance(spec, dict) and (spec.get("music_id") or spec.get("mood") or
                                          spec.get("auto", True) or self.m.get("full_script")):
             # 默认基于脚本/剧情对曲库相关性排序；显式 mood/music_id 优先
@@ -2261,7 +2285,20 @@ class OrchestrationEngine:
             if not cands:
                 self._warn("bgm_not_found", f"未找到匹配BGM: {spec}")
                 return None
-            chosen = cands[0]
+            task_identity = {"task_id": self.m.get("task_id") or self.m.get("record_id") or
+                             self.m.get("draft_name"),
+                             "script_sha256": hashlib.sha256(str(self.m.get("full_script") or
+                                 [c.get("text", "") for c in self.m.get("segments", [])]).encode()).hexdigest()}
+            state_dir = (self.resolve(self.m["bgm_state_dir"]) if self.m.get("bgm_state_dir") else
+                         self.report_dir / "bgm_selection")
+            requested_bgm = str(spec.get("music_id") or "")
+            resolved_music_id = (str(cands[0].get("music_id") or requested_bgm)
+                                 if requested_bgm else "")
+            chosen = bgm_selector.select_bgm_for_task(cands, task_identity=task_identity,
+                batch_identity=self.m.get("batch_id") or self.m.get("batch_identity") or task_identity,
+                state_dir=state_dir, explicit_music_id=resolved_music_id)
+            if requested_bgm and resolved_music_id and requested_bgm != resolved_music_id:
+                chosen["requested_label"] = requested_bgm
             self._bgm_choice = chosen
             if chosen.get("url"):
                 src = bgm_selector.download_track(chosen, bgm_dir)
@@ -2427,17 +2464,35 @@ class OrchestrationEngine:
             return {"status": verdict.status if verdict.status != "BLOCKED" else "BLOCKED",
                     "reason": verdict.message}
 
+        # Caption timing follows exactly the processed narration that will be
+        # staged below. The original sentence text stays on screen for its audio.
+        loudness_overrides = self._normalize_narrations(clips)
+        caption_source = str(self.m.get("caption_source") or
+                             ("audio" if self.m.get("selection_mode") == "ai_editor" else "legacy"))
+        if caption_source not in {"audio", "legacy"}:
+            return {"status": "CAPTION_CONFIG_INVALID", "reason": "caption_source must be audio or legacy"}
+        if caption_source == "legacy" and self.m.get("selection_mode") == "ai_editor":
+            return {"status": "CAPTION_CONFIG_INVALID", "reason": "AI editor requires final-audio captions"}
+        caption_result = None
+        if caption_source == "audio":
+            from . import audio_captions
+            caption_result = audio_captions.build_captions(self.m, clips, self.report_dir / "captions",
+                audio_overrides=loudness_overrides, probe=self.probe)
+            if not caption_result.get("ok"):
+                return {"status": "CAPTION_TIMING_UNCERTIFIED", "draft_path": None,
+                        "formal_delivery_allowed": False, "issues": caption_result.get("issues", []),
+                        "caption_report": str(self.report_dir / "captions" / "audio_captions.json")}
         w, h = (1080, 1920) if str(self.m.get("aspect_ratio", "9:16")) == "9:16" else (1920, 1080)
+        from .production_parameters import subtitle_transform
+        try:
+            subtitle_position = subtitle_transform(self.m, w, h)
+        except ValueError as exc:
+            return {"status": "SUBTITLE_CONFIGURATION_INVALID", "reason": str(exc)}
         # ``find_drafts_root`` may resolve JianYing's Windows custom library
         # from the client registry.  Pass it through explicitly: the wrapper's
         # legacy default resolver otherwise falls back to LOCALAPPDATA.
         project = JyProject(name, width=w, height=h, drafts_root=str(drafts_root), overwrite=True)
         media_dir = Path(project.draft_dir) / "media"
-
-        # 旁白响度归一（通用规则）：先产出归一成品，再让它替身进 stage 与写入。
-        # 必须**先于** sources 收集 —— 否则 stage 的还是原始 TTS，草稿里写进去的
-        # 也就还是忽大忽小的那批。
-        loudness_overrides = self._normalize_narrations(clips)
 
         sources = []
         for c in clips:
@@ -2557,14 +2612,14 @@ class OrchestrationEngine:
                     track_name="Narration")
                 if a is None:
                     raise RuntimeError(f"旁白添加失败: {narration}")
-            # 字幕：多镜的子段**照常各出一条字幕**（各自的时间区间、各自的时长），
-            # 这是摊平带来的必然结果 —— 中间若切成新的镜头，字幕条跟着走。同一句
-            # 文本铺在 N 段上，视觉上就是一句话横跨 N 个镜头。判据仍与原版一致
-            # （有文本才有字幕），只是现在按摊平后的段逐条走。
-            if c.text:
+            # Explicit legacy retains clip-timed text. Audio captions are written
+            # once per narration sentence after the video loop, across shot cuts.
+            if c.text and caption_source == "legacy":
                 project.add_text_simple(
                     c.text, start_time=c.start_us, duration=to_us(c.duration),
-                    track_name="Subtitles")
+                    track_name="Subtitles", **({"clip_settings": draft.ClipSettings(
+                        transform_x=subtitle_position["x"], transform_y=subtitle_position["y"])}
+                        if self.m.get("subtitle_position_px") is not None else {}))
             # 画面标注（【素材待补】/【本批未认证】）已按用户 2026-09-17 定案
             # **停止写入草稿**：交付画面必须干净。降级段与未认证状态继续在
             # `built`/报告/事件里如实上报（`c.degraded`、`_uncertified_coverage`、
@@ -2580,6 +2635,11 @@ class OrchestrationEngine:
                           "visual_missing": bool(c.visual_missing),
                           "operator_note": c.visual_missing_note})
             prev_seg = vid
+
+        if caption_result is not None:
+            project.add_caption_cues(caption_result["cues"], track_name="Subtitles",
+                                     transform_x=subtitle_position["x"],
+                                     transform_y=subtitle_position["y"])
 
         # ── 写入后不变量自检（定案第 7、8 条）────────────────────────────
         #
@@ -2660,6 +2720,7 @@ class OrchestrationEngine:
                 "schema": "chatcut-ai-draft-v1", "selection_mode": "ai_editor",
                 "selection_sha256": ai_editor_contract.digest(self.m.get("segments", [])),
                 "policy_version": ai_editor_contract.POLICY_VERSION,
+                "editorial_rules": ai_editor_contract.rules_identity(self.m),
             }, ensure_ascii=False, indent=2), encoding="utf-8")
         # 需求7：写后独立校验，不通过不上报成功
         #
@@ -2669,14 +2730,13 @@ class OrchestrationEngine:
         #   · 旁白轨：多镜的同一句配音虽然加了 N 条 `AudioSegment`（每段取一片），
         #     但**计数按 clips 走**才与写入一致 —— 每条 clip 只要挂了 tts/audio
         #     就加一条，没有去重；
-        #   · 字幕轨：同样按 `clips` 逐条，同句多镜会出 N 条。
-        # 所以三类都保持 `clips` 口径。曾经想把旁白/字幕改成「父段落去重」，
-        # 那会与写入循环（按 clips）对不上，反而制造 DRAFT_INVALID 假阳性。
+        #   · 字幕轨：audio 按实际 ASR cues 计数；legacy 才按有文本的 clips。
         narration_expected = sum(
             1 for c in clips
             if c.tts_path or (c.audio_mode == "file" and c.audio)
         )
-        subtitle_expected = sum(1 for c in clips if c.text.strip())
+        subtitle_expected = (len(caption_result["cues"]) if caption_result is not None else
+                             sum(1 for c in clips if c.text.strip()))
         expected_tracks = {
             "video_segments": len(clips),
             "narration_segments": narration_expected,
@@ -2690,14 +2750,21 @@ class OrchestrationEngine:
             # 成片里看不见 —— 见 text_ops 的常量注释。
             "subtitle_font_size": 8.0,
             "subtitle_bold": True,
-            "subtitle_transform_x": 0.0,
-            "subtitle_transform_y": -0.55,
+            "subtitle_transform_x": subtitle_position["x"],
+            "subtitle_transform_y": subtitle_position["y"],
             "subtitle_strip_punctuation": True,
+            "native_subtitles_required": caption_result is not None,
+            "subtitle_cues": caption_result["cues"] if caption_result is not None else None,
         }
         issues = draft_safety.post_write_validate(
             draft_dir, expected_tracks=expected_tracks)
         if issues:
             return {"status": "DRAFT_INVALID", "draft_path": str(draft_dir), "issues": issues}
+        if caption_result is not None:
+            (draft_dir / "caption_identity.json").write_text(json.dumps({
+                "schema": "chatcut-audio-captions-v1", "identity": caption_result["identity"],
+                "cue_count": subtitle_expected, "ui_acceptance": "UNKNOWN",
+            }, ensure_ascii=False, indent=2), encoding="utf-8")
         draft_safety.sync_root_meta(Path(drafts_root), name, duration_us=self.total_us)
         actual_total_us = project.get_track_duration("Video_BRoll") or self.total_us
         intelligent = self.intelligent_mode_authorized()
@@ -2707,7 +2774,7 @@ class OrchestrationEngine:
             selected_preset = resolve_voice(selected_voice)
             selected_data = selected_preset.to_dict()
             voice_used = {
-                "input": os.environ.get("JY_OPERATOR_VOICE", "").strip() or self.m.get("voice"),
+                "input": self.m.get("voice"),
                 "normalized_name": selected_data.get("label"),
                 "speaker_id": selected_data.get("sami"),
                 "display_name": selected_data.get("label"),
@@ -2716,8 +2783,8 @@ class OrchestrationEngine:
             if any(c.tts_path for c in clips):
                 voice_used["backend"] = "sami"
         except (TypeError, ValueError):
-            voice_used = {"input": os.environ.get("JY_OPERATOR_VOICE", "").strip() or self.m.get("voice"), "speaker_id": str(selected_voice)}
-        operator_voice_input = os.environ.get("JY_OPERATOR_VOICE", "").strip() or self.m.get("voice")
+            voice_used = {"input": self.m.get("voice"), "speaker_id": str(selected_voice)}
+        operator_voice_input = self.m.get("voice")
         if voice_rec:
             voice_selection = {
                 "mode": "intelligent_recommended" if intelligent else "recommended",
@@ -2762,6 +2829,9 @@ class OrchestrationEngine:
                 "voice_used": voice_used,
                 "bgm_choice": bgm_choice,
                 "audio_selection": audio_guidance,
+                "caption_source": caption_source,
+                "caption_identity": caption_result["identity"] if caption_result else None,
+                "subtitle_ui_acceptance": "UNKNOWN" if caption_result else None,
                 "visual_evidence": getattr(self, "_visual_evidence_report", None),
                 # 闸门认证状态透到运营侧（定案第 10 条）。键名用 ``coverage`` ——
                 # `cli._compact_build_result` 的非 SUCCESS 白名单已含该键，改别的
@@ -2775,6 +2845,33 @@ class OrchestrationEngine:
                 "storyboard_scores": getattr(self, "_storyboard_scores", [])}
 
     # ---------- 主流水线 ----------
+    def _narration_gap_gate(self, clips: list[Clip]) -> Optional[dict]:
+        from . import rulepack
+        from .production_parameters import silence_edges, gap_errors
+        rules = rulepack.for_manifest(self.m)
+        maximum = (rules.get("voice") or {}).get("acceptance_max_gap_frames")
+        if rules.get("category") != "zhipin" or maximum is None:
+            return None
+        rows = []
+        try:
+            for c in clips:
+                narration = c.tts_path if c.audio_mode == "tts" else (c.audio if c.audio_mode == "file" else None)
+                if not narration:
+                    continue
+                edges = silence_edges(narration, start_s=self._audio_slice_us(c) / US,
+                    duration_s=c.duration, ffmpeg=str(self.ffmpeg))
+                rows.append({**edges, "sentence": c.raw_index, "start_s": c.start_us / US,
+                    "end_s": c.start_us / US + c.duration})
+            issues = gap_errors(rows, fps=self._fps(), max_frames=int(maximum))
+        except (ValueError, OSError, subprocess.TimeoutExpired) as exc:
+            issues = [{"code": "NARRATION_GAP_UNVERIFIED", "reason": str(exc)}]
+        report = {"status": "PASS" if not issues else "UNCERTIFIED", "rows": rows,
+            "max_gap_frames": maximum, "issues": issues}
+        (self.report_dir / "narration_gap_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        if issues:
+            return {"status": "NARRATION_GAP_UNVERIFIED", "narration_gap": report}
+        return None
+
     def run(self) -> dict:
         """跑一次构建；无论走到哪个出口，都把本次 GPU 用量写进事件和结果。"""
         gpu_runtime.reset_stats()
@@ -2900,6 +2997,9 @@ class OrchestrationEngine:
         sync_err = self.validate_audio_video_sync(clips)
         if sync_err:
             return sync_err
+        gap_err = self._narration_gap_gate(clips)
+        if gap_err:
+            return gap_err
         # 1.3.27.1 执行位①：计划解算完成后、写草稿前，跑一次不变量校验。
         plan_gate = self._invariant_gate(clips, stage="plan_complete")
         if plan_gate:
