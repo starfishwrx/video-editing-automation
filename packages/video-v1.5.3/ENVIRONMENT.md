@@ -58,7 +58,7 @@ machine's tested capacity. A larger slot limit alone does not create requests.
 `vision_progress.json` distinguishes `frame_prepare`, `sheet_prepare`, `vision`,
 `text_prepare` and text calls, with preparation and completed-request counts.
 `shot_candidates.json.vision_analysis` records stage wall times (API stages
-include validation/checkpoint I/O) and the source hash captured at module import.
+include validation/checkpoint I/O). Source-code hashes are not collected at runtime.
 These counters do not measure provider-side in-flight requests or prove a real
 API speedup; offline tests exercise concurrency using synthetic responses.
 
@@ -91,17 +91,11 @@ general `.env` loader. Verify the chosen backend's image capability separately.
 
 ## Production integrations
 
-Final-audio captions for the meeting feature candidate require
-`uv sync --frozen --group asr`; run builds with `uv run --frozen --group asr`.
-The ASR group is included in the default sync for the new AI workflow; a
-legacy-only installation can explicitly use `uv sync --no-group asr`.
-`JY_ASR_MODEL` (or manifest `asr_model`) selects faster-whisper `small` by default
-or a prepared local model directory. First use downloads model weights.
-`asr_language` is optional; `asr_timeout_s` defaults to 180 seconds and bounds
-loading/download/inference in a child process. CUDA runtime failures retry CPU
-int8 once and are recorded. `HF_HUB_DOWNLOAD_TIMEOUT` configures the model
-download HTTP timeout in the launch environment. These ASR options do not change
-the video's GPU/queue/GLM configuration. Recognition failure stays uncertified.
+Captions use the original TTS sentence text and measured final audio durations.
+Tempo, edge trimming and loudness processing finish before caption timing is
+read. A sentence spanning several video shots gets one continuous subtitle cue.
+No ASR service, speech-recognition model, model download or ASR dependency group
+is required. Missing or unreadable narration audio remains an explicit error.
 
 `JY_MEETING_OPTIONAL_FIELDS_JSON` optionally maps **existing** Feishu fields to
 `voice_tempo`, `modified_reference_links` and `modified_reference_attachments`.

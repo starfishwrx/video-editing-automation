@@ -305,11 +305,11 @@ def _expected_track_issues(draft: dict, expected_tracks: dict) -> list[str]:
                 import re
                 normalize = lambda value: re.sub(r"[^\w\u3400-\u9fff]+", "", str(value or ""))
                 if normalize(_text_from_material(material)) != normalize(cue["text"]):
-                    issues.append(f"字幕第 {idx} 条与音频识别文本不一致")
+                    issues.append(f"字幕第 {idx} 条与原文不一致")
                 target = segment.get("target_timerange") or {}
                 if (target.get("start") != cue["start_us"] or
                         target.get("duration") != cue["end_us"] - cue["start_us"]):
-                    issues.append(f"字幕第 {idx} 条与音频识别时间不一致")
+                    issues.append(f"字幕第 {idx} 条与口播时间不一致")
             if not _text_from_material(material):
                 issues.append(f"字幕第 {idx} 条缺少可解析的 content.text")
             issues.extend(_subtitle_style_issues(material, segment, idx, expected_tracks))

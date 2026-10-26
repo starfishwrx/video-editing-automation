@@ -699,10 +699,6 @@ class OrchestrationEngine:
 
     def _script_segment_length_gate(self, clips: list[Clip]) -> Optional[dict]:
         """15 字是软目标。只拦住完全没按词拆开、长到硬上限的口播。"""
-        if self.m.get("selection_mode") == "ai_editor" or self.m.get("caption_source") == "audio":
-            # Narration sentences are no longer the display subtitle units.
-            # Word-timed ASR cues apply their own readable-length validation.
-            return None
         offenders = []
         for index, clip in enumerate(self._parent_clips(clips), 1):
             text = re.sub(r"\s+", "", str(getattr(clip, "text", "") or ""))
@@ -2469,7 +2465,7 @@ class OrchestrationEngine:
                     "reason": verdict.message}
 
         # Caption timing follows exactly the processed narration that will be
-        # staged below. Fail before allocating a new draft on recognition errors.
+        # staged below. The original sentence text stays on screen for its audio.
         loudness_overrides = self._normalize_narrations(clips)
         caption_source = str(self.m.get("caption_source") or
                              ("audio" if self.m.get("selection_mode") == "ai_editor" else "legacy"))
@@ -2481,9 +2477,9 @@ class OrchestrationEngine:
         if caption_source == "audio":
             from . import audio_captions
             caption_result = audio_captions.build_captions(self.m, clips, self.report_dir / "captions",
-                str(self.ffmpeg or "ffmpeg"), audio_overrides=loudness_overrides)
+                audio_overrides=loudness_overrides, probe=self.probe)
             if not caption_result.get("ok"):
-                return {"status": "CAPTION_ASR_UNCERTIFIED", "draft_path": None,
+                return {"status": "CAPTION_TIMING_UNCERTIFIED", "draft_path": None,
                         "formal_delivery_allowed": False, "issues": caption_result.get("issues", []),
                         "caption_report": str(self.report_dir / "captions" / "audio_captions.json")}
         w, h = (1080, 1920) if str(self.m.get("aspect_ratio", "9:16")) == "9:16" else (1920, 1080)
@@ -2617,7 +2613,7 @@ class OrchestrationEngine:
                 if a is None:
                     raise RuntimeError(f"旁白添加失败: {narration}")
             # Explicit legacy retains clip-timed text. Audio captions are written
-            # once from word timestamps after the video loop, across shot cuts.
+            # once per narration sentence after the video loop, across shot cuts.
             if c.text and caption_source == "legacy":
                 project.add_text_simple(
                     c.text, start_time=c.start_us, duration=to_us(c.duration),

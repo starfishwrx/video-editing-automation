@@ -45,6 +45,13 @@ def file_sha256(path: str | Path) -> str:
     return value.hexdigest()
 
 
+def source_identity(path: str | Path) -> dict:
+    """Cheap stale-media detection for local editing, not a content signature."""
+    source = Path(path).resolve(strict=True)
+    info = source.stat()
+    return {"path": str(source), "size": info.st_size, "mtime_ns": info.st_mtime_ns}
+
+
 def editorial_context(manifest: dict | None = None) -> dict:
     # production_eval loads this contract as a standalone file. Load the sibling
     # rulepack from the same runtime, never an unrelated installed package.
@@ -59,7 +66,7 @@ def editorial_context(manifest: dict | None = None) -> dict:
 
 def rules_identity(manifest: dict | None = None) -> dict:
     context = editorial_context(manifest)
-    return {key: context[key] for key in ("category", "versions", "sha256")}
+    return {key: context[key] for key in ("category", "versions")}
 
 
 def policy_prompt(manifest: dict) -> str:
@@ -87,14 +94,14 @@ def sequence_errors(segments: list[dict]) -> list[str]:
     for index, segment in enumerate(segments, 1):
         for part in segment.get("span_parts") or [segment]:
             receipt = part.get("ai_selection") or {}
-            sha = receipt.get("source_sha256")
+            source = str(receipt.get("video") or part.get("video") or "")
             window = receipt.get("window_us") or {}
             try:
                 start, end = int(window["start"]), int(window["end"])
             except (KeyError, TypeError, ValueError):
                 return ["AI_EDITOR_SEQUENCE_RECEIPT_INVALID"]
             sensitive = receipt.get("time_sensitive") is True
-            for previous, a, b, was_sensitive in used.get(sha, []):
+            for previous, a, b, was_sensitive in used.get(source, []):
                 scarce_reuse = (receipt.get("sentence_kind") == "selling_point"
                                 and bool(receipt.get("scarce_reuse_reason"))
                                 and not (sensitive and was_sensitive and index <= previous + 1))
@@ -102,7 +109,7 @@ def sequence_errors(segments: list[dict]) -> list[str]:
                     return [f"AI_EDITOR_REPEATED_SOURCE_WINDOW:{previous}:{index}"]
                 if sensitive and was_sensitive and index <= previous + 1 and start < a - 40000:
                     return [f"AI_EDITOR_EXPERIMENT_TIME_REVERSED:{previous}:{index}"]
-            used.setdefault(sha, []).append((index, start, end, sensitive))
+            used.setdefault(source, []).append((index, start, end, sensitive))
     return []
 
 
@@ -117,9 +124,9 @@ def _window(item: dict) -> dict[str, int]:
     return {"start": start, "end": end}
 
 
-def seal_receipt(segment: dict, *, index: int, sentence: dict, observation: dict,
-                 source_sha256: str, identity: dict) -> dict:
-    """Only the producer seals a successfully observed, technically solved cut."""
+def make_receipt(segment: dict, *, index: int, sentence: dict, observation: dict,
+                 source_identity: dict, identity: dict) -> dict:
+    """Record the actual observation and solved cut without a self-signature."""
     receipt = {
         "schema": RECEIPT_SCHEMA, "policy_version": POLICY_VERSION,
         "index": index, "text": str(segment.get("text") or ""),
@@ -130,20 +137,14 @@ def seal_receipt(segment: dict, *, index: int, sentence: dict, observation: dict
         "supported_point_ids": observation.get("supported_point_ids", []),
         "scarce_reuse_reason": observation.get("scarce_reuse_reason", ""),
         "video": str(segment["video"]), "shot_id": segment["temporary_shot_id"],
-        "source_sha256": source_sha256, "window_us": _window(segment),
+        "source_identity": source_identity, "window_us": _window(segment),
         "video_speed": segment.get("video_speed"),
         "speed_range_override": segment.get("speed_range_override"),
         "preferred_speed": segment.get("preferred_speed", 1.0),
         "scene_ids": observation.get("scene_ids", []), "sentence_scene_ids": sentence.get("scene_ids", []),
-        "review_prompt_sha256": observation["review_prompt_sha256"],
-        "frame_sheet_sha256": observation["frame_sheet_sha256"],
         "evidence_intervals_us": observation["evidence_intervals_us"],
         "identity": identity, "judgment": "matched",
     }
-    receipt["receipt_sha256"] = digest(receipt)
-    if segment.get("multi_shot"):
-        receipt["parts_sha256"] = digest(segment.get("span_parts"))
-        receipt["receipt_sha256"] = digest({k: v for k, v in receipt.items() if k != "receipt_sha256"})
     return receipt
 
 
@@ -155,9 +156,6 @@ def validate_segment_receipt(item: dict, *, text: str | None = None,
     if not isinstance(receipt, dict):
         return {"ok": False, "reasons": ["AI_SELECTION_RECEIPT_MISSING"]}
     try:
-        unsigned = {k: v for k, v in receipt.items() if k != "receipt_sha256"}
-        if receipt.get("receipt_sha256") != digest(unsigned):
-            reasons.append("AI_SELECTION_RECEIPT_CHANGED")
         if receipt.get("schema") != RECEIPT_SCHEMA or receipt.get("policy_version") != POLICY_VERSION:
             reasons.append("AI_SELECTION_CONTRACT_MISMATCH")
         if receipt.get("judgment") != "matched" or receipt.get("sentence_kind") not in KINDS:
@@ -201,7 +199,7 @@ def validate_segment_receipt(item: dict, *, text: str | None = None,
             reasons.append("AI_SELECTION_PURPOSE_CHANGED")
         if item.get("multi_shot"):
             parts = item.get("span_parts")
-            if not isinstance(parts, list) or len(parts) < 2 or receipt.get("parts_sha256") != digest(parts):
+            if not isinstance(parts, list) or len(parts) < 2:
                 reasons.append("AI_SELECTION_PARTS_CHANGED")
             else:
                 for part in parts:
@@ -214,19 +212,12 @@ def validate_segment_receipt(item: dict, *, text: str | None = None,
             reasons.append("AI_SELECTION_CONFIDENCE_INVALID")
         if not all(isinstance(receipt.get(k), str) and receipt[k].strip() for k in ("observation", "reason")):
             reasons.append("AI_SELECTION_OBSERVATION_MISSING")
-        sha = receipt.get("source_sha256", "")
-        if not isinstance(sha, str) or len(sha) != 64 or any(c not in "0123456789abcdef" for c in sha):
-            reasons.append("AI_SELECTION_SOURCE_HASH_INVALID")
-        for field in ("review_prompt_sha256", "frame_sheet_sha256"):
-            value = receipt.get(field)
-            if not isinstance(value, str) or len(value) != 64 or any(c not in "0123456789abcdef" for c in value):
-                reasons.append("AI_SELECTION_FRAME_IDENTITY_MISSING")
         identity = receipt.get("identity") or {}
-        if not all(identity.get(k) for k in ("model", "manifest_sha256", "prompt_sha256")):
+        if not identity.get("model"):
             reasons.append("AI_SELECTION_IDENTITY_MISSING")
         recorded_rules = identity.get("editorial_rules")
         context_manifest = manifest if manifest is not None else {"category": (recorded_rules or {}).get("category")}
-        if not isinstance(recorded_rules, dict) or recorded_rules != rules_identity(context_manifest):
+        if not isinstance(recorded_rules, dict) or {k: recorded_rules.get(k) for k in ("category", "versions")} != rules_identity(context_manifest):
             reasons.append("AI_SELECTION_RULES_CHANGED")
         scenes = editorial_context(context_manifest)["rules"].get("semantic_contracts", [])
         known_scenes = {scene["id"] for scene in scenes}
@@ -256,7 +247,7 @@ def validate_segment_receipt(item: dict, *, text: str | None = None,
                     break
         if window["start"] < 0 or window["end"] <= window["start"]:
             reasons.append("AI_SELECTION_WINDOW_INVALID")
-        if verify_source and file_sha256(item["video"]) != sha:
+        if verify_source and source_identity(item["video"]) != receipt.get("source_identity"):
             reasons.append("AI_SELECTION_SOURCE_CONTENT_CHANGED")
     except (KeyError, ValueError, TypeError, OverflowError, OSError):
         reasons.append("AI_SELECTION_RECEIPT_INVALID")

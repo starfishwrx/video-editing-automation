@@ -147,7 +147,7 @@ def result_contract(result: dict[str, Any], *, task_id: str, run_id: str,
         "TASK_ALREADY_RUNNING": ("environment", "TASK_ALREADY_RUNNING"),
         "PACKAGE_NOT_ACTIVE": ("ui", "PACKAGE_NOT_ACTIVE"),
         "CAPTION_CONFIG_INVALID": ("environment", "CAPTION_CONFIG_INVALID"),
-        "CAPTION_ASR_UNCERTIFIED": ("semantic", "CAPTION_ASR_UNCERTIFIED"),
+        "CAPTION_TIMING_UNCERTIFIED": ("semantic", "CAPTION_TIMING_UNCERTIFIED"),
     }
     if status in status_codes and (not failure_class or failure_class == "unknown"):
         failure_class, failure_code = status_codes[status]
@@ -174,7 +174,7 @@ def result_contract(result: dict[str, Any], *, task_id: str, run_id: str,
 
     coverage = payload.get("coverage") if isinstance(payload.get("coverage"), dict) else {}
     uncertified = bool(
-        status in {"PREVIEW_READY", "PARTIAL", "UNCERTIFIED", "CAPTION_ASR_UNCERTIFIED"}
+        status in {"PREVIEW_READY", "PARTIAL", "UNCERTIFIED", "CAPTION_TIMING_UNCERTIFIED"}
         or str(payload.get("delivery_mode") or "").lower() == "preview"
         or str(coverage.get("certification") or "").upper() not in {"", "CERTIFIED"}
         or coverage.get("uncertified_reasons")

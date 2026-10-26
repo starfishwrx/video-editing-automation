@@ -33,8 +33,7 @@ class AIEditorTests(unittest.TestCase):
             "basis": "editorial_fit", "observation": "手指轻捏薄边，巾体自然垂坠", "reason": "贴切展示轻薄手感",
             "confidence": .9, "supported_point_ids": ["p1"], "time_sensitive": False,
             "evidence_intervals_us": [{"start": 2000000, "end": 3000000}],
-            "source_sha256": contract.file_sha256(self.video)}
-        self.review.update(review_prompt_sha256="a" * 64, frame_sheet_sha256="b" * 64)
+            "source_identity": contract.source_identity(self.video)}
 
     def plan(self):
         return {"schema": contract.PLAN_SCHEMA, "ok": True, "sentences": [self.sentence],
@@ -79,7 +78,8 @@ class AIEditorTests(unittest.TestCase):
             editor._edit_plan(self.manifest, {"shots": [self.shot]}, plan, self.root)
         prompt = call.call_args.args[0]
         self.assertIn('"within_preferred_speed": true', prompt)
-        self.assertIn(self.review["source_sha256"], prompt)
+        self.assertIn('"source_identity": "source1"', prompt)
+        self.assertNotIn(str(self.video), prompt)
         self.assertIn("最高20倍", prompt)
 
     def test_mid_late_preference_preserves_correct_evidence_and_short_sources(self):
@@ -150,7 +150,7 @@ class AIEditorTests(unittest.TestCase):
         changed["window_solution"]["source_end"] = 2.1
         self.assertFalse(contract.validate_segment_receipt(changed)["ok"])
         changed = copy.deepcopy(segment)
-        changed["ai_selection"]["observation"] = "伪造通过"
+        changed["ai_selection"]["observation"] = ""
         self.assertFalse(contract.validate_segment_receipt(changed)["ok"])
 
     def test_hook_packaging_is_normal_and_selling_point_keeps_its_candidate(self):
@@ -163,7 +163,7 @@ class AIEditorTests(unittest.TestCase):
         pack_video.write_bytes(b"different synthetic packaging source")
         pack["video"] = str(pack_video)
         display = {**self.review, "shot_id": "pack", "supported_point_ids": [], "basis": "product_display",
-                   "observation": "同商品外包装展示", "reason": "承接无卖点钩子", "source_sha256": contract.file_sha256(pack_video)}
+                   "observation": "同商品外包装展示", "reason": "承接无卖点钩子", "source_identity": contract.source_identity(pack_video)}
         plan.update(sentences=[hook, sale], reviews={"2": [self.review]}, display_reviews=[display], rows=[
             {"index": 1, "parts": [{"shot_id": "pack", "audio_duration_us": 2000000}]},
             {"index": 2, "parts": [{"shot_id": "handfeel", "audio_duration_us": 2000000}]}])
@@ -254,7 +254,7 @@ class AIEditorTests(unittest.TestCase):
                 "exhausted": False, "feasible": True, "failed_calls": 0, "uncertain": 0}},
             "identity": {"model": "synthetic-model", "manifest_sha256": "a" * 64,
                 "timing_sha256": "b" * 64, "analysis_sha256": "c" * 64,
-                "prompt_sha256": "d" * 64}}
+                "prompt_sha256": "d" * 64, "editorial_rules": contract.rules_identity(self.manifest)}}
         responses = [
             {"rows": [{"index": 1, "parts": [{"shot_id": "shot1", "audio_duration_us": 2_000_000}],
                        "scarce_reuse_reason": "首批只有一个支持候选"}]},
@@ -350,7 +350,7 @@ class AIEditorTests(unittest.TestCase):
         other = {**self.shot, "shot_id": "second", "video": str(other_video)}
         first_review = {**self.review, "evidence_intervals_us": [{"start": 2000000, "end": 2500000}]}
         second_review = {**first_review, "shot_id": "second", "supported_point_ids": ["p2"],
-                         "source_sha256": contract.file_sha256(other_video)}
+                         "source_identity": contract.source_identity(other_video)}
         plan["reviews"]["1"] = [first_review, second_review]
         plan["rows"][0]["parts"] = [{"shot_id": sid, "audio_duration_us": 1000000} for sid in ("handfeel", "second")]
         plan["identity"]["analysis_sha256"] = contract.digest({"shots": [self.shot, other]})

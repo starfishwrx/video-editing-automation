@@ -43,8 +43,7 @@ def validate_cut(claim: dict, rows: list[dict]) -> list[str]:
         return issues + ["AI_QC_PART_COUNT_CHANGED"]
     for part, actual in zip(expected, rows):
         receipt = part.get("ai_selection") or {}
-        source_hash = contract.file_sha256(actual["source"])
-        if source_hash != receipt.get("source_sha256"):
+        if contract.source_identity(actual["source"]) != receipt.get("source_identity"):
             issues.append("AI_QC_SOURCE_CONTENT_CHANGED")
         start = round(actual["source_start"] * 1e6)
         end = round((actual["source_start"] + actual["source_duration"]) * 1e6)

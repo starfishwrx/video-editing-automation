@@ -421,7 +421,7 @@ def main() -> int:
             issues.extend(cut_errors)
             result["final_windows_verified"] = bool(claim_rows) and not cut_errors
             result["uncertified"] = result["uncertified"] or bool(cut_errors)
-            result["source_bindings"] = [{"path": row["source"], "sha256": ai_editor_contract.file_sha256(row["source"])}
+            result["source_bindings"] = [{"path": row["source"], "identity": ai_editor_contract.source_identity(row["source"])}
                                          for _, cut_rows in claim_rows for row in cut_rows]
         result["segment_map"] = [
             {"claim_index": claim["index"], "draft_segments": [row["index"] for row in rows]}
@@ -648,7 +648,7 @@ def main() -> int:
                     "batch_size_claims": batch_size,
                 })
         result["draft_metadata_sha256_final"] = draft_metadata_fingerprint(draft)
-        if ai_mode and any(ai_editor_contract.file_sha256(b["path"]) != b["sha256"] for b in result["source_bindings"]):
+        if ai_mode and any(ai_editor_contract.source_identity(b["path"]) != b["identity"] for b in result["source_bindings"]):
             result["issues"].append("AI_QC_SOURCE_CHANGED_DURING_REVIEW")
             result["uncertified"] = True
         if result["draft_metadata_sha256_final"] != result["draft_metadata_sha256"]:

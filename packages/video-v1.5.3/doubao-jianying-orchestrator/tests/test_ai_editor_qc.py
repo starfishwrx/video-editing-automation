@@ -85,7 +85,7 @@ class AIEditorQCIntegrationTests(unittest.TestCase):
         import batch_worker
         ok, message = batch_worker.validate_visual_match(self.report)
         self.assertTrue(ok, message)
-        self.match["segments"][0]["ai_selection"]["observation"] = "changed"
+        self.match["segments"][0]["ai_selection"]["observation"] = ""
         (self.report / "shot_match_report.json").write_text(json.dumps(self.match), encoding="utf-8")
         ok, message = batch_worker.validate_visual_match(self.report)
         self.assertFalse(ok, message)

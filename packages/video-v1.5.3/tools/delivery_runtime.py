@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -36,14 +35,6 @@ SHIP_FILES = (
 )
 
 
-def sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with Path(path).open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
 def require_ship_dependencies(root: Path) -> None:
     """Raise a clear error when this root cannot run its bundled ship entrypoint.
 
@@ -56,7 +47,7 @@ def require_ship_dependencies(root: Path) -> None:
         raise RuntimeError("SHIP_DEPENDENCIES_MISSING: " + ", ".join(missing))
 
 
-def _read_candidate(package: Path) -> tuple[str | None, dict[str, str], list[str]]:
+def _read_candidate(package: Path) -> tuple[str | None, set[str], list[str]]:
     issues: list[str] = []
     try:
         version = (package / "VERSION").read_text(encoding="utf-8-sig").strip()
@@ -79,45 +70,38 @@ def _read_candidate(package: Path) -> tuple[str | None, dict[str, str], list[str
     if not isinstance(manifest_files, list):
         manifest_files = []
         issues.append("PACKAGE_RELEASE_MANIFEST_FILES_INVALID")
-    declared = {
-        str(row.get("path")): str(row.get("sha256", "")).lower()
-        for row in manifest_files
-        if isinstance(row, dict) and row.get("path") and row.get("sha256")
-    }
+    declared = {str(row["path"]) for row in manifest_files
+                if isinstance(row, dict) and row.get("path")}
     return version, declared, issues
 
 
-def _file_check(root: Path, relative: str, expected: str | None, *, source_ok: bool = True) -> dict[str, Any]:
-    path = Path(root) / Path(relative)
-    actual = sha256(path) if path.is_file() else None
-    if actual is None:
+def _file_check(root: Path, relative: str, source: Path | None) -> dict[str, Any]:
+    path = root / relative
+    if not path.is_file():
         status = "missing"
-    elif expected is None:
+    elif source is None:
         status = "manifest_entry_missing"
-    elif not source_ok:
-        status = "package_source_drift"
-    elif actual != expected:
-        status = "hash_mismatch"
+    elif not source.is_file():
+        status = "package_source_missing"
+    elif path != source and path.read_bytes() != source.read_bytes():
+        status = "content_mismatch"
     else:
         status = "ok"
-    return {"path": relative, "status": status, "expected_sha256": expected,
-            "actual_sha256": actual}
+    return {"path": relative, "status": status}
 
 
 def diagnose(package: Path, pipeline: Path, skills: Path) -> dict[str, Any]:
-    """Compare declared candidate bytes with the two actual execution roots."""
+    """Compare required source files directly; no frozen per-file hash manifest."""
     package, pipeline, skills = (Path(p).resolve() for p in (package, pipeline, skills))
     version, declared, package_issues = _read_candidate(package)
     critical = sorted(set(PIPELINE_FILES) | set(SHIP_FILES))
     package_checks = []
-    source_ok: dict[str, bool] = {}
     issues = list(package_issues)
     for relative in critical:
-        expected = declared.get(relative)
+        expected = package / relative if relative in declared else None
         check = _file_check(package, relative, expected)
         package_checks.append(check)
         good = check["status"] == "ok"
-        source_ok[relative] = good
         if not good:
             issues.append("PACKAGE_" + check["status"].upper() + ":" + relative)
 
@@ -131,8 +115,7 @@ def diagnose(package: Path, pipeline: Path, skills: Path) -> dict[str, Any]:
             version_status = "ok" if runtime_version == version else "version_mismatch"
         except (OSError, UnicodeError):
             runtime_version, version_status = None, "missing"
-        files = [_file_check(root, relative, declared.get(relative),
-                             source_ok=source_ok.get(relative, False))
+        files = [_file_check(root, relative, package / relative if relative in declared else None)
                  for relative in required]
         runtimes[label] = {"root": str(root), "version": runtime_version,
                            "version_status": version_status, "files": files}

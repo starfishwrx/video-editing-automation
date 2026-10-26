@@ -18,7 +18,7 @@
   - 视频轨/旁白轨/BGM/字幕轨段数；字幕字号/粗体/位置（`X=0,Y=-0.55`）等默认兜底与规范
   - 引用的 `media/` 文件存在；音频轨不超过视频结尾
 
-会议候选通过维护 wrapper 的 `add_caption_cues` 写统一原生 `subtitle` 素材轨；ASR cue与草稿文本/区间独立回读。无头回读能验证结构和媒体，剪映全选移动与保存重开需另留UI验收，详见[实现记录](../meeting-features-20261026.md)。
+会议候选通过维护 wrapper 的 `add_caption_cues` 写统一原生 `subtitle` 素材轨；按每句最终 TTS 时长生成的原文字幕与草稿文本/区间独立回读。无头回读能验证结构和媒体，剪映全选移动与保存重开需另留UI验收，详见[实现记录](../meeting-features-20261026.md)。
 
 ## 3. 运行与定位
 - 由 orchestrator 使用 `platform_env.find_jianying_editor_root()` 定位；优先 `JY_SKILL_ROOT`，否则搜索常见技能根

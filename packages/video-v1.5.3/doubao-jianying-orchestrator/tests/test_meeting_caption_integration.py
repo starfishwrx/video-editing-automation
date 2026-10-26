@@ -14,11 +14,12 @@ from orchestrator import cli, draft_safety, engine, task_log
 
 
 class CaptionIntegrationTests(unittest.TestCase):
-    def test_long_narration_is_not_rejected_as_one_legacy_subtitle(self):
+    def test_long_narration_requires_readable_tts_sentences(self):
         instance = engine.OrchestrationEngine.__new__(engine.OrchestrationEngine)
         instance.m = {"selection_mode": "ai_editor"}
+        instance.logger = None
         clip = engine.Clip("unused.mp4", 0, 12, text="一段需要按实际语音分成多条字幕的较长口播" * 3)
-        self.assertIsNone(instance._script_segment_length_gate([clip]))
+        self.assertIsNotNone(instance._script_segment_length_gate([clip]))
 
     def _engine(self, root: Path, *, selection_mode="ai_editor"):
         instance = engine.OrchestrationEngine.__new__(engine.OrchestrationEngine)
@@ -34,7 +35,7 @@ class CaptionIntegrationTests(unittest.TestCase):
         }
         return instance
 
-    def test_asr_failure_blocks_before_jyproject_and_never_uses_legacy_text(self):
+    def test_caption_failure_blocks_before_jyproject_and_never_uses_legacy_text(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             instance = self._engine(root)
@@ -43,7 +44,7 @@ class CaptionIntegrationTests(unittest.TestCase):
             fake_wrapper.draft = SimpleNamespace()
             verdict = SimpleNamespace(ok=True, status="OK", message="")
             clips = [engine.Clip("video.mp4", 0, 1, text="legacy clip text", audio_mode="mute")]
-            failed = {"ok": False, "issues": ["ASR timeout"]}
+            failed = {"ok": False, "issues": ["missing final TTS audio"]}
             with patch.dict(sys.modules, {"jy_wrapper": fake_wrapper}), \
                  patch.object(engine, "find_drafts_root", return_value=root / "drafts"), \
                  patch.object(draft_safety, "pre_write_check", return_value=verdict), \
@@ -53,9 +54,9 @@ class CaptionIntegrationTests(unittest.TestCase):
                  patch.object(engine.OrchestrationEngine, "_event") as event:
                 result = instance.write_draft(clips, None)
 
-            self.assertEqual(result["status"], "CAPTION_ASR_UNCERTIFIED")
+            self.assertEqual(result["status"], "CAPTION_TIMING_UNCERTIFIED")
             self.assertFalse(result["formal_delivery_allowed"])
-            self.assertEqual(result["issues"], ["ASR timeout"])
+            self.assertEqual(result["issues"], ["missing final TTS audio"])
             fake_wrapper.JyProject.assert_not_called()
             event.assert_not_called()
 
@@ -75,7 +76,7 @@ class CaptionIntegrationTests(unittest.TestCase):
             fake_wrapper = types.ModuleType("jy_wrapper")
             fake_wrapper.JyProject = Mock(return_value=project)
             fake_wrapper.draft = SimpleNamespace()
-            cues = [{"start_us": 100_000, "end_us": 800_000, "text": "ASR连续字幕"}]
+            cues = [{"start_us": 100_000, "end_us": 800_000, "text": "口播连续字幕"}]
             instance = self._engine(root)
             instance.profile = SimpleNamespace(staging_workers=1, name="test")
             instance.total_us = 2_000_000
@@ -119,7 +120,7 @@ class CaptionIntegrationTests(unittest.TestCase):
             sys.path.insert(0, scripts)
         from jy_wrapper import JyProject
 
-        cue = {"start_us": 120_000, "end_us": 920_000, "text": "整句ASR字幕"}
+        cue = {"start_us": 120_000, "end_us": 920_000, "text": "整句口播字幕"}
         expected = {
             "video_segments": 0, "narration_segments": 0, "subtitle_segments": 1,
             "bgm_required": False, "bgm_segments": 0,
@@ -149,9 +150,9 @@ class CaptionIntegrationTests(unittest.TestCase):
             for mutation, expected_issue in (
                 (lambda data, mat, seg: mat.update(type="text"), "未写为原生 subtitle"),
                 (lambda data, mat, seg: seg["target_timerange"].update(start=cue["start_us"] + 1),
-                 "与音频识别时间不一致"),
+                 "与口播时间不一致"),
                 (lambda data, mat, seg: json.loads(mat["content"]).update(text="错误文本"),
-                 "与音频识别文本不一致"),
+                 "与原文不一致"),
             ):
                 corrupted = copy.deepcopy(document)
                 track = next(t for t in corrupted["tracks"] if t.get("name") == "Subtitles")
@@ -169,15 +170,15 @@ class CaptionIntegrationTests(unittest.TestCase):
                 issues = draft_safety.post_write_validate(draft_dir, expected_tracks=expected)
                 self.assertTrue(any(expected_issue in issue for issue in issues), issues)
 
-    def test_asr_uncertified_is_terminal_and_cli_keeps_evidence(self):
-        issue = "ASR transcript/timing was not certified"
+    def test_caption_uncertified_is_terminal_and_cli_keeps_evidence(self):
+        issue = "Final narration audio could not be measured"
         contract = task_log.result_contract(
-            {"status": "CAPTION_ASR_UNCERTIFIED", "issues": [issue],
+            {"status": "CAPTION_TIMING_UNCERTIFIED", "issues": [issue],
              "caption_report": "report/captions/audio_captions.json"},
             task_id="task-1", run_id="run-1", task_log="report/task_log.json")
         self.assertEqual(contract["terminal_state"], "UNCERTIFIED")
         self.assertEqual(contract["failure_class"], "semantic")
-        self.assertEqual(contract["failure_code"], "CAPTION_ASR_UNCERTIFIED")
+        self.assertEqual(contract["failure_code"], "CAPTION_TIMING_UNCERTIFIED")
         compact = cli._compact_build_result(contract)
         self.assertEqual(compact["issues"], [issue])
         self.assertEqual(compact["caption_report"], "report/captions/audio_captions.json")

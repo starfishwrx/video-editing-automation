@@ -54,7 +54,6 @@ from .proc_slots import env_float, env_int, slot
 
 
 # Capture the imported source, rather than the file a later deployment may overwrite.
-_RUNTIME_SOURCE_SHA256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 
 
 def _number(value: Any, default: float = 0.0) -> float:
@@ -1688,7 +1687,6 @@ def enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repor
             "cache_path": str(cache_path),
             "partial": partial,
             "stage_seconds": dict(stage_seconds),
-            "source_sha256": _RUNTIME_SOURCE_SHA256,
         })
         analysis["vision_analysis"] = summary
 

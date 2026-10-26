@@ -9,11 +9,11 @@ description: Build and recover editable Jianying video drafts from task manifest
 口播默认1.3倍、清洁画面优先1.3倍、硬切、实际气口不超过5帧、字幕像素X=0/Y=-800。
 规则身份改变后旧AI观察和QC不自动复用。分段AI视频生成仅为素材制作规范，本包不新增生成服务。
 
-For new production tasks, freeze task-level Eval inputs and runtime identity
-before generation. Use the reviewed category/SKU material index when configured;
-keep visual rules separate from the generic Diaodu/RDM contract. Retain real
-QC, Gold-quality and Mac-review evidence. Observation mode never fabricates a
-PASS and does not replace existing delivery gates.
+完成标准：产出可打开、媒体可读、旁白与画面时长匹配、字幕内容正确的剪映草稿，
+并记录独立视觉 QC 的结果。模型失败或证据不足保留待审状态，不虚报正式完成。
+任务级 Eval、Gold 对照和 Mac 审阅按已配置的生产流程启用；它们不是普通源码修复的前置仪式。
+源码合并以代码审查和离线回归为准，生产安装与真实成片验收分别记录。
+哈希只用于需要复用的缓存或运输完整性，不要求源码、模型快照、提示词、拼图和收据逐层签名。
 
 正式质量与故障恢复合同见
 [references/production_quality_and_lessons.md](references/production_quality_and_lessons.md)。
@@ -24,10 +24,10 @@ formal 不得用 settled/lead_in/黑屏冒充完整动作；派生卖点标签�
 画面支持。旧词表不裁决新模式语义，最终切片独立QC使用v4，旧报告不能自动认证。
 调用链、逐轮8候选、缓存及显式legacy回滚见包根`docs/AI_EDITOR.md`。
 
-会议功能候选：先按音色表锁定 speaker，再应用一次 TTS 倍速（显式1.0有效）；兼容“真人播客女1.2”和“真人播客女1.2倍速”，裸整数不从名称拆走。
-新 AI 草稿字幕必须取自最终纯旁白 ASR 词时间，失败/超时/内容不符保持未认证，
-不以字数字幕兜底。运行环境通过 `uv sync --frozen --group asr` 准备 ASR；
-`asr_model`/`JY_ASR_MODEL` 可指定本地模型。画面速度2倍为偏好，最高20倍；
+会议功能：先按音色表锁定 speaker，再应用一次 TTS 倍速（显式1.0有效）；兼容“真人播客女1.2”和“真人播客女1.2倍速”，裸整数不从名称拆走。
+新 AI 草稿字幕沿用原文，按完成倍速、静音和响度处理后的每句 TTS 音频真实时长写入。
+同一句跨多个镜头只显示一次；长口播先规划成可读句段，再合成，不按字数伪造词级时间。
+不使用 ASR，不下载识别模型，也不把识别错字写回文案。画面速度2倍为偏好，最高20倍；
 原素材中后段取段和去重不得挤掉唯一卖点证据。字幕写统一原生轨，结构回读不代替
 剪映全选移动和保存重开验收。标准任务一文案一视频；人工参考字段评价保持 unknown。
 

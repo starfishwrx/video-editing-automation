@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import json
-import hashlib
 import os
 import re
 from functools import lru_cache
@@ -126,12 +125,7 @@ def for_manifest(manifest: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def editorial_context(manifest: dict[str, Any] | None) -> dict[str, Any]:
-    """Return versioned editorial guidance for downstream vision/orchestration/QC.
-
-    The hash covers the effective versions and returned ``rules`` payload.
-    ``rules`` contains merged global AI rules plus the selected category editorial
-    contract, while legacy prompt_rules also expose its semantic contracts.
-    """
+    """Return effective rules and explicit versions for all editing stages."""
     category, _ = detect_category(manifest)
     merged = load(category)
     source_rules = _read_rules(category) if category in _CATEGORY_FILES else {}
@@ -146,13 +140,9 @@ def editorial_context(manifest: dict[str, Any] | None) -> dict[str, Any]:
         "subtitle_position_px": source_rules.get("editorial_contract", {}).get(
             "subtitle_position_px"),
     }
-    digest_payload = json.dumps({"versions": merged.get("versions") or {}, "rules": rules},
-                                ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    digest = hashlib.sha256(digest_payload.encode("utf-8")).hexdigest()
     return {
         "category": category,
         "versions": dict(merged.get("versions") or {}),
-        "sha256": digest,
         "rules": rules,
     }
 

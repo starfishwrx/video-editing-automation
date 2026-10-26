@@ -6,7 +6,7 @@
 
 ## 输入与边界
 
-冻结原失败、有效修复、用户确认和适用条件，私有案例放在包外。维护源码、版本包和已安装 runtime 是三个位置；按 `JY_PIPE_ROOT` 与实际 VERSION/manifest 核对，不用版本名称代替文件哈希。生产期间先做隔离候选，不替换运行文件或恢复旧队列。
+冻结原失败、有效修复、用户确认和适用条件，私有案例放在包外。维护源码、版本包和已安装 runtime 是三个位置；按 `JY_PIPE_ROOT` 与实际 VERSION/manifest 核对，核对运行入口与实际文件，不要求逐层源码哈希。生产期间先做隔离候选，不替换运行文件或恢复旧队列。
 
 通用逻辑应进入包内模块，真实路径改为参数；让正常入口调用必要验证。特殊恢复仍独立显式调用，不能丢失人工编辑或降低质量标准。
 
@@ -27,7 +27,7 @@ uv run --frozen python -X utf8 -m tools.release_package build --output $fullRele
 uv run --frozen python -X utf8 -m tools.release_package verify --package $unpackedPackage
 ```
 
-命令会用维护中的 `build_manifest.py` 重建清单，检查文件哈希、文件集合、版本与校验清单一致，生成 ZIP 并解压到新目录，在解压副本里运行所选测试，再确认源目录没有并发变动。已有输出目录、损坏文件或测试失败都会停止；失败输出保留作诊断，不自动覆盖重试。
+命令会用维护中的 `build_manifest.py` 重建清单，检查文件集合、版本和路径边界，生成 ZIP 并解压到新目录，在解压副本里运行所选测试。已有输出目录、缺少文件或测试失败都会停止；失败输出保留作诊断，不自动覆盖重试。
 
 输出目录包含 ZIP、SHA256SUMS、解压副本、测试日志与 `release-receipt.json`。`SOURCE_RELEASE_VERIFIED` 证明源码交付合同，不授予 NAS/飞书写入、远程发布或生产部署权限。生产验收仍要求真实任务、播放和人工审核。
 

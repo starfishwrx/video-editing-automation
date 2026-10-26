@@ -33,9 +33,7 @@ class PaperRulepackTests(unittest.TestCase):
 
     def test_all_thirteen_contracts_and_intent_separation(self):
         context = rulepack.editorial_context({"category": "纸品"})
-        self.assertEqual(set(context), {"category", "versions", "sha256", "rules"})
-        self.assertIsInstance(context["sha256"], str)
-        self.assertEqual(len(context["sha256"]), 64)
+        self.assertEqual(set(context), {"category", "versions", "rules"})
         contracts = context["rules"]["semantic_contracts"]
         ids = {c["id"] for c in contracts}
         self.assertEqual(len(contracts), 13)
@@ -111,7 +109,7 @@ class PaperRulepackTests(unittest.TestCase):
                 changed = rulepack.editorial_context({"category": "zhipin"})
                 rulepack._read_rules.cache_clear()
         self.assertNotEqual(initial["versions"], changed["versions"])
-        self.assertNotEqual(initial["sha256"], changed["sha256"])
+        self.assertNotEqual(initial["rules"], changed["rules"])
 
 
 if __name__ == "__main__":

@@ -52,12 +52,12 @@ class PaperProductionTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "PROBE_FAILED"):
                 silence_edges(str(self.fixture.video), start_s=0, duration_s=2, ffmpeg="test")
 
-    def test_old_or_changed_rule_identity_cannot_certify(self):
+    def test_hash_metadata_is_optional_but_policy_version_still_applies(self):
         result = self.fixture.result()
         self.assertTrue(result["ok"], result)
         changed = self.fixture.plan()
         changed["identity"]["editorial_rules"]["sha256"] = "0" * 64
-        self.assertFalse(self.fixture.result(changed)["ok"])
+        self.assertTrue(self.fixture.result(changed)["ok"])
         item = copy.deepcopy(result["segments"][0])
         item["ai_selection"]["policy_version"] = "selling-points-first-v1"
         self.assertFalse(contract.validate_segment_receipt(item)["ok"])

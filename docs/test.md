@@ -36,7 +36,7 @@ uv run --frozen python -X utf8 -m unittest discover -s doubao-jianying-orchestra
 | NAS 往返 | `test_nas_portable.py` |
 | 单一闸门 | 对应 `test_*gate*` / 模块测试，且必须含「该拦的输入被拦住」 |
 
-局部绿 ≠ 可合并发版。准备发版 PR 时回到第 1 节或第 3 节。
+普通源码 PR 依据适用离线回归、代码审查与目标 Windows CI 合并；真实成片、GUI 编辑及生产安装另行验收，不要求每次源码修复都先出两条成片。准备发版时才运行第 3 节。
 
 ## 3. 发版验收（合包命令）
 

@@ -4,10 +4,10 @@
 
 ## 0. 先读这五条
 
-1. **版本身份**：可改的候选包目录是 `packages/video-v1.5.3/`（目录名是历史代号，不随小版本改名）。真实版本只读该目录下的 `VERSION`（当前主线 **1.5.6**）。生产以部署机器的 `ACTIVE_VIDEO_RUNTIME.json` 与已安装技能哈希为准。开发使用从 `main` 创建的干净功能分支/工作树。1.5.4/1.5.5 为隔离索引实验，不作默认入口。
+1. **版本身份**：可改的候选包目录是 `packages/video-v1.5.3/`（目录名是历史代号，不随小版本改名）。真实版本只读该目录下的 `VERSION`（当前主线 **1.5.6**）。生产以部署机器的 `ACTIVE_VIDEO_RUNTIME.json` 与实际安装文件为准。开发使用从 `main` 创建的干净功能分支/工作树。1.5.4/1.5.5 为隔离索引实验，不作默认入口。
 2. **文档入口**：先读 [`docs/README.md`](docs/README.md)。子系统文档与代码路径一律指向 `packages/video-v1.5.3/`。`packages/video-v1.5.2/` 及更早是历史归档，禁止修改。
 3. **凭据**：只能来自环境变量 `JY_SKILL_ROOT` `JY_DRAFT_ROOT` `JY_INSTALL_ROOT` `JY_NAS_SHARE` `JY_NAS_USER` `NAS_PASSWORD` `JY_MAC_DRAFT_ROOT` `LARK_BASE_TOKEN` 等（完整列表见包内 `ENVIRONMENT.md`）。不得写进代码、测试、日志或提交。
-4. **闸门**：任何改动都不能让 `RULES.md` 的证据闸门变松；formal 模式只认 `PASS`；模型超时/证据缺失/版本漂移只能是 `UNCERTIFIED` 或 `FAIL`。
+4. **闸门**：`RULES.md` 的成片证据要求继续生效；formal 模式只认 `PASS`。素材缺失、窗口越界、字幕内容不符或独立 QC 失败必须拦住。哈希、签名或逐文件发布清单不是成片质量证据，禁止为普通修改新增这类门槛。
 5. **提交习惯**：小步 commit；改完更新 `docs/working.md`；可复用教训写入 `LESSONS.md`。不 push `main`，只开 PR。
 
 ## 1. 按任务找文档

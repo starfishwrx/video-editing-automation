@@ -145,7 +145,7 @@ class TextOpsMixin:
         return self.add_text_simple(text, start_time, duration, track_name, **kwargs)
 
     def add_caption_cues(self, cues: list, track_name: str = "Subtitles"):
-        """Write ASR-timed cues on one editable Jianying subtitle track."""
+        """Write narration-timed script cues on one editable Jianying subtitle track."""
         if not _is_subtitle_track(track_name):
             raise ValueError("caption cues must use the shared Subtitles track")
         self._ensure_track(draft.TrackType.text, track_name)

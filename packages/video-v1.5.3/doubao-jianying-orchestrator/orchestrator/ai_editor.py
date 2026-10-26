@@ -38,7 +38,7 @@ def _call(prompt: str, path: Path, sheet: Path | None = None) -> dict:
             if json.loads(request_path.read_text(encoding="utf-8")) == identity:
                 cached = vision._json_from_text(path.read_text(encoding="utf-8"))
                 if isinstance(cached, dict):
-                    contract.digest(cached)
+                    json.dumps(cached, allow_nan=False)
                     return cached
         except (OSError, ValueError, TypeError):
             pass
@@ -53,7 +53,7 @@ def _call(prompt: str, path: Path, sheet: Path | None = None) -> dict:
             payload = vision._json_from_text(text)
             if not isinstance(payload, dict):
                 raise ValueError("AI_EDITOR_RESPONSE_NOT_OBJECT")
-            contract.digest(payload)  # Reject NaN anywhere before persisting it.
+            json.dumps(payload, allow_nan=False)  # Reject non-finite model output.
             path.write_text(text, encoding="utf-8")
             _save(request_path, identity)
             return payload
@@ -122,7 +122,7 @@ def _review(manifest: dict, sentence: dict, shot: dict, directory: Path, *, dens
     if not math.isfinite(start + end) or not 0 <= start < end:
         raise ValueError("AI_EDITOR_SOURCE_WINDOW_INVALID")
     source = str(shot["video"])
-    before = contract.file_sha256(source)
+    before = contract.source_identity(source)
     key = contract.digest([sentence["index"], shot["shot_id"], before, dense])[:24]
     frame_dir = directory / "frames" / key
     frame_dir.mkdir(parents=True, exist_ok=True)
@@ -142,7 +142,7 @@ def _review(manifest: dict, sentence: dict, shot: dict, directory: Path, *, dens
     sheet = frame_dir / "sheet.jpg"
     if not vision._write_sheet(frames, sheet, columns=4, tile_width=420, tile_height=300, ffmpeg=ffmpeg):
         raise ValueError("AI_EDITOR_CONTACT_SHEET_FAILED")
-    if before != contract.file_sha256(source):
+    if before != contract.source_identity(source):
         raise ValueError("AI_EDITOR_SOURCE_CHANGED_DURING_REVIEW")
     prompt = contract.policy_prompt(manifest) + "\n只根据附图判断，所有时间戳均为原素材秒数。\n" + json.dumps({
         "product": manifest.get("product"), "category": manifest.get("category"),
@@ -197,8 +197,7 @@ evidence_intervals_us内各区间会被当作全部必须保留，不能把多�
             if (not isinstance(ev, dict) or any(type(ev.get(k)) is not int for k in ("start", "end"))
                     or not round(start * 1e6) <= ev["start"] < ev["end"] <= round(end * 1e6)):
                 raise ValueError("AI_EDITOR_EVIDENCE_INVALID")
-    return {**result, "shot_id": shot["shot_id"], "source_sha256": before,
-            "review_prompt_sha256": contract.digest(prompt), "frame_sheet_sha256": contract.file_sha256(sheet),
+    return {**result, "shot_id": shot["shot_id"], "source_identity": before,
             "frame_times_us": [round(t * 1e6) for t in times], "sheet": str(sheet)}
 
 
@@ -292,7 +291,7 @@ def _observed_shot(shot: dict, review: dict) -> dict:
 def _assemble(manifest: dict, analysis: dict, plan: dict, *, narration_timing: dict | None,
               verify_sources: bool = False) -> dict:
     from . import shot_analyzer
-    if plan.get("identity", {}).get("editorial_rules") != contract.rules_identity(manifest):
+    if {k: plan.get("identity", {}).get("editorial_rules", {}).get(k) for k in ("category", "versions")} != contract.rules_identity(manifest):
         raise ValueError("AI_EDITOR_RULES_CHANGED")
     shots = {str(s["shot_id"]): s for s in analysis.get("shots", [])}
     sentences = plan["sentences"]
@@ -335,7 +334,7 @@ def _assemble(manifest: dict, analysis: dict, plan: dict, *, narration_timing: d
                 raise ValueError(f"AI_EDITOR_UNREVIEWED_SELECTION:{index}")
             review, shot = {**good[sid], "scarce_reuse_reason": reuse_reason}, shots[sid]
             review = {**review, "preferred_speed": _scene_preference(manifest, sentence, review)}
-            if verify_sources and review["source_sha256"] != contract.file_sha256(shot["video"]):
+            if verify_sources and review["source_identity"] != contract.source_identity(shot["video"]):
                 raise ValueError("AI_EDITOR_SOURCE_CONTENT_CHANGED")
             observed = _observed_shot(shot, review)
             # A continuation requests a later in-point; it must retain every
@@ -359,8 +358,8 @@ def _assemble(manifest: dict, analysis: dict, plan: dict, *, narration_timing: d
                     "scene_source_start": shot["source_start"], "scene_source_end": shot["source_end"],
                     "evidence_intervals": observed["evidence_intervals"], "text": sentence["text"]}
             part_sentence = {**sentence, "selling_points": [p for p in sentence["selling_points"] if p["id"] in review.get("supported_point_ids", [])]}
-            item["ai_selection"] = contract.seal_receipt(item, index=index, sentence=part_sentence,
-                observation=review, source_sha256=review["source_sha256"], identity=plan["identity"])
+            item["ai_selection"] = contract.make_receipt(item, index=index, sentence=part_sentence,
+                observation=review, source_identity=review["source_identity"], identity=plan["identity"])
             assembled.append(item)
             supported.update(review.get("supported_point_ids", []))
         if not {p["id"] for p in sentence["selling_points"]} <= supported:
@@ -379,8 +378,8 @@ def _assemble(manifest: dict, analysis: dict, plan: dict, *, narration_timing: d
                           "time_sensitive": any(good[p["shot_id"]]["time_sensitive"] for p in parts),
                           "observation": segment["visual_description"], "reason": row.get("reason") or good[first["shot_id"]]["reason"]}
         segment["time_sensitive"] = overall_review["time_sensitive"]
-        segment["ai_selection"] = contract.seal_receipt(segment, index=index, sentence=sentence,
-            observation=overall_review, source_sha256=good[first["shot_id"]]["source_sha256"], identity=plan["identity"])
+        segment["ai_selection"] = contract.make_receipt(segment, index=index, sentence=sentence,
+            observation=overall_review, source_identity=good[first["shot_id"]]["source_identity"], identity=plan["identity"])
         check = contract.validate_segment_receipt(segment, index=index, manifest=manifest)
         if not check["ok"]:
             raise ValueError(";".join(check["reasons"]))
@@ -409,6 +408,8 @@ def _build_edit_inventory(manifest: dict, analysis: dict, plan: dict,
     original = timing_contract.split_sentences(manifest)
     shots = {str(s["shot_id"]): s for s in analysis.get("shots", [])}
     inventory = []
+    source_ids = {path: f"source{i}" for i, path in enumerate(dict.fromkeys(
+        shot["video"] for shot in shots.values()), 1)}
     for sentence in plan["sentences"]:
         reviews = (plan["reviews"].get(str(sentence["index"]), [])
                    if sentence["kind"] == "selling_point" else plan["display_reviews"])
@@ -420,10 +421,11 @@ def _build_edit_inventory(manifest: dict, analysis: dict, plan: dict,
         for candidate in candidates:
             review = next(r for r in reviews if r["shot_id"] == candidate["shot_id"])
             shot = shots[candidate["shot_id"]]
+            review = {**review, "preferred_speed": _scene_preference(manifest, sentence, review)}
             solution = shot_analyzer.candidate_window(_observed_shot(shot, review),
                 audio_duration_us=duration, manifest=manifest,
                 time_sensitive=review["time_sensitive"])
-            candidate["source_identity"] = review["source_sha256"]
+            candidate["source_identity"] = source_ids[shot["video"]]
             candidate["technical_option"] = {**solution.to_dict(),
                 "within_preferred_speed": solution.ok and solution.speed <= 2.0,
                 "original_scene_start_us": round(float(shot["source_start"]) * 1e6),
@@ -452,16 +454,13 @@ technical_option是按本句完整配音求出的实际可行窗口；分配多�
 
     def make_prompt() -> str:
         current_inventory = _build_edit_inventory(manifest, analysis, plan, narration_timing)
-        return (contract.POLICY + "\n你是整稿剪辑师。以下候选均已经实际看图。先保留卖点稀缺候选，再给介绍和钩子分配展示池。\n"
+        return (contract.policy_prompt(manifest) + "\n你是整稿剪辑师。以下候选均已经实际看图。先保留卖点稀缺候选，再给介绍和钩子分配展示池。\n"
                 + json.dumps(current_inventory, ensure_ascii=False) + instructions)
 
     for attempt in range(2):
         prompt = make_prompt()
         response = _call(prompt, directory / f"edit_{attempt}.json")
         plan["rows"] = response.get("rows")
-        plan["identity"]["prompt_sha256"] = contract.digest([
-            {"path": p.relative_to(directory).as_posix(), "sha256": contract.file_sha256(p)}
-            for p in sorted(directory.rglob("*.prompt.txt"))])
         if attempt == 0:
             expanded = False
             for row in plan.get("rows") or []:
@@ -507,7 +506,7 @@ def prepare(manifest: dict, analysis: dict, report_dir: Path, *, narration_timin
         plan["identity"] = {"model": os.environ.get("JY_VISION_MODEL") or "glm-5.3-flash",
             "manifest_sha256": contract.digest(manifest), "timing_sha256": contract.digest(narration_timing),
             "analysis_sha256": contract.digest({k: v for k, v in analysis.items() if k != "ai_editor_plan"}),
-            "prompt_sha256": contract.digest(contract.policy_prompt(manifest)), "policy_version": contract.POLICY_VERSION,
+            "policy_version": contract.POLICY_VERSION,
             "editorial_rules": contract.rules_identity(manifest)}
         original = timing_contract.split_sentences(manifest)
         for sentence in plan["sentences"]:
