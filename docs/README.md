@@ -32,8 +32,13 @@
 | [`agent-loops.md`](agent-loops.md) | Issue/反馈/夜间审计三类循环提示词 |
 | [`release-process.md`](release-process.md) | 合包发版流程 |
 | [`RELEASES.md`](RELEASES.md) | 各版本归档与 ZIP 收据 |
-| [`meeting-features-20261026.md`](meeting-features-20261026.md) | 会议 F01–F08 实现候选、配置与待验项 |
-| [`plans/20261026_feature_plan.md`](plans/20261026_feature_plan.md) | 会议原计划与验收标准 |
+
+## 会议与功能计划
+
+| 文件 | 内容与状态 |
+|---|---|
+| [2026-10-26 会议功能计划](plans/20261026_feature_plan.md) | 原计划与验收标准；功能源码候选已提交，部署和完整成片验收待完成 |
+| [会议功能实现记录](meeting-features-20261026.md) | F01–F08行为、配置、无头验证及未完成验收项 |
 
 ## 子系统
 
