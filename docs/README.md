@@ -33,6 +33,12 @@
 | [`release-process.md`](release-process.md) | 合包发版流程 |
 | [`RELEASES.md`](RELEASES.md) | 各版本归档与 ZIP 收据 |
 
+## 会议与功能计划
+
+| 文件 | 内容与状态 |
+|---|---|
+| [2026-10-26 会议功能计划](plans/20261026_feature_plan.md) | 音色与TTS倍速、音频字幕、BGM、选镜及反馈计划；仅规划，未实现或部署新增需求 |
+
 ## 子系统
 
 路径一律相对活包 `packages/video-v1.5.3/`（真实版本见该目录 `VERSION`）。
