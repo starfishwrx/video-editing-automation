@@ -20,6 +20,12 @@ uv run --frozen python -X utf8 -m unittest discover -s doubao-jianying-orchestra
 
 **通过标准**：两套 discover 退出码 0。不要用历史文档里的 `pytest packages/video-v1.5.3/...` 路径。
 
+## 1.1 GitHub 离线 CI 与示例
+
+`.github/workflows/ci.yml` 在 PR、`main` push 和手动触发时使用 Windows / Python 3.11、uv 与冻结锁文件运行上述两套测试，另核对 CLI `--help` 与 `examples/manifest.preview.json` 的 JSON 语法。CI 不注入生产密钥，不执行真实模型/TTS、NAS/飞书或生产部署。workflow 文件不等于仓库已开启必须通过检查的分支保护，维护者需在 Settings 中单独设置。
+
+文档中的合成视频/`analyze-shots --no-vision` 示例见 `docs/quickstart.md`，可在准备 FFmpeg 后本地验证；它验证素材解析与抽帧，不作为视觉效果验收。模型、prompt 或选镜逻辑变更还需单独记录真实图片观察和人工审阅。
+
 ## 2. 局部迭代（可缩小）
 
 | 改动面 | 可先跑 |

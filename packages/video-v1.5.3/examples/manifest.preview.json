@@ -1,0 +1,12 @@
+{
+  "draft_name": "quickstart-preview",
+  "product": "演示素材",
+  "category": "generic",
+  "mode": "intelligent",
+  "selection_mode": "ai_editor",
+  "delivery_mode": "preview",
+  "material_sources": ["media/sample.mp4"],
+  "segments": [
+    {"narration": "看看这段演示画面。"}
+  ]
+}

@@ -1,5 +1,9 @@
 # Video automation candidate v1.5.6
 
+默认视觉模型为 **GLM-5.3-Flash**（`glm-5.3-flash`），通过火山 Ark 直接发送图片；请保留完整型号，不与 GLM-5.3 或 ChatGLM3 混写。默认 `ai_editor` 复审候选并整稿编排，最终 QC 为 v4；旧 Top3/QC v3 只供显式 legacy 回滚。
+
+新用户从仓库[快速开始](https://github.com/starfishwrx/video-editing-automation/blob/main/docs/quickstart.md)、[模型说明](https://github.com/starfishwrx/video-editing-automation/blob/main/docs/model-and-vision.md)及本包 [ENVIRONMENT.md](ENVIRONMENT.md) 进入。包内 `examples/` 提供脱敏 manifest 和 PowerShell 配置模板。源码候选不代表 GitHub 已发布该版本，下载状态见仓库 README。
+
 2026-10-23 NAS 分发修订：正常出货与修复统一素材收集，复制核验后才发布目录，多版本归档使用独立媒体引用，新增双执行位置部署检查。见 [NAS 分发稳定性说明](docs/NAS_DELIVERY_STABILITY.md)。
 
 2026-10-23 证据合同修订：关闭不完整 QC 响应与单包数量误放，统一重排后的证据复验、直接/关联排序和短动作搜索，接入私有人工审稿回放。行为与迁移见 [证据与反馈闭环说明](docs/QUALITY_CONTRACT_FIXES.md)。

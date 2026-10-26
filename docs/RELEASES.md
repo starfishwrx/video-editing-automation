@@ -1,5 +1,21 @@
 # Release archive notes
 
+## Source / download / deployment status (checked 2026-10-24)
+
+- Maintained default source: `packages/video-v1.5.3/`, with `VERSION` 1.5.6;
+  its directory name is historical, not the current product version.
+- GitHub Releases currently lists only the `video-v1.5.1` prerelease. Older
+  entries and ZIP receipts below do not imply that a matching GitHub Release
+  was published. Recheck actual release assets when downloading.
+- `packages/video-v1.5.4/` and `packages/video-v1.5.5/` are separate indexed
+  pipeline experiments, not the maintained default or proof of deployment.
+- Production identity is read from the deployment host and installed hashes.
+  Source commits, package receipts, published assets and production installs
+  are distinct states.
+- A normal documentation/feature PR does not regenerate historical package
+  inventories. Rebuild a current candidate with `tools.release_package` and
+  complete the documented release gates before publishing new assets.
+
 ## 1.5.6 — current source candidate (tree still named video-v1.5.3)
 
 - Source: `packages/video-v1.5.3/` with package `VERSION` **1.5.6**. Directory name stays historical; do not invent `packages/video-v1.5.6/`.
