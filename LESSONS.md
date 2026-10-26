@@ -26,7 +26,7 @@
 - 现象: 黑场 / 过曝 / 纯色全部硬拒时选帧仍 `ok=True`，坏帧进入视觉和相位 contact sheet。批量抽帧在 `-fps_mode` 失败且工作目录为空时不改试 `-vsync`。
 - 根因: `pick_best` 全拒时回退到被拒帧，`_finalize_choice` 只要有路径就报成功。`bool(Path.glob(...))` 对生成器恒为真，空目录也被当成已有输出，兼容重试走不到。
 - 以后怎么做: 全硬拒时外层 `ok=False`，调用方只收 `ok` 帧；准入口径变更升 `FRAME_QUALITY_VERSION`（当前 `frame-quality-v2`），让视觉 `frame_protocol` 与 `phase-timing-v3` 的 quality 字段换缓存键。判断有没有抽出文件用 `any(path.glob(...))` 或 `next(..., None)`。逃生阀写清楚：`JY_FRAME_QUALITY=0` 只按抽帧成败；`JY_FRAME_BATCH=0` 逐帧抽取。`SAMPLE_MAX` 仍是 12（`JY_VISION_SAMPLE_MAX` 可覆盖）。离线单测不代替成片或生产验收；质量门打开且合格帧不足 2 张时，视觉可能回落未过硬门的 `frame_paths`，相位则 `PHASE_FRAME_EXTRACT_FAILED`。
-- 证据: PR #19 环审 https://github.com/starfishwrx/video-editing-automation/pull/19#pullrequestreview-5648674977 ；squash `7c733237c19086694460ab66e84c7b079f6f30dc`
+- 证据: PR #19 环审 https://github.com/starfishwrx/video-editing-automation/pull/19#pullrequestreview-5648674977 ；squash `7c733237c19086694460ab66e84c7b079f6f30dc`；修复 PR #20
 
 ### L-20261024-01 模型全名、默认流程与入口文档必须同步
 - status: OPEN
