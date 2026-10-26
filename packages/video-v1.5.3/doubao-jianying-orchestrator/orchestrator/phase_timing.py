@@ -15,7 +15,7 @@ from typing import Any, Callable, Optional
 
 from .file_safety import locked_json_update, private_temp_dir
 
-PHASE_TIMING_VERSION = "phase-timing-v2"
+PHASE_TIMING_VERSION = "phase-timing-v3"
 MAX_FRAMES = 20
 MIN_STEP_S = 0.4
 EDGE_S = 0.05
@@ -53,12 +53,16 @@ def _cache_key(shot: dict[str, Any], scene: dict[str, Any], profile: str) -> str
         source = str(path)
     except OSError:
         return ""
+    from . import frame_quality
     identity = {
         "version": PHASE_TIMING_VERSION, "profile": profile, "video": source,
         "signature": signature, "scene": scene.get("id"),
         "phases": [p.get("name") for p in scene.get("phases") or []],
         "start_us": int(round(_number(shot.get("source_start")) * 1e6)),
         "end_us": int(round(_number(shot.get("source_end")) * 1e6)),
+        "max_frames": MAX_FRAMES,
+        "min_step_s": MIN_STEP_S,
+        "quality": frame_quality.FRAME_QUALITY_VERSION if frame_quality.enabled() else "off",
     }
     raw = json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -141,15 +145,30 @@ def locate(shot: dict[str, Any], scene: dict[str, Any], report_dir: Path, *,
         if isinstance(cached, dict) and cached.get("version") == PHASE_TIMING_VERSION:
             return {**cached, "cached": True}
     video = Path(str(shot.get("video") or ""))
+    from . import frame_quality
+    half_width = MIN_STEP_S / 2.0
     with private_temp_dir(prefix="jy_phase_", dir=report_dir) as temp:
         temp_dir = Path(temp)
         items = []
         for index, t in enumerate(times, 1):
             frame = temp_dir / f"f_{index:03d}.jpg"
-            if shot_analyzer.extract_frame(video, t, frame, ffmpeg=ffmpeg):
-                items.append({"path": str(frame), "label": f"t={t:.2f}s", "timestamp": t})
+            picked = frame_quality.select_frame(
+                video, t, frame, start=start, end=end, half_width=half_width,
+                extract=shot_analyzer.extract_frame, ffmpeg=ffmpeg)
+            if not picked.get("ok"):
+                continue
+            stamp = float(picked["timestamp"])
+            items.append({
+                "path": str(picked["path"]),
+                "label": f"t={stamp:.2f}s",
+                "timestamp": stamp,
+                "quality": picked.get("quality") or {},
+                "replaced": bool(picked.get("replaced")),
+            })
         if len(items) < 2:
             return {"ok": False, "reason": "PHASE_FRAME_EXTRACT_FAILED"}
+        # Keep timestamps monotonic after quality-gate swaps.
+        items.sort(key=lambda row: float(row["timestamp"]))
         times = [item["timestamp"] for item in items]
         sheet = temp_dir / "phase_sheet.jpg"
         if not vision_analyzer._write_sheet(items, sheet, columns=5, ffmpeg=ffmpeg):
@@ -168,8 +187,15 @@ def locate(shot: dict[str, Any], scene: dict[str, Any], report_dir: Path, *,
     except (ValueError, TypeError):
         return {"ok": False, "reason": "PHASE_RESPONSE_INVALID", "message": str(text)[-400:]}
     result = validate(payload, scene, times, bounds=(start, end))
-    result.update({"version": PHASE_TIMING_VERSION, "scene": scene.get("id"),
-                   "sample_times": times, "cached": False})
+    result.update({
+        "version": PHASE_TIMING_VERSION, "scene": scene.get("id"),
+        "sample_times": times, "cached": False,
+        "frame_quality": [
+            {"timestamp": item["timestamp"], "quality": item.get("quality") or {},
+             "replaced": bool(item.get("replaced"))}
+            for item in items
+        ],
+    })
     if key and result.get("reason") not in ("PHASE_RESPONSE_INVALID",):
         def mutate(data):
             data = data if isinstance(data, dict) else {}

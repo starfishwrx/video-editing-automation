@@ -84,8 +84,10 @@ _VISION_CACHE_FIELDS = (
 )
 # A long take often holds several demonstrations (hang it, then pull one
 # sheet); two frames per shot missed them, so frames follow the shot length.
+# SAMPLE_MAX aligns with SHEET_TILES so one contact sheet can keep density on
+# long takes without spilling into a second sheet. Override with JY_VISION_SAMPLE_MAX.
 SAMPLE_STEP_S = 1.5
-SAMPLE_MAX = 8
+SAMPLE_MAX = 12
 EVIDENCE_MAX_S = 2.5
 SHEET_TILES = 12
 _PORTRAIT_TILE = (360, 640)
@@ -656,6 +658,7 @@ def _vision_cache_key(manifest: dict[str, Any], shot: dict[str, Any], profile: s
         source = str(path)
     except OSError:
         return ""
+    from . import frame_quality
     identity = {
         "version": VISION_ANALYSIS_VERSION,
         "profile": profile,
@@ -668,6 +671,13 @@ def _vision_cache_key(manifest: dict[str, Any], shot: dict[str, Any], profile: s
         "analysis_rules": hashlib.sha256(json.dumps(
             _keyed_rules(manifest) if rules is None else rules,
             ensure_ascii=False).encode("utf-8")).hexdigest()[:16],
+        # Sampling grid + quality gate are part of the observation protocol.
+        # Changing them must not reuse stale contact-sheet answers.
+        "frame_protocol": {
+            "step_s": SAMPLE_STEP_S,
+            "sample_max": env_int("JY_VISION_SAMPLE_MAX", SAMPLE_MAX, minimum=2),
+            "quality": frame_quality.FRAME_QUALITY_VERSION if frame_quality.enabled() else "off",
+        },
     }
     transport = _vision_transport()
     if transport != "codex":
@@ -1263,8 +1273,10 @@ def _shot_frames(shot: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def sample_times(start: float, end: float, *, step: float = SAMPLE_STEP_S,
-                 limit: int = SAMPLE_MAX) -> list[float]:
+                 limit: int | None = None) -> list[float]:
     """Evenly spaced frame times for one shot, plus a frame just before the cut."""
+    if limit is None:
+        limit = env_int("JY_VISION_SAMPLE_MAX", SAMPLE_MAX, minimum=2)
     duration = max(0.0, end - start)
     if duration <= 0:
         return [round(start, 3)]
@@ -1284,13 +1296,28 @@ def _sample_frames(shot: dict[str, Any], frame_dir: Path,
     if not str(shot.get("video") or "").strip() or not video.is_file() or end <= start:
         return _shot_frames(shot)
     from .shot_analyzer import extract_frame
+    from . import frame_quality
+    times = sample_times(start, end)
+    # Bucket half-width: distance from a sample to the midpoint between neighbors.
+    half_width = (end - start) / (2.0 * max(1, len(times)))
     frames: list[dict[str, Any]] = []
-    for index, timestamp in enumerate(sample_times(start, end), 1):
+    for index, timestamp in enumerate(times, 1):
         path = frame_dir / f"{shot['shot_id']}_{int(round(timestamp * 1000)):07d}.jpg"
-        if not (path.is_file() and path.stat().st_size > 0):
-            if not extract_frame(video, timestamp, path, ffmpeg=ffmpeg):
-                continue
-        frames.append({"path": str(path), "timestamp": timestamp, "suffix": f"t{index}"})
+        if path.is_file() and path.stat().st_size > 0 and not frame_quality.enabled():
+            frames.append({"path": str(path), "timestamp": timestamp, "suffix": f"t{index}"})
+            continue
+        picked = frame_quality.select_frame(
+            video, timestamp, path, start=start, end=end, half_width=half_width,
+            extract=extract_frame, ffmpeg=ffmpeg)
+        if not picked.get("ok"):
+            continue
+        frames.append({
+            "path": str(picked["path"]),
+            "timestamp": float(picked["timestamp"]),
+            "suffix": f"t{index}",
+            "quality": picked.get("quality") or {},
+            "replaced": bool(picked.get("replaced")),
+        })
     if len(frames) >= 2:
         return frames
     return _shot_frames(shot) or frames
@@ -1806,8 +1833,14 @@ def enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repor
                 except Exception:
                     pass
                 frames = shot_frames.get(shot_id) or _shot_frames(row)
-                row["vision_frames"] = [{"path": f["path"], "timestamp": f["timestamp"]}
-                                        for f in frames]
+                row["vision_frames"] = []
+                for f in frames:
+                    entry = {"path": f["path"], "timestamp": f["timestamp"]}
+                    if f.get("quality"):
+                        entry["quality"] = f["quality"]
+                    if f.get("replaced"):
+                        entry["replaced"] = True
+                    row["vision_frames"].append(entry)
                 row["action_segments"] = _action_segments(raw.get("action_segments"), row)
                 if isinstance(raw.get("evidence_time"), (int, float)):
                     frame = _nearest_frame(frames, float(raw["evidence_time"]))
