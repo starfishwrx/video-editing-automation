@@ -6,6 +6,8 @@
 
 ### 2026-10-26
 
+- 视觉并发修复：抽帧、拼图独立限流并先完成，再启动 API 线程池；文字复核先完成拼图，默认 API 并发跟随批次上限。素材分析逐批消费并保存完成结果；QC 批次独立并发并按原句索引归并。保留双次文字复核、失败阻断和现有视觉合同。新增分阶段计时、准备/完成计数及模块导入时的源码哈希。详见环境合同与 L-20261026-01；本次不部署或重启生产任务。
+- 并发修复离线验证：冻结依赖下包级 99 项通过，编排器 632 项通过（1 项因 ffmpeg/ffprobe 不可用跳过）；新增 5 项阶段并发测试及 2 项 QC 并发/失败测试。测试使用合成响应，不调用真实模型，不作为生产提速或成片验收结论。
 - 跟进已合入的 #19（环审 https://github.com/starfishwrx/video-editing-automation/pull/19#pullrequestreview-5648674977）：候选帧全部硬拒（黑场 / 过曝 / 纯色）时 `select_frames` 外层 `ok=False`。视觉 `_sample_frames` 与相位 `locate` 只收 `ok` 的帧，坏帧不再进入 contact sheet；相位样本不足 2 张返回 `PHASE_FRAME_EXTRACT_FAILED`，不调用视觉模型。质量协议升为 `frame-quality-v2`（`FRAME_QUALITY_VERSION`）。视觉缓存键的 `frame_protocol.quality` 与 `phase-timing-v3` 缓存键里的 `quality` 都引用该字符串，因此 v1 观察不会被复用；相位版本号本身仍是 `phase-timing-v3`。`JY_FRAME_QUALITY=0` 仍只按抽帧成败，黑场也可以 `ok=True`。软模糊仍只标注、不硬拒。
 - 批量抽帧：`Path.glob` 在 Python 3.11+ 返回生成器，布尔值恒为真，`-fps_mode` 失败且工作目录没有 `f_*.jpg` 时会跳过 `-vsync` 重试。改为 `any(work.glob(...))`：空目录改试 `-vsync vfr`，已有输出则保留第一次结果。两次都没有输出再逐帧 `extract_frame`。`JY_FRAME_BATCH=0` 或单帧请求仍走逐帧抽取。
 - 长镜头 `SAMPLE_MAX` 仍为 12，与 `SHEET_TILES` 对齐（#19 已改，本轮不改数值）。覆盖用 `JY_VISION_SAMPLE_MAX`。

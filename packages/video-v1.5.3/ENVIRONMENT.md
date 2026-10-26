@@ -31,8 +31,12 @@ See [model and image-call details](https://github.com/starfishwrx/video-editing-
 | `ARK_API_KEY` | Required for direct calls | First credential source; process environment only |
 | `JY_VOLC_API_KEY` | Used only if `ARK_API_KEY` is empty | Alternative Ark credential; process environment only |
 | `JY_VOLC_BASE_URL` | `https://ark.cn-beijing.volces.com/api/plan/v3` | Base URL; code appends `/chat/completions` |
-| `JY_VISION_BATCH_WORKERS` | `20` for direct Ark | Concurrent material-understanding batches |
+| `JY_VISION_BATCH_WORKERS` | `20` for direct Ark | Per-task API workers for material understanding and final QC |
 | `JY_VISION_SLOTS` | `20` by default | Cross-process vision slots; AI editor also shares these slots |
+| `JY_VISION_TEXT_WORKERS` | Same as batch workers; capped by batch workers | Concurrent text-review requests; both independent reads remain required |
+| `JY_VISION_PREP_WORKERS` | `2` | Per-process media preparation workers; independent of API workers |
+| `JY_VISION_PREP_SLOTS` | `2` | Shared cross-process media preparation slots, released before API calls |
+| `JY_VISION_PREP_TIMEOUT` | `600` seconds | Media slot wait; timeout fails without starting an unbounded preparation |
 | `JY_VISION_TIMEOUT` | `600` seconds for enrichment; `180` for AI editor when unset | Per-call timeout; enrichment enforces a 60-second minimum |
 | `JY_AI_EDITOR_TIMEOUT_S` | `JY_VISION_TIMEOUT`, otherwise `180` | AI-editor-specific timeout |
 | `JY_VISION_THINKING` | enabled | Do not set `disabled` for GLM-5.3-Flash |
@@ -40,6 +44,23 @@ See [model and image-call details](https://github.com/starfishwrx/video-editing-
 | `JY_VISION_MAX_TOKENS` | `8192` for direct Ark | Completion token cap |
 | `JY_VISION_CACHE_DIR` | Derived from task/report location | Optional private material-understanding cache root |
 | `JY_VISION_RECHECK` | `reuse` | `reuse`, `vision` or `off`; explicit recheck policy |
+
+Media preparation and API calls run in separate stages: finish all frames and
+contact sheets, then start the API pool. Text review and final QC follow the
+same preparation/call separation. Completed API results are validated and
+checkpointed without waiting for the slowest batch. Text review starts after
+the material-understanding stage, so the two pools do not add their limits.
+`JY_VISION_SLOTS` is a shared total, not a per-task limit: if eight tasks should
+each have up to 20 requests, explicitly configure a provider-approved shared
+capacity (for example 160), while keeping media preparation slots at the
+machine's tested capacity. A larger slot limit alone does not create requests.
+
+`vision_progress.json` distinguishes `frame_prepare`, `sheet_prepare`, `vision`,
+`text_prepare` and text calls, with preparation and completed-request counts.
+`shot_candidates.json.vision_analysis` records stage wall times (API stages
+include validation/checkpoint I/O) and the source hash captured at module import.
+These counters do not measure provider-side in-flight requests or prove a real
+API speedup; offline tests exercise concurrency using synthetic responses.
 
 Generic configuration is read from the **process environment**. There is no
 generic `.env` auto-loader. Copy `examples/config.example.ps1` to the ignored

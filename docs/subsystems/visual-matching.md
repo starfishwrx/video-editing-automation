@@ -46,6 +46,8 @@
 
 ## 5. 验证
 
+- `test_vision_stage_concurrency.py`：媒体准备与 API 阶段分离、2 路准备后 20 路请求、慢请求期间持久化快结果、文字双读及 API 上限、失败拼图和跨批响应阻断（离线）。
+- `test_visual_qc_response_contract.py`：QC 独立并发、乱序返回仍按原句对应、失败批次不放行。
 - `test_volc_glm_vision.py`：默认模型、图片入参、直连与失败合同（模拟网络）。
 - `test_ai_editor.py` / `test_ai_editor_qc.py`：召回、看图观察、整稿编排、窗口和独立盲审合同。
 - `test_visual_matching_governance.py` 等：legacy 的证据、复用、机位、缓存与预览规则。

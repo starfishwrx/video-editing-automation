@@ -36,6 +36,8 @@
 - 凭据：`ARK_API_KEY` → `JY_VOLC_API_KEY`；两者都缺失返回 `VOLC_API_KEY_MISSING`。
 - base URL：`JY_VOLC_BASE_URL` → 上面的 Ark 地址；填写 base URL 时不重复附加 `/chat/completions`。
 - 默认直连的批次工作线程和跨进程槽位均为 20，分别由 `JY_VISION_BATCH_WORKERS`、`JY_VISION_SLOTS` 覆盖。
+- 抽帧/拼图先以独立的媒体并发完成（`JY_VISION_PREP_WORKERS`、跨进程 `JY_VISION_PREP_SLOTS` 均默认 2），随后 API 按任务并发；文字复核也先拼图再请求，默认跟随批次并发，QC 使用同一批次并发配置。请求完成即校验保存，不等待最慢批次。
+- `JY_VISION_SLOTS` 是所有任务共享的总量。需要每任务 20 路时，同时按服务商容量配置共享总量；不能把共享 20 误认为每任务 20。媒体并发不随 API 槽位增加。
 - 默认思考模式启用；GLM-5.3-Flash 不支持关闭思考，不应设置 `JY_VISION_THINKING=disabled`。相关预算、超时和缓存变量见 [`ENVIRONMENT.md`](../packages/video-v1.5.3/ENVIRONMENT.md)。
 
 通用配置从进程环境变量读取，没有通用 `.env` 自动加载器。PowerShell 示例见[配置模板](../packages/video-v1.5.3/examples/config.example.ps1)，本机副本和任务数据放在忽略的 `work/`。

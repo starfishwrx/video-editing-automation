@@ -497,7 +497,8 @@ def main() -> int:
                 timeout = int(os.environ.get("JY_POST_QC_TIMEOUT_S", "180"))
                 visual_rows = []
                 batch_count = (len(active_claims) + batch_size - 1) // batch_size
-                for batch_no, start in enumerate(range(0, len(active_claims), batch_size), 1):
+                def prepare_batch(job):
+                    batch_no, start = job
                     claims = active_claims[start:start + batch_size]
                     items = [dict(item, label=(f"S{local:02d} {item['suffix']} @{item['timestamp']:.3f}s" if ai_mode else f"S{local:02d} {item['suffix']}"))
                              for local, claim in enumerate(claims, 1)
@@ -513,9 +514,7 @@ def main() -> int:
                     if not vision_analyzer._write_sheet(items, chunk_sheet, columns=chunk_columns,
                                                         tile_width=420 if ai_mode else 260, tile_height=300 if ai_mode else 190,
                                                         ffmpeg=ffmpeg):
-                        result["warnings"].append(f"CONTACT_SHEET_FAILED:B{batch_no:02d}")
-                        result["uncertified"] = True
-                        continue
+                        return batch_no, None
                     response = report_dir / f"draft_visual_qc_vision_{batch_no:02d}.json"
                     batch_meta = report_dir / f"draft_visual_qc_batch_{batch_no:02d}.json"
                     batch_meta.write_text(json.dumps({
@@ -524,9 +523,27 @@ def main() -> int:
                         "frame_labels": [item["label"] for item in items],
                         "prompt_version": response_version,
                     }, ensure_ascii=False, indent=2), encoding="utf-8")
-                    ok, text = _call_qc_model(vision_analyzer, chunk_sheet,
-                                              _prompt(claims, len(items)), response,
-                                              timeout=timeout, workdir=report_dir, strict_slots=ai_mode)
+                    return batch_no, (claims, chunk_sheet, _prompt(claims, len(items)), response)
+
+                prepared = vision_analyzer._prepare_indexed(
+                    list(enumerate(range(0, len(active_claims), batch_size), 1)), prepare_batch)
+                jobs = []
+                for batch_no in sorted(prepared):
+                    if prepared[batch_no] is None:
+                        result["warnings"].append(f"CONTACT_SHEET_FAILED:B{batch_no:02d}")
+                        result["uncertified"] = True
+                    else:
+                        jobs.append((batch_no, prepared[batch_no]))
+
+                def call_batch(job):
+                    batch_no, (claims, chunk_sheet, prompt, response) = job
+                    return batch_no, _call_qc_model(vision_analyzer, chunk_sheet,
+                        prompt, response, timeout=timeout, workdir=report_dir, strict_slots=ai_mode)
+
+                workers = vision_analyzer._batch_workers(len(jobs))
+                result["batch_workers"] = workers
+                for batch_no, (ok, text) in vision_analyzer._iter_indexed(jobs, call_batch, workers):
+                    claims = prepared[batch_no][0]
                     if not ok:
                         result["response_contract"]["errors"].append(f"B{batch_no:02d}:CALL_FAILED")
                         result["batch_results"].append({
@@ -609,7 +626,11 @@ def main() -> int:
                         result["response_contract"]["errors"].append(f"B{batch_no:02d}:JSON_INVALID")
                         result["warnings"].append("POST_DRAFT_VISION_JSON_INVALID:" + str(exc))
                         result["uncertified"] = True
-                result["model_review"] = visual_rows
+                # Requests finish out of order; retain timeline order in the evidence report.
+                result["model_review"] = sorted(visual_rows, key=lambda row: row["index"])
+                result["batch_results"].sort(key=lambda row: row["batch_no"])
+                result["degraded_matches"].sort(key=lambda row: row["index"])
+                result["response_contract"]["validated_batches"].sort()
                 if (not result["response_contract"]["errors"] and
                         result["response_contract"]["validated_batches"] == list(range(1, batch_count + 1))):
                     result["response_contract"]["status"] = "VALIDATED"

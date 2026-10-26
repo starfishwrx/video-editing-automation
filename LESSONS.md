@@ -19,6 +19,15 @@
 
 ## 已有条目（从代码注释与 references 中回填的种子，hits 按已知次数）
 
+### L-20261026-01 API 槽位不是工作线程，媒体与请求阶段独立控制
+- status: OPEN
+- hits: 1
+- 模块: visual-matching / runtime-and-recovery
+- 现象: 放宽视觉槽位仍没有体感提速；进度字段也可能沿用上一轮的并发数。
+- 根因: 槽位只限流，不创建请求；媒体准备占用请求工作线程会压低吞吐，整批收集返回值又推迟断点保存。跨进程槽位与每任务工作线程不是同一预算。
+- 以后怎么做: 媒体准备先独立限流并完成，再启动请求池；请求按完成顺序校验并持久化，归并时按批次及镜头身份绑定。提交前记录实际并发配置，分阶段计时；不以离线模拟宣称生产加速。
+- 证据: `test_vision_stage_concurrency.py`、`test_visual_qc_response_contract.py` 与包内 `ENVIRONMENT.md`。
+
 ### L-20261026-01 硬拒帧不能报成功；Path.glob 不能当布尔值
 - status: OPEN
 - hits: 1

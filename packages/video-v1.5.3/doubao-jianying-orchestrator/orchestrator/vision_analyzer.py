@@ -53,6 +53,10 @@ from .json_extract import extract_json, is_blank
 from .proc_slots import env_float, env_int, slot
 
 
+# Capture the imported source, rather than the file a later deployment may overwrite.
+_RUNTIME_SOURCE_SHA256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+
+
 def _number(value: Any, default: float = 0.0) -> float:
     try:
         return float(value)
@@ -1081,16 +1085,41 @@ def _batch_workers(batch_count: int) -> int:
     return max(1, min(_requested_batch_workers(), max(1, batch_count)))
 
 
-def _call_indexed(jobs: list[Any], fn, workers: int) -> dict[int, Any]:
-    """``fn(job) -> (index, value)``. One worker stays on the calling thread."""
+def _iter_indexed(jobs: list[Any], fn, workers: int):
+    """Yield completed jobs so the caller can validate and checkpoint immediately."""
     if workers <= 1 or len(jobs) <= 1:
-        return {index: value for index, value in (fn(job) for job in jobs)}
-    found: dict[int, Any] = {}
+        for job in jobs:
+            yield fn(job)
+        return
     with ThreadPoolExecutor(max_workers=min(workers, len(jobs))) as pool:
         futures = [pool.submit(fn, job) for job in jobs]
         for future in as_completed(futures):
-            index, value = future.result()
-            found[index] = value
+            yield future.result()
+
+
+def _call_indexed(jobs: list[Any], fn, workers: int) -> dict[int, Any]:
+    return dict(_iter_indexed(jobs, fn, workers))
+
+
+def _prepare_indexed(jobs: list[Any], fn, *, on_done=None) -> dict[int, Any]:
+    """Finish media preparation before starting the independent API pool.
+
+    Preparation slots cover CPU/image work across tasks as well as decoding;
+    they are never held while waiting for the vision provider.
+    """
+    def prepare(job):
+        with slot("vision_prepare", env_int("JY_VISION_PREP_SLOTS", 2, minimum=1),
+                  timeout=env_float("JY_VISION_PREP_TIMEOUT", 600.0)) as handle:
+            if not handle.acquired:
+                raise TimeoutError("VISION_PREP_SLOT_TIMEOUT")
+            return fn(job)
+
+    found = {}
+    workers = env_int("JY_VISION_PREP_WORKERS", 2, minimum=1)
+    for index, value in _iter_indexed(jobs, prepare, workers):
+        found[index] = value
+        if on_done is not None:
+            on_done(len(found), len(jobs))
     return found
 
 
@@ -1548,6 +1577,7 @@ def enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repor
     shots = [row for row in analysis.get("shots", []) if isinstance(row, dict)]
     if not shots:
         return analysis
+    stage_seconds: dict[str, float] = {}
     cache_path = _vision_cache_path(report_dir)
     cache = _load_vision_cache(cache_path)
     cache_hits = 0
@@ -1657,6 +1687,8 @@ def enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repor
             "text_resumed": len(text_resume),
             "cache_path": str(cache_path),
             "partial": partial,
+            "stage_seconds": dict(stage_seconds),
+            "source_sha256": _RUNTIME_SOURCE_SHA256,
         })
         analysis["vision_analysis"] = summary
 
@@ -1673,8 +1705,20 @@ def enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repor
     frame_dir = report_dir / "vision_frames"
     groups: list[list[dict[str, Any]]] = []
     shot_frames: dict[str, list[dict[str, Any]]] = {}
-    for shot in shots_to_analyze:
-        frames = _sample_frames(shot, frame_dir, ffmpeg)
+    _progress(report_dir, phase="frame_prepare", prepare_done=0,
+              prepare_total=len(shots_to_analyze), batch_workers=0,
+              requests_finished=0, finished_at=None)
+    stage_started = time.monotonic()
+
+    def _prepare_frames(job):
+        index, shot = job
+        return index, _sample_frames(shot, frame_dir, ffmpeg)
+
+    sampled = _prepare_indexed(list(enumerate(shots_to_analyze)), _prepare_frames,
+        on_done=lambda done, total: _progress(report_dir, prepare_done=done, prepare_total=total))
+    stage_seconds["frame_prepare"] = round(time.monotonic() - stage_started, 3)
+    for index, shot in enumerate(shots_to_analyze):
+        frames = sampled[index]
         if not frames:
             shot.setdefault("status", "pending_analysis")
             shot.setdefault("analysis_error", "no readable frame")
@@ -1747,7 +1791,8 @@ def enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repor
         analysis["ok"] = False
         _persist(report_dir, analysis)
 
-    _progress(report_dir, phase="vision", index=0, total=len(batches),
+    _progress(report_dir, phase="sheet_prepare", index=0, total=len(batches),
+              prepare_done=0, prepare_total=len(batches),
               vision_left=len(batches), text_left=len(text_requests), started_at=
               time.strftime("%Y-%m-%dT%H:%M:%S%z"), finished_at=None)
     with private_temp_dir(prefix="jy_vision_", dir=report_dir) as temp:
@@ -1768,33 +1813,37 @@ def enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repor
             )
             return batch_index, result
 
-        prepared: list[tuple[int, list[dict[str, Any]], Path | None]] = []
-        for batch_index, batch in enumerate(batches, 1):
+        def _prepare_batch(job):
+            batch_index, batch = job
             sheet = temp_dir / f"sheet_{batch_index:04d}.jpg"
             tiles = [{**item, "label": f"#{n} {item['timestamp']:.1f}s"}
                      for n, item in enumerate(batch, 1)]
             written = _write_sheet(tiles, sheet, ffmpeg=ffmpeg, fit=True, font_size=22,
                                    **_sheet_geometry(batch))
-            prepared.append((batch_index, batch,
-                             temp_dir / f"response_{batch_index:04d}.txt" if written else None))
-        jobs = [item for item in prepared if item[2] is not None]
-        workers = _batch_workers(len(jobs))
-        prefetched = _call_indexed(jobs, _call_batch, workers) if workers > 1 else {}
-        _progress(report_dir, batch_workers=workers, transport=_vision_transport())
+            return batch_index, (batch_index, batch,
+                                  temp_dir / f"response_{batch_index:04d}.txt" if written else None)
 
-        for batch_index, batch, response_file in prepared:
-            if batch_index > 1:
-                _checkpoint()
+        stage_started = time.monotonic()
+        prepared = _prepare_indexed(list(enumerate(batches, 1)), _prepare_batch,
+            on_done=lambda done, total: _progress(report_dir, prepare_done=done, prepare_total=total))
+        stage_seconds["sheet_prepare"] = round(time.monotonic() - stage_started, 3)
+        jobs = [prepared[index] for index in sorted(prepared) if prepared[index][2] is not None]
+        for batch_index, _, response_file in prepared.values():
             if response_file is None:
                 vision_errors.append({"type": "VISION_SHEET_FAILED", "batch": batch_index})
-                continue
-            if batch_index in prefetched:
-                ok, text = prefetched[batch_index]
-            else:
-                _, (ok, text) = _call_batch((batch_index, batch, response_file))
+        workers = _batch_workers(len(jobs))
+        _progress(report_dir, phase="vision", batch_workers=workers, transport=_vision_transport(),
+                  requests_finished=0, vision_left=len(jobs))
+        _checkpoint()
+
+        stage_started = time.monotonic()
+        for done, (batch_index, (ok, text)) in enumerate(_iter_indexed(jobs, _call_batch, workers), 1):
+            _, batch, _ = prepared[batch_index]
+            _progress(report_dir, requests_finished=done, vision_left=len(jobs) - done)
             if not ok:
                 vision_errors.append({"type": "VISION_CALL_FAILED", "batch": batch_index,
                                       "message": text[-4000:]})
+                _checkpoint()
                 continue
             try:
                 payload = _json_from_text(text)
@@ -1804,15 +1853,17 @@ def enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repor
             except (ValueError, TypeError, AttributeError) as exc:
                 vision_errors.append({"type": "VISION_JSON_INVALID", "batch": batch_index,
                                       "message": str(exc), "response": text[-2000:]})
+                _checkpoint()
                 continue
             responses.append({"batch": batch_index, "shot_count": len(rows)})
             tile_map = {n: item for n, item in enumerate(batch, 1)}
+            batch_shots = {str(item["shot_id"]) for item in batch}
             seen: set[str] = set()
             for raw in rows:
                 if not isinstance(raw, dict):
                     continue
                 shot_id = str(raw.get("shot_id") or raw.get("shot_label") or "").strip()
-                if shot_id not in by_id or shot_id in seen:
+                if shot_id not in batch_shots or shot_id not in by_id or shot_id in seen:
                     continue
                 seen.add(shot_id)
                 row = by_id[shot_id]
@@ -1897,19 +1948,33 @@ def enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repor
             # Persist after every completed vision batch so a later timeout
             # does not discard the understanding work that already finished.
             _save_vision_cache(cache_path, cache)
+            _checkpoint()
+        stage_seconds["vision_api_and_checkpoint"] = round(time.monotonic() - stage_started, 3)
         if batches:
             _checkpoint()
         text_total = len(text_requests)
-        _progress(report_dir, vision_left=0, text_left=text_total)
+        _progress(report_dir, phase="text_prepare", vision_left=0, text_left=text_total,
+                  prepare_done=0, prepare_total=text_total, batch_workers=0)
 
-        def _read_text(text_index: int, shot_id: str, items: list[dict[str, Any]]):
+        def _prepare_text(job):
+            text_index, (shot_id, items) = job
             sheet = temp_dir / f"text_{text_index:04d}.jpg"
             tiles = [{**item, "label": f"#{n} {item['timestamp']:.1f}s"}
                      for n, item in enumerate(items, 1)]
+            written = _write_sheet(tiles, sheet, ffmpeg=ffmpeg, fit=True, font_size=26,
+                                   **_sheet_geometry(items, text=True))
+            return text_index, (text_index, shot_id, items, sheet if written else None)
+
+        stage_started = time.monotonic()
+        text_prepared = _prepare_indexed(list(enumerate(text_requests.items(), 1)), _prepare_text,
+            on_done=lambda done, total: _progress(report_dir, prepare_done=done, prepare_total=total))
+        stage_seconds["text_prepare"] = round(time.monotonic() - stage_started, 3)
+
+        def _read_text(job):
+            text_index, shot_id, items, sheet = job
             text = "VISION_TEXT_SHEET_FAILED"
             payloads: list[dict[str, Any]] = []
-            if _write_sheet(tiles, sheet, ffmpeg=ffmpeg, fit=True, font_size=26,
-                            **_sheet_geometry(items, text=True)):
+            if sheet is not None:
                 for read in range(env_int("JY_VISION_TEXT_READS", 2, minimum=1)):
                     ok, text = _run_vision_with_retry(
                         sheet, _text_prompt(shot_id, items),
@@ -1929,18 +1994,20 @@ def enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repor
                         payloads = []
                         break
                     payloads.append(payload)
-            return shot_id, items, payloads, text
+            return text_index, (shot_id, items, payloads, text)
 
         # 每个镜头的复核互不依赖，并发读；总并发仍受跨进程 vision 槽位约束。
         # 结果只在主线程落到行上、写缓存与断点，避免多线程同时改同一份分析。
-        workers = min(env_int("JY_VISION_TEXT_WORKERS", 4, minimum=1), max(1, text_total))
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = [pool.submit(_read_text, index, shot_id, items)
-                       for index, (shot_id, items) in enumerate(text_requests.items(), 1)]
-            for done, future in enumerate(as_completed(futures), 1):
-                _apply_text(*future.result())
-                _progress(report_dir, text_left=text_total - done)
-                _checkpoint()
+        workers = min(env_int("JY_VISION_TEXT_WORKERS", _requested_batch_workers(), minimum=1),
+                      _requested_batch_workers(), max(1, text_total))
+        _progress(report_dir, phase="text", batch_workers=workers, requests_finished=0)
+        text_jobs = [text_prepared[index] for index in sorted(text_prepared)]
+        stage_started = time.monotonic()
+        for done, (_, value) in enumerate(_iter_indexed(text_jobs, _read_text, workers), 1):
+            _apply_text(*value)
+            _progress(report_dir, text_left=text_total - done, requests_finished=done)
+            _checkpoint()
+        stage_seconds["text_api_and_checkpoint"] = round(time.monotonic() - stage_started, 3)
     _annotate_shot_labels(manifest, shots)
     apply_cross_shot_text(shots)
     analysis["text_pass"] = {"requested": len(text_requests),
