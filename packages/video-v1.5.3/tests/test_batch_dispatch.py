@@ -84,6 +84,37 @@ class BatchDispatchTests(unittest.TestCase):
             runner=lambda *args: self.fail("material resume invoked build"))
         self.assertEqual(result[0]["status"], "READY")
 
+    def test_wait_uses_short_timeout_to_allow_periodic_polling(self):
+        # Verify that dispatch.wait is called with a timeout to enable periodic polling
+        called = {"timeout_values": []}
+
+        real_wait = dispatch.wait
+
+        def wrapped_wait(fs, timeout=None, return_when=None):
+            called["timeout_values"].append(timeout)
+            # Defer to the real wait but respect the provided timeout
+            return real_wait(fs, timeout=timeout, return_when=return_when)
+
+        def preparer(task, directory, env):
+            path = directory / "shot_candidates.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("{}", encoding="utf-8")
+            return str(path)
+
+        def runner(task, stage, env, work):
+            return {"record_id": task["record_id"], "formal_deliveries": 0}
+
+        old = dispatch.wait
+        try:
+            dispatch.wait = wrapped_wait  # monkeypatch module-level imported wait
+            dispatch.dispatch([{"record_id": "one", "material_dir": "m"}],
+                              work=self.root, policy=self.policy,
+                              preparer=preparer, runner=runner)
+        finally:
+            dispatch.wait = old
+        self.assertTrue(any((t is not None and t > 0) for t in called["timeout_values"]),
+                        f"expected wait to be called with a positive timeout; seen={called['timeout_values']}")
+
     def test_ok_or_preview_flags_without_certified_delivery_never_count(self):
         for status in ("OK", "PREVIEW_READY", "ERROR"):
             self.assertEqual(dispatch.formal_delivery_count({"status": status, "drafts": ["x"]}), 0)

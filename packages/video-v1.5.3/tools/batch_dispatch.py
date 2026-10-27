@@ -28,6 +28,15 @@ from orchestrator.proc_slots import slot
 from orchestrator.visual_qc_contract import report_status, report_matches_draft
 
 
+def _string_seconds(value) -> str:
+    """Format seconds for env vars: integer seconds as '360', otherwise keep float string."""
+    try:
+        val = float(value)
+        return str(int(val)) if float(val).is_integer() else str(val)
+    except Exception:
+        return str(value)
+
+
 def _read(path: Path) -> dict:
     try:
         data = json.loads(path.read_text(encoding="utf-8-sig"))
@@ -94,8 +103,8 @@ def _child_env(policy_file: Path, policy: RuntimePolicy, task: dict | None = Non
         JY_VISION_BATCH_WORKERS=str(policy.api_workers),
         JY_VISION_PREP_WORKERS=str(policy.prep_workers),
         JY_VISION_PREP_SLOTS=str(policy.prep_slots),
-        JY_VISION_TIMEOUT=str(policy.request_timeout),
-        JY_POST_QC_TIMEOUT_S=str(policy.request_timeout),
+        JY_VISION_TIMEOUT=_string_seconds(policy.request_timeout),
+        JY_POST_QC_TIMEOUT_S=_string_seconds(policy.request_timeout),
         JY_POST_QC_STAGE_TIMEOUT_S=str(policy.qc_stage_timeout),
         JY_TASK_BUDGET_S=str(int(policy.task_timeout)), JY_TASK_BUDGET_OVERRIDE="1",
         JY_TASK_DEADLINE_EPOCH=str(time.time() + policy.task_timeout))
@@ -311,7 +320,12 @@ def dispatch(tasks: list[dict], *, work: Path, policy: RuntimePolicy | None = No
                     pending.remove((task, stage))
                 if not futures:
                     continue
-                completed, _ = wait(futures, return_when=FIRST_COMPLETED)
+                poll_interval = float(os.environ.get("JY_DISPATCH_POLL_INTERVAL_S", "1.0"))
+                completed, _ = wait(futures, timeout=max(0.01, poll_interval), return_when=FIRST_COMPLETED)
+                if not completed:
+                    # Timed out with no task completed; continue the loop to absorb new submissions
+                    # and to fill any freed worker slots.
+                    continue
                 for future in completed:
                     kind, key, task = futures.pop(future)
                     try:

@@ -114,7 +114,7 @@ class VisualQcDeliveryContractTests(unittest.TestCase):
                 mock.patch.object(worker.subprocess, "run", side_effect=worker.subprocess.TimeoutExpired("qc", 930)) as called:
             answer = worker.run_post_draft_qc(self.draft, self.report_dir)
         self.assertEqual(called.call_args.kwargs["timeout"], 930)
-        self.assertEqual(called.call_args.kwargs["env"]["JY_POST_QC_TIMEOUT_S"], "360.0")
+        self.assertEqual(called.call_args.kwargs["env"]["JY_POST_QC_TIMEOUT_S"], "360")
         self.assertEqual(answer["resume_stage"], "qc")
         self.assertTrue(self.draft.exists())
 

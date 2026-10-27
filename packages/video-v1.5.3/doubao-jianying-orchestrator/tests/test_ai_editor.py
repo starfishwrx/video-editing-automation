@@ -347,6 +347,19 @@ class AIEditorTests(unittest.TestCase):
                 editor._call("prompt", self.root / "response.json")
             provider.assert_called_once()
 
+    def test_float_vision_timeout_env_string_is_parsed_safely(self):
+        from orchestrator import vision_analyzer
+        output = self.root / "out.json"
+        with mock.patch.object(vision_analyzer, "_run_volc_chat", return_value=(True, '{"ok":true}')) as provider, \
+             mock.patch.dict("os.environ", {"JY_VISION_TRANSPORT": "volc_glm", "JY_VISION_TIMEOUT": "360.0"}):
+            editor._call("prompt", output)
+            # Ensure the timeout passed to provider is an int parsed from the float string
+            self.assertTrue(provider.called)
+            kwargs = provider.call_args.kwargs
+            self.assertIn("timeout", kwargs)
+            self.assertIsInstance(kwargs["timeout"], int)
+            self.assertEqual(kwargs["timeout"], 360)
+
     def test_normal_cli_defaults_to_ai_and_never_calls_legacy_match(self):
         from orchestrator import cli, vision_analyzer
         analysis = {"shots": [self.shot], "vision_analysis": {"errors": []}}

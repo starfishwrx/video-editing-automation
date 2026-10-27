@@ -52,8 +52,13 @@ def _call(prompt: str, path: Path, sheet: Path | None = None) -> dict:
     shared = material_cache.cache_root(path.parent) / "editor_calls" / f"{contract.digest(identity)}.json"
     # One transport owns retries and account slots, including after restart.
     with file_lock(shared.with_suffix(".editor"), timeout=7200):
-        ok, text = vision._run_volc_chat(sheet, prompt, shared, validator=valid,
-            timeout=int(os.environ.get("JY_AI_EDITOR_TIMEOUT_S", os.environ.get("JY_VISION_TIMEOUT", "360"))))
+        # Parse timeout from environment, accepting float-formatted seconds such as "360.0".
+        raw_timeout = os.environ.get("JY_AI_EDITOR_TIMEOUT_S", os.environ.get("JY_VISION_TIMEOUT", "360"))
+        try:
+            timeout_s = int(float(str(raw_timeout).strip()))
+        except (TypeError, ValueError):
+            timeout_s = 360
+        ok, text = vision._run_volc_chat(sheet, prompt, shared, validator=valid, timeout=timeout_s)
     if not ok:
         raise ValueError("AI_EDITOR_CALL_FAILED:" + str(text)[-500:])
     payload = vision._json_from_text(text)

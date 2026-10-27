@@ -786,7 +786,7 @@ def run_post_draft_qc(draft_dir: pathlib.Path, report_dir: pathlib.Path) -> dict
                 "failed_stage": "qc", "resume_stage": "qc"})
     stage_deadline = time.time() + stage_timeout
     env = dict(os.environ, PYTHONUTF8="1",
-               JY_POST_QC_TIMEOUT_S=str(request_timeout),
+               JY_POST_QC_TIMEOUT_S=str(int(request_timeout)) if float(request_timeout).is_integer() else str(request_timeout),
                JY_POST_QC_STAGE_TIMEOUT_S=str(stage_timeout),
                JY_STAGE_DEADLINE_EPOCH=str(stage_deadline),
                JY_STAGE_DEADLINE_TS=str(stage_deadline))
@@ -1318,8 +1318,7 @@ def prior_draft_requires_recheck(task_dir: pathlib.Path, index: int,
             failure_index = 0
         if failure_index == index:
             return True
-    report_dir = task_dir / "report" / (
-        base_draft if index == 1 else "report_%d" % index)
+    report_dir = task_dir / "report" / (base_draft if index == 1 else "report_%d" % index)
     qc_path = report_dir / "draft_visual_qc.json"
     if not qc_path.is_file():
         return True
@@ -1327,8 +1326,9 @@ def prior_draft_requires_recheck(task_dir: pathlib.Path, index: int,
         payload = json.loads(qc_path.read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError):
         return True
+    draft_name = base_draft if index == 1 else f"{base_draft}-{index}"
     return (production_eval.visual_qc_contract.report_status(payload) != "PASS"
-            or not production_eval.visual_qc_contract.report_matches_draft(payload, DRAFTS / base_draft))
+            or not production_eval.visual_qc_contract.report_matches_draft(payload, DRAFTS / draft_name))
 
 
 def build_progress_inputs(manifest: dict, analysis_file: str | None, repair_indices) -> dict:
