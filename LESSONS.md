@@ -7,6 +7,15 @@
 
 ## 新增条目
 
+### L-20261027-01 并发槽位必须覆盖实际连接，重试预算必须跨恢复
+- status: OPEN
+- hits: 1
+- 模块: visual-matching / runtime-and-recovery / package-tools
+- 现象: 等待超时后后台请求仍存活，外层重复重试叠加在途量；不同入口各自扩大槽位；已成稿QC超时又整稿重建。
+- 根因: 线程等待期限冒充HTTP总期限，准备/请求/父阶段混用预算，重试与状态分散在多个模块。
+- 以后怎么做: 连接清理完成才释放账户槽，只有最终content可认证；一个适配层拥有持久两次总预算，所有生产入口共享策略并经调度准入。同产品冷准备作为依赖，逐批保存QC；缺文字只补文字，没有新输入停止重建。只统计独立PASS与验证交付的新增交集。
+- 证据: `test_vision_client.py`、`test_runtime_policy.py`、`test_material_cache.py`、`test_batch_dispatch.py`、`test_visual_qc_response_contract.py`、`docs/production-throughput.md`。
+
 ### L-20261026-01 配音身份和最终字幕时间必须共用同一输入
 - status: OPEN
 - hits: 1

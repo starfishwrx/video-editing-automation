@@ -17,6 +17,9 @@ from orchestrator import ai_editor_qc, semantic_gate, shot_analyzer, visual_qc_c
 
 class AIEditorTests(unittest.TestCase):
     def setUp(self):
+        prepare = mock.patch.object(editor, "_prepare_review_round")
+        prepare.start()
+        self.addCleanup(prepare.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
@@ -54,6 +57,22 @@ class AIEditorTests(unittest.TestCase):
         self.assertEqual(result["degraded_count"], 0)
         with mock.patch("orchestrator.demo_actions.judge", side_effect=AssertionError("legacy gate")):
             self.assertTrue(semantic_gate.evaluate_segments(result["segments"], require_explicit=True, category="weipin")["ok"])
+
+    def test_refill_preserves_other_sentences_and_reindexes_current_receipt(self):
+        manifest = {**self.manifest, "selection_mode": "rule_then_ai", "segments": [
+            {"text": "保留原句", "audio_duration_us": 2000000}, self.manifest["segments"][0]]}
+        kept = {"index": 1, "text": "保留原句", "temporary_shot_id": "keep",
+                "video": "kept.mp4", "source_start": 3, "duration": 2}
+        matched = {"segments": [kept, {"index": 2, "text": self.sentence["text"]}],
+                   "pending_items": [{"index": 2}], "material_gaps": [{"index": 2}]}
+        review = {**self.review, "source_identity": contract.source_identity(self.video)}
+        with mock.patch.object(editor, "_review_pool", return_value=([review], {"feasible": True})):
+            result = editor.refill_indices(manifest, {"shots": [self.shot]}, matched, [2], self.root)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["segments"][0], kept)
+        row = result["segments"][1]
+        self.assertEqual(row["ai_selection"]["index"], 2)
+        self.assertTrue(contract.validate_segment_receipt(row, index=2, verify_source=True, manifest=manifest)["ok"])
 
     def test_selector_cannot_pick_packaging_that_pixel_review_rejected(self):
         plan = self.plan()
@@ -322,12 +341,24 @@ class AIEditorTests(unittest.TestCase):
 
     def test_slot_timeout_does_not_make_an_unthrottled_request(self):
         from orchestrator import vision_analyzer
-        with mock.patch.object(vision_analyzer, "_vision_slot", return_value=contextlib.nullcontext(SimpleNamespace(acquired=False))), \
-                mock.patch.object(vision_analyzer, "_run_volc_chat") as provider, \
+        with mock.patch.object(vision_analyzer, "_run_volc_chat", return_value=(False, "VISION_SLOT_TIMEOUT")) as provider, \
                 mock.patch.dict("os.environ", {"JY_VISION_TRANSPORT": "volc_glm"}):
             with self.assertRaisesRegex(ValueError, "SLOT_TIMEOUT"):
                 editor._call("prompt", self.root / "response.json")
-            provider.assert_not_called()
+            provider.assert_called_once()
+
+    def test_float_vision_timeout_env_string_is_parsed_safely(self):
+        from orchestrator import vision_analyzer
+        output = self.root / "out.json"
+        with mock.patch.object(vision_analyzer, "_run_volc_chat", return_value=(True, '{"ok":true}')) as provider, \
+             mock.patch.dict("os.environ", {"JY_VISION_TRANSPORT": "volc_glm", "JY_VISION_TIMEOUT": "360.0"}):
+            editor._call("prompt", output)
+            # Ensure the timeout passed to provider is an int parsed from the float string
+            self.assertTrue(provider.called)
+            kwargs = provider.call_args.kwargs
+            self.assertIn("timeout", kwargs)
+            self.assertIsInstance(kwargs["timeout"], int)
+            self.assertEqual(kwargs["timeout"], 360)
 
     def test_normal_cli_defaults_to_ai_and_never_calls_legacy_match(self):
         from orchestrator import cli, vision_analyzer

@@ -192,7 +192,7 @@ class BatchContinuationTests(unittest.TestCase):
                  mock.patch.object(batch_worker, "PROGRESS", root / "progress.jsonl"), \
                  mock.patch.object(batch_worker, "STATUS_SNAPSHOT", root / "snapshot.json"), \
                  mock.patch.object(batch_worker, "LOG", root / "worker.log"), \
-                 mock.patch.object(batch_worker, "_run_task", side_effect=lambda task: selected.append(task["record_id"])), \
+                 mock.patch("tools.batch_dispatch.dispatch", side_effect=lambda tasks, **kwargs: selected.extend(task["record_id"] for task in tasks)), \
                  mock.patch.dict(batch_worker.os.environ, {
                      "JY_TASK_SKIP_CURRENT": "1", "JY_TASK_RECORD_ID": "",
                      "JY_TASK_FORCE_REBUILD": "",
@@ -446,7 +446,8 @@ class VisionRetryTests(unittest.TestCase):
                 profile="flash", timeout=1, max_retries=1)
         self.assertFalse(ok)
         self.assertEqual(text, "502")
-        self.assertEqual(call.call_count, 2)
+        self.assertEqual(call.call_count, 1)
+        self.assertEqual(call.call_args.kwargs["max_attempts"], 2)
 
 
 if __name__ == "__main__":

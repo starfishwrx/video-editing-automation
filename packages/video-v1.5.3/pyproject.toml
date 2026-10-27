@@ -9,6 +9,7 @@ dependencies = [
   "websockets>=12.0",
   "pillow>=10.0.0",
   "uiautomation>=2.0.0; sys_platform == 'win32'",
+  "aiohttp>=3.12,<4",
 ]
 
 [dependency-groups]

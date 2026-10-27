@@ -25,7 +25,8 @@ See [model and image-call details](https://github.com/starfishwrx/video-editing-
 
 | Variable | Default / precedence | Purpose |
 | --- | --- | --- |
-| `JY_SELECTION_MODE` | `ai_editor`; manifest `selection_mode` wins | Select `ai_editor` or explicit `legacy` |
+| `JY_SELECTION_MODE` | `ai_editor`; manifest `selection_mode` wins | `ai_editor`, `rule_then_ai` (rule recall plus pixel-reviewed gaps), or explicit `legacy` |
+| `JY_CONCURRENCY_POLICY_FILE` | Explicit JSON is authoritative | One host/account policy for every entry; see `examples/concurrency-policy.json` |
 | `JY_VISION_TRANSPORT` | `volc_glm` | Direct Ark chat completions; `glm`/`volc` are aliases |
 | `JY_VISION_MODEL` | `glm-5.3-flash` | Exact model ID, shared by image review and text planning |
 | `ARK_API_KEY` | Required for direct calls | First credential source; process environment only |
@@ -37,11 +38,13 @@ See [model and image-call details](https://github.com/starfishwrx/video-editing-
 | `JY_VISION_PREP_WORKERS` | `2` | Per-process media preparation workers; independent of API workers |
 | `JY_VISION_PREP_SLOTS` | `2` | Shared cross-process media preparation slots, released before API calls |
 | `JY_VISION_PREP_TIMEOUT` | `600` seconds | Media slot wait; timeout fails without starting an unbounded preparation |
-| `JY_VISION_TIMEOUT` | `600` seconds for enrichment; `180` for AI editor when unset | Per-call timeout; enrichment enforces a 60-second minimum |
-| `JY_AI_EDITOR_TIMEOUT_S` | `JY_VISION_TIMEOUT`, otherwise `180` | AI-editor-specific timeout |
-| `JY_VISION_THINKING` | enabled | Do not set `disabled` for GLM-5.3-Flash |
-| `JY_VISION_THINKING_BUDGET` | `2048` | Enabled-thinking budget for direct Ark calls |
-| `JY_VISION_MAX_TOKENS` | `8192` for direct Ark | Completion token cap |
+| `JY_VISION_TIMEOUT` | `360` seconds maximum under default policy | Cancellable total HTTP deadline, bounded by remaining stage/task time |
+| `JY_AI_EDITOR_TIMEOUT_S` | `JY_VISION_TIMEOUT`, otherwise `360` | Can tighten the policy's request deadline |
+| `JY_POST_QC_STAGE_TIMEOUT_S` | `900` seconds | Separate QC stage budget; parent reserves another 30 seconds for cleanup |
+| `JY_STAGE_DEADLINE_TS`, `JY_TASK_DEADLINE_TS` | Inherited epoch deadlines | Requests can use only the remaining stage/task budget |
+| `JY_VISION_THINKING` | Always enabled for this model | Direct Ark uses `reasoning_effort=low`; legacy disable/budget overrides are ignored |
+| `JY_VISION_MAX_TOKENS` | `16384` | Initial completion cap; token semantics depend on the actual endpoint |
+| `JY_VISION_LENGTH_RETRY_VERIFIED` | off | Set `1` only after this endpoint is verified to support a 16384→32768 length retry |
 | `JY_VISION_CACHE_DIR` | Queue `work/.cache`; otherwise persistent user cache | Shared visual observations and completed text verification across tasks |
 | `JY_VISION_CACHE_WAIT_TIMEOUT` | `7200` seconds | Wait for another task recognizing the same product; timeout never starts duplicate calls |
 | `JY_VISION_RECHECK` | `reuse` | `reuse`, `vision` or `off`; explicit recheck policy |
@@ -51,25 +54,41 @@ contact sheets, then start the API pool. Text review and final QC follow the
 same preparation/call separation. Completed API results are validated and
 checkpointed without waiting for the slowest batch. Text review starts after
 the material-understanding stage, so the two pools do not add their limits.
-`JY_VISION_SLOTS` is a shared total, not a per-task limit: if eight tasks should
-each have up to 20 requests, explicitly configure a provider-approved shared
-capacity (for example 160), while keeping media preparation slots at the
-machine's tested capacity. A larger slot limit alone does not create requests.
+The starting policy is four build tasks, two media workers/slots, twenty API
+workers per task and twenty account API slots. Explicit policy values override
+child-process environment values; without a policy, legacy environment values
+can only tighten the defaults. Never use a slot wait timeout to bypass admission.
+Account capacity must be confirmed before calibrating 20→40→80. Per-task capacity
+does not establish account capacity. All entry points must use the same policy
+file and slot directory; do not edit that policy while its dispatcher is active.
 
 `vision_progress.json` distinguishes `frame_prepare`, `sheet_prepare`, `vision`,
 `text_prepare` and text calls, with preparation and completed-request counts.
 `shot_candidates.json.vision_analysis` records stage wall times (API stages
 include validation/checkpoint I/O). Source-code hashes are not collected at runtime.
-These counters do not measure provider-side in-flight requests or prove a real
-API speedup; offline tests exercise concurrency using synthetic responses.
+Request `.call.json` checkpoints record attempts, typed errors, HTTP status,
+request ID, finish reason, usage, elapsed time and slot wait. They contain no
+credentials or reasoning text. They track client calls, not provider-side work;
+offline tests do not prove a production speedup.
 
 Visual and verified-text observations are shared by product and source window,
 not by task ID, script, draft name or shot numbering. The cache key checks the
 source path/size/mtime, product identity (including SKU when supplied), model,
 analysis rules and sampling/quality protocol. Matching completed observations
 skip both image understanding and text reads. Explicitly rejected observations
-are also reusable, but stay outside the matching pool. Provider failures and
-pending/failed text verification are not completed cache entries.
+are also reusable, but stay outside the matching pool. Visual success is saved
+independently of OCR completion. Missing/failed text verification triggers only
+the two text reads, never another visual call; it cannot certify a usable shot.
+The shared media cache precedes scene detection and reuses unchanged per-source
+windows, frames and sheets. Candidate 8/16-frame media is shared; purpose-specific
+verdicts reuse only identical inputs.
+
+The HTTP adapter is the only retry owner: at most two actual attempts per logical
+input, persisted across stage recovery. 429/recoverable 5xx honor Retry-After;
+network/empty/invalid JSON may consume the one remaining retry. Refusal, auth,
+balance and deterministic parameter errors stop. Only final `message.content`
+is validated; thinking/refusal cannot supply an answer. Connection cleanup
+completes before releasing the account slot. Cleanup failure stops auto retry.
 
 Concurrent tasks for the same product coordinate through a file lock before
 reading and filling the cache. Only the first cold task recognizes the material;

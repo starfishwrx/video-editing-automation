@@ -89,24 +89,20 @@ class MatchFailureTests(_Env):
         self.assertEqual(record["attempts"], 1)
         self.assertIn("unexpected argument", record["stderr_tail"])
 
-    def test_rate_limit_is_retried_then_succeeds(self):
-        matches = [{"index": 1, "top3": [{"shot_id": "S1", "score": 88}]}]
-        result, record, call = self._match(
-            [(1, "HTTP 429 Too Many Requests", None), (0, "", json.dumps(matches))])
-        self.assertEqual(call.call_count, 2)
-        self.assertEqual(self.sleep.call_count, 1)
-        self.assertNotIn("semantic_match_error", result)
-        self.assertEqual(result["semantic_matches"], matches)
-        self.assertEqual((record["error"], record["attempts"], record["stderr_tail"]), (None, 2, ""))
+    def test_rollback_error_has_no_outer_retry(self):
+        result, record, call = self._match([(1, "HTTP 429 Too Many Requests", None)])
+        self.assertEqual(call.call_count, 1)
+        self.sleep.assert_not_called()
+        self.assertIn("semantic_match_error", result)
+        self.assertEqual(record["attempts"], 1)
 
-    def test_all_empty_candidates_are_retried(self):
+    def test_empty_candidates_remain_blocked_without_repeating_judgment(self):
         empty = [{"index": 1, "top3": []}, {"index": 2, "top3": []}]
-        matches = [{"index": 1, "top3": [{"shot_id": "S1", "score": 88}]}, {"index": 2, "top3": []}]
-        result, record, call = self._match(
-            [(0, "", json.dumps(empty)), (0, "", json.dumps(matches))])
-        self.assertEqual(call.call_count, 2)
-        self.assertEqual(result["semantic_matches"], matches)
-        self.assertEqual(record["attempts"], 2)
+        result, record, call = self._match([(0, "", json.dumps(empty))])
+        self.assertEqual(call.call_count, 1)
+        self.assertEqual(result["semantic_matches"], [])
+        self.assertIn("semantic_match_error", result)
+        self.assertEqual(record["attempts"], 1)
 
 
 class MatchPromptTests(_Env):

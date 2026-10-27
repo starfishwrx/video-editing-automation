@@ -25,7 +25,8 @@ def _save(path: Path, data: dict) -> None:
 
 
 def _call(prompt: str, path: Path, sheet: Path | None = None) -> dict:
-    from . import vision_analyzer as vision
+    from . import vision_analyzer as vision, material_cache
+    from .file_safety import file_lock
     if vision._vision_transport() != "volc_glm":
         raise ValueError("AI_EDITOR_REQUIRES_DIRECT_GLM")
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -43,23 +44,29 @@ def _call(prompt: str, path: Path, sheet: Path | None = None) -> dict:
         except (OSError, ValueError, TypeError):
             pass
     (path.with_suffix(".prompt.txt")).write_text(prompt, encoding="utf-8")
-    for attempt in range(2):
-        with vision._vision_slot() as handle:
-            if not handle.acquired:
-                raise ValueError("AI_EDITOR_VISION_SLOT_TIMEOUT")
-            ok, text = vision._run_volc_chat(sheet, prompt, path,
-                timeout=int(os.environ.get("JY_AI_EDITOR_TIMEOUT_S", os.environ.get("JY_VISION_TIMEOUT", "180"))))
-        if ok:
-            payload = vision._json_from_text(text)
-            if not isinstance(payload, dict):
-                raise ValueError("AI_EDITOR_RESPONSE_NOT_OBJECT")
-            json.dumps(payload, allow_nan=False)  # Reject non-finite model output.
-            path.write_text(text, encoding="utf-8")
-            _save(request_path, identity)
-            return payload
-        if attempt or not vision._is_transient(text):
-            raise ValueError("AI_EDITOR_CALL_FAILED:" + str(text)[-500:])
-    raise ValueError("AI_EDITOR_CALL_FAILED")
+    def valid(payload):
+        if not isinstance(payload, dict):
+            return False
+        json.dumps(payload, allow_nan=False)
+        return True
+    shared = material_cache.cache_root(path.parent) / "editor_calls" / f"{contract.digest(identity)}.json"
+    # One transport owns retries and account slots, including after restart.
+    with file_lock(shared.with_suffix(".editor"), timeout=7200):
+        # Parse timeout from environment, accepting float-formatted seconds such as "360.0".
+        raw_timeout = os.environ.get("JY_AI_EDITOR_TIMEOUT_S", os.environ.get("JY_VISION_TIMEOUT", "360"))
+        try:
+            timeout_s = int(float(str(raw_timeout).strip()))
+        except (TypeError, ValueError):
+            timeout_s = 360
+        ok, text = vision._run_volc_chat(sheet, prompt, shared, validator=valid, timeout=timeout_s)
+    if not ok:
+        raise ValueError("AI_EDITOR_CALL_FAILED:" + str(text)[-500:])
+    payload = vision._json_from_text(text)
+    if not valid(payload):
+        raise ValueError("AI_EDITOR_RESPONSE_NOT_OBJECT")
+    path.write_text(text, encoding="utf-8")
+    _save(request_path, identity)
+    return payload
 
 
 def _inventory(manifest: dict, shots: list[dict], directory: Path) -> list[dict]:
@@ -116,34 +123,67 @@ def _inventory(manifest: dict, shots: list[dict], directory: Path) -> list[dict]
     return result
 
 
-def _review(manifest: dict, sentence: dict, shot: dict, directory: Path, *, dense: bool = False) -> dict:
-    from . import vision_analyzer as vision, platform_env, shot_analyzer
+def _review_media(shot: dict, directory: Path, *, dense: bool = False) -> dict:
+    from . import vision_analyzer as vision, platform_env, shot_analyzer, material_cache
+    from .runtime_policy import media_slot
     start, end = float(shot["source_start"]), float(shot["source_end"])
     if not math.isfinite(start + end) or not 0 <= start < end:
         raise ValueError("AI_EDITOR_SOURCE_WINDOW_INVALID")
     source = str(shot["video"])
     before = contract.source_identity(source)
-    key = contract.digest([sentence["index"], shot["shot_id"], before, dense])[:24]
-    frame_dir = directory / "frames" / key
-    frame_dir.mkdir(parents=True, exist_ok=True)
     count = 16 if dense else 8
     last = end - min(.04, (end - start) / 10)
     times = [start + (last - start) * n / (count - 1) for n in range(count)]
-    ffmpeg, _ = platform_env.find_ffmpeg()
-    if not ffmpeg:
-        raise ValueError("AI_EDITOR_FFMPEG_MISSING")
-    frames = []
-    for i, timestamp in enumerate(times):
-        target = frame_dir / f"{i:02d}.jpg"
-        shot_analyzer.extract_frame(source, timestamp, target, ffmpeg=ffmpeg)
-        if not target.is_file() or target.stat().st_size == 0:
-            raise ValueError("AI_EDITOR_FRAME_EXTRACTION_FAILED")
-        frames.append({"path": str(target), "label": f"{shot['shot_id']} t={timestamp:.3f}s"})
-    sheet = frame_dir / "sheet.jpg"
-    if not vision._write_sheet(frames, sheet, columns=4, tile_width=420, tile_height=300, ffmpeg=ffmpeg):
+    def prepare_frames(frame_dir):
+        ffmpeg, _ = platform_env.find_ffmpeg()
+        if not ffmpeg:
+            raise ValueError("AI_EDITOR_FFMPEG_MISSING")
+        frames = []
+        with media_slot(timeout=600) as handle:
+            if not handle.acquired:
+                raise ValueError("AI_EDITOR_MEDIA_SLOT_TIMEOUT")
+            for i, timestamp in enumerate(times):
+                target = frame_dir / f"{i:02d}.jpg"
+                shot_analyzer.extract_frame(source, timestamp, target, ffmpeg=ffmpeg)
+                if not target.is_file() or target.stat().st_size == 0:
+                    raise ValueError("AI_EDITOR_FRAME_EXTRACTION_FAILED")
+                frames.append({"path": str(target), "timestamp": timestamp})
+        return frames
+    frames = material_cache.cached_frames(shot, directory, prepare_frames,
+        protocol=f"candidate-even-window-{count}-v1")
+    tiles = [{**frame, "label": f"t={frame['timestamp']:.3f}s"} for frame in frames]
+    def prepare_sheet(target):
+        with media_slot(timeout=600) as handle:
+            if not handle.acquired:
+                raise ValueError("AI_EDITOR_MEDIA_SLOT_TIMEOUT")
+            return vision._write_sheet(tiles, target, columns=4, tile_width=420, tile_height=300,
+                                       ffmpeg=platform_env.find_ffmpeg()[0])
+    sheet = material_cache.cached_sheet(tiles, directory, prefix=f"candidate{count}",
+        parameters={"columns": 4, "tile_width": 420, "tile_height": 300}, prepare=prepare_sheet)
+    if sheet is None:
         raise ValueError("AI_EDITOR_CONTACT_SHEET_FAILED")
     if before != contract.source_identity(source):
         raise ValueError("AI_EDITOR_SOURCE_CHANGED_DURING_REVIEW")
+    return {"start": start, "end": end, "before": before, "times": times, "sheet": sheet}
+
+
+def _prepare_review_round(shots: list[dict], directory: Path, *, dense: bool = False) -> None:
+    from .runtime_policy import load_policy
+    with ThreadPoolExecutor(max_workers=load_policy().prep_workers) as pool:
+        futures = [pool.submit(_review_media, shot, directory, dense=dense) for shot in shots]
+        # Finish every preparation before the first review request is admitted.
+        # A preparation error is reported by that candidate's review below.
+        for future in futures:
+            try:
+                future.result()
+            except (ValueError, OSError, TypeError, KeyError, TimeoutError):
+                pass
+
+
+def _review(manifest: dict, sentence: dict, shot: dict, directory: Path, *, dense: bool = False) -> dict:
+    media = _review_media(shot, directory, dense=dense)
+    start, end, before, times, sheet = (media[k] for k in ("start", "end", "before", "times", "sheet"))
+    key = contract.digest([sentence["index"], shot["shot_id"], before, dense])[:24]
     prompt = contract.policy_prompt(manifest) + "\n只根据附图判断，所有时间戳均为原素材秒数。\n" + json.dumps({
         "product": manifest.get("product"), "category": manifest.get("category"),
         "sentence": sentence, "shot_id": shot["shot_id"],
@@ -172,8 +212,6 @@ evidence_intervals_us内各区间会被当作全部必须保留，不能把多�
         raise ValueError("AI_EDITOR_REVIEW_CONFIDENCE_INVALID")
     if not all(isinstance(result.get(k), str) and result[k].strip() for k in ("observation", "reason")):
         raise ValueError("AI_EDITOR_REVIEW_OBSERVATION_MISSING")
-    if result["verdict"] == "uncertain" and not dense:
-        return _review(manifest, sentence, shot, directory, dense=True)
     if not result["same_product"] or confidence < .6:
         result["verdict"] = "uncertain" if result["same_product"] else "mismatch"
     if result["verdict"] == "matched":
@@ -197,7 +235,8 @@ evidence_intervals_us内各区间会被当作全部必须保留，不能把多�
             if (not isinstance(ev, dict) or any(type(ev.get(k)) is not int for k in ("start", "end"))
                     or not round(start * 1e6) <= ev["start"] < ev["end"] <= round(end * 1e6)):
                 raise ValueError("AI_EDITOR_EVIDENCE_INVALID")
-    return {**result, "shot_id": shot["shot_id"], "source_identity": before,
+    return {**result, "dense_required": result["verdict"] == "uncertain" and not dense,
+            "shot_id": shot["shot_id"], "source_identity": before,
             "frame_times_us": [round(t * 1e6) for t in times], "sheet": str(sheet)}
 
 
@@ -236,6 +275,7 @@ def _review_pool(manifest: dict, sentence: dict, shots: dict, directory: Path, a
         chunk = [sid for sid in ids[offset:offset + ROUND_SIZE] if sid not in reviewed_by_id]
         if not chunk:
             continue
+        _prepare_review_round([shots[sid] for sid in chunk], directory)
         def review(sid: str) -> dict:
             try:
                 return _review(manifest, sentence, shots[sid], directory)
@@ -254,6 +294,16 @@ def _review_pool(manifest: dict, sentence: dict, shots: dict, directory: Path, a
                     "reviews": [reviewed_by_id[s] for s in ids if s in reviewed_by_id] +
                                [completed[s] for s in chunk if s in completed]})
             reviewed_by_id.update(completed)
+        dense_ids = [sid for sid in chunk if reviewed_by_id[sid].get("dense_required")]
+        if dense_ids:
+            _prepare_review_round([shots[sid] for sid in dense_ids], directory, dense=True)
+            def dense_review(sid):
+                try:
+                    return _review(manifest, sentence, shots[sid], directory, dense=True)
+                except (ValueError, OSError, TypeError, KeyError) as exc:
+                    return {"shot_id": sid, "verdict": "uncertain", "error": str(exc)}
+            with ThreadPoolExecutor(max_workers=min(20, len(dense_ids))) as pool:
+                reviewed_by_id.update(zip(dense_ids, pool.map(dense_review, dense_ids)))
         reviewed = [reviewed_by_id[sid] for sid in ids if sid in reviewed_by_id]
         good = [r for r in reviewed if r["verdict"] == "matched"]
         covered = {p for r in good for p in r.get("supported_point_ids", [])}
@@ -564,3 +614,226 @@ def match_manifest(manifest: dict, analysis: dict, *, narration_timing: dict | N
                 "pending_items": plan.get("issues") or [{"type": "AI_EDITOR_UNCERTIFIED", "message": str(exc)}],
                 "recommendations": [], "degraded_matches": [], "material_gaps": plan.get("material_gaps", []),
                 "material_gap_count": len(plan.get("material_gaps", []))}
+
+
+def _heuristic_sentence(index: int, text: str) -> dict:
+    """规则初排后的补选句：不做 inventory LLM，按整句作一个卖点点。"""
+    value = str(text or "").strip()
+    return {
+        "index": index,
+        "text": value,
+        "kind": "selling_point",
+        "selling_points": [{"id": "p1", "text": value[:48] or value}],
+        "candidate_ids": [], "scene_ids": [],
+    }
+
+
+def _rule_shortlist_ids(matched: dict, analysis: dict, index: int, *, limit: int = 8,
+                        min_duration_s: float = 0.0) -> list[str]:
+    """从规则匹配结果取该句短名单；不够时用更长的 ready 镜头补齐。
+
+    When ``min_duration_s`` is set, long-enough ready shots are placed first so
+    a full shortlist of short rule candidates cannot crowd out feasible windows.
+    """
+    preferred: list[str] = []
+    for rec in matched.get("recommendations") or []:
+        if not isinstance(rec, dict):
+            continue
+        try:
+            if int(rec.get("index")) != index:
+                continue
+        except (TypeError, ValueError):
+            continue
+        for row in rec.get("candidates") or rec.get("top3") or []:
+            if isinstance(row, dict) and str(row.get("shot_id") or "").strip():
+                preferred.append(str(row["shot_id"]).strip())
+    for seg in matched.get("segments") or []:
+        if not isinstance(seg, dict):
+            continue
+        try:
+            if int(seg.get("index") or 0) != index and int(seg.get("sentence_index") or 0) != index:
+                continue
+        except (TypeError, ValueError):
+            continue
+        sid = str(seg.get("shot_id") or seg.get("temporary_shot_id") or "").strip()
+        if sid:
+            preferred.append(sid)
+        for part in seg.get("span_parts") or []:
+            if isinstance(part, dict) and str(part.get("shot_id") or "").strip():
+                preferred.append(str(part["shot_id"]).strip())
+    # Timing gaps are usually SOURCE_TOO_SHORT: prefer longer ready shots when
+    # padding so AI refill is not stuck reviewing the same short windows.
+    ready_rows = [
+        s for s in analysis.get("shots") or []
+        if isinstance(s, dict) and s.get("status") == "ready_for_matching" and s.get("shot_id")
+    ]
+    by_id = {
+        str(s["shot_id"]).strip(): s for s in ready_rows if str(s.get("shot_id") or "").strip()
+    }
+
+    def _dur(row: dict) -> float:
+        try:
+            return float(row.get("duration") or row.get("duration_s") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    floor = max(0.0, float(min_duration_s or 0))
+    ready_rows.sort(key=_dur, reverse=True)
+    long_enough = [s for s in ready_rows if _dur(s) >= floor]
+
+    def _long_enough_id(sid: str) -> bool:
+        row = by_id.get(sid)
+        return bool(row) and _dur(row) >= floor
+
+    ids: list[str] = []
+    # 1) rule/segment picks that already clear the duration floor
+    if floor > 0:
+        for sid in preferred:
+            if sid and _long_enough_id(sid) and sid not in ids:
+                ids.append(sid)
+            if len(ids) >= limit:
+                return ids
+    else:
+        for sid in preferred:
+            if sid and sid not in ids:
+                ids.append(sid)
+            if len(ids) >= limit:
+                return ids
+    # 2) other long ready shots (longest first)
+    for row in long_enough:
+        sid = str(row["shot_id"]).strip()
+        if sid and sid not in ids:
+            ids.append(sid)
+        if len(ids) >= limit:
+            return ids
+    # 3) remaining preferred (may be short — last resort for review coverage)
+    for sid in preferred:
+        if sid and sid not in ids:
+            ids.append(sid)
+        if len(ids) >= limit:
+            return ids
+    for row in ready_rows:
+        sid = str(row["shot_id"]).strip()
+        if sid and sid not in ids:
+            ids.append(sid)
+        if len(ids) >= limit:
+            break
+    return ids
+
+
+def _reindex_ai_segment(segment: dict, index: int) -> dict:
+    """Keep the current observation receipt when a mini-manifest becomes S<n>."""
+    result = copy.deepcopy(segment)
+    result["index"] = index
+    for item in [result, *(result.get("span_parts") or [])]:
+        if isinstance(item.get("ai_selection"), dict):
+            item["ai_selection"]["index"] = index
+    return result
+
+
+def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[int],
+                   report_dir: Path, *, narration_timing: dict | None = None) -> dict:
+    """Recover only failed sentences, preserving the other selected windows.
+
+    Retrieval may use rule candidates, while the existing pixel review and
+    window contract make the decision. Repeated recovery reuses observations.
+    """
+    wanted = sorted({int(i) for i in indices if int(i) >= 1})
+    if not wanted:
+        return matched
+    original = timing_contract.split_sentences(manifest)
+    shots = {str(s["shot_id"]): s for s in analysis.get("shots", [])
+             if isinstance(s, dict) and s.get("status") == "ready_for_matching"
+             and s.get("shot_id") and s.get("text_pass") not in ("pending", "failed")}
+    directory = report_dir / "ai_editor_refill"
+    directory.mkdir(parents=True, exist_ok=True)
+    script_indices = {"".join(timing_contract.sentence_text(s).split()): i
+                      for i, s in enumerate(original, 1)}
+    by_index = {}
+    for enum_i, segment in enumerate(matched.get("segments", []), 1):
+        row = copy.deepcopy(segment)
+        index = script_indices.get("".join(str(row.get("text") or row.get("claim") or "").split()))
+        index = index or int(row.get("index") or enum_i)
+        row["index"] = index
+        by_index[index] = row
+    reserved = {str(part.get("shot_id") or part.get("temporary_shot_id"))
+                for index, row in by_index.items() if index not in wanted
+                for part in (row.get("span_parts") or [row])}
+    replaced, errors = [], []
+    for index in wanted:
+        if index > len(original):
+            errors.append(f"AI_REFILL_INDEX_OOB:{index}")
+            continue
+        sentence = _heuristic_sentence(index, timing_contract.sentence_text(original[index - 1]))
+        preferred = _rule_shortlist_ids(matched, analysis, index, limit=max(ROUND_SIZE, 16))
+        sentence["candidate_ids"] = [sid for sid in dict.fromkeys([*preferred, *shots])
+                                     if sid in shots and sid not in reserved]
+        audio_us, certainty = timing_contract.duration_for(narration_timing, index,
+                                                          segment=original[index - 1])
+        sentence["audio_durations_us"] = [audio_us]
+        try:
+            if not sentence["candidate_ids"]:
+                raise ValueError(f"AI_REFILL_NO_UNIQUE_CANDIDATES:{index}")
+            reviews, coverage = _review_pool(manifest, sentence, shots, directory, narration_timing or {})
+            good = [r for r in reviews if r.get("verdict") == "matched"]
+            if not good or not coverage.get("feasible"):
+                raise ValueError(f"AI_REFILL_NO_MATCH:{index}")
+            mini_manifest = {k: v for k, v in manifest.items() if k not in ("segments", "full_script", "script")}
+            mini_manifest.update(full_script=sentence["text"], selection_mode="ai_editor")
+            timing_row = {"key": "s1", "text": sentence["text"], "audio_duration_us": audio_us,
+                          "timing_certainty": certainty}
+            if narration_timing and index <= len(narration_timing.get("rows", [])):
+                timing_row = {**narration_timing["rows"][index - 1], **timing_row}
+            mini_timing = {**(narration_timing or {}), "rows": [timing_row]}
+            last_error = f"AI_REFILL_WINDOW_INFEASIBLE:{index}"
+            for best in sorted(good, key=lambda r: float(r.get("confidence", 0)), reverse=True):
+                plan = {"schema": contract.PLAN_SCHEMA, "policy_version": contract.POLICY_VERSION,
+                        "sentences": [{**sentence, "index": 1}], "reviews": {"1": reviews},
+                        "display_reviews": [], "rows": [{"index": 1, "parts": [{
+                            "shot_id": best["shot_id"], "audio_duration_us": int(audio_us)}],
+                            "reason": f"rule_then_ai refill for S{index:02d}"}],
+                        "identity": {"model": os.environ.get("JY_VISION_MODEL") or "glm-5.3-flash",
+                                     "editorial_rules": contract.rules_identity(manifest)}, "ok": True}
+                try:
+                    assembled = _assemble(mini_manifest, analysis, plan, narration_timing=mini_timing,
+                                          verify_sources=True)
+                    row = _reindex_ai_segment(assembled["segments"][0], index)
+                    checked = contract.validate_segment_receipt(row, index=index, verify_source=True,
+                                                                 manifest=manifest)
+                    if not checked["ok"]:
+                        raise ValueError(";".join(checked["reasons"]))
+                    by_index[index] = row
+                    reserved.add(str(best["shot_id"]))
+                    replaced.append(index)
+                    _save(directory / f"refill_{index:02d}.json", {
+                        "index": index, "shot_id": best["shot_id"], "coverage": coverage})
+                    break
+                except (ValueError, KeyError, TypeError, OSError) as exc:
+                    last_error = str(exc)
+            else:
+                raise ValueError(last_error)
+        except (ValueError, KeyError, TypeError, OSError) as exc:
+            errors.append(str(exc))
+    ordered = [by_index[i] for i in sorted(by_index)]
+    def keep(row):
+        return not isinstance(row, dict) or row.get("index") not in replaced
+    result = {**matched, "selection_mode": "rule_then_ai", "selection_policy": "rule_then_ai_refill",
+              "segments": ordered, "refill_indices": wanted, "refill_replaced": replaced,
+              "refill_errors": errors, "manifest": {**(matched.get("manifest") or manifest),
+                  "selection_mode": "rule_then_ai", "segments": ordered}}
+    for field in ("pending_items", "material_gaps", "degraded_matches", "visual_missing_matches", "preview_unresolved"):
+        result[field] = [row for row in matched.get(field, []) if keep(row)]
+    result["pending_items"].extend({"type": "AI_EDITOR_UNCERTIFIED", "message": error} for error in errors)
+    result["ok"] = (bool(ordered) and len(ordered) == len(original) and not result["pending_items"]
+                    and set(wanted) <= set(replaced)
+                    and not contract.sequence_errors([s for s in ordered if contract.is_ai_segment(s)]))
+    for counter, field in (("material_gap_count", "material_gaps"), ("degraded_count", "degraded_matches"),
+                           ("visual_missing_count", "visual_missing_matches"), ("preview_unresolved_count", "preview_unresolved")):
+        result[counter] = len(result[field])
+    result["degraded_fallback_count"] = len(result["degraded_matches"])
+    if result["ok"]:
+        result["claim_gate_coverage"] = {"mode": "rule_then_ai", "certification": "MIXED_RULE_AND_AI_REFILL",
+            "validation_passed": True, "uncertified_reasons": [], "scope": "independent_qc_required"}
+        result["accepted_shots"] = [p.get("shot_id") or p.get("temporary_shot_id")
+            for row in ordered for p in (row.get("span_parts") or [row])]
+    return result

@@ -260,7 +260,8 @@ def _run_shot_analysis(manifest: dict, input_path: Path, report_dir: Path) -> di
     """Create or consume task-local shot candidates; never writes a library."""
     report_dir.mkdir(parents=True, exist_ok=True)
     analysis_file = manifest.get("shot_analysis_file")
-    analysis = None
+    inline = manifest.get("shot_analysis")
+    analysis = dict(inline) if isinstance(inline, dict) and isinstance(inline.get("shots"), list) else None
     if analysis_file:
         path = Path(str(analysis_file)).expanduser()
         path = (path if path.is_absolute() else input_path.parent / path).resolve()
@@ -274,15 +275,12 @@ def _run_shot_analysis(manifest: dict, input_path: Path, report_dir: Path) -> di
             return analysis
     env = environment_report(refresh=True)
     if analysis is None:
-        analysis = shot_analyzer.analyze_manifest(
-            manifest, input_path.parent, report_dir,
-            ffmpeg=env.get("ffmpeg"), ffprobe=env.get("ffprobe"))
-        # Automatic vision is the default for temporary task material.  The raw
-        # extractor remains available through ``analyze-shots --no-vision`` for
-        # diagnostics, but build must never ask the outer Codex turn to hand-fill
-        # semantic labels.
-        if not bool(manifest.get("vision_analysis", True)):
-            return analysis
+        from . import material_cache
+        return material_cache.analyze_product(
+            manifest, input_path.parent, report_dir, ffmpeg=env.get("ffmpeg"),
+            ffprobe=env.get("ffprobe"), vision=bool(manifest.get("vision_analysis", True)))
+    if not bool(manifest.get("vision_analysis", True)):
+        return analysis
     from . import vision_analyzer
     return vision_analyzer.enrich_with_vision(manifest, analysis, report_dir,
                                               ffmpeg=env.get("ffmpeg"))
@@ -408,7 +406,8 @@ def _pre_synthesize_narration(manifest: dict, report_dir: Path, preset) -> dict:
 def _temporary_match(manifest: dict, input_path: Path, report_dir: Path,
                      narration_timing: dict | None = None) -> tuple[dict, dict | None]:
     from . import ai_editor, ai_editor_contract
-    manifest = {**manifest, "selection_mode": ai_editor_contract.selection_mode(manifest)}
+    mode = ai_editor_contract.selection_mode(manifest)
+    manifest = {**manifest, "selection_mode": mode}
     analysis = _run_shot_analysis(manifest, input_path, report_dir)
     if analysis.get("shots"):
         from . import material_corrections
@@ -420,8 +419,115 @@ def _temporary_match(manifest: dict, input_path: Path, report_dir: Path,
     from . import vision_analyzer
     vision_meta = analysis.get("vision_analysis")
     vision_meta = vision_meta if isinstance(vision_meta, dict) else {}
-    if manifest["selection_mode"] == "ai_editor":
+    refill_indices = []
+    for raw in (manifest.get("ai_refill_indices") or []):
+        try:
+            refill_indices.append(int(raw))
+        except (TypeError, ValueError):
+            continue
+    refill_indices = sorted(set(i for i in refill_indices if i >= 1))
+
+    if mode == "ai_editor":
         analysis = ai_editor.prepare(manifest, analysis, report_dir, narration_timing=narration_timing)
+        matched = shot_analyzer.match_manifest(
+            manifest, analysis, topk=int(manifest.get("shot_topk", 3) or 3),
+            auto_accept_top1=bool(manifest.get("auto_accept_top1", True)),
+            narration_timing=narration_timing)
+    elif mode == "rule_then_ai":
+        from . import ai_editor_contract
+        # Keep prior AI-refill sentences across rebuilds. A fresh rule pass would
+        # otherwise overwrite them with degraded_fallback and trip FORMAL_EVIDENCE.
+        prior_ai: dict[int, dict] = {}
+        prior_path = report_dir / "shot_match_report.json"
+        if refill_indices and prior_path.is_file():
+            try:
+                prior_match = json.loads(prior_path.read_text(encoding="utf-8-sig"))
+            except (OSError, ValueError, TypeError):
+                prior_match = {}
+            for i, seg in enumerate(prior_match.get("segments") or [], 1):
+                if not isinstance(seg, dict):
+                    continue
+                try:
+                    key = int(seg.get("index") or i)
+                except (TypeError, ValueError):
+                    key = i
+                if ai_editor_contract.is_ai_segment(seg) or str(seg.get("selection_mode") or "") == "ai_editor":
+                    prior_ai[key] = seg
+        # 1) 规则/描述表初排（走 legacy matcher，不做整库 inventory）
+        rule_manifest = {**manifest, "selection_mode": "legacy"}
+        matched = shot_analyzer.match_manifest(
+            rule_manifest, analysis, topk=int(manifest.get("shot_topk", 8) or 8),
+            auto_accept_top1=bool(manifest.get("auto_accept_top1", True)),
+            narration_timing=narration_timing)
+        if matched.get("ok"):
+            scene_report = scene_rules.apply(manifest, matched, analysis, report_dir)
+            matched["scene_rules"] = {k: scene_report.get(k) for k in
+                                      ("category", "rulepacks", "versions", "applied", "partial", "unmet")}
+        # Restore prior AI segments that are not being re-refilled this pass.
+        if prior_ai:
+            keep = set(prior_ai) - set(refill_indices)
+            segs = list(matched.get("segments") or [])
+            for i, seg in enumerate(segs):
+                if not isinstance(seg, dict):
+                    continue
+                try:
+                    key = int(seg.get("index") or i + 1)
+                except (TypeError, ValueError):
+                    key = i + 1
+                if key in keep:
+                    segs[i] = dict(prior_ai[key])
+            matched["segments"] = segs
+            def _drop_kept(rows: object) -> list:
+                out = []
+                for row in rows or []:
+                    if not isinstance(row, dict):
+                        out.append(row)
+                        continue
+                    try:
+                        idx = int(row.get("index"))
+                    except (TypeError, ValueError):
+                        out.append(row)
+                        continue
+                    if idx not in keep:
+                        out.append(row)
+                return out
+            for key in ("material_gaps", "degraded_matches", "visual_missing_matches",
+                        "pending_items", "preview_unresolved"):
+                if key in matched:
+                    matched[key] = _drop_kept(matched.get(key))
+            matched["degraded_count"] = len(matched.get("degraded_matches") or [])
+            matched["material_gap_count"] = len(matched.get("material_gaps") or [])
+            matched["visual_missing_count"] = len(matched.get("visual_missing_matches") or [])
+            if not matched.get("pending_items") and not matched.get("material_gaps") and not matched.get("degraded_matches"):
+                matched["ok"] = True
+        # 2) QC 指定句再 AI 看图补选；规则初排若已整体失败，才对缺口句补选以图出稿。
+        gap_indices = []
+        for key in ("material_gaps", "degraded_matches", "visual_missing_matches",
+                    "pending_items"):
+            for row in matched.get(key) or []:
+                if not isinstance(row, dict):
+                    continue
+                try:
+                    gap_indices.append(int(row.get("index")))
+                except (TypeError, ValueError):
+                    continue
+        need_ai = list(refill_indices)
+        if not need_ai and not matched.get("ok"):
+            # Rule first-pass left timing/material gaps: AI-refill those sentences
+            # before returning SHOT_MATCH_BLOCKED.
+            need_ai = [i for i in gap_indices if i >= 1]
+        need_ai = sorted(set(need_ai))
+        if need_ai:
+            matched = ai_editor.refill_indices(
+                manifest, analysis, matched, need_ai, report_dir,
+                narration_timing=narration_timing)
+        matched["selection_mode"] = "rule_then_ai"
+        if isinstance(matched.get("manifest"), dict):
+            matched["manifest"]["selection_mode"] = "rule_then_ai"
+        # 把规则结果写回当前 mode，供引擎消费
+        manifest = {**manifest, **(matched.get("manifest") or {}), "selection_mode": "rule_then_ai"}
+        if matched.get("segments"):
+            manifest["segments"] = matched["segments"]
     elif not analysis.get("semantic_matches") and vision_meta.get("errors") == []:
         analysis = vision_analyzer.match_with_codex(manifest, analysis, report_dir)
         if analysis.get("semantic_match_error"):
@@ -432,14 +538,23 @@ def _temporary_match(manifest: dict, input_path: Path, report_dir: Path,
                                          "不用规则选镜兜底出稿。",
                               "error": analysis["semantic_match_error"],
                               "report": str(report_dir / "shot_match_ai.json")}
-    matched = shot_analyzer.match_manifest(
-        manifest, analysis, topk=int(manifest.get("shot_topk", 3) or 3),
-        auto_accept_top1=bool(manifest.get("auto_accept_top1", True)),
-        narration_timing=narration_timing)
-    if matched.get("ok") and manifest["selection_mode"] != "ai_editor":
-        scene_report = scene_rules.apply(manifest, matched, analysis, report_dir)
-        matched["scene_rules"] = {k: scene_report.get(k) for k in
-                                  ("category", "rulepacks", "versions", "applied", "partial", "unmet")}
+        matched = shot_analyzer.match_manifest(
+            manifest, analysis, topk=int(manifest.get("shot_topk", 3) or 3),
+            auto_accept_top1=bool(manifest.get("auto_accept_top1", True)),
+            narration_timing=narration_timing)
+        if matched.get("ok"):
+            scene_report = scene_rules.apply(manifest, matched, analysis, report_dir)
+            matched["scene_rules"] = {k: scene_report.get(k) for k in
+                                      ("category", "rulepacks", "versions", "applied", "partial", "unmet")}
+    else:
+        matched = shot_analyzer.match_manifest(
+            manifest, analysis, topk=int(manifest.get("shot_topk", 3) or 3),
+            auto_accept_top1=bool(manifest.get("auto_accept_top1", True)),
+            narration_timing=narration_timing)
+        if matched.get("ok") and mode != "ai_editor":
+            scene_report = scene_rules.apply(manifest, matched, analysis, report_dir)
+            matched["scene_rules"] = {k: scene_report.get(k) for k in
+                                      ("category", "rulepacks", "versions", "applied", "partial", "unmet")}
     (report_dir / "shot_match_report.json").write_text(
         json.dumps(matched, ensure_ascii=False, indent=2), encoding="utf-8")
     # DEMO_ACTIONS V0.2 §7（用户定案）：素材缺口单独落盘，交付前必须可见 ——
@@ -617,14 +732,11 @@ def cmd_analyze_shots(args) -> int:
     manifest = _read(input_path)
     report_dir = Path(args.report_dir).expanduser().resolve()
     env = environment_report()
-    result = shot_analyzer.analyze_manifest(
+    from . import material_cache
+    result = material_cache.analyze_product(
         manifest, input_path.parent, report_dir,
         ffmpeg=env.get("ffmpeg"), ffprobe=env.get("ffprobe"),
-        threshold=args.threshold, min_shot_s=args.min_shot_s)
-    if not args.no_vision:
-        from . import vision_analyzer
-        result = vision_analyzer.enrich_with_vision(manifest, result, report_dir,
-                                                    ffmpeg=env.get("ffmpeg"))
+        threshold=args.threshold, min_shot_s=args.min_shot_s, vision=not args.no_vision)
     result.update({"status": "SHOT_ANALYSIS_READY",
                    "candidate_file": str(report_dir / "shot_candidates.json"),
                    "prompt_file": str(report_dir / "shot_analysis_prompt.md")})

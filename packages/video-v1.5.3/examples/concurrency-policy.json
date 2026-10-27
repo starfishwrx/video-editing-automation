@@ -1,0 +1,10 @@
+{
+  "task_workers": 4,
+  "prep_workers": 2,
+  "prep_slots": 2,
+  "api_workers": 20,
+  "vision_slots": 20,
+  "request_timeout": 360,
+  "qc_stage_timeout": 900,
+  "task_timeout": 14400
+}

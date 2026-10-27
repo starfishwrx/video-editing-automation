@@ -28,7 +28,7 @@ def response(rows=None, **changes):
 
 
 class VisualQcResponseContractTests(unittest.TestCase):
-    def run_main(self, responses, *, claims=1, batch_size=4, write_sheet=None):
+    def run_main(self, responses, *, claims=1, batch_size=4, write_sheet=None, passes=1):
         with tempfile.TemporaryDirectory(prefix="visual-qc-contract-") as raw:
             root = Path(raw)
             draft, report = root / "draft", root / "report"
@@ -60,7 +60,8 @@ class VisualQcResponseContractTests(unittest.TestCase):
                     mock.patch.object(vision_analyzer, "_write_sheet", side_effect=write_sheet or (lambda *a, **k: True)), \
                     mock.patch.object(qc, "_call_qc_model", side_effect=output_for_batch) as model, \
                     contextlib.redirect_stdout(io.StringIO()):
-                code = qc.main()
+                for _ in range(passes):
+                    code = qc.main()
             result = json.loads((root / "qc.json").read_text(encoding="utf-8"))
             return result, code, extract.call_count, model.call_args_list
 
@@ -79,6 +80,48 @@ class VisualQcResponseContractTests(unittest.TestCase):
         self.assertEqual(result["response_contract"]["status"], "VALIDATED")
         self.assertIn(contract.RESPONSE_VERSION, calls[0].args[2])
         self.assertIn("不得重复", calls[0].args[2])
+
+    def test_partial_success_resumes_only_missing_qc_batch(self):
+        attempts = {}
+        def model(vision, sheet, prompt, output, **kwargs):
+            number = int(output.stem.rsplit("_", 1)[1])
+            attempts[number] = attempts.get(number, 0) + 1
+            if number == 2 and attempts[number] == 1:
+                return False, "QC_STAGE_DEADLINE_EXCEEDED"
+            return True, json.dumps(response())
+        result, code, _, calls = self.run_main(model, claims=2, batch_size=1, passes=2)
+        self.assertEqual(attempts, {1: 1, 2: 2})
+        self.assertEqual((result["status"], code), ("PASS", 0))
+        self.assertEqual(len(calls), 3)
+
+    def test_request_validator_accepts_parsed_qc_and_rejects_incomplete_contract(self):
+        vision = mock.Mock()
+        def call(*args, **kwargs):
+            kwargs["validator"](response())
+            with self.assertRaises(ValueError):
+                kwargs["validator"]({"overall": "PASS"})
+            return True, json.dumps(response())
+        vision._run_vision_with_retry.side_effect = call
+        ok, _ = qc._call_qc_model(vision, Path("sheet"), "prompt", Path("out"),
+                                  timeout=360, workdir=Path("."), expected_count=1)
+        self.assertTrue(ok)
+        self.assertEqual(vision._run_vision_with_retry.call_count, 1)
+
+    def test_resumed_frames_reuse_only_the_same_source_and_time(self):
+        with tempfile.TemporaryDirectory() as raw:
+            source, frame = Path(raw) / "source", Path(raw) / "frame.jpg"
+            source.write_bytes(b"synthetic-source")
+            def extract(*args):
+                frame.write_bytes(b"synthetic-frame")
+                return True, ""
+            with mock.patch.object(qc, "_extract", side_effect=extract) as decode:
+                self.assertTrue(qc._resume_frame("ffmpeg", source, 2, frame)[0])
+                self.assertTrue(qc._resume_frame("ffmpeg", source, 2, frame)[0])
+                self.assertEqual(decode.call_count, 1)
+                source.write_bytes(b"changed-source")
+                self.assertTrue(qc._resume_frame("ffmpeg", source, 2, frame)[0])
+                self.assertTrue(qc._resume_frame("ffmpeg", source, 3, frame)[0])
+                self.assertEqual(decode.call_count, 3)
 
     def test_positive_small_confidence_is_not_an_invented_quality_threshold(self):
         result, _, _, _ = self.run_main([response([judgment(confidence=0.01)])])

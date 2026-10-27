@@ -108,7 +108,10 @@ class ResumeIntegrityTest(unittest.TestCase):
         self.assertTrue(row["text_request_frames"])
         self.assertFalse(partial["ok"])
         self.assertTrue(vision_analyzer.needs_vision(row))
-        self.assertEqual(self._cache(), {})
+        cached = next(iter(self._cache().values()))
+        self.assertEqual(cached["text_pass"], "pending")
+        self.assertTrue(cached["action_complete"])
+        self.assertFalse(partial["ok"])
         progress = json.loads((self.report / "vision_progress.json").read_text(encoding="utf-8"))
         self.assertEqual(progress["phase"], "text_read_1")
         self.assertEqual(progress["shot_ids"], [SHOT_ID])
@@ -134,17 +137,18 @@ class ResumeIntegrityTest(unittest.TestCase):
         self.assertEqual(row["status"], "ready_for_matching")
         self.assertEqual(row["text_pass"], "failed")
         self.assertEqual(row["readable_claims"], [])
-        self.assertEqual(self._cache(), {})
+        self.assertEqual(next(iter(self._cache().values()))["text_pass"], "failed")
+        self.assertFalse(result["ok"])
 
-    def test_resume_without_frames_redoes_the_shot(self):
+    def test_resume_without_frames_prepares_only_text_images(self):
         partial = self._killed_during_text()
         row = partial["shots"][0]
         row["text_request_frames"] = [{"path": str(self.root / "gone.jpg"), "timestamp": 7.4}]
         row["vision_frames"] = []
         row["evidence_intervals"] = [{"start": 6.0, "end": 8.0}]
-        result, prompts = self._run(partial, [(True, _first_pass(text_tiles=[], readable_claims=[]))])
-        self.assertEqual(len(prompts), 1)
-        self.assertNotIn("逐字抄录", prompts[0])
+        result, prompts = self._run(partial, [_text(["80抽"]), _text(["80抽"])])
+        self.assertEqual(len(prompts), 2)
+        self.assertTrue(all("逐字抄录" in prompt for prompt in prompts))
         self.assertEqual(result["shots"][0]["status"], "ready_for_matching")
 
     def test_finished_local_rows_with_same_signature_are_kept_and_seeded(self):

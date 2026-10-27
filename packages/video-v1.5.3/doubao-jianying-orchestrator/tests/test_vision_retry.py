@@ -36,82 +36,43 @@ class _SlotEnv(unittest.TestCase):
 
 
 class VisionRetryTests(_SlotEnv):
-    def test_rate_limit_then_success(self):
+    def test_http_wrapper_does_not_multiply_transport_attempts(self):
         (ok, text), call = self._call([(False, "HTTP 429 Too Many Requests"), (True, "[]")])
-        self.assertEqual((ok, text), (True, "[]"))
-        self.assertEqual(call.call_count, 2)
-        self.assertEqual(self.sleep.call_count, 1)
-
-    def test_empty_output_is_retried(self):
-        (ok, text), call = self._call([(True, "  \n"), (True, '{"shots": []}')])
-        self.assertTrue(ok)
-        self.assertEqual(text, '{"shots": []}')
-        self.assertEqual(call.call_count, 2)
-
-    def test_exhausted_retries_return_last_failure(self):
-        (ok, text), call = self._call([(False, "503 Service Unavailable")] * 10)
         self.assertFalse(ok)
-        self.assertEqual(text, "503 Service Unavailable")
-        self.assertEqual(call.call_count, 4)
-        self.assertEqual(self.sleep.call_count, 3)
-
-    def test_exhausted_empty_reports_empty_failure(self):
-        os.environ["JY_VISION_RETRIES"] = "2"
-        (ok, text), call = self._call([(True, "")] * 5)
-        self.assertFalse(ok)
-        self.assertTrue(vision_analyzer.is_empty_failure(text))
-        self.assertEqual(call.call_count, 2)
-
-    def test_deterministic_failure_is_not_retried(self):
-        (ok, text), call = self._call([(False, "CCSWITCH_ANTHROPIC_CONFIG_MISSING")])
-        self.assertEqual((ok, text), (False, "CCSWITCH_ANTHROPIC_CONFIG_MISSING"))
         self.assertEqual(call.call_count, 1)
+        self.assertEqual(call.call_args.kwargs["max_attempts"], 2)
         self.sleep.assert_not_called()
 
-    def test_explicit_max_retries_overrides_env(self):
-        (ok, _), call = self._call([(False, "502")] * 5, max_retries=0)
+    def test_explicit_no_retry_reaches_the_transport(self):
+        (ok, _), call = self._call([(False, "502")], max_retries=0)
         self.assertFalse(ok)
+        self.assertEqual(call.call_args.kwargs["max_attempts"], 1)
+
+    def test_legacy_retry_env_cannot_expand_attempt_budget(self):
+        os.environ["JY_VISION_RETRIES"] = "6"
+        (_, _), call = self._call([(False, "503")])
+        self.assertEqual(call.call_count, 1)
+        self.assertEqual(call.call_args.kwargs["max_attempts"], 2)
+
+    def test_empty_final_answer_never_succeeds(self):
+        (ok, text), call = self._call([(True, "  ")])
+        self.assertFalse(ok)
+        self.assertTrue(vision_analyzer.is_empty_failure(text))
         self.assertEqual(call.call_count, 1)
 
-    def test_backoff_is_exponential_jittered_and_capped(self):
-        os.environ["JY_VISION_BACKOFF"] = "3"
-        for attempt, nominal in ((0, 3.0), (1, 6.0), (2, 12.0)):
-            delay = vision_analyzer._backoff_seconds(attempt)
-            self.assertGreaterEqual(delay, nominal * 0.75)
-            self.assertLessEqual(delay, nominal * 1.25)
-        self.assertLessEqual(vision_analyzer._backoff_seconds(10), 60.0)
-
-    def test_slot_timeout_degrades_to_unthrottled_call(self):
+    def test_rollback_slot_timeout_fails_without_request(self):
+        os.environ["JY_VISION_TRANSPORT"] = "codex"
         os.environ["JY_VISION_SLOTS"] = "1"
         os.environ["JY_VISION_SLOT_TIMEOUT"] = "0"
         with vision_analyzer._vision_slot() as held:
             self.assertTrue(held.acquired)
             (ok, text), call = self._call([(True, "[]")])
-        self.assertTrue(ok)
-        self.assertEqual(call.call_count, 1)
+        self.assertFalse(ok)
+        self.assertIn("SLOT_TIMEOUT", text)
+        call.assert_not_called()
 
 
 class QcEmptyResponseTests(_SlotEnv):
-    def test_empty_qc_response_retried_once_then_failed(self):
-        with mock.patch.object(vision_analyzer, "_run_vision",
-                               side_effect=[(True, ""), (True, "")]) as call:
-            ok, text = draft_visual_qc._call_qc_model(
-                vision_analyzer, Path("sheet.jpg"), "prompt", Path("r.json"),
-                timeout=1, workdir=Path("."))
-        self.assertFalse(ok)
-        self.assertIn("EMPTY", text)
-        self.assertEqual(call.call_count, 2)
-
-    def test_empty_then_valid_qc_response(self):
-        body = '{"segments":[{"index":1,"match_level":"DIRECT","visual_ok":true}],"overall":"PASS"}'
-        with mock.patch.object(vision_analyzer, "_run_vision",
-                               side_effect=[(True, " "), (True, body)]):
-            ok, text = draft_visual_qc._call_qc_model(
-                vision_analyzer, Path("sheet.jpg"), "prompt", Path("r.json"),
-                timeout=1, workdir=Path("."))
-        self.assertTrue(ok)
-        self.assertEqual(draft_visual_qc._parse_model(text)["overall"], "PASS")
-
     def test_empty_text_never_parses_as_pass(self):
         with self.assertRaises(ValueError):
             draft_visual_qc._parse_model("")

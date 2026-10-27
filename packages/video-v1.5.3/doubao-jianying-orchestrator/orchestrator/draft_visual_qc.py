@@ -17,11 +17,14 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from typing import Any
 
 try:
     from .json_extract import EmptyResponseError, is_blank, iter_json_values
     from .video_decode import run_ffmpeg_decode
+    from .file_safety import atomic_write_text
+    from .runtime_policy import load_policy, media_slot
     from .visual_qc_contract import (MATCH_LEVELS, REPORT_VERSION, RESPONSE_VERSION,
                                      draft_metadata_fingerprint, normalize_match_level,
                                      response_errors)
@@ -30,6 +33,8 @@ except ImportError:
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
     from orchestrator.json_extract import EmptyResponseError, is_blank, iter_json_values
     from orchestrator.video_decode import run_ffmpeg_decode
+    from orchestrator.file_safety import atomic_write_text
+    from orchestrator.runtime_policy import load_policy, media_slot
     from orchestrator.visual_qc_contract import (MATCH_LEVELS, REPORT_VERSION, RESPONSE_VERSION,
                                                 draft_metadata_fingerprint, normalize_match_level,
                                                 response_errors)
@@ -322,20 +327,102 @@ def _parse_model(text: str) -> dict[str, Any]:
 
 def _call_qc_model(vision_analyzer: Any, sheet: pathlib.Path, prompt: str,
                    response: pathlib.Path, *, timeout: int,
-                   workdir: pathlib.Path, strict_slots: bool = False) -> tuple[bool, str]:
-    """单批次视觉验收调用。空回复重试一次，仍为空就按调用失败处理（判 UNCERTIFIED，绝不 PASS）。"""
-    ok, text = False, ""
-    for _ in range(2):
-        ok, text = vision_analyzer._run_vision_with_retry(
-            sheet, prompt, response,
-            profile=os.environ.get("JY_VISION_PROFILE", "volc").strip() or "volc",
-            timeout=timeout, workdir=workdir, schema=None, max_retries=0,
-            **({"require_slot": True} if strict_slots else {}),
-        )
-        empty = (ok and is_blank(text)) or (not ok and vision_analyzer.is_empty_failure(text))
-        if not empty:
-            return ok, text
-    return False, "POST_DRAFT_VISION_EMPTY_RESPONSE: " + str(text or "")[-400:]
+                   workdir: pathlib.Path, strict_slots: bool = False,
+                   expected_count: int | None = None,
+                   expected_version: str = RESPONSE_VERSION) -> tuple[bool, str]:
+    """The transport owns the complete two-attempt logical request budget."""
+    def validate(data):
+        model = data if isinstance(data, dict) else _parse_model(data)
+        if expected_count is not None:
+            errors = response_errors(model, expected_count, expected_version=expected_version)
+            if errors:
+                raise ValueError("QC_RESPONSE_CONTRACT: " + ";".join(errors))
+        return model
+
+    return vision_analyzer._run_vision_with_retry(
+        sheet, prompt, response,
+        profile=os.environ.get("JY_VISION_PROFILE", "volc").strip() or "volc",
+        timeout=timeout, workdir=workdir, schema=None, max_retries=2,
+        require_slot=True, validator=validate,
+    )
+
+
+def _checkpoint_binding(draft_identity: str, prompt: str, claims: list,
+                        items: list, rows: list) -> dict:
+    """Cache identity for the current final windows and the model's exact input."""
+    sources = []
+    for row in rows:
+        source = pathlib.Path(row["source"])
+        stat = source.stat()
+        sources.append({"path": str(source.resolve()), "size": stat.st_size,
+                        "mtime_ns": stat.st_mtime_ns, "window": row})
+    return json.loads(json.dumps({"draft": draft_identity, "prompt": prompt,
+        "claims": claims, "sources": sources,
+        "frames": [{key: item.get(key) for key in
+                    ("label", "source_start", "source_end", "timestamp", "draft_segment")}
+                   for item in items]}, ensure_ascii=False, default=str))
+
+
+def _load_batch_checkpoint(path: pathlib.Path, binding: dict, count: int,
+                           version: str) -> str | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if payload.get("input") != binding:
+            return None
+        text = payload["text"]
+        if response_errors(_parse_model(text), count, expected_version=version):
+            return None
+        return text
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+
+
+def _save_batch_checkpoint(path: pathlib.Path, binding: dict, text: str,
+                           count: int, version: str) -> None:
+    try:
+        valid = not response_errors(_parse_model(text), count, expected_version=version)
+    except (ValueError, TypeError, AttributeError):
+        valid = False
+    if not valid:
+        return
+    atomic_write_text(path, json.dumps({"input": binding, "text": text,
+        "completed_at": time.time()}, ensure_ascii=False, indent=2))
+
+
+def _remaining_request_timeout() -> float:
+    timeout = load_policy().request_timeout
+    for name in ("STAGE", "TASK"):
+        value = (os.environ.get(f"JY_{name}_DEADLINE_TS") or
+                 os.environ.get(f"JY_{name}_DEADLINE_EPOCH", "")).strip()
+        if value:
+            timeout = min(timeout, float(value) - time.time())
+    return max(0, timeout)
+
+
+def _prepare_media(fn, *args, **kwargs):
+    with media_slot(timeout=600) as handle:
+        if not handle.acquired:
+            raise TimeoutError("QC_MEDIA_SLOT_TIMEOUT")
+        return fn(*args, **kwargs)
+
+
+def _resume_frame(ffmpeg: str, source: pathlib.Path, seconds: float, frame: pathlib.Path):
+    stat = source.stat()
+    binding = {"source": str(source.resolve()), "size": stat.st_size,
+               "mtime_ns": stat.st_mtime_ns, "seconds": seconds}
+    state = frame.with_suffix(".frame.json")
+    try:
+        if frame.is_file() and frame.stat().st_size and json.loads(state.read_text(encoding="utf-8")) == binding:
+            return True, ""
+    except (OSError, ValueError):
+        pass
+    ok, error = _extract(ffmpeg, source, seconds, frame)
+    if ok and frame.is_file() and frame.stat().st_size:
+        current = source.stat()
+        if (current.st_size, current.st_mtime_ns) != (stat.st_size, stat.st_mtime_ns):
+            return False, "QC_SOURCE_CHANGED_DURING_FRAME_PREPARATION"
+        atomic_write_text(state, json.dumps(binding))
+    return ok, error
 
 
 def main() -> int:
@@ -465,7 +552,7 @@ def main() -> int:
                     continue
                 seconds = row["source_start"] + row["source_duration"] * fraction
                 frame = frame_dir / f"segment_{row['index']:03d}_{suffix}.jpg"
-                ok, error = _extract(ffmpeg, pathlib.Path(row["source"]), seconds, frame)
+                ok, error = _prepare_media(_resume_frame, ffmpeg, pathlib.Path(row["source"]), seconds, frame)
                 if not ok:
                     frame_issues.append(f"FRAME_EXTRACT_FAILED:S{row['index']:02d}:{suffix}:{error}")
                     continue
@@ -492,16 +579,18 @@ def main() -> int:
                 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
                 from orchestrator import vision_analyzer
             sheet = report_dir / "draft_visual_qc_contact_sheet.jpg"
-            if not vision_analyzer._write_sheet(frame_items, sheet, columns=6, tile_width=260, tile_height=190, ffmpeg=ffmpeg):
+            if not _prepare_media(vision_analyzer._write_sheet, frame_items, sheet, columns=6, tile_width=260, tile_height=190, ffmpeg=ffmpeg):
                 result["issues"].append("CONTACT_SHEET_FAILED")
                 result["uncertified"] = True
             else:
                 # Keep the overall sheet as evidence, but send bounded
                 # semantic batches so one large prompt cannot block all QC.
                 batch_size = max(1, int(os.environ.get("JY_POST_QC_BATCH_CLAIMS", "2" if ai_mode else "4")))
-                timeout = int(os.environ.get("JY_POST_QC_TIMEOUT_S", "180"))
                 visual_rows = []
                 batch_count = (len(active_claims) + batch_size - 1) // batch_size
+                bindings = {}
+                checkpoints = {}
+                request_errors = {}
                 def prepare_batch(job):
                     batch_no, start = job
                     claims = active_claims[start:start + batch_size]
@@ -528,7 +617,14 @@ def main() -> int:
                         "frame_labels": [item["label"] for item in items],
                         "prompt_version": response_version,
                     }, ensure_ascii=False, indent=2), encoding="utf-8")
-                    return batch_no, (claims, chunk_sheet, _prompt(claims, len(items)), response)
+                    prompt = _prompt(claims, len(items))
+                    indices = {claim["index"] for claim in claims}
+                    windows = [row for claim, cut_rows in claim_rows
+                               if claim["index"] in indices for row in cut_rows]
+                    bindings[batch_no] = _checkpoint_binding(
+                        result["draft_metadata_sha256"], prompt, claims, items, windows)
+                    checkpoints[batch_no] = report_dir / f"draft_visual_qc_completed_{batch_no:02d}.json"
+                    return batch_no, (claims, chunk_sheet, prompt, response)
 
                 prepared = vision_analyzer._prepare_indexed(
                     list(enumerate(range(0, len(active_claims), batch_size), 1)), prepare_batch)
@@ -542,8 +638,29 @@ def main() -> int:
 
                 def call_batch(job):
                     batch_no, (claims, chunk_sheet, prompt, response) = job
-                    return batch_no, _call_qc_model(vision_analyzer, chunk_sheet,
-                        prompt, response, timeout=timeout, workdir=report_dir, strict_slots=ai_mode)
+                    cached = _load_batch_checkpoint(checkpoints[batch_no],
+                        bindings[batch_no], len(claims), response_version)
+                    if cached is not None:
+                        return batch_no, (True, cached)
+                    timeout = _remaining_request_timeout()
+                    if timeout <= 0:
+                        request_errors[batch_no] = {"error_code": "DEADLINE_EXCEEDED"}
+                        return batch_no, (False, "QC_STAGE_DEADLINE_EXCEEDED")
+                    answer = _call_qc_model(vision_analyzer, chunk_sheet,
+                        prompt, response, timeout=timeout, workdir=report_dir,
+                        strict_slots=ai_mode, expected_count=len(claims),
+                        expected_version=response_version)
+                    if answer[0]:
+                        _save_batch_checkpoint(checkpoints[batch_no], bindings[batch_no],
+                                               answer[1], len(claims), response_version)
+                    else:
+                        try:
+                            ledger = json.loads(response.with_suffix(".call.json").read_text(encoding="utf-8"))
+                            request_errors[batch_no] = {key: ledger.get("last_result", {}).get(key)
+                                for key in ("error_code", "http_status", "request_id", "finish_reason", "usage")}
+                        except (OSError, ValueError, AttributeError):
+                            request_errors[batch_no] = {"error_code": "CALL_FAILED"}
+                    return batch_no, answer
 
                 workers = vision_analyzer._batch_workers(len(jobs))
                 result["batch_workers"] = workers
@@ -556,6 +673,7 @@ def main() -> int:
                             "claim_indices": [claim["index"] for claim in claims],
                             "status": "FAILED",
                             "error": text[-500:],
+                            **request_errors.get(batch_no, {}),
                         })
                         result["warnings"].append(
                             f"POST_DRAFT_VISION_CALL_FAILED:B{batch_no:02d}:" + text[-500:])
