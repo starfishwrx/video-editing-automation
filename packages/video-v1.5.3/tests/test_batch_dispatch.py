@@ -122,6 +122,19 @@ class BatchDispatchTests(unittest.TestCase):
             "drafts": ["x"], "qc_reports": [{"draft": "x", "status": "UNCERTIFIED_TIMEOUT"}],
             "distribution_receipts": [{"draft_name": "x", "status": "VERIFIED"}]}), 0)
 
+    def test_material_failure_preserves_reason_for_every_waiter_and_never_builds(self):
+        def prepare(*args):
+            raise RuntimeError("MATERIAL_PREP_INCOMPLETE: NETWORK_ERROR; report=private-checkpoint")
+        result = dispatch.dispatch([{"record_id": rid, "material_dir": "same"} for rid in ("a", "b")],
+            work=self.root, policy=self.policy, preparer=prepare,
+            runner=lambda *args: self.fail("blocked material entered production"))
+        self.assertEqual(len(result), 2)
+        for row in result:
+            self.assertEqual(row["status"], "BLOCKED")
+            self.assertIn("NETWORK_ERROR", row["error"])
+        run = next((self.root / "dispatch_runs").glob("*.json"))
+        self.assertIn("NETWORK_ERROR", run.read_text(encoding="utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()

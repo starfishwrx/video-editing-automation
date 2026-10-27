@@ -1844,7 +1844,6 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
             text_errors.append({"type": "VISION_TEXT_PASS_FAILED", "shot_id": shot_id,
                                 "message": str(text)[-1000:]})
             _remember(shot_id)
-            _save_vision_cache(cache_path, cache)
             return
         row["text_agreed"] = agreed_text(
             [_as_list(p.get("readable_claims")) for p in payloads])
@@ -1858,7 +1857,6 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
         row["text_frames"] = [{"path": item["path"], "timestamp": item["timestamp"]}
                               for item in items]
         _remember(shot_id)
-        _save_vision_cache(cache_path, cache)
 
     def _attempts(phase: str, index: int, total: int, shot_ids: list[str]):
         started = time.time()
@@ -1901,7 +1899,10 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
                 return (isinstance(rows, list) and len(rows) == len(expected)
                     and all(isinstance(row, dict) and str(row.get("shot_id")) in expected
                             and isinstance(row.get("description"), str) and bool(row["description"].strip())
-                            and type(row.get("action_complete")) is bool for row in rows)
+                            and type(row.get("action_complete")) is bool
+                            and bool(_as_list(row.get("visual_tags")))
+                            and bool(_as_list(row.get("evidence_tags")))
+                            and _number(row.get("confidence")) > 0 for row in rows)
                     and {str(row.get("shot_id")) for row in rows} == expected)
             result = _run_vision_with_retry(
                 sheets[batch_index],
@@ -2123,10 +2124,22 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
         _progress(report_dir, phase="text", batch_workers=workers, requests_finished=0)
         text_jobs = [text_prepared[index] for index in sorted(text_prepared)]
         stage_started = time.monotonic()
-        for done, (_, value) in enumerate(_iter_indexed(text_jobs, _read_text, workers), 1):
-            _apply_text(*value)
-            _progress(report_dir, text_left=text_total - done, requests_finished=done)
-            _checkpoint()
+        # Every result remains durable in the task report and HTTP ledger.
+        # The product lock excludes other consumers until this stage exits;
+        # amortize the whole-library merge rather than rewriting it per shot.
+        pending_cache = 0
+        try:
+            for done, (_, value) in enumerate(_iter_indexed(text_jobs, _read_text, workers), 1):
+                _apply_text(*value)
+                pending_cache += 1
+                _checkpoint()
+                if pending_cache >= 8:
+                    _save_vision_cache(cache_path, cache)
+                    pending_cache = 0
+                _progress(report_dir, text_left=text_total - done, requests_finished=done)
+        finally:
+            if pending_cache:
+                _save_vision_cache(cache_path, cache)
         stage_seconds["text_api_and_checkpoint"] = round(time.monotonic() - stage_started, 3)
     _annotate_shot_labels(manifest, shots)
     apply_cross_shot_text(shots)

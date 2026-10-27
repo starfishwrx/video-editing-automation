@@ -3,6 +3,7 @@ import contextlib
 from concurrent.futures import ThreadPoolExecutor
 import json
 import os
+import re
 from pathlib import Path
 import sys
 import tempfile
@@ -149,6 +150,60 @@ class SharedProductVisionCacheTests(unittest.TestCase):
             with self.assertRaises(TimeoutError):
                 self.run_task("task_a")
         api.assert_not_called()
+
+    def test_text_only_backfill_batches_library_merges_but_checkpoints_each_result(self):
+        analysis = {"shots": []}
+        cache = {}
+        for index in range(19):
+            shot = {**self.analysis()["shots"][0], "shot_id": f"text-{index}",
+                    "source_start": index, "source_end": index + 9.4}
+            analysis["shots"].append(shot)
+            row = json.loads(_first_pass())["shots"][0]
+            row.update(status="ready_for_matching", text_pass="pending",
+                       analysis_confidence=.8)
+            cache[vision._vision_cache_key(self.manifest, shot, "volc")] = row
+        path = vision._vision_cache_path(self.report("text_only"))
+        vision._save_vision_cache(path, cache)
+        checkpoints = []
+        original_persist = vision._persist
+
+        def persist(directory, data):
+            original_persist(directory, data)
+            disk = json.loads((directory / "shot_candidates.json").read_text(encoding="utf-8"))
+            checkpoints.append(sum(row.get("text_pass") == "hires" for row in disk["shots"]))
+
+        def response(sheet, prompt, *args, **kwargs):
+            self.assertTrue(sheet.name.startswith("text_"), "visual call repeated during text backfill")
+            shot_id = re.search(r"shot_id=(text-\d+)", prompt).group(1)
+            return True, json.dumps({"shot_id": shot_id, "readable_claims": ["verified"],
+                                     "pointed_text": []})
+
+        with mock.patch.object(vision, "_run_vision_with_retry", side_effect=response) as api, \
+                mock.patch.object(vision, "_save_vision_cache", wraps=vision._save_vision_cache) as saves, \
+                mock.patch.object(vision, "_persist", side_effect=persist):
+            result = self.run_task("text_only", analysis=analysis)
+        self.assertEqual(api.call_count, 38)  # Exactly two reads; no repeated vision.
+        self.assertLess(saves.call_count, 19 // 2)
+        self.assertTrue(set(range(1, 20)).issubset(checkpoints))
+        disk = vision._load_vision_cache(path)
+        self.assertTrue(all(row.get("text_pass") == "hires" for row in disk.values()))
+        self.assertEqual(result["vision_analysis"]["cache_hits"], 19)
+
+    def test_text_cache_tail_is_flushed_when_a_later_read_raises(self):
+        original = vision._iter_indexed
+        def interrupted(jobs, fn, workers):
+            if fn.__name__ == "_read_text":
+                yield fn(jobs[0])
+                raise RuntimeError("synthetic interruption after one durable text result")
+            yield from original(jobs, fn, workers)
+        with mock.patch.object(vision, "_run_vision_with_retry", side_effect=self.response), \
+                mock.patch.object(vision, "_iter_indexed", side_effect=interrupted):
+            with self.assertRaisesRegex(RuntimeError, "synthetic interruption"):
+                self.run_task("interrupted")
+        cache = vision._load_vision_cache(vision._vision_cache_path(self.report("interrupted")))
+        self.assertEqual(next(iter(cache.values()))["text_pass"], "hires")
+        report = json.loads((self.report("interrupted") / "shot_candidates.json").read_text(encoding="utf-8"))
+        self.assertEqual(report["shots"][0]["text_pass"], "hires")
 
 
 if __name__ == "__main__":

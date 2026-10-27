@@ -167,6 +167,22 @@ class VisionStageConcurrencyTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertTrue(all(row["status"] == "pending_analysis" for row in result["shots"]))
 
+    def test_request_validator_rejects_missing_auditable_fields_before_success(self):
+        def api(sheet, prompt, output, **kwargs):
+            _, body = self.answer(0)
+            valid = json.loads(body)
+            validator = kwargs["validator"]
+            self.assertTrue(validator(valid))
+            for field in ("visual_tags", "evidence_tags", "confidence"):
+                malformed = json.loads(body)
+                malformed["shots"][0].pop(field)
+                self.assertFalse(validator(malformed), field)
+            return True, body
+        with mock.patch.object(vision, "_write_sheet", return_value=True), \
+                mock.patch.object(vision, "_run_vision_with_retry", side_effect=api):
+            result = vision.enrich_with_vision(self.manifest, {"shots": self.shots(1)}, self.report)
+        self.assertTrue(result["ok"])
+
 
 if __name__ == "__main__":
     unittest.main()

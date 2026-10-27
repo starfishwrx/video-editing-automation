@@ -207,6 +207,25 @@ class VisionClientTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual(result.attempts, 2)
         self.assertEqual(self.ledger()["history"][0]["error_code"], "NETWORK_ERROR")
+        metadata = self.ledger()["history"][0]["metadata"]
+        self.assertIn("network_error_type", metadata)
+        self.assertNotIn("test-key-must-not-be-logged", json.dumps(self.ledger()))
+
+    def test_connector_diagnostics_keep_numeric_cause_without_exception_message(self):
+        error = client.aiohttp.ClientConnectorError(
+            SimpleNamespace(host="synthetic", port=443, ssl=True),
+            OSError(10061, "secret-in-exception-message"))
+        class Session:
+            def post(self, *args, **kwargs):
+                raise error
+            async def close(self):
+                pass
+        with patch.object(client.aiohttp, "ClientSession", return_value=Session()):
+            result = asyncio.run(client._http("https://synthetic", "secret-key", {}, 1, None))
+        self.assertEqual(result.error_code, "NETWORK_ERROR")
+        self.assertEqual(result.metadata["network_error_type"], "ClientConnectorError")
+        self.assertEqual(result.metadata["network_errno"], 10061)
+        self.assertNotIn("secret", json.dumps(result.metadata))
 
     def test_rate_limit_retry_after_and_persistent_attempt_cap(self):
         action = {"status": 429, "headers": {"Retry-After": "0"}, "payload": {"error": {"code": "rate_limit"}}}

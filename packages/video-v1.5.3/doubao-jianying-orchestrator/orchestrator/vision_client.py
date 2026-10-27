@@ -244,8 +244,17 @@ async def _http(url: str, api_key: str, body: dict, timeout: float,
                                      validator)
     except (asyncio.TimeoutError, TimeoutError):
         result.error_code, result.retryable = "REQUEST_TIMEOUT", True
-    except (aiohttp.ClientError, OSError):
+    except (aiohttp.ClientError, OSError) as exc:
         result.error_code, result.retryable = "NETWORK_ERROR", True
+        # Exception messages may contain URLs or credentials. Keep only safe
+        # types and numeric OS codes to distinguish DNS/connect/TLS failures.
+        result.metadata["network_error_type"] = type(exc).__name__
+        cause = getattr(exc, "os_error", None) or exc
+        result.metadata["network_cause_type"] = type(cause).__name__
+        for name in ("errno", "winerror"):
+            value = getattr(cause, name, None)
+            if isinstance(value, int):
+                result.metadata["network_" + name] = value
     finally:
         try:
             # 连接关闭完成后协程才返回；外层随后才归还账户槽位。

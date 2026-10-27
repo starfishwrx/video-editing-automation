@@ -226,7 +226,7 @@ def dispatch(tasks: list[dict], *, work: Path, policy: RuntimePolicy | None = No
         atomic_write_text(policy_file, json.dumps(policy.to_dict(), indent=2))
         progress = work / "batch_dispatch_progress.jsonl"
         atomic_write_text(progress, "")
-        results, ready, preparing, failed = [], {}, set(), set()
+        results, ready, preparing, failed = [], {}, set(), {}
         submitted_files = set()
         run_file = work / "dispatch_runs" / (str(time.time_ns()) + "-" + uuid.uuid4().hex[:8] + ".json")
         atomic_write_text(run_file, json.dumps({"policy": policy.to_dict(),
@@ -296,7 +296,8 @@ def dispatch(tasks: list[dict], *, work: Path, policy: RuntimePolicy | None = No
                     elif key in failed:
                         pending.remove((task, stage))
                         record({"record_id": task["record_id"], "stage": "material",
-                                "status": "BLOCKED", "formal_deliveries": 0})
+                                "status": "BLOCKED", "formal_deliveries": 0,
+                                "error": failed[key]})
                         continue
                     elif key not in ready:
                         if key not in preparing and len(preparing) < policy.prep_workers:
@@ -342,7 +343,7 @@ def dispatch(tasks: list[dict], *, work: Path, policy: RuntimePolicy | None = No
                     except Exception as exc:
                         if kind == "prep":
                             preparing.discard(key)
-                            failed.add(key)
+                            failed[key] = str(exc)
                         else:
                             record({"record_id": task["record_id"], "status": "ERROR",
                                     "error": str(exc), "formal_deliveries": 0})
