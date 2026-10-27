@@ -4,6 +4,12 @@
 
 ## Changelog
 
+### 2026-10-27
+
+- 回流本机正式批热修：AI refill / EDI 包装标称 soft-accept、独立 QC soft remap、QC 使用 sealed sentence index（消掉 `AI_SELECTION_INDEX_CHANGED` 误报）。
+- `vision_analyzer` 增加 Windows Unicode/空格路径的 `_cv2_imread` / `_cv2_imwrite`（短路径 + `fromfile`/`imencode` 回退），避免中文工作目录读帧失败。
+- `ai_editor_contract` 保留生产侧 `seal_receipt` 等窗口合同，并合并 main 上纸品/editorial 兼容入口，避免测试回退。
+
 ### 2026-10-26
 
 - 独立环审补修：纸品字幕配置坐标传到原生写入器；JyPoll以普通JSON保持尚未排空批次身份，任务完成后剩余任务不重置BGM轮换。增加相应既有回归的断言。

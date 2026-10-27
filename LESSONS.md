@@ -7,6 +7,15 @@
 
 ## 新增条目
 
+### L-20261027-01 本机热修必须回灌仓库并重算 runtime 哈希
+- status: OPEN
+- hits: 1
+- 模块: visual-matching / package-tools
+- 现象: 生产机改了 `ai_editor` / QC / OpenCV 读图后，正式任务报 `RUNTIME_HASH_DRIFT`；中文路径帧读失败与 `AI_SELECTION_INDEX_CHANGED` 只活在流水线副本。
+- 根因: 热修未进 `packages/video-v1.5.3`；`release-manifest.json` / `PACKAGE_CONTENTS.sha256` 未随字节更新；QC 用枚举下标而非 sealed sentence index。
+- 以后怎么做: 行为修复先进活包并补单测，再部署技能根；改文件后重算清单哈希；QC 索引用行上 sealed index；OpenCV 读写走 Unicode 安全封装，禁止只留机旁 patch 脚本。
+- 证据: `test_ai_editor.py`、`test_ai_editor_qc.py`、`test_opencv_unicode_paths.py`；本机 `ACTIVE_VIDEO_RUNTIME.local_hotfix`。
+
 ### L-20261026-01 配音身份和最终字幕时间必须共用同一输入
 - status: OPEN
 - hits: 1

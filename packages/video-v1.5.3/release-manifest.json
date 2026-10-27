@@ -6,7 +6,7 @@
     "machine-specific paths",
     "knowledge-base bodies"
   ],
-  "file_count": 227,
+  "file_count": 228,
   "files": [
     {
       "path": ".gitignore"
@@ -286,6 +286,9 @@
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_meeting_voice.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/tests/test_opencv_unicode_paths.py"
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_paper_production.py"
