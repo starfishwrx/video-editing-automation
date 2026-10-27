@@ -48,6 +48,83 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Iterable
 
+def _opencv_path(path: Path | str) -> str:
+    """Return a path OpenCV can open on Windows when possible.
+
+    OpenCV's ANSI ``imread``/``imwrite`` break on spaces and on non-ASCII
+    directory names. Prefer the 8.3 short path when it is pure ASCII; callers
+    that must always succeed should use ``_cv2_imread`` / ``_cv2_imwrite``.
+    """
+    text = str(path)
+    if os.name != "nt":
+        return text
+    if " " not in text and text.isascii():
+        return text
+    try:
+        import ctypes
+        buf = ctypes.create_unicode_buffer(32768)
+        n = ctypes.windll.kernel32.GetShortPathNameW(text, buf, 32768)
+        if n and buf.value and " " not in buf.value and buf.value.isascii():
+            return buf.value
+        # New files have no short name yet; shorten an existing parent.
+        parent = Path(text).parent
+        name = Path(text).name
+        if parent.exists():
+            pbuf = ctypes.create_unicode_buffer(32768)
+            pn = ctypes.windll.kernel32.GetShortPathNameW(str(parent), pbuf, 32768)
+            if pn and pbuf.value and " " not in pbuf.value and pbuf.value.isascii():
+                return str(Path(pbuf.value) / name)
+    except Exception:
+        pass
+    return text
+
+
+def _cv2_imread(path: Path | str):
+    """Read an image even when the Windows path has spaces or non-ASCII names."""
+    import cv2  # type: ignore
+    import numpy as np  # type: ignore
+
+    text = _opencv_path(path)
+    image = cv2.imread(text)
+    if image is not None:
+        return image
+    try:
+        data = np.fromfile(str(path), dtype=np.uint8)
+    except OSError:
+        return None
+    if data.size == 0:
+        return None
+    return cv2.imdecode(data, cv2.IMREAD_COLOR)
+
+
+def _cv2_imwrite(path: Path | str, image) -> bool:
+    """Write an image even when the Windows path has spaces or non-ASCII names."""
+    import cv2  # type: ignore
+
+    text = _opencv_path(path)
+    try:
+        if cv2.imwrite(text, image):
+            return Path(path).is_file() and Path(path).stat().st_size > 0
+    except cv2.error:
+        pass
+    suffix = Path(path).suffix.lower() or ".jpg"
+    ok, buf = cv2.imencode(suffix, image)
+    if not ok:
+        return False
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        buf.tofile(str(target))
+    except OSError:
+        return False
+    return target.is_file() and target.stat().st_size > 0
+
+
+from .file_safety import locked_json_update, private_temp_dir
+from .json_extract import extract_json, is_blank
+from .proc_slots import env_float, env_int, slot
+
+
 from .file_safety import locked_json_update, private_temp_dir
 from .json_extract import extract_json, is_blank
 from .proc_slots import env_float, env_int, slot
@@ -207,7 +284,7 @@ def _load_image(path: Path, width: int, height: int):
     """Load/resize a frame with OpenCV, falling back to Pillow."""
     try:
         import cv2  # type: ignore
-        image = cv2.imread(str(path))
+        image = _cv2_imread(path)
         if image is None:
             return None
         return cv2.resize(image, (width, height), interpolation=cv2.INTER_AREA)
@@ -325,7 +402,7 @@ def _write_sheet(items: list[dict[str, Any]], output: Path, *, columns: int = 4,
         row, col = divmod(index, columns)
         x, y = col * tile_width, row * tile_height
         if fit:
-            raw = cv2.imread(str(item["path"]))
+            raw = _cv2_imread(item["path"])
             image = None
             if raw is not None:
                 w, h = _fit_size(raw.shape[1], raw.shape[0], tile_width, tile_height - 34)
@@ -348,7 +425,7 @@ def _write_sheet(items: list[dict[str, Any]], output: Path, *, columns: int = 4,
                     cv2.FONT_HERSHEY_SIMPLEX, font_size / 30 if font_size else 0.43,
                     (255, 255, 255), 2 if font_size else 1, cv2.LINE_AA)
     output.parent.mkdir(parents=True, exist_ok=True)
-    return bool(cv2.imwrite(str(output), canvas))
+    return bool(_cv2_imwrite(output, canvas))
 
 
 # The loop needs a shell to manufacture new images to look at, so removing
@@ -1375,7 +1452,7 @@ def _orientation(path: str) -> str:
         pass
     try:
         import cv2  # type: ignore
-        image = cv2.imread(str(path))
+        image = _cv2_imread(path)
         if image is not None:
             return "portrait" if image.shape[0] > image.shape[1] else "landscape"
     except Exception:
