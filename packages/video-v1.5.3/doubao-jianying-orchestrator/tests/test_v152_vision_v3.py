@@ -234,14 +234,15 @@ class EnrichV3Test(unittest.TestCase):
         result, _ = self._run([(True, first)])
         self.assertEqual(result["shots"][0]["status"], "pending_analysis")
 
-    def test_failed_text_pass_drops_low_resolution_text_and_skips_cache(self):
+    def test_failed_text_pass_keeps_visual_cache_but_cannot_certify(self):
         result, _ = self._run([(True, self._first_pass()), (False, "timed out")])
         row = result["shots"][0]
         self.assertEqual(row["status"], "ready_for_matching")
         self.assertEqual(row["readable_claims"], [])
         self.assertEqual(row["text_pass"], "failed")
         self.assertEqual(result["text_pass"]["failed"], 1)
-        self.assertEqual(self._cache(), {})
+        self.assertEqual(next(iter(self._cache().values()))["text_pass"], "failed")
+        self.assertFalse(result["ok"])
 
     def test_display_only_shot_without_located_demo_stays_out(self):
         first = self._first_pass(evidence_intervals=[], action_segments=[], text_tiles=[],

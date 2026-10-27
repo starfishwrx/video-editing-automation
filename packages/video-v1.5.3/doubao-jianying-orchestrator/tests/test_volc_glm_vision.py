@@ -11,7 +11,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from orchestrator import vision_analyzer  # noqa: E402
+from orchestrator import vision_analyzer, vision_client  # noqa: E402
 
 
 class VolcDirectTests(unittest.TestCase):
@@ -45,23 +45,11 @@ class VolcDirectTests(unittest.TestCase):
         sheet.write_bytes(b"\xff\xd8\xff\xd9")
         captured = {}
 
-        class _Resp:
-            def read(self):
-                return json.dumps({"choices": [{"message": {"content": "{\"shots\":[]}"}}]}).encode()
+        def post(url, api_key, body, output, **kwargs):
+            captured.update(url=url, auth=f"Bearer {api_key}", body=body, **kwargs)
+            return vision_client.VisionCallResult(True, text='{"shots":[]}')
 
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *_a):
-                return False
-
-        def opener(request, timeout=None):
-            captured["url"] = request.full_url
-            captured["auth"] = request.get_header("Authorization")
-            captured["body"] = json.loads(request.data.decode("utf-8"))
-            return _Resp()
-
-        with mock.patch.object(vision_analyzer.urllib.request, "urlopen", side_effect=opener):
+        with mock.patch.object(vision_client, "post_chat", side_effect=post):
             ok, text = vision_analyzer._run_vision(
                 sheet, "看图", self.root / "out.txt", profile="volc", timeout=30)
         self.assertTrue(ok)
@@ -75,23 +63,16 @@ class VolcDirectTests(unittest.TestCase):
         self.assertTrue(image.startswith("data:image/jpeg;base64,"))
         self.assertEqual(vision_analyzer._requested_batch_workers(), 20)
 
-    def test_auth_failure_is_not_retried_and_redacts_the_key(self):
-        os.environ["ARK_API_KEY"] = "ark-test-key-value"
-        sheet = self.root / "sheet.jpg"
-        sheet.write_bytes(b"\xff\xd8\xff\xd9")
-
-        def opener(request, timeout=None):
-            raise urllib.error.HTTPError(
-                request.full_url, 401, "Unauthorized", {},
-                io.BytesIO(b'{"error":"bad ark-test-key-value"}'))
-
-        with mock.patch.object(vision_analyzer.urllib.request, "urlopen", side_effect=opener) as opened, \
-                mock.patch.object(vision_analyzer.time, "sleep"):
-            ok, text = vision_analyzer._run_vision_with_retry(
-                sheet, "看图", self.root / "out.txt",
-                profile="volc", timeout=5)
+    def test_final_content_and_thinking_contract_is_fixed(self):
+        os.environ.update(ARK_API_KEY="synthetic", JY_VISION_THINKING="disabled",
+                          JY_VISION_REASONING_EFFORT="high", JY_VISION_RETRIES="6")
+        failed = vision_client.VisionCallResult(False, error_code="AUTHENTICATION", http_status=401)
+        with mock.patch.object(vision_client, "post_chat", return_value=failed) as post:
+            ok, text = vision_analyzer._run_volc_chat(None, "prompt", self.root / "out.txt", timeout=5)
         self.assertFalse(ok)
-        self.assertIn("VOLC_HTTP_401", text)
-        self.assertIn("ark-***", text)
-        self.assertNotIn("ark-test-key-value", text)
-        self.assertEqual(opened.call_count, 1)
+        self.assertIn("AUTHENTICATION", text)
+        body = post.call_args.args[2]
+        self.assertEqual(body["thinking"], {"type": "enabled"})
+        self.assertEqual(body["reasoning_effort"], "low")
+        self.assertEqual(body["max_tokens"], 16384)
+        self.assertEqual(post.call_args.kwargs["max_attempts"], 2)

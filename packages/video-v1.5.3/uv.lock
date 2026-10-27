@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.11, <3.13"
 resolution-markers = [
     "python_full_version >= '3.12'",
@@ -524,7 +524,9 @@ wheels = [
 name = "video-automation"
 version = "1.5.6"
 source = { virtual = "." }
+default-groups = ["recommended", "vision"]
 dependencies = [
+    { name = "aiohttp" },
     { name = "pillow" },
     { name = "pymediainfo" },
     { name = "uiautomation", marker = "sys_platform == 'win32'" },
@@ -545,6 +547,7 @@ vision = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aiohttp", specifier = ">=3.12,<4" },
     { name = "pillow", specifier = ">=10.0.0" },
     { name = "pymediainfo", specifier = ">=6.0.0" },
     { name = "uiautomation", marker = "sys_platform == 'win32'", specifier = ">=2.0.0" },

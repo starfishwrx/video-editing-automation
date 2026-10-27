@@ -2,6 +2,7 @@
 import contextlib
 import json
 import os
+import re
 from pathlib import Path
 import sys
 import tempfile
@@ -75,7 +76,7 @@ class VisionStageConcurrencyTests(unittest.TestCase):
             self.assertEqual(len(prepared), 20)
             progress = json.loads((self.report / "vision_progress.json").read_text(encoding="utf-8"))
             self.assertEqual(progress["batch_workers"], 20)
-            index = int(sheet.stem.split("_")[1]) - 1
+            index = int(re.search(r"shot_id=s(\d+)", prompt).group(1))
             with lock:
                 state["active"] += 1
                 state["peak"] = max(state["peak"], state["active"])
@@ -125,8 +126,8 @@ class VisionStageConcurrencyTests(unittest.TestCase):
             return True
 
         def api(sheet, prompt, output, **kwargs):
-            index = int(sheet.stem.split("_")[1]) - 1
             if not sheet.name.startswith("text_"):
+                index = int(re.search(r"shot_id=s(\d+)", prompt).group(1))
                 return self.answer(index, text=True)
             self.assertEqual(sum(name.startswith("text_") for name in prepared), 6)
             with lock:
@@ -157,8 +158,8 @@ class VisionStageConcurrencyTests(unittest.TestCase):
         self.assertEqual(result["vision_analysis"]["errors"][0]["type"], "VISION_SHEET_FAILED")
 
     def test_cross_batch_response_cannot_modify_another_shot(self):
-        def api(sheet, *args, **kwargs):
-            return self.answer(1 if sheet.stem.endswith("0001") else 0)
+        def api(sheet, prompt, *args, **kwargs):
+            return self.answer(1 if "shot_id=s00" in prompt else 0)
 
         with mock.patch.object(vision, "_write_sheet", return_value=True), \
                 mock.patch.object(vision, "_run_vision_with_retry", side_effect=api):

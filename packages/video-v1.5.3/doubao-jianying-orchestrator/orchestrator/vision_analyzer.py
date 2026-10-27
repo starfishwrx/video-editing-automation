@@ -51,6 +51,7 @@ from typing import Any, Iterable
 from .file_safety import file_lock, locked_json_update, private_temp_dir
 from .json_extract import extract_json, is_blank
 from .proc_slots import env_float, env_int, slot
+from . import runtime_policy
 
 
 # Capture the imported source, rather than the file a later deployment may overwrite.
@@ -523,7 +524,7 @@ def _progress(report_dir: Path, **fields: Any) -> None:
 
 def needs_vision(row: dict[str, Any]) -> bool:
     """动作没认证完，或包装文字的高清复核还没做完。CLI 与 enrich 共用这一个判据。"""
-    return row.get("status") != "ready_for_matching" or row.get("text_pass") == "pending"
+    return row.get("status") != "ready_for_matching" or row.get("text_pass") in ("pending", "failed")
 
 
 def _hold_text(row: dict[str, Any], items: list[dict[str, Any]]) -> None:
@@ -839,14 +840,17 @@ def _cache_projection(row: dict[str, Any]) -> dict[str, Any] | None:
     """Keep only stable visual facts; never cache task-local frame paths/status noise."""
     if not _reusable_visual_observation(row):
         return None
-    if row.get("text_pass") in ("pending", "failed"):
-        return None
     projection = {field: row[field] for field in _VISION_CACHE_FIELDS if field in row}
     if isinstance(projection.get("evidence_intervals"), list):
         projection["evidence_intervals"] = [
             {k: v for k, v in item.items() if k != "frame_path"}
             for item in projection["evidence_intervals"] if isinstance(item, dict)]
     return projection
+
+
+def _needs_text_backfill(row: dict[str, Any]) -> bool:
+    return (_text_pass_enabled() and row.get("action_complete") is True
+            and row.get("text_pass") not in ("hires", "not_applicable"))
 
 
 def _reusable_visual_observation(row: dict[str, Any]) -> bool:
@@ -1078,7 +1082,8 @@ def _run_anthropic_messages(sheet: Path, prompt: str, output: Path,
 
 def _run_vision(sheet: Path, prompt: str, output: Path, *, profile: str,
                 timeout: int, workdir: Path | None = None,
-                schema: Path | None = None) -> tuple[bool, str]:
+                schema: Path | None = None, validator=None,
+                max_attempts: int = 2) -> tuple[bool, str]:
     output.parent.mkdir(parents=True, exist_ok=True)
     stdout_path = output.with_suffix(".stdout.log")
     stderr_path = output.with_suffix(".stderr.log")
@@ -1088,7 +1093,8 @@ def _run_vision(sheet: Path, prompt: str, output: Path, *, profile: str,
     if transport == "anthropic":
         return _run_anthropic_messages(sheet, prompt, output, timeout=timeout)
     if transport == "volc_glm":
-        return _run_volc_chat(sheet, prompt, output, timeout=timeout)
+        return _run_volc_chat(sheet, prompt, output, timeout=timeout,
+                              validator=validator, max_attempts=max_attempts)
     ok, code, error = _run_codex_file(
         _codex_command(sheet, output, profile, workdir=workdir, schema=schema),
         prompt_path, stdout_path, stderr_path, timeout)
@@ -1143,13 +1149,7 @@ def _requested_batch_workers() -> int:
 
     Codex stays at one agent process. Direct GLM HTTP defaults to 20.
     """
-    raw = os.environ.get("JY_VISION_BATCH_WORKERS", "").strip()
-    if raw:
-        try:
-            return max(1, int(raw))
-        except ValueError:
-            return 1
-    return 20 if _direct_http_transport() else 1
+    return runtime_policy.load_policy().api_workers if _direct_http_transport() else 1
 
 
 def _batch_workers(batch_count: int) -> int:
@@ -1179,14 +1179,14 @@ def _prepare_indexed(jobs: list[Any], fn, *, on_done=None) -> dict[int, Any]:
     they are never held while waiting for the vision provider.
     """
     def prepare(job):
-        with slot("vision_prepare", env_int("JY_VISION_PREP_SLOTS", 2, minimum=1),
-                  timeout=env_float("JY_VISION_PREP_TIMEOUT", 600.0)) as handle:
+        with runtime_policy.media_slot(
+                timeout=env_float("JY_VISION_PREP_TIMEOUT", 600.0)) as handle:
             if not handle.acquired:
                 raise TimeoutError("VISION_PREP_SLOT_TIMEOUT")
             return fn(job)
 
     found = {}
-    workers = env_int("JY_VISION_PREP_WORKERS", 2, minimum=1)
+    workers = runtime_policy.load_policy().prep_workers
     for index, value in _iter_indexed(jobs, prepare, workers):
         found[index] = value
         if on_done is not None:
@@ -1211,13 +1211,13 @@ def _volc_settings() -> dict[str, str]:
 
 
 def _run_volc_chat(sheet: Path | None, prompt: str, output: Path,
-                   *, timeout: int) -> tuple[bool, str]:
+                   *, timeout: int, validator=None, max_attempts: int = 2) -> tuple[bool, str]:
     """Post one contact sheet to Volcengine Ark chat completions.
 
-    Skips Codex. ``glm-5.3-flash`` rejects ``thinking.type=disabled`` and
-    spends the completion budget on reasoning when the cap is small, so thinking
-    stays enabled with a bounded budget and a larger ``max_tokens``.
+    The request client owns cancellation, persistent attempts and validation.
+    Only the provider's final content can become a business result.
     """
+    from . import vision_client
     cfg = _volc_settings()
     if not cfg["api_key"]:
         return False, "VOLC_API_KEY_MISSING"
@@ -1231,45 +1231,20 @@ def _run_volc_chat(sheet: Path | None, prompt: str, output: Path,
         content.append({"type": "image_url", "image_url": {
             "url": f"data:{media_type};base64,{image}",
         }})
-    if os.environ.get("JY_VISION_THINKING", "").strip().lower() == "disabled":
-        thinking = {"type": "disabled"}
-    else:
-        thinking = {"type": "enabled", "budget_tokens": int(
-            os.environ.get("JY_VISION_THINKING_BUDGET", "2048"))}
     body = {
         "model": cfg["model"],
         "messages": [{"role": "user", "content": content}],
-        "thinking": thinking,
-        "max_tokens": int(os.environ.get("JY_VISION_MAX_TOKENS", "8192")),
+        "thinking": {"type": "enabled"},
+        "reasoning_effort": "low",
+        "max_tokens": env_int("JY_VISION_MAX_TOKENS", 16384, minimum=1),
         "temperature": 0,
         "stream": False,
     }
-    request = urllib.request.Request(
-        cfg["base_url"] + "/chat/completions",
-        data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
-        headers={
-            "content-type": "application/json",
-            "authorization": f"Bearer {cfg['api_key']}",
-        }, method="POST")
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            payload = json.loads(response.read().decode("utf-8", "replace"))
-    except urllib.error.HTTPError as exc:
-        detail = _redact_secret(exc.read(800).decode("utf-8", "replace"))
-        return False, f"VOLC_HTTP_{exc.code}:{detail[-500:]}"
-    except (OSError, ValueError) as exc:
-        return False, f"VOLC_REQUEST_FAILED:{_redact_secret(str(exc))}"
-    choices = payload.get("choices") or []
-    message = choices[0].get("message", {}) if choices and isinstance(choices[0], dict) else {}
-    out = str((message or {}).get("content") or "").strip()
-    if not out:
-        return False, EMPTY_RESPONSE
-    try:
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(out, encoding="utf-8")
-    except OSError:
-        pass
-    return True, out
+    result = vision_client.post_chat(
+        cfg["base_url"] + "/chat/completions", cfg["api_key"], body, output,
+        timeout=min(float(timeout), runtime_policy.load_policy().request_timeout),
+        max_attempts=min(2, max(1, max_attempts)), validator=validator)
+    return result.legacy_tuple()
 
 
 _TRANSIENT_MARKERS = (
@@ -1300,14 +1275,7 @@ def _backoff_seconds(attempt: int) -> float:
 
 
 def _vision_slot():
-    if os.environ.get("JY_VISION_SLOTS", "").strip():
-        capacity = env_int("JY_VISION_SLOTS", 20)
-    elif _direct_http_transport():
-        capacity = max(20, _requested_batch_workers())
-    else:
-        capacity = 2
-    return slot("vision", capacity,
-                timeout=env_float("JY_VISION_SLOT_TIMEOUT", 600.0))
+    return runtime_policy.vision_slot(timeout=env_float("JY_VISION_SLOT_TIMEOUT", 600.0))
 
 
 def _run_vision_with_retry(sheet: Path, prompt: str, output: Path, *,
@@ -1316,39 +1284,22 @@ def _run_vision_with_retry(sheet: Path, prompt: str, output: Path, *,
                            schema: Path | None = None,
                            max_retries: int | None = None,
                            require_slot: bool = False,
-                           on_attempt: Any = None) -> tuple[bool, str]:
-    """Retry transient provider failures with jittered exponential backoff.
-
-    Parallel runs hit 429/502/503, empty model output and channel timeouts
-    from the relay; one failed batch used to hard-block the whole task.
-    Attempts default to ``JY_VISION_RETRIES`` (4); ``max_retries`` overrides
-    it for callers with a tight budget.  Deterministic failures return at
-    once.  Every attempt holds a cross-process ``vision`` slot
-    (``JY_VISION_SLOTS``); a slot wait timeout degrades to an unthrottled
-    call instead of failing.  After exhausting retries the last
-    ``(False, message)`` is returned unchanged.
-    """
-    attempts = (env_int("JY_VISION_RETRIES", 4, minimum=1) if max_retries is None
-                else max(1, int(max_retries) + 1))
-    last: tuple[bool, str] = (False, "")
-    for attempt in range(attempts):
-        if on_attempt is not None:
-            on_attempt(attempt + 1, attempts, last[1][-300:] if attempt else "")
+                           on_attempt: Any = None, validator=None) -> tuple[bool, str]:
+    """Compatibility entry point; HTTP attempts belong exclusively to the client."""
+    attempts = 2 if max_retries is None else min(2, max(1, int(max_retries) + 1))
+    if on_attempt is not None:
+        on_attempt(1, attempts, "")
+    kwargs = {"profile": profile, "timeout": timeout, "workdir": workdir, "schema": schema}
+    if _direct_http_transport():
+        kwargs.update(validator=validator, max_attempts=attempts)
+        # post_chat acquires/releases the account slot around each real request.
+        ok, text = _run_vision(sheet, prompt, output, **kwargs)
+    else:
         with _vision_slot() as handle:
             if not handle.acquired:
-                if require_slot:
-                    return False, "VISION_SLOT_TIMEOUT"
-                print(f"[vision] slot wait {handle.waited:.0f}s timed out; calling without throttle",
-                      file=sys.stderr, flush=True)
-            ok, text = _run_vision(sheet, prompt, output, profile=profile, timeout=timeout,
-                                   workdir=workdir, schema=schema)
-        if ok and not is_blank(text):
-            return ok, text
-        last = (False, EMPTY_RESPONSE) if ok else (ok, text)
-        if attempt >= attempts - 1 or not _is_transient(last[1]):
-            break
-        time.sleep(_backoff_seconds(attempt))
-    return last
+                return False, "VISION_SLOT_TIMEOUT"
+            ok, text = _run_vision(sheet, prompt, output, **kwargs)
+    return (False, EMPTY_RESPONSE) if ok and is_blank(text) else (ok, text)
 
 
 def _shot_frames(shot: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1647,6 +1598,10 @@ def enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repor
     cache_path = _vision_cache_path(report_dir)
     profile = _clean_profile(
         profile if profile is not None else os.environ.get("JY_VISION_PROFILE", "volc"))
+    from .file_safety import atomic_write_text
+    atomic_write_text(report_dir / "vision_progress.json", json.dumps({
+        "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "phase": "product_cache_wait", "finished_at": None}))
     waiting = time.monotonic()
     _progress(report_dir, phase="product_cache_wait", cache_path=str(cache_path),
               cache_wait_s=0.0, finished_at=None)
@@ -1667,7 +1622,7 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
                        timeout: int | None = None, ffmpeg: str | None = None) -> dict[str, Any]:
     """Use the configured image backend to fill and validate temporary shots."""
     if timeout is None:
-        timeout = env_int("JY_VISION_TIMEOUT", 600, minimum=60)
+        timeout = runtime_policy.load_policy().request_timeout
     profile = _clean_profile(
         profile if profile is not None else os.environ.get("JY_VISION_PROFILE", "volc"))
     shots = [row for row in analysis.get("shots", []) if isinstance(row, dict)]
@@ -1683,6 +1638,7 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
     cache_keys: dict[str, str] = {}
     uncached_shots: list[dict[str, Any]] = []
     text_resume: dict[str, list[dict[str, Any]]] = {}
+    text_missing_frames: list[dict[str, Any]] = []
     seeded = 0
     stale = 0
     rechecked = 0
@@ -1711,7 +1667,6 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
                 cache[key] = cached
         if (isinstance(cached, dict)
                 and _reusable_visual_observation(cached)
-                and cached.get("text_pass") not in ("pending", "failed")
                 and shot.get("frame_exists") is not False):
             _apply_cached_visual(shot, cached, key)
             if (shot.get("action_complete_source") == "evidence_interval"
@@ -1729,6 +1684,13 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
             cache_hits += 1
             text_cache_hits += int(cached.get("text_pass") == "hires")
             rejected_cache_hits += int(cached.get("action_complete") is False)
+            if _needs_text_backfill(shot):
+                items = _resume_text_items(shot) or _shot_frames(shot)
+                if items:
+                    _hold_text(shot, items[:2])
+                    text_resume[shot_id] = items[:2]
+                else:
+                    text_missing_frames.append(shot)
             continue
         # 本任务候选文件里做完的观察：只有产生它的输入签名（商品、素材、窗口、
         # 规则、分析版本）与当前一致才保留并回种全局缓存；对不上就整条重做。
@@ -1740,7 +1702,7 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
             if local_recheck == "stamp":
                 recheck_reused += 1
                 shot["rule_checks"] = sorted(checks)
-            if shot.get("text_pass") != "pending":
+            if not _needs_text_backfill(shot):
                 shot["analysis_cache_hit"] = True
                 projection = _cache_projection(shot)
                 if projection is not None and (key not in cache or local_recheck == "stamp"):
@@ -1748,7 +1710,7 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
                     seeded += 1
                 cache_hits += 1
                 continue
-            items = _resume_text_items(shot)
+            items = _resume_text_items(shot) or _shot_frames(shot)
             if items:
                 # 动作已认证，只补没做完的文字复核。
                 shot["analysis_cache_hit"] = True
@@ -1756,6 +1718,12 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
                 text_resume[shot_id] = items
                 cache_hits += 1
                 continue
+            # A lost local image is a preparation miss, never a reason to
+            # repeat a successful visual model call.
+            shot["analysis_cache_hit"] = True
+            text_missing_frames.append(shot)
+            cache_hits += 1
+            continue
         if local and local_recheck == "redo":
             rechecked += 1
         if local:
@@ -1771,6 +1739,21 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
         cache_misses += 1
         uncached_shots.append(shot)
     shots_to_analyze = uncached_shots
+    from . import material_cache, frame_quality
+    frame_protocol = json.dumps({"samples": [SAMPLE_STEP_S, env_int("JY_VISION_SAMPLE_MAX", SAMPLE_MAX, minimum=2)],
+                                 "quality": [frame_quality.FRAME_QUALITY_VERSION, frame_quality.enabled()]})
+
+    def _shared_frames(shot):
+        return material_cache.cached_frames(shot, report_dir,
+            lambda directory: _sample_frames(shot, directory, ffmpeg), protocol=frame_protocol)
+
+    # Only missing text images are prepared here; visual facts remain cached.
+    prepared_text_frames = _prepare_indexed(list(enumerate(text_missing_frames)),
+        lambda job: (job[0], _shared_frames(job[1])))
+    for index, shot in enumerate(text_missing_frames):
+        items = prepared_text_frames[index][:2]
+        _hold_text(shot, items)
+        text_resume[str(shot["shot_id"])] = items
     if seeded:
         try:
             _save_vision_cache(cache_path, cache)
@@ -1815,7 +1798,7 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
 
     def _prepare_frames(job):
         index, shot = job
-        return index, _sample_frames(shot, frame_dir, ffmpeg)
+        return index, _shared_frames(shot)
 
     sampled = _prepare_indexed(list(enumerate(shots_to_analyze)), _prepare_frames,
         on_done=lambda done, total: _progress(report_dir, prepare_done=done, prepare_total=total))
@@ -1860,6 +1843,8 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
                         "pointed_agreed": [], "text_pass": "failed"})
             text_errors.append({"type": "VISION_TEXT_PASS_FAILED", "shot_id": shot_id,
                                 "message": str(text)[-1000:]})
+            _remember(shot_id)
+            _save_vision_cache(cache_path, cache)
             return
         row["text_agreed"] = agreed_text(
             [_as_list(p.get("readable_claims")) for p in payloads])
@@ -1901,16 +1886,32 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
     with private_temp_dir(prefix="jy_vision_", dir=report_dir) as temp:
         temp_dir = Path(temp)
         schema = _write_schema(temp_dir)
+        sheets: dict[int, Path] = {}
+        def _call_path(prompt: str, sheet: Path, prefix: str) -> Path:
+            # This identity survives task/report-directory changes. The client
+            # ledger retains the logical call's two-attempt budget on recovery.
+            identity = hashlib.sha256((prompt + "\n" + str(sheet)).encode("utf-8")).hexdigest()
+            return cache_path.parent / "calls" / f"{prefix}_{identity}.txt"
+
         def _call_batch(job: tuple[int, list[dict[str, Any]], Path]) -> tuple[int, tuple[bool, str]]:
             batch_index, batch, response_file = job
+            def validate(data):
+                rows = data if isinstance(data, list) else data.get("shots") if isinstance(data, dict) else None
+                expected = {str(item["shot_id"]) for item in batch}
+                return (isinstance(rows, list) and len(rows) == len(expected)
+                    and all(isinstance(row, dict) and str(row.get("shot_id")) in expected
+                            and isinstance(row.get("description"), str) and bool(row["description"].strip())
+                            and type(row.get("action_complete")) is bool for row in rows)
+                    and {str(row.get("shot_id")) for row in rows} == expected)
             result = _run_vision_with_retry(
-                temp_dir / f"sheet_{batch_index:04d}.jpg",
+                sheets[batch_index],
                 _vision_prompt(batch, batch_index, len(batches), analysis_rules),
                 response_file,
                 profile=profile,
                 timeout=timeout,
                 workdir=temp_dir,
                 schema=schema,
+                validator=validate,
                 on_attempt=_attempts("vision", batch_index, len(batches),
                                      sorted({str(item["shot_id"]) for item in batch})),
             )
@@ -1918,13 +1919,17 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
 
         def _prepare_batch(job):
             batch_index, batch = job
-            sheet = temp_dir / f"sheet_{batch_index:04d}.jpg"
             tiles = [{**item, "label": f"#{n} {item['timestamp']:.1f}s"}
                      for n, item in enumerate(batch, 1)]
-            written = _write_sheet(tiles, sheet, ffmpeg=ffmpeg, fit=True, font_size=22,
-                                   **_sheet_geometry(batch))
+            parameters = {"fit": True, "font_size": 22, **_sheet_geometry(batch)}
+            sheet = material_cache.cached_sheet(tiles, report_dir, prefix="sheet",
+                parameters=parameters, prepare=lambda target: _write_sheet(tiles, target,
+                    ffmpeg=ffmpeg, **parameters))
+            if sheet is not None:
+                sheets[batch_index] = sheet
             return batch_index, (batch_index, batch,
-                                  temp_dir / f"response_{batch_index:04d}.txt" if written else None)
+                _call_path(_vision_prompt(batch, batch_index, len(batches), analysis_rules), sheet, "vision")
+                if sheet is not None else None)
 
         stage_started = time.monotonic()
         prepared = _prepare_indexed(list(enumerate(batches, 1)), _prepare_batch,
@@ -2048,7 +2053,9 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
                     text_requests[shot_id] = wanted[:2]
                     _hold_text(row, wanted[:2])
                 else:
-                    _remember(shot_id)
+                    row["text_pass"] = "not_applicable" if _text_pass_enabled() else "disabled"
+                # Store visual success independently, even if OCR later fails.
+                _remember(shot_id)
             # Persist after every completed vision batch so a later timeout
             # does not discard the understanding work that already finished.
             _save_vision_cache(cache_path, cache)
@@ -2062,12 +2069,13 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
 
         def _prepare_text(job):
             text_index, (shot_id, items) = job
-            sheet = temp_dir / f"text_{text_index:04d}.jpg"
             tiles = [{**item, "label": f"#{n} {item['timestamp']:.1f}s"}
                      for n, item in enumerate(items, 1)]
-            written = _write_sheet(tiles, sheet, ffmpeg=ffmpeg, fit=True, font_size=26,
-                                   **_sheet_geometry(items, text=True))
-            return text_index, (text_index, shot_id, items, sheet if written else None)
+            parameters = {"fit": True, "font_size": 26, **_sheet_geometry(items, text=True)}
+            sheet = material_cache.cached_sheet(tiles, report_dir, prefix="text",
+                parameters=parameters, prepare=lambda target: _write_sheet(tiles, target,
+                    ffmpeg=ffmpeg, **parameters)) if items else None
+            return text_index, (text_index, shot_id, items, sheet)
 
         stage_started = time.monotonic()
         text_prepared = _prepare_indexed(list(enumerate(text_requests.items(), 1)), _prepare_text,
@@ -2079,11 +2087,19 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
             text = "VISION_TEXT_SHEET_FAILED"
             payloads: list[dict[str, Any]] = []
             if sheet is not None:
-                for read in range(env_int("JY_VISION_TEXT_READS", 2, minimum=1)):
+                def validate_text(data):
+                    if isinstance(data, list) and len(data) == 1:
+                        data = data[0]
+                    return (isinstance(data, dict) and data.get("shot_id") == shot_id
+                            and all(isinstance(data.get(key), list) and
+                                    all(isinstance(value, str) for value in data[key])
+                                    for key in ("readable_claims", "pointed_text")))
+                for read in range(2):
                     ok, text = _run_vision_with_retry(
                         sheet, _text_prompt(shot_id, items),
-                        temp_dir / f"text_{text_index:04d}_{read + 1}.txt",
+                        _call_path(_text_prompt(shot_id, items), sheet, f"text_read_{read + 1}"),
                         profile=profile, timeout=timeout, workdir=temp_dir,
+                        validator=validate_text,
                         on_attempt=_attempts(f"text_read_{read + 1}", text_index,
                                              text_total, [shot_id]))
                     payload: Any = None
@@ -2209,7 +2225,7 @@ score 0-100；只有明确匹配并且证据足够才给 70 以上；`matched_cl
 {catalog}
 """
     report_dir.mkdir(parents=True, exist_ok=True)
-    attempts = env_int("JY_VISION_RETRIES", 4, minimum=1)
+    attempts = 1  # HTTP transport owns the persistent two-attempt budget.
     failure = ""
     stderr_tail = ""
     used = 0
@@ -2217,12 +2233,17 @@ score 0-100；只有明确匹配并且证据足够才给 70 以上；`matched_cl
         used = attempt + 1
         with private_temp_dir(prefix="jy_match_", dir=report_dir) as temp:
             temp_dir = Path(temp)
-            response = temp_dir / "response.txt"
+            response = report_dir / "vision_calls" / (
+                "match_" + hashlib.sha256(prompt.encode("utf-8")).hexdigest() + ".txt")
+            if not _direct_http_transport():
+                response = temp_dir / "response.txt"
+            response.parent.mkdir(parents=True, exist_ok=True)
             prompt_path = temp_dir / "prompt.txt"
             prompt_path.write_text(prompt, encoding="utf-8")
             if _vision_transport() == "volc_glm":
-                with _vision_slot():
-                    ok, text = _run_volc_chat(None, prompt, response, timeout=timeout)
+                ok, text = _run_volc_chat(None, prompt, response, timeout=timeout,
+                    validator=lambda data: isinstance(data, list) or
+                    (isinstance(data, dict) and isinstance(data.get("matches"), list)))
                 stderr_tail = ""
                 if ok:
                     raw_text, error, code = text, "", 0
@@ -2233,7 +2254,11 @@ score 0-100；只有明确匹配并且证据足够才给 70 以上；`matched_cl
                 # same file-backed runner as the vision batches.  It previously kept
                 # the old stdout=PIPE pattern, which is the same deadlock v1.3.17
                 # fixed in _run_vision and left behind here.
-                with _vision_slot():
+                with _vision_slot() as handle:
+                    if not handle.acquired:
+                        analysis["semantic_match_error"] = "VISION_SLOT_TIMEOUT"
+                        analysis["semantic_matches"] = []
+                        return analysis
                     ok, code, error = _run_codex_file(
                         _codex_command(None, response, profile, workdir=temp_dir),
                         prompt_path, temp_dir / "stdout.log", temp_dir / "stderr.log", timeout)
@@ -2264,9 +2289,6 @@ score 0-100；只有明确匹配并且证据足够才给 70 以上；`matched_cl
             analysis["semantic_matches"] = matches
             analysis.pop("semantic_match_error", None)
             break
-        if attempt >= attempts - 1 or not _is_transient(failure):
-            break
-        time.sleep(_backoff_seconds(attempt))
     if failure:
         analysis["semantic_match_error"] = failure
         analysis["semantic_matches"] = []

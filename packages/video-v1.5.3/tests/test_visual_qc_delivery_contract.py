@@ -101,10 +101,55 @@ class VisualQcDeliveryContractTests(unittest.TestCase):
         legacy = self.run_worker({"version": "chatcut-visual-qc-v2", "status": "PASS"})
         self.assertEqual((legacy["status"], legacy["rc"]), ("UNCERTIFIED", 2))
 
+    def test_qc_stage_has_independent_900_second_budget_and_cleanup_margin(self):
+        script = self.root / "qc.py"
+        script.touch()
+        policy = self.root / "policy.json"
+        policy.write_text(json.dumps({"request_timeout": 360, "qc_stage_timeout": 900,
+                                      "slot_dir": str(self.root / "slots")}))
+        with mock.patch.object(worker, "POST_DRAFT_QC", script), \
+                mock.patch.object(worker, "SKILL", self.root), \
+                mock.patch.dict("os.environ", {"JY_CONCURRENCY_POLICY_FILE": str(policy),
+                    "JY_TASK_DEADLINE_TS": "", "JY_TASK_DEADLINE_EPOCH": ""}), \
+                mock.patch.object(worker.subprocess, "run", side_effect=worker.subprocess.TimeoutExpired("qc", 930)) as called:
+            answer = worker.run_post_draft_qc(self.draft, self.report_dir)
+        self.assertEqual(called.call_args.kwargs["timeout"], 930)
+        self.assertEqual(called.call_args.kwargs["env"]["JY_POST_QC_TIMEOUT_S"], "360.0")
+        self.assertEqual(answer["resume_stage"], "qc")
+        self.assertTrue(self.draft.exists())
+
+    def test_qc_recovery_never_rebuilds_or_synthesizes(self):
+        task_dir = self.root / self.task["record_id"]
+        report_dir = task_dir / "report" / "draft-a"
+        report_dir.mkdir(parents=True)
+        (report_dir / "qc_stage.json").write_text(json.dumps({"draft": str(self.draft), "resume_stage": "qc"}))
+        with mock.patch.object(worker, "WORK", self.root), \
+                mock.patch.object(worker, "DRAFTS", self.drafts), \
+                mock.patch.object(worker, "SKIP_SHIP", True), \
+                mock.patch.object(worker, "run_post_draft_qc", return_value={"status": "PASS", "output": "qc.json"}) as review, \
+                mock.patch.object(worker, "run_build", side_effect=AssertionError("unexpected rebuild")):
+            result = worker.resume_task_qc(self.task)
+        self.assertEqual(review.call_count, 1)
+        self.assertEqual(result["resume_stage"], "delivery")
+        self.assertNotEqual(result.get("distribution_status"), "SHIPPED_VERIFIED")
+
+    def test_rebuild_progress_changes_only_with_new_inputs(self):
+        manifest = {"material_sources": [str(self.source)], "full_script": "same"}
+        first = worker.build_progress_inputs(manifest, None, [])
+        self.assertEqual(first, worker.build_progress_inputs({**manifest, "draft_name": "another"}, None, []))
+        self.assertNotEqual(first, worker.build_progress_inputs(manifest, None, [1]))
+        self.source.write_bytes(b"changed source bytes")
+        self.assertNotEqual(first, worker.build_progress_inputs(manifest, None, []))
+
     def test_worker_preserves_fail_even_when_issue_also_mentions_timeout(self):
         result = self.run_worker({"status": "FAIL", "issues": ["MISMATCH after provider timeout"]}, returncode=2)
         self.assertEqual(result["status"], "FAIL")
         self.assertNotIn("nonblocking_timeout", result)
+
+    def test_failed_child_cannot_reuse_a_previous_pass(self):
+        answer = self.run_worker(qc_report(), returncode=2)
+        self.assertEqual(answer["status"], "UNCERTIFIED")
+        self.assertNotEqual(answer["rc"], 0)
 
     def test_worker_rechecks_rows_even_when_marker_claims_validated(self):
         payload = qc_report()

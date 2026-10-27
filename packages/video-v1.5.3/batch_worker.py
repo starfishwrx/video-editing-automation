@@ -724,12 +724,19 @@ def run_build(manifest: dict, report_dir: pathlib.Path, draft_name: str, *,
     if vm:
         env["JY_VISION_MODEL"] = vm
     timeout = timeout or BUILD_TIMEOUT_SECONDS
+    deadline = time.time() + timeout
+    inherited = env.get("JY_TASK_DEADLINE_TS") or env.get("JY_TASK_DEADLINE_EPOCH")
+    if inherited:
+        deadline = min(deadline, float(inherited))
+    timeout = max(0.001, deadline - time.time())
+    env["JY_STAGE_DEADLINE_EPOCH"] = str(deadline)
+    env["JY_STAGE_DEADLINE_TS"] = str(deadline)
     log("build draft=%s vision_profile=%s vision_model=%s timeout=%ss reuse=%s attempt=%s" % (
         draft_name, vp or "volc(default)", vm or "profile-default", timeout,
         "yes" if reuse_analysis else "no", attempt))
     p = subprocess.run(cmd, cwd=str(SKILL), env=env, capture_output=True,
                        text=True, encoding="utf-8", errors="replace",
-                       timeout=timeout)
+                       timeout=timeout + 30)
     out = (p.stdout or "") + "\n" + (p.stderr or "")
     return {"rc": p.returncode, "stdout": (p.stdout or "")[-20000:],
             "stderr": (p.stderr or "")[-20000:], "manifest": str(mpath),
@@ -745,26 +752,58 @@ def run_post_draft_qc(draft_dir: pathlib.Path, report_dir: pathlib.Path) -> dict
     before NAS shipping.
     """
     output = report_dir / "draft_visual_qc.json"
+    def finish(payload: dict) -> dict:
+        from orchestrator.file_safety import atomic_write_text
+        status = payload.get("status") or "UNCERTIFIED"
+        atomic_write_text(report_dir / "qc_stage.json", json.dumps({
+            "draft": str(draft_dir), "report_dir": str(report_dir),
+            "status": status, "completed": status == "PASS",
+            "failed_stage": None if status == "PASS" else "qc",
+            "resume_stage": None if status == "PASS" else "qc",
+            "updated_at": time.time()}, ensure_ascii=False, indent=2))
+        return payload
+    if str(SKILL) not in sys.path:
+        sys.path.insert(0, str(SKILL))
     if not POST_DRAFT_QC.is_file():
-        return {"rc": 2, "status": "UNCERTIFIED",
+        return finish({"rc": 2, "status": "UNCERTIFIED",
                 "message": "DRAFT_VISUAL_QC_BLOCKED: script missing",
-                "output": str(output)}
+                "output": str(output)})
     cmd = [PY, str(POST_DRAFT_QC), "--draft", str(draft_dir),
            "--report-dir", str(report_dir), "--output", str(output)]
-    qc_timeout = _env_int("JY_POST_QC_TIMEOUT_S", 90, 30)
-    env = dict(os.environ, PYTHONUTF8="1", JY_POST_QC_TIMEOUT_S=str(qc_timeout))
+    if str(SKILL) not in sys.path:
+        sys.path.insert(0, str(SKILL))
+    from orchestrator.runtime_policy import load_policy
+    policy = load_policy()
+    request_timeout = policy.request_timeout
+    stage_timeout = policy.qc_stage_timeout
+    task_deadline = (os.environ.get("JY_TASK_DEADLINE_TS") or os.environ.get("JY_TASK_DEADLINE_EPOCH", "")).strip()
+    if task_deadline:
+        stage_timeout = min(stage_timeout, max(0, float(task_deadline) - time.time()))
+    if stage_timeout <= 0:
+        return finish({"rc": 2, "status": "UNCERTIFIED_TIMEOUT",
+                "message": "TASK_DEADLINE_EXCEEDED: draft retained for deferred QC",
+                "output": str(output), "nonblocking_timeout": True,
+                "failed_stage": "qc", "resume_stage": "qc"})
+    stage_deadline = time.time() + stage_timeout
+    env = dict(os.environ, PYTHONUTF8="1",
+               JY_POST_QC_TIMEOUT_S=str(request_timeout),
+               JY_POST_QC_STAGE_TIMEOUT_S=str(stage_timeout),
+               JY_STAGE_DEADLINE_EPOCH=str(stage_deadline),
+               JY_STAGE_DEADLINE_TS=str(stage_deadline))
+    finish({"status": "RUNNING"})
     try:
         p = subprocess.run(cmd, cwd=str(SKILL), env=env, capture_output=True,
                            text=True, encoding="utf-8", errors="replace",
-                           timeout=qc_timeout + 30)
+                           timeout=stage_timeout + 30)
     except subprocess.TimeoutExpired as exc:
         # A provider timeout is not the same as a visual mismatch.  The draft
         # has already passed the build/match gate; archive it as an explicitly
         # uncertified preview so one slow QC call cannot rebuild the same draft
         # and block the queue.  Other QC failures remain hard blockers.
-        return {"rc": 2, "status": "UNCERTIFIED_TIMEOUT",
+        return finish({"rc": 2, "status": "UNCERTIFIED_TIMEOUT",
                 "message": "POST_DRAFT_VISION_QC_TIMEOUT: post-draft visual QC timeout (%ss); draft retained for deferred QC" % exc.timeout,
-                "output": str(output), "nonblocking_timeout": True}
+                "output": str(output), "nonblocking_timeout": True,
+                "failed_stage": "qc", "resume_stage": "qc"})
     payload = {}
     if output.is_file():
         try:
@@ -774,19 +813,82 @@ def run_post_draft_qc(draft_dir: pathlib.Path, report_dir: pathlib.Path) -> dict
     if not isinstance(payload, dict):
         payload = {}
     status = production_eval.visual_qc_contract.report_status(payload)
+    if p.returncode != 0 and status in {"PASS", "PASS_WITH_DEGRADED", "PASS_WITH_GAPS"}:
+        status = "UNCERTIFIED"
+        payload.setdefault("issues", []).append("QC_CHILD_EXIT_NONZERO")
+    if status in {"PASS", "PASS_WITH_DEGRADED", "PASS_WITH_GAPS"} and not production_eval.visual_qc_contract.report_matches_draft(payload, draft_dir):
+        status = "UNCERTIFIED"
+        payload.setdefault("issues", []).append("QC_REPORT_CURRENT_DRAFT_BINDING_MISMATCH")
     issues_text = " ".join(str(item) for item in (payload.get("issues") or []))
     if p.returncode != 0 or status not in {"PASS", "PASS_WITH_DEGRADED", "PASS_WITH_GAPS"}:
-        if status != "FAIL" and ("timed out" in issues_text.lower() or "timeout" in issues_text.lower()):
-            return {"rc": 2, "status": "UNCERTIFIED_TIMEOUT",
+        error_codes = {row.get("error_code") for row in payload.get("batch_results", []) if isinstance(row, dict)}
+        if status != "FAIL" and error_codes & {"REQUEST_TIMEOUT", "DEADLINE_EXCEEDED", "LIMIT_WAIT_TIMEOUT", "LEDGER_WAIT_TIMEOUT"}:
+            return finish({"rc": 2, "status": "UNCERTIFIED_TIMEOUT",
                     "message": "POST_DRAFT_VISION_QC_TIMEOUT: internal visual call timed out; draft retained for deferred QC",
                     "output": str(output), "report": payload,
-                    "nonblocking_timeout": True}
+                    "nonblocking_timeout": True, "failed_stage": "qc", "resume_stage": "qc"})
         issues = payload.get("issues") or ((p.stdout or "") + (p.stderr or ""))[-1200:]
-        return {"rc": p.returncode or 2, "status": status,
+        return finish({"rc": p.returncode or 2, "status": status,
                 "message": "DRAFT_VISUAL_QC_BLOCKED: %s" % str(issues)[-1600:],
-                "output": str(output), "report": payload}
-    return {"rc": 0, "status": status, "output": str(output),
-            "report": payload}
+                "output": str(output), "report": payload})
+    return finish({"rc": 0, "status": status, "output": str(output),
+            "report": payload})
+
+
+def resume_task_qc(task: dict) -> dict:
+    """Resume retained final drafts through QC and the existing delivery gates.
+
+    This entry never invokes TTS, shot selection or draft construction. An
+    unfinished requested output remains PARTIAL rather than being synthesized.
+    """
+    if str(SKILL) not in sys.path:
+        sys.path.insert(0, str(SKILL))
+    from orchestrator.file_safety import atomic_write_text
+    rid = str(task.get("record_id") or "")
+    if not rid or pathlib.Path(rid).name != rid:
+        raise ValueError("invalid record_id")
+    task_dir = WORK / rid
+    task_dir.mkdir(parents=True, exist_ok=True)
+    run_id = "%s-qc-%s" % (rid, uuid.uuid4().hex[:8])
+    record_lock = _acquire_record_lock(task_dir, run_id)
+    try:
+        previous = _read_json(task_dir / "done.json")
+        retained = {}
+        for state_path in (task_dir / "report").glob("**/qc_stage.json"):
+            state = _read_json(state_path)
+            draft = pathlib.Path(str(state.get("draft") or ""))
+            if draft.is_dir():
+                retained[draft.name] = (draft, state_path.parent)
+        for index, name in enumerate(previous.get("drafts") or [], 1):
+            draft = DRAFTS / str(name)
+            report = task_dir / "report" / (str(task.get("title") or rid) if index == 1 else "report_%d" % index)
+            if draft.is_dir():
+                retained[str(name)] = retained.get(str(name), (draft, report))
+        if not retained:
+            raise ValueError("QC_RESUME_NO_RETAINED_DRAFT")
+        reports = []
+        for name, (draft, report_dir) in retained.items():
+            answer = run_post_draft_qc(draft, report_dir)
+            reports.append({"draft": name, "status": answer.get("status"),
+                            "report": answer.get("output")})
+        all_pass = all(row["status"] == "PASS" for row in reports)
+        payload = dict(previous, record_id=rid, drafts=list(retained), qc_reports=reports,
+                       status="PREVIEW_READY" if all_pass else "PARTIAL",
+                       resume_stage="delivery" if all_pass else "qc",
+                       terminal_state="QC_READY_FOR_DELIVERY" if all_pass else "QC_PENDING",
+                       failed_stage=None if all_pass else "qc", safe_to_continue=True,
+                       finished_at=time.strftime("%Y-%m-%d %H:%M:%S"))
+        atomic_write_text(task_dir / "done.json", json.dumps(payload, ensure_ascii=False, indent=2))
+        if all_pass and len(retained) >= max(1, int(task.get("count") or 1)) and not SKIP_SHIP:
+            result = finalize_closed_loop(task_dir, task, list(retained), reports)
+            payload = _read_json(task_dir / "done.json")
+            payload["resume_stage"] = None if result.get("ok") else "delivery"
+            payload["terminal_state"] = "DELIVERED" if result.get("ok") else "QC_READY_FOR_DELIVERY"
+            payload["safe_to_continue"] = True
+            atomic_write_text(task_dir / "done.json", json.dumps(payload, ensure_ascii=False, indent=2))
+        return payload
+    finally:
+        _release_record_lock(record_lock, run_id)
 
 
 def ship_one(draft_dir: pathlib.Path, task_dir: pathlib.Path | None = None,
@@ -1190,7 +1292,8 @@ def existing_task_has_nonpass_qc(task_dir: pathlib.Path) -> bool:
         if not path.is_file():
             return True
         payload = _read_json(path)
-        if str(payload.get("status") or "").upper() != "PASS":
+        if (production_eval.visual_qc_contract.report_status(payload) != "PASS"
+                or not production_eval.visual_qc_contract.report_matches_draft(payload, DRAFTS / draft)):
             return True
     return False
 
@@ -1219,17 +1322,41 @@ def prior_draft_requires_recheck(task_dir: pathlib.Path, index: int,
         base_draft if index == 1 else "report_%d" % index)
     qc_path = report_dir / "draft_visual_qc.json"
     if not qc_path.is_file():
-        return False
+        return True
     try:
         payload = json.loads(qc_path.read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError):
         return True
-    return str(payload.get("status") or "").upper() != "PASS"
+    return (production_eval.visual_qc_contract.report_status(payload) != "PASS"
+            or not production_eval.visual_qc_contract.report_matches_draft(payload, DRAFTS / base_draft))
+
+
+def build_progress_inputs(manifest: dict, analysis_file: str | None, repair_indices) -> dict:
+    """Track meaningful candidates/observations rather than output names or errors."""
+    analysis = _read_json(pathlib.Path(analysis_file)) if analysis_file else {}
+    fields = ("shot_id", "video", "source_start", "source_end", "visual_description",
+              "description", "action", "object", "result", "evidence_intervals",
+              "action_segments", "text_reads", "text_pass", "visual_observation_complete")
+    sources = []
+    for name in manifest.get("material_sources", []):
+        path = pathlib.Path(str(name))
+        try:
+            stat = path.stat()
+            sources.append({"path": str(path), "size": stat.st_size, "mtime_ns": stat.st_mtime_ns})
+        except OSError:
+            sources.append({"path": str(path), "missing": True})
+    return {"sources": sources, "manifest": {key: value for key, value in manifest.items()
+                         if key not in {"draft_name", "run_id", "attempt"}},
+            "repairs": sorted(repair_indices),
+            "candidates": [{key: row.get(key) for key in fields}
+                           for row in analysis.get("shots", []) if isinstance(row, dict)]}
 
 
 def process_task(task: dict, *, retry_partial: bool = False,
-                 retry_error: bool = False) -> None:
+                 retry_error: bool = False, admitted: bool = False) -> None:
     global ACTIVE_RECORD_ID
+    if not admitted:
+        raise RuntimeError("DISPATCH_ADMISSION_REQUIRED: submit through tools.batch_dispatch")
     if str(SKILL) not in sys.path:
         sys.path.insert(0, str(SKILL))
     from orchestrator.task_inputs import normalize_meeting_task, manifest_meeting_fields
@@ -1242,6 +1369,14 @@ def process_task(task: dict, *, retry_partial: bool = False,
     task_id = str(task.get("task_id") or rid)
     manifest_sha256 = _payload_sha256(task)
     runtime = _runtime_facts()
+    from orchestrator.runtime_policy import load_policy
+    task_started = time.time()
+    task_timeout = load_policy().task_timeout
+    inherited_deadline = (os.environ.get("JY_TASK_DEADLINE_TS") or os.environ.get("JY_TASK_DEADLINE_EPOCH", "")).strip()
+    task_deadline = min(task_started + task_timeout,
+                        float(inherited_deadline) if inherited_deadline else float("inf"))
+    os.environ["JY_TASK_DEADLINE_EPOCH"] = str(task_deadline)
+    os.environ["JY_TASK_DEADLINE_TS"] = str(task_deadline)
     log("=" * 60)
     log("TASK %s title=%r count=%s voice=%s" % (rid, task.get("title"),
                                                 task.get("count", 1),
@@ -1445,15 +1580,9 @@ def process_task(task: dict, *, retry_partial: bool = False,
         # A large candidate pool is scanned in full, but it must not monopolise
         # the only queue worker. Keep a shorter wall-clock slice for oversized
         # pools; the retained material cache/report makes the next pass cheap.
-        task_budget_seconds = TASK_BUDGET_SECONDS
-        if os.environ.get("JY_TASK_BUDGET_OVERRIDE", "").strip() != "1":
-            if len(sources) >= 400:
-                task_budget_seconds = min(task_budget_seconds, 900)
-            elif len(sources) >= 200:
-                task_budget_seconds = min(task_budget_seconds, 1200)
+        task_budget_seconds = max(0, int(task_deadline - task_started))
         log("task_wall_clock_budget=%ss candidate_pool=%d" % (
             task_budget_seconds, len(sources)))
-        task_deadline = time.time() + task_budget_seconds
         for i in range(1, count + 1):
             name = base_draft if i == 1 else f"{base_draft}-{i}"
 
@@ -1498,6 +1627,7 @@ def process_task(task: dict, *, retry_partial: bool = False,
             draft_ok = False
             last_failure = None
             for attempt in range(1, MAX_DRAFT_ATTEMPTS + 1):
+                applied_repair_indices = frozenset(repair_visual_missing_indices)
                 # Escalating strategies so one broken build never repeats
                 # identically.  The first draft may scan the pool once; all
                 # later drafts reuse that validated analysis, and retries
@@ -1550,6 +1680,20 @@ def process_task(task: dict, *, retry_partial: bool = False,
                             repair_visual_missing_indices)
                         log("post-draft visual repair: force blank segments=%s" %
                             sorted(repair_visual_missing_indices))
+                    attempt_state = rd / "build_attempt_state.json"
+                    inputs = build_progress_inputs(build_manifest, analysis_cache,
+                                                   repair_visual_missing_indices)
+                    previous_inputs = _read_json(attempt_state).get("input")
+                    if previous_inputs == inputs and not (force_rebuild and attempt == 1):
+                        last_failure = last_failure or {"index": i, "draft": name,
+                            "phase": "build", "type": "blocked"}
+                        last_failure["message"] = "BUILD_NO_PROGRESS: no new candidates, windows or observations"
+                        log(last_failure["message"])
+                        break
+                    from orchestrator.file_safety import atomic_write_text
+                    atomic_write_text(attempt_state, json.dumps({"input": inputs,
+                        "attempt": attempt, "status": "running", "updated_at": time.time()},
+                        ensure_ascii=False, indent=2))
                     res = run_build(build_manifest, rd, a_name, timeout=timeout,
                                     reuse_analysis=reuse, attempt=attempt)
                     candidate_report = rd / "shot_candidates.json"
@@ -1614,7 +1758,13 @@ def process_task(task: dict, *, retry_partial: bool = False,
                         # and the next build will turn those exact segments
                         # into intentional gaps. Allow one final repair pass;
                         # do not keep retrying deterministic match failures.
-                        qc_repairable = bool(qc_result and repair_visual_missing_indices)
+                        qc_repairable = bool(qc_result and
+                            repair_visual_missing_indices.difference(applied_repair_indices))
+                        if qc_result and not qc_repairable:
+                            last_failure.update(phase="post_draft_qc", resume_stage="qc",
+                                                failed_stage="qc", draft=a_name)
+                            log("QC has no new repair window; retain draft for QC recovery")
+                            break
                         # `vision_analyzer` has already performed its single
                         # bounded provider retry.  Re-running the complete
                         # build here would turn one service retry into a
@@ -2273,7 +2423,8 @@ def main():
             item["record_id"], item["task_id"], item["proc_key"],
             item["script_sha256"]))
         queue[0]["worker_batch_identity"] = _payload_sha256(queue_identity)
-    _run_task(queue[0])
+    from tools.batch_dispatch import dispatch
+    dispatch(queue, work=WORK)
     log("BATCH FINISHED")
 
 

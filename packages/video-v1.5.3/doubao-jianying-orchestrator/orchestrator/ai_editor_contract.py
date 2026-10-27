@@ -79,7 +79,7 @@ def policy_prompt(manifest: dict) -> str:
 def selection_mode(manifest: dict | None = None) -> str:
     value = str((manifest or {}).get("selection_mode") or
                 os.environ.get("JY_SELECTION_MODE") or "ai_editor").strip().lower()
-    if value not in {"ai_editor", "legacy"}:
+    if value not in {"ai_editor", "rule_then_ai", "legacy"}:
         raise ValueError("INVALID_SELECTION_MODE")
     return value
 

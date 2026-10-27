@@ -3,6 +3,9 @@
 - 代码：`packages/video-v1.5.3/{batch_worker.py, closed_loop.py, tools/*.py, run_task.template.ps1, jy_poll.ps1, gold-reference.json}`
 
 ## 1. 队列与执行（`batch_worker.py`）
+- 正式批次统一入口：`python -m tools.batch_dispatch run --queue <queue.json>`；其他启动器向 `submit` 提交，制作进程须经账户级准入。同产品先完成公共准备，等待缓存不占制作池；已有草稿 QC 优先，其次就绪制作，再准备新产品。同级 FIFO。
+- 按阶段恢复：`python -m tools.batch_dispatch resume --queue <queue.json> --record-id <id> --stage qc|build|material`。QC 只补未完成批次，不重做 TTS、选镜或建稿；独立 PASS 后才进入既有交付闸门。
+- 每轮清空 `batch_dispatch_progress.jsonl`；完整观察保留在 `dispatch_runs/`。用 `python -m tools.throughput_calibration --run <run.json>` 比较真实批次，不清生产缓存或额外调用模型。只有已确认账户容量才使用 `--confirmed-account-capacity 40` / `80`。
 - 工作根：`work/batch_queue.json`（记录列表）；每条任务落 `work/<record_id>/`
 - `done.json` 为权威终态收据；历史 start 事件/活跃进程都会被它覆盖
 - 环境变量控制：
