@@ -325,7 +325,6 @@ class WindowRequest:
     preferred_start_us: Optional[int] = None
     video_duration_us: Optional[int] = None
     fps: float = DEFAULT_FPS
-    preferred_speed: float = 1.0
 
     @property
     def timeline_us(self) -> int:
@@ -418,11 +417,7 @@ def _candidate_speeds(req: WindowRequest, usable_us: int, timeline_us: int,
     if hi < lo:
         lo, hi = hi, lo
     frame = frame_us(req.fps)
-    try:
-        preference = float(req.preferred_speed)
-    except (TypeError, ValueError):
-        preference = 1.0
-    values: set[float] = {preference, lo, hi}
+    values: set[float] = {1.0, lo, hi}
 
     if timeline_us > 0:
         values.add(usable_us / timeline_us)                     # 恰好铺满可用素材
@@ -450,16 +445,8 @@ def solve_window(req: WindowRequest) -> WindowSolution:
        ``speed_range_for_role``）；
     4. **时长严格**：时间线占位恒等于 ``音频 + tail_pad``，与音频误差恒为 tail_pad。
 
-    目标：在可行集里选距 ``preferred_speed`` 最近的倍率；并列时选窗口更小者。
+    目标：在可行集里选 ``|v − 1.0|`` 最小者；并列时选窗口更小的（少动素材）。
     """
-    try:
-        preferred_speed = float(req.preferred_speed)
-    except (TypeError, ValueError):
-        preferred_speed = math.nan
-    if not math.isfinite(preferred_speed) or not 0.05 <= preferred_speed <= 20.0:
-        return _fail(REASON_SPEED_OUT_OF_RANGE, preferred_speed=req.preferred_speed,
-                     allowed_preference=[0.05, 20.0])
-
     timeline_us = req.timeline_us
     if timeline_us <= 0:
         return _fail(REASON_NO_AUDIO, audio_duration_us=req.audio_duration_us)
@@ -528,18 +515,14 @@ def solve_window(req: WindowRequest) -> WindowSolution:
             place_hi = min(place_hi, ev_start)
         if place_lo > place_hi:
             continue
-        if req.preferred_start_us is not None:
-            # A soft placement preference must stay inside the feasible interval,
-            # which already includes every required evidence instant.
-            start = max(place_lo, min(int(req.preferred_start_us), place_hi))
-        elif span is not None:
+        if span is not None:
             center = int(round((ev_start + ev_end) / 2 - window_us / 2))
             start = max(place_lo, min(center, place_hi))
         else:
             preferred = req.preferred_start_us
             preferred = place_lo if preferred is None else int(preferred)
             start = max(place_lo, min(preferred, place_hi))
-        feasible.append((abs(speed - preferred_speed), window_us, speed, start))
+        feasible.append((abs(speed - 1.0), window_us, speed, start))
 
     if not feasible:
         if span is not None and span > int(round(speed_max * timeline_us)):
@@ -667,7 +650,6 @@ class SpanSegment:
     speed_max: float = 1.0
     video: str = ""
     shot_id: str = ""
-    preferred_speed: float = 1.0
 
     @property
     def lo_bound_us(self) -> int:
@@ -700,8 +682,7 @@ class SpanSegment:
             transition_in_handle_us=int(self.transition_in_handle_us),
             transition_out_handle_us=int(self.transition_out_handle_us),
             evidence_start_us=self.evidence_start_us, evidence_end_us=self.evidence_end_us,
-            speed_min=float(self.speed_min), speed_max=float(self.speed_max),
-            preferred_speed=self.preferred_speed, fps=fps)
+            speed_min=float(self.speed_min), speed_max=float(self.speed_max), fps=fps)
 
 
 @dataclass(frozen=True)
@@ -905,21 +886,53 @@ TIMING_CERTAINTY_SEGMENT = "segment"      # 段内已有音频参数，先于本
 
 _SENTENCE_SPLIT_RE = re.compile(r"[。！？!?；;\n\r]+")
 
+def _expand_by_copy_punctuation(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """句号切完后，再按文案逗号/顿号拆开；已绑画面或音频的段不重切。
+
+    按原文标点留段，不往 15 字软目标拼接或硬砍。
+    """
+    from .subtitle_units import split_subtitle_units
+
+    out: list[dict[str, Any]] = []
+    drop_keys = ("tts_path", "audio", "audio_duration_us", "key", "timing_certainty")
+    for item in items:
+        text = sentence_text(item)
+        if not text:
+            continue
+        if any(str(item.get(k) or "").strip() for k in ("video", "tts_path", "audio")):
+            out.append(dict(item))
+            continue
+        parts = split_subtitle_units(text)
+        if len(parts) <= 1:
+            row = dict(item)
+            row["text"] = parts[0] if parts else text
+            out.append(row)
+            continue
+        for part in parts:
+            row = {k: v for k, v in item.items() if k not in drop_keys}
+            row["text"] = part
+            out.append(row)
+    return out
+
 
 def split_sentences(manifest: Any) -> list[dict[str, Any]]:
     """全流水线**唯一**的切句口径（规划层 `_sentences` 与 pre-TTS 共用）。
 
     两边各切一次必然会出现「规划层按 A 切、TTS 按 B 切」的错位，于是真值表
     的键对不上段落、估出来的时长套到了别的句子上。所以切句只留这一份实现。
+
+    按文案标点切：先句号/问叹号，再逗号/顿号；不按 15 字硬凑。
     """
     m = manifest if isinstance(manifest, dict) else {}
     if m.get("segments"):
-        return [dict(s) for s in m.get("segments", [])
-                if isinstance(s, dict)
-                and str(s.get("text", s.get("caption", ""))).strip()]
+        items = [dict(s) for s in m.get("segments", [])
+                 if isinstance(s, dict)
+                 and str(s.get("text", s.get("caption", ""))).strip()]
+        return _expand_by_copy_punctuation(items)
     text = str(m.get("full_script") or m.get("script") or "")
-    return [{"text": part.strip()} for part in _SENTENCE_SPLIT_RE.split(text)
-            if part.strip()]
+    items = [{"text": part.strip()} for part in _SENTENCE_SPLIT_RE.split(text)
+             if part.strip()]
+    return _expand_by_copy_punctuation(items)
 
 
 def sentence_key(item: Any, index: int) -> str:

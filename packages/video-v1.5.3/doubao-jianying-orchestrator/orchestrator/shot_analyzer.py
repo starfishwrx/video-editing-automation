@@ -218,10 +218,6 @@ def candidate_window(shot: dict[str, Any], *, audio_duration_us: int,
         # 补黑屏不是在证明这句。审核帧落在头尾保护区外时，仍允许用这段画面的长度。
         evidence_start_us = None
         evidence_end_us = None
-    # Original-source timestamps, never a new three-second trim per scene.
-    # The solver clamps this preference to the complete-evidence feasible range.
-    preferred_start_us = (max(3_000_000, int(material_us) // 2)
-                          if shot.get("selection_mode") == "ai_editor" else None)
     return timing_contract.solve_window_waste_aware(timing_contract.WindowRequest(
         source_in_us=_us(shot.get("source_start")),
         source_out_us=_us(shot.get("source_end"), _number(shot.get("source_start"))),
@@ -231,8 +227,6 @@ def candidate_window(shot: dict[str, Any], *, audio_duration_us: int,
         tail_guard_us=_us(source.get("tail_trim_s"), DEFAULT_TAIL_TRIM_S),
         evidence_start_us=evidence_start_us, evidence_end_us=evidence_end_us,
         speed_min=speed_min, speed_max=speed_max,
-        preferred_start_us=preferred_start_us,
-        preferred_speed=shot.get("preferred_speed", 1.0),
         video_duration_us=int(round(material_us)),
         fps=(frm or timing_contract.DEFAULT_FPS)),
         shot.get("head_waste"), shot.get("tail_waste"))
@@ -259,7 +253,6 @@ def span_segment_for(shot: dict[str, Any], *, manifest: dict[str, Any] | None = 
         transition_in_handle_us=int(handles[0]), transition_out_handle_us=int(handles[1]),
         evidence_start_us=_us(evidence_start), evidence_end_us=_us(evidence_end),
         speed_min=speed_min, speed_max=speed_max,
-        preferred_speed=shot.get("preferred_speed", 1.0),
         video=str(video), shot_id=str(shot_id))
 
 
@@ -501,7 +494,10 @@ def detect_scene_boundaries(path: Path, *, ffmpeg: str | None = None,
 
 
 def extract_frame(path: Path, timestamp: float, output: Path, *,
-                  ffmpeg: str | None = None) -> bool:
+                  ffmpeg: str | None = None, force: bool = False) -> bool:
+    """Extract one JPEG frame. Reuse an existing non-empty file unless ``force``."""
+    if not force and output.is_file() and output.stat().st_size > 0:
+        return True
     command = str(ffmpeg or "ffmpeg")
     output.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -512,146 +508,6 @@ def extract_frame(path: Path, timestamp: float, output: Path, *,
     except (OSError, subprocess.SubprocessError):
         return False
     return output.is_file() and output.stat().st_size > 0
-
-
-def batch_extract_enabled() -> bool:
-    return str(os.environ.get("JY_FRAME_BATCH", "1")).strip() != "0"
-
-
-def extract_frames_batch(
-    path: Path,
-    requests: Iterable[tuple[float, Path]],
-    *,
-    ffmpeg: str | None = None,
-    timeout: float | None = None,
-    match_tol_s: float = 0.20,
-) -> list[bool]:
-    """一次解码抽出多个时刻的 jpeg。
-
-    ``requests`` 是 ``(timestamp_sec, output_path)`` 列表，返回与之等长的成功标志。
-    用 ``select=lt(prev_pts*TB\,T)*gte(pts*TB\,T)`` 在每个目标时刻取第一帧，
-    再靠 showinfo 的 pts_time 对齐输出文件。对不上的时刻回退单点 ``extract_frame``。
-
-    关闭：``JY_FRAME_BATCH=0``。单帧请求直接走 ``extract_frame``。
-    ``-fps_mode vfr`` 失败且工作目录没有输出时，改试旧版 ``-vsync vfr``，
-    仍失败再逐帧回退。
-    """
-    items = [(round(max(0.0, float(ts)), 3), Path(out)) for ts, out in requests]
-    if not items:
-        return []
-    if len(items) == 1 or not batch_extract_enabled():
-        return [extract_frame(path, ts, out, ffmpeg=ffmpeg) for ts, out in items]
-
-    # De-dupe identical timestamps while keeping first output as canonical.
-    unique: list[tuple[float, Path]] = []
-    seen: set[float] = set()
-    for ts, out in items:
-        out.parent.mkdir(parents=True, exist_ok=True)
-        if ts in seen:
-            continue
-        seen.add(ts)
-        unique.append((ts, out))
-    unique.sort(key=lambda row: row[0])
-
-    command = str(ffmpeg or "ffmpeg")
-    select = "+".join(
-        f"lt(prev_pts*TB\\,{ts:.3f})*gte(pts*TB\\,{ts:.3f})" for ts, _ in unique
-    )
-    work = unique[0][1].parent / f".batch_{os.getpid()}_{unique[0][1].stem}"
-    try:
-        if work.exists():
-            for stale in work.glob("*"):
-                try:
-                    stale.unlink()
-                except OSError:
-                    pass
-        work.mkdir(parents=True, exist_ok=True)
-        pattern = work / "f_%04d.jpg"
-        wait = float(timeout) if timeout is not None else max(60.0, 12.0 * len(unique))
-        # FFmpeg 9 dropped ``-vsync``; ``-fps_mode vfr`` is the replacement.
-        # Older builds still accept ``-vsync`` — try modern flag first.
-        base_cmd = [command, "-y", "-hide_banner", "-nostdin",
-                    "-i", str(path),
-                    "-vf", f"select='{select}',showinfo"]
-        proc = None
-        last_exc: Exception | None = None
-        for vfr_flag in (["-fps_mode", "vfr"], ["-vsync", "vfr"]):
-            # 上一次失败留下的半成品不能算「已经抽出」，否则会跳过下一条旗标。
-            for stale in list(work.glob("f_*.jpg")):
-                try:
-                    stale.unlink()
-                except OSError:
-                    pass
-            try:
-                proc = run_ffmpeg_decode(
-                    base_cmd + vfr_flag + ["-q:v", "2", str(pattern)],
-                    capture_output=True, text=True, encoding="utf-8",
-                    errors="replace", timeout=wait)
-                # Path.glob 返回生成器，布尔值恒为真。空目录必须用 any()
-                # 才会改试下一条 vfr 旗标（新 ffmpeg 的 -fps_mode，旧版的 -vsync）。
-                if proc.returncode == 0 or any(work.glob("f_*.jpg")):
-                    break
-            except (OSError, subprocess.SubprocessError, ValueError) as exc:
-                last_exc = exc
-                proc = None
-                continue
-        if proc is None:
-            if last_exc is not None:
-                raise last_exc
-            return [extract_frame(path, ts, out, ffmpeg=ffmpeg) for ts, out in items]
-    except (OSError, subprocess.SubprocessError, ValueError):
-        return [extract_frame(path, ts, out, ffmpeg=ffmpeg) for ts, out in items]
-
-    written = sorted(work.glob("f_*.jpg"))
-    pts = [round(float(v), 3) for v in _PTS_TIME_RE.findall(proc.stderr or "")]
-    # showinfo may emit more lines than files if some encodes failed; zip tightly.
-    produced = list(zip(pts, written))
-    assigned: dict[float, Path] = {}
-    used_files: set[Path] = set()
-    for ts, _canonical in unique:
-        best = None
-        best_delta = None
-        for pts_t, file_path in produced:
-            if file_path in used_files:
-                continue
-            delta = abs(pts_t - ts)
-            if delta > match_tol_s:
-                continue
-            if best_delta is None or delta < best_delta:
-                best = file_path
-                best_delta = delta
-        if best is None:
-            continue
-        used_files.add(best)
-        assigned[ts] = best
-
-    # Map unique timestamps back onto every request (including duplicates).
-    ok_flags: list[bool] = []
-    for ts, out in items:
-        src = assigned.get(ts)
-        if src is None:
-            ok_flags.append(extract_frame(path, ts, out, ffmpeg=ffmpeg))
-            continue
-        try:
-            if out.exists() and out.resolve() != src.resolve():
-                out.unlink()
-            if src.resolve() != out.resolve():
-                # Copy rather than rename so duplicate timestamps can share source.
-                out.write_bytes(src.read_bytes())
-            ok_flags.append(out.is_file() and out.stat().st_size > 0)
-        except OSError:
-            ok_flags.append(extract_frame(path, ts, out, ffmpeg=ffmpeg))
-
-    try:
-        for leftover in work.glob("*"):
-            try:
-                leftover.unlink()
-            except OSError:
-                pass
-        work.rmdir()
-    except OSError:
-        pass
-    return ok_flags
 
 
 def _boundaries_us(duration_us: int, scene_times: Iterable[float], *,
@@ -718,6 +574,34 @@ def analyze_manifest(manifest: dict[str, Any], base_dir: Path, report_dir: Path,
     report_dir.mkdir(parents=True, exist_ok=True)
     frame_dir = report_dir / "temporary_shot_frames"
     existing = manifest.get("shot_analysis") if isinstance(manifest.get("shot_analysis"), (dict, list)) else None
+    # Formal retries already carry cut+described shots. Re-running scene detect
+    # across hundreds of NAS videos blocks the queue for hours; reuse windows
+    # and let enrich_with_vision fill only cache misses.
+    prior_rows: list[dict[str, Any]] = []
+    if isinstance(existing, dict):
+        prior_rows = [row for row in (existing.get("shots") or []) if isinstance(row, dict)]
+    elif isinstance(existing, list):
+        prior_rows = [row for row in existing if isinstance(row, dict)]
+    reusable_prior = [
+        row for row in prior_rows
+        if str(row.get("video") or "").strip()
+        and row.get("source_end") is not None
+        and row.get("source_start") is not None
+    ]
+    if reusable_prior:
+        prompt = build_analysis_prompt(manifest, reusable_prior)
+        result = {
+            "version": _skill_version(), "scope": "task_local",
+            "sources": [str(path) for path in manifest_sources(manifest, base_dir)],
+            "shots": reusable_prior, "issues": [], "pending_items": [],
+            "analysis_prompt": prompt, "library_write": [],
+            "ok": bool(reusable_prior),
+            "reused_shot_analysis": True,
+        }
+        (report_dir / "shot_candidates.json").write_text(
+            json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        (report_dir / "shot_analysis_prompt.md").write_text(prompt, encoding="utf-8")
+        return result
     old = _existing_shot_map(existing)
     shots: list[dict[str, Any]] = []
     issues: list[dict[str, Any]] = []
