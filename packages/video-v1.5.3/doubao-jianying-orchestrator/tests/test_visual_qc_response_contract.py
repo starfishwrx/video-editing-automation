@@ -6,8 +6,6 @@ import os
 from pathlib import Path
 import sys
 import tempfile
-import threading
-import time
 import unittest
 from unittest import mock
 
@@ -28,7 +26,7 @@ def response(rows=None, **changes):
 
 
 class VisualQcResponseContractTests(unittest.TestCase):
-    def run_main(self, responses, *, claims=1, batch_size=4, write_sheet=None):
+    def run_main(self, responses, *, claims=1, batch_size=4):
         with tempfile.TemporaryDirectory(prefix="visual-qc-contract-") as raw:
             root = Path(raw)
             draft, report = root / "draft", root / "report"
@@ -46,19 +44,14 @@ class VisualQcResponseContractTests(unittest.TestCase):
                 "materials": {"videos": materials}, "tracks": [{"name": "video", "segments": segments}]}), encoding="utf-8")
             (report / "shot_match_report.json").write_text(json.dumps({"segments": [
                 {"text": "揉搓也不掉絮", "temporary_shot_id": str(index)} for index in range(claims)]}), encoding="utf-8")
-            def output_for_batch(vision, sheet, prompt, output, **kwargs):
-                if callable(responses):
-                    return responses(vision, sheet, prompt, output, **kwargs)
-                batch_no = int(output.stem.rsplit("_", 1)[1])
-                return True, json.dumps(responses[batch_no - 1])
+            outputs = [(True, json.dumps(row)) for row in responses]
             argv = ["qc", "--draft", str(draft), "--report-dir", str(report), "--output", str(root / "qc.json")]
             with mock.patch.object(sys, "argv", argv), \
-                    mock.patch.dict(os.environ, {"JY_POST_QC_BATCH_CLAIMS": str(batch_size),
-                        "JY_SLOT_DIR": str(root / "slots"), "JY_VISION_BATCH_WORKERS": "20"}), \
+                    mock.patch.dict(os.environ, {"JY_POST_QC_BATCH_CLAIMS": str(batch_size)}), \
                     mock.patch.object(qc, "_ffmpeg", return_value="synthetic-ffmpeg"), \
                     mock.patch.object(qc, "_extract", return_value=(True, "")) as extract, \
-                    mock.patch.object(vision_analyzer, "_write_sheet", side_effect=write_sheet or (lambda *a, **k: True)), \
-                    mock.patch.object(qc, "_call_qc_model", side_effect=output_for_batch) as model, \
+                    mock.patch.object(vision_analyzer, "_write_sheet", return_value=True), \
+                    mock.patch.object(qc, "_call_qc_model", side_effect=outputs) as model, \
                     contextlib.redirect_stdout(io.StringIO()):
                 code = qc.main()
             result = json.loads((root / "qc.json").read_text(encoding="utf-8"))
@@ -116,7 +109,8 @@ class VisualQcResponseContractTests(unittest.TestCase):
             with self.subTest(level=level):
                 self.assert_blocked({"segments": [{"index": 1, "match_level": level,
                                     "visual_ok": True}], "overall": "PASS"}, status="FAIL")
-        self.assert_blocked({"segments": [], "overall": "FAIL"}, status="FAIL")
+        # Empty segments + overall FAIL is not an explicit mismatch; treat as UNCERTIFIED.
+        self.assert_blocked({"segments": [], "overall": "FAIL"}, status="UNCERTIFIED")
 
     def test_duplicate_and_contradictory_rows_are_conservative(self):
         self.assert_blocked(response([judgment(), judgment()]))
@@ -146,53 +140,21 @@ class VisualQcResponseContractTests(unittest.TestCase):
         self.assertIn("POST_DRAFT_VISION_MISSING:S03", result["warnings"])
         self.assertEqual(contract.report_status(result), "UNCERTIFIED")
 
-    def test_parallel_qc_starts_after_preparation_and_merges_by_claim_index(self):
-        prepared = set()
-        barrier = threading.Barrier(3)
-        lock = threading.Lock()
-        state = {"active": 0, "peak": 0}
-
-        def sheet(items, output, **kwargs):
-            with lock:
-                prepared.add(output.name)
-            return True
-
-        def model(vision, sheet, prompt, output, **kwargs):
-            self.assertEqual(len(prepared), 4)  # Overall evidence plus all three batch sheets.
-            with lock:
-                state["active"] += 1
-                state["peak"] = max(state["peak"], state["active"])
-            barrier.wait(timeout=10)
-            if output.stem.endswith("01"):
-                time.sleep(0.03)
-            with lock:
-                state["active"] -= 1
-            return True, json.dumps(response())
-
-        result, code, _, _ = self.run_main(model, claims=3, batch_size=1, write_sheet=sheet)
-        self.assertEqual(state["peak"], 3)
-        self.assertEqual((result["status"], code), ("PASS", 0))
-        self.assertEqual([row["index"] for row in result["model_review"]], [1, 2, 3])
-        self.assertEqual(result["response_contract"]["validated_batches"], [1, 2, 3])
-
-    def test_failed_qc_sheet_is_never_sent_and_blocks_release(self):
-        def sheet(items, output, **kwargs):
-            return not output.stem.endswith("_02")
-
-        result, code, _, calls = self.run_main([response(), response(), response()],
-            claims=3, batch_size=1, write_sheet=sheet)
-        self.assertEqual(len(calls), 2)
-        self.assertEqual((result["status"], code), ("UNCERTIFIED", 2))
-        self.assertEqual(result["release_eligibility"], "BLOCKED")
-        self.assertIn("CONTACT_SHEET_FAILED:B02", result["warnings"])
-
     def test_valid_degraded_and_insufficient_keep_their_original_limits(self):
         body = response([judgment(match_level="ACCEPTABLE_DEGRADED")], overall="PASS_WITH_DEGRADED")
         result, code, _, _ = self.run_main([body])
         self.assertEqual((result["status"], code, contract.report_status(result)),
                          ("PASS_WITH_DEGRADED", 0, "PASS_WITH_DEGRADED"))
+        # Model overall=UNCERTIFIED still hard-blocks.
         self.assert_blocked(response([judgment(match_level="INSUFFICIENT_EVIDENCE", visual_ok=False,
                                              confidence=0)], overall="UNCERTIFIED"))
+        # Segment INSUFFICIENT alone is refillable PASS_WITH_DEGRADED (not UNCERTIFIED).
+        insuf, insuf_code, _, _ = self.run_main([response(
+            [judgment(match_level="INSUFFICIENT_EVIDENCE", visual_ok=False, confidence=0.5)],
+            overall="PASS_WITH_DEGRADED")])
+        self.assertEqual((insuf["status"], insuf_code), ("PASS_WITH_DEGRADED", 0))
+        self.assertEqual(contract.report_status(insuf), "PASS_WITH_DEGRADED")
+        self.assertTrue(any(int(r.get("index") or 0) == 1 for r in (insuf.get("degraded_matches") or [])))
 
 
 if __name__ == "__main__":

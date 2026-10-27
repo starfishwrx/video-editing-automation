@@ -31,7 +31,6 @@ class AIEditorQCIntegrationTests(unittest.TestCase):
         (self.report / "shot_candidates.json").write_text(json.dumps({"shots": [self.fixture.shot]}), encoding="utf-8")
         (self.draft / "ai_selection_identity.json").write_text(json.dumps({
             "schema": "chatcut-ai-draft-v1", "selection_mode": "ai_editor",
-            "editorial_rules": contract.rules_identity(self.match["manifest"]), "policy_version": contract.POLICY_VERSION,
             "selection_sha256": contract.digest(self.match["segments"])}), encoding="utf-8")
         info = {"duration": 2000000, "materials": {"videos": [{"id": "v1", "path": str(self.fixture.video)}]},
             "tracks": [{"type": "video", "segments": [{"material_id": "v1",
@@ -85,7 +84,7 @@ class AIEditorQCIntegrationTests(unittest.TestCase):
         import batch_worker
         ok, message = batch_worker.validate_visual_match(self.report)
         self.assertTrue(ok, message)
-        self.match["segments"][0]["ai_selection"]["observation"] = ""
+        self.match["segments"][0]["ai_selection"]["observation"] = "changed"
         (self.report / "shot_match_report.json").write_text(json.dumps(self.match), encoding="utf-8")
         ok, message = batch_worker.validate_visual_match(self.report)
         self.assertFalse(ok, message)

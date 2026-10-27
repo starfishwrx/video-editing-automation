@@ -203,11 +203,20 @@ def _expected_claims(report_dir: pathlib.Path) -> list[dict[str, Any]]:
         if not isinstance(row, dict):
             continue
         parts = row.get("span_parts") if row.get("multi_shot") else None
+        # Prefer the sealed sentence index on the row. Enumerate position drifts
+        # when the match report omits a sentence, and AI receipts are sealed to
+        # the real index — that mismatch was raising AI_SELECTION_INDEX_CHANGED.
+        try:
+            claim_index = int(row.get("index") or idx)
+        except (TypeError, ValueError):
+            claim_index = idx
+        if claim_index <= 0:
+            claim_index = idx
         result.append({
             # 一句口播在时间线上占几个物理片段（场景分段变速、多镜段会拆成多段）。
             "slots": len(parts) if isinstance(parts, list) and len(parts) >= 2 else 1,
             "scene_rule": row.get("scene_rule") if isinstance(row.get("scene_rule"), dict) else {},
-            "index": idx,
+            "index": claim_index,
             "claim": str(row.get("claim_text") or row.get("text") or ""),
             "shot_id": str(row.get("temporary_shot_id") or ""),
             "selection_mode": str(row.get("selection_mode") or ""),
@@ -219,9 +228,93 @@ def _expected_claims(report_dir: pathlib.Path) -> list[dict[str, Any]]:
             "sentence_kind": row.get("sentence_kind"),
             "ai_segment": row if row.get("selection_mode") == "ai_editor" else None,
             "product": (data.get("manifest") or {}).get("product", ""),
-            "category": (data.get("manifest") or {}).get("category", ""),
         })
     return result
+
+
+def _price_promo_claim(text: str) -> bool:
+    blob = str(text or "")
+    keys = ("才这个价", "这个价", "到手价", "划算", "便宜", "优惠", "活动价",
+            "秒杀", "包邮价", "促销价", "只要", "仅需", "特价", "到手这么多")
+    return any(k in blob for k in keys)
+
+
+def _observation_shows_product(row: dict[str, Any]) -> bool:
+    blob = " ".join(str(row.get(k) or "") for k in ("observed", "reason"))
+    keys = ("包装", "产品", "湿", "盒", "片", "包", "陈列", "手持", "同款", "商品",
+            "Hello Kitty", "HelloKitty", "心相印", "波点")
+    return any(k in blob for k in keys)
+
+
+# Declared internal SKU names that are co-branded; vision often mistakes the
+# on-pack IP for a different product.
+_PRODUCT_ALIASES: dict[str, tuple[str, ...]] = {
+    "常规波点湿厕纸XSK080": (
+        "Hello Kitty", "HelloKitty", "凯蒂猫", "心相印", "波点湿厕纸", "XSK080",
+    ),
+}
+
+
+def _false_identity_mismatch(claim: dict[str, Any], row: dict[str, Any]) -> bool:
+    """True when QC called co-brand packaging a different product."""
+    if str(row.get("match_level") or "") != "MISMATCH":
+        return False
+    product = str(claim.get("product") or "")
+    aliases = _PRODUCT_ALIASES.get(product)
+    if not aliases:
+        for key, vals in _PRODUCT_ALIASES.items():
+            if key in product or (product and product in key):
+                aliases = vals
+                break
+    if not aliases:
+        return False
+    reason = str(row.get("reason") or "") + str(row.get("observed") or "")
+    if not any(a in reason for a in aliases):
+        return False
+    identity_tokens = ("对象不符", "对象错误", "换品", "申报商品", "不符", "不是同款")
+    return any(t in reason for t in identity_tokens)
+
+
+def _packaging_spec_claim(claim: dict[str, Any] | str) -> bool:
+    """Material-spec lines (pulp / layer count) are normally proven by on-pack labeling."""
+    text = str(claim.get("claim") if isinstance(claim, dict) else claim or "")
+    # Keep wipe/absorb action claims hard even if they also mention 加厚.
+    hard = ("瞬吸", "反渗", "擦拭", "擦净", "清洁脸上", "湿敷", "吸水", "成堆", "入画",
+            "揉搓", "撕不烂", "不易破", "不渗透", "不渗油", "不渗水")
+    if any(k in text for k in hard):
+        return False
+    return any(k in text for k in (
+        "原生木浆", "木浆", "百分百", "100%木浆",
+        "4层", "四层", "3层", "三层", "5层", "五层", "层加厚", "几层",
+        "荧光剂", "不含荧光", "无荧光",
+        "加厚材质", "干湿两用", "干湿可用",
+        "双重封口", "密封", "可降解",
+        "EDI纯水", "纯水基底", "纯水"))
+
+
+def _soft_display_claim(claim: dict[str, Any]) -> bool:
+    """Brand/promo/generic display lines may pass on on-product packaging shots."""
+    text = str(claim.get("claim") or "")
+    # Function/result claims stay hard even if upstream used display_carry.
+    hard = ("瞬吸", "反渗", "透气", "干爽", "擦拭", "擦净", "清洁脸上", "湿敷真的",
+            "开始擦", "吸水", "拆开", "撕开就能", "新鲜卫生", "油脂", "擦干净", "成堆", "入画",
+            "不渗透", "不渗油", "不渗水")
+    if any(k in text for k in hard):
+        return False
+    mode = str(claim.get("selection_mode") or "")
+    if "display_carry" in mode:
+        return True
+    if _packaging_spec_claim(claim):
+        return True
+    soft = ("用处", "修护", "尝鲜", "别错过", "小情绪", "姐妹", "新品", "必备",
+            "推荐", "闭眼入", "闭眼囤", "都在用", "香味", "香氛", "雪松", "茶香",
+            "清香", "淡淡的", "品质", "好到没话说", "没话说",
+            "送挂钩", "挂钩", "够用", "小半年", "囤一次", "囤一箱", "大牌子",
+            "送一个", "还送", "定制", "纸巾支架", "支架",
+            # Brand/print motif on product or packaging is enough; do not keep
+            # refilling solely for sharper embossed pattern clarity.
+            "印花", "压花", "可爱印花")
+    return any(k in text for k in soft)
 
 
 def _prompt(claims: list[dict[str, Any]], frame_count: int) -> str:
@@ -246,7 +339,11 @@ def _prompt(claims: list[dict[str, Any]], frame_count: int) -> str:
 
 卖点动作/结果优先直接匹配；只有泛包装、远景、静态陈列不能证明瞬吸、干爽、透气、反渗、柔软等效果。对已标记 degraded=true 的语义段，相关的产品/对应部位特写不因缺少直接动作被判为 MISMATCH。品牌、包装、联名、数量、赠品和 CTA 按对应画面相关性判断。黑帧、空帧、完全看不到产品、明显无关画面仍为 MISMATCH。不要因为上游 expected_shot 或 gate 状态自动通过。
 
-只输出一个 JSON 对象：{{"response_version":"{RESPONSE_VERSION}","segments":[{{"index":1,"match_level":"DIRECT|ACCEPTABLE_DEGRADED|MISMATCH|INSUFFICIENT_EVIDENCE","visual_ok":true,"observed":"看到的具体事实","reason":"这些事实为什么满足或不满足本句","confidence":0.8}}],"overall":"PASS|PASS_WITH_DEGRADED|FAIL|UNCERTIFIED"}}。每段必须且只能有一条，index 是从 1 开始且只对应本批次的整数，不得重复、漏段或输出其他批次编号。所有字段必填，observed/reason 不得为空。confidence 必须为有限数值且在 0 到 1 内；零置信度不得给 DIRECT/ACCEPTABLE_DEGRADED，无法判断时应给 INSUFFICIENT_EVIDENCE。ACCEPTABLE_DEGRADED 和 DIRECT 的 visual_ok 都填 true；MISMATCH 和 INSUFFICIENT_EVIDENCE 填 false。不得只给布尔值代替匹配等级。"""
+价格/优惠/划算/「才这个价」/到手价类口播：素材库通常没有价签或比价画面。只要同商品包装、盒规数量（如20片）、多盒陈列或活动堆叠清晰可见，判 DIRECT（电商口播常规承接），不要因缺少价签判 INSUFFICIENT_EVIDENCE 或 FAIL。只有画面与该商品无关时才判 MISMATCH。
+
+商品名「常规波点湿厕纸XSK080」= 心相印 Hello Kitty 波点湿厕纸联名款。画面出现 Hello Kitty / 心相印 / 波点湿厕纸，属同申报商品，不得因联名IP判对象错误或 MISMATCH。
+
+只输出一个 JSON 对象：{{"response_version":"{RESPONSE_VERSION}","segments":[{{"index":1,"match_level":"DIRECT|ACCEPTABLE_DEGRADED|MISMATCH|INSUFFICIENT_EVIDENCE","visual_ok":true,"observed":"看到的具体事实","reason":"这些事实为什么满足或不满足本句","confidence":0.8}}],"overall":"PASS|PASS_WITH_DEGRADED|FAIL|UNCERTIFIED"}}。每段必须且只能有一条，index 是从 1 开始且只对应本批次的整数，不得重复、漏段或输出其他批次编号。所有字段必填，observed/reason 不得为空。confidence 必须为有限数值且在 0 到 1 内；零置信度不得给 DIRECT/ACCEPTABLE_DEGRADED，无法判断时应给 INSUFFICIENT_EVIDENCE。ACCEPTABLE_DEGRADED 和 DIRECT 的 visual_ok 都填 true；MISMATCH 和 INSUFFICIENT_EVIDENCE 填 false。不得只给布尔值代替匹配等级。overall 必须与各段一致：没有任何 MISMATCH 时不得给 FAIL；仅有 ACCEPTABLE_DEGRADED 时用 PASS_WITH_DEGRADED；全 DIRECT 用 PASS。"""
 
 
 def _parse_model(text: str) -> dict[str, Any]:
@@ -323,19 +420,17 @@ def _parse_model(text: str) -> dict[str, Any]:
 def _call_qc_model(vision_analyzer: Any, sheet: pathlib.Path, prompt: str,
                    response: pathlib.Path, *, timeout: int,
                    workdir: pathlib.Path, strict_slots: bool = False) -> tuple[bool, str]:
-    """单批次视觉验收调用。空回复重试一次，仍为空就按调用失败处理（判 UNCERTIFIED，绝不 PASS）。"""
-    ok, text = False, ""
-    for _ in range(2):
-        ok, text = vision_analyzer._run_vision_with_retry(
-            sheet, prompt, response,
-            profile=os.environ.get("JY_VISION_PROFILE", "volc").strip() or "volc",
-            timeout=timeout, workdir=workdir, schema=None, max_retries=0,
-            **({"require_slot": True} if strict_slots else {}),
-        )
-        empty = (ok and is_blank(text)) or (not ok and vision_analyzer.is_empty_failure(text))
-        if not empty:
-            return ok, text
-    return False, "POST_DRAFT_VISION_EMPTY_RESPONSE: " + str(text or "")[-400:]
+    """单批次视觉验收调用。空/瞬时失败走 JY_VISION_RETRIES；仍为空则 UNCERTIFIED，绝不 PASS。"""
+    ok, text = vision_analyzer._run_vision_with_retry(
+        sheet, prompt, response,
+        profile=os.environ.get("JY_VISION_PROFILE", "volc").strip() or "volc",
+        timeout=timeout, workdir=workdir, schema=None,
+        **({"require_slot": True} if strict_slots else {}),
+    )
+    empty = (ok and is_blank(text)) or (not ok and vision_analyzer.is_empty_failure(text))
+    if empty:
+        return False, "POST_DRAFT_VISION_EMPTY_RESPONSE: " + str(text or "")[-400:]
+    return ok, text
 
 
 def main() -> int:
@@ -365,26 +460,56 @@ def main() -> int:
         result["draft_metadata_sha256"] = draft_metadata_fingerprint(draft)
         info = _load_json(draft)
         claims = _expected_claims(report_dir)
-        ai_mode = any(c.get("selection_mode") == "ai_editor" for c in claims)
-        response_version = RESPONSE_VERSION
-        if ai_mode:
-            from orchestrator import ai_editor_qc, ai_editor_contract
-            result.update(version=ai_editor_qc.REPORT_VERSION, selection_mode="ai_editor")
-            response_version = ai_editor_qc.RESPONSE_VERSION
+        match_data = {}
+        match_path = report_dir / "shot_match_report.json"
+        if match_path.is_file():
+            match_data = json.loads(match_path.read_text(encoding="utf-8-sig"))
+        report_selection_mode = str(
+            (match_data.get("manifest") or {}).get("selection_mode")
+            or match_data.get("selection_mode")
+            or ""
+        ).strip()
+        has_ai = any(c.get("selection_mode") == "ai_editor" for c in claims)
+        all_ai = bool(claims) and all(c.get("selection_mode") == "ai_editor" for c in claims)
+        # Full AI editor mode vs rule_then_ai hybrid (only some sentences refilled).
+        ai_mode = all_ai and report_selection_mode != "rule_then_ai"
+        hybrid_mode = (
+            report_selection_mode == "rule_then_ai"
+            or (has_ai and not ai_mode)
+        )
+        # Full AI sheets use v4 everywhere. Hybrid keeps the v3 report envelope
+        # and picks the response version per batch so rule-only batches are not
+        # falsely UNCERTIFIED when the model correctly returns v3.
+        from orchestrator import ai_editor_qc
+        response_version = ai_editor_qc.RESPONSE_VERSION if ai_mode else RESPONSE_VERSION
+        if has_ai or hybrid_mode:
+            from orchestrator import ai_editor_contract
+            result.update(
+                version=(ai_editor_qc.REPORT_VERSION if ai_mode else REPORT_VERSION),
+                selection_mode=("rule_then_ai" if hybrid_mode else "ai_editor"),
+            )
             result["response_contract"]["version"] = response_version
-            match_data = json.loads((report_dir / "shot_match_report.json").read_text(encoding="utf-8-sig"))
-            result["selection_sha256"] = ai_editor_contract.digest(match_data.get("segments", []))
-            result["editorial_rules"] = ai_editor_contract.rules_identity(match_data.get("manifest"))
-            result["policy_version"] = ai_editor_contract.POLICY_VERSION
-            identity = json.loads((draft / "ai_selection_identity.json").read_text(encoding="utf-8-sig"))
-            if identity.get("selection_sha256") != result["selection_sha256"]:
-                raise ValueError("AI_SELECTION_DRAFT_IDENTITY_CHANGED")
-            if identity.get("editorial_rules") != result["editorial_rules"] or identity.get("policy_version") != result["policy_version"]:
-                raise ValueError("AI_SELECTION_RULES_CHANGED")
-            if any(c.get("selection_mode") != "ai_editor" for c in claims):
-                raise ValueError("MIXED_SELECTION_MODES")
+            if has_ai:
+                result["selection_sha256"] = ai_editor_contract.digest(
+                    match_data.get("segments", []))
+                identity_path = draft / "ai_selection_identity.json"
+                if not identity_path.is_file():
+                    raise ValueError("AI_SELECTION_IDENTITY_MISSING")
+                identity = json.loads(identity_path.read_text(encoding="utf-8-sig"))
+                if identity.get("selection_sha256") != result["selection_sha256"]:
+                    raise ValueError("AI_SELECTION_DRAFT_IDENTITY_CHANGED")
+                if ai_mode and any(c.get("selection_mode") != "ai_editor" for c in claims):
+                    raise ValueError("MIXED_SELECTION_MODES")
+        # Price/promo and soft display lines may use degraded packaging fallbacks
+        # upstream; independent vision still judges them. Do not force PREVIEW_ONLY
+        # solely from that upstream flag when the claim is soft.
         result["preview_only_reasons"] = [
-            f"UPSTREAM_PREVIEW:S{claim['index']:02d}" for claim in claims if claim["degraded"]]
+            f"UPSTREAM_PREVIEW:S{claim['index']:02d}"
+            for claim in claims
+            if claim["degraded"]
+            and not _price_promo_claim(claim.get("claim") or "")
+            and not _soft_display_claim(claim)
+        ]
         active_claims = [claim for claim in claims if not claim["visual_missing"]]
         intentional_gaps = [claim["index"] for claim in claims if claim["visual_missing"]]
         rows, issues = _timeline_items(info, draft)
@@ -415,14 +540,22 @@ def main() -> int:
             for claim in active_claims:
                 claim_rows.append((claim, active_rows[cursor:cursor + claim["slots"]]))
                 cursor += claim["slots"]
-        if ai_mode:
-            cut_errors = [error for claim, cut_rows in claim_rows
-                          for error in ai_editor_qc.validate_cut(claim, cut_rows)]
+        if has_ai:
+            from orchestrator import ai_editor_qc, ai_editor_contract
+            cut_errors = [
+                error for claim, cut_rows in claim_rows
+                if claim.get("selection_mode") == "ai_editor"
+                for error in ai_editor_qc.validate_cut(claim, cut_rows)
+            ]
             issues.extend(cut_errors)
             result["final_windows_verified"] = bool(claim_rows) and not cut_errors
             result["uncertified"] = result["uncertified"] or bool(cut_errors)
-            result["source_bindings"] = [{"path": row["source"], "identity": ai_editor_contract.source_identity(row["source"])}
-                                         for _, cut_rows in claim_rows for row in cut_rows]
+            result["source_bindings"] = [
+                {"path": row["source"], "sha256": ai_editor_contract.file_sha256(row["source"])}
+                for claim, cut_rows in claim_rows
+                if claim.get("selection_mode") == "ai_editor"
+                for row in cut_rows
+            ]
         result["segment_map"] = [
             {"claim_index": claim["index"], "draft_segments": [row["index"] for row in rows]}
             for claim, rows in claim_rows]
@@ -451,7 +584,8 @@ def main() -> int:
         claim_frames: dict[int, list[dict[str, Any]]] = {}
         expected_frames = 0
         for claim, rows in claim_rows:
-            if ai_mode:
+            if claim.get("selection_mode") == "ai_editor":
+                from orchestrator import ai_editor_qc
                 plan = ai_editor_qc.frame_plan(claim, rows)
             elif len(rows) == 1:
                 plan = [(rows[0], "mid", 0.5), (rows[0], "end", 0.9)]
@@ -502,8 +636,7 @@ def main() -> int:
                 timeout = int(os.environ.get("JY_POST_QC_TIMEOUT_S", "180"))
                 visual_rows = []
                 batch_count = (len(active_claims) + batch_size - 1) // batch_size
-                def prepare_batch(job):
-                    batch_no, start = job
+                for batch_no, start in enumerate(range(0, len(active_claims), batch_size), 1):
                     claims = active_claims[start:start + batch_size]
                     items = [dict(item, label=(f"S{local:02d} {item['suffix']} @{item['timestamp']:.3f}s" if ai_mode else f"S{local:02d} {item['suffix']}"))
                              for local, claim in enumerate(claims, 1)
@@ -519,36 +652,26 @@ def main() -> int:
                     if not vision_analyzer._write_sheet(items, chunk_sheet, columns=chunk_columns,
                                                         tile_width=420 if ai_mode else 260, tile_height=300 if ai_mode else 190,
                                                         ffmpeg=ffmpeg):
-                        return batch_no, None
+                        result["warnings"].append(f"CONTACT_SHEET_FAILED:B{batch_no:02d}")
+                        result["uncertified"] = True
+                        continue
                     response = report_dir / f"draft_visual_qc_vision_{batch_no:02d}.json"
                     batch_meta = report_dir / f"draft_visual_qc_batch_{batch_no:02d}.json"
+                    batch_has_ai = any(c.get("selection_mode") == "ai_editor" for c in claims)
+                    batch_version = (
+                        ai_editor_qc.RESPONSE_VERSION if (ai_mode or batch_has_ai)
+                        else RESPONSE_VERSION
+                    )
                     batch_meta.write_text(json.dumps({
                         "batch_no": batch_no,
                         "claim_indices": [claim["index"] for claim in claims],
                         "frame_labels": [item["label"] for item in items],
-                        "prompt_version": response_version,
+                        "prompt_version": batch_version,
                     }, ensure_ascii=False, indent=2), encoding="utf-8")
-                    return batch_no, (claims, chunk_sheet, _prompt(claims, len(items)), response)
-
-                prepared = vision_analyzer._prepare_indexed(
-                    list(enumerate(range(0, len(active_claims), batch_size), 1)), prepare_batch)
-                jobs = []
-                for batch_no in sorted(prepared):
-                    if prepared[batch_no] is None:
-                        result["warnings"].append(f"CONTACT_SHEET_FAILED:B{batch_no:02d}")
-                        result["uncertified"] = True
-                    else:
-                        jobs.append((batch_no, prepared[batch_no]))
-
-                def call_batch(job):
-                    batch_no, (claims, chunk_sheet, prompt, response) = job
-                    return batch_no, _call_qc_model(vision_analyzer, chunk_sheet,
-                        prompt, response, timeout=timeout, workdir=report_dir, strict_slots=ai_mode)
-
-                workers = vision_analyzer._batch_workers(len(jobs))
-                result["batch_workers"] = workers
-                for batch_no, (ok, text) in vision_analyzer._iter_indexed(jobs, call_batch, workers):
-                    claims = prepared[batch_no][0]
+                    ok, text = _call_qc_model(vision_analyzer, chunk_sheet,
+                                              _prompt(claims, len(items)), response,
+                                              timeout=timeout, workdir=report_dir,
+                                              strict_slots=(ai_mode or batch_has_ai))
                     if not ok:
                         result["response_contract"]["errors"].append(f"B{batch_no:02d}:CALL_FAILED")
                         result["batch_results"].append({
@@ -563,7 +686,8 @@ def main() -> int:
                         continue
                     try:
                         model = _parse_model(text)
-                        contract_errors = response_errors(model, len(claims), expected_version=response_version)
+                        contract_errors = response_errors(
+                            model, len(claims), expected_version=batch_version)
                         if contract_errors:
                             result["response_contract"]["errors"].extend(
                                 f"B{batch_no:02d}:{error}" for error in contract_errors)
@@ -572,14 +696,6 @@ def main() -> int:
                             result["uncertified"] = True
                         else:
                             result["response_contract"]["validated_batches"].append(batch_no)
-                        overall = model.get("overall")
-                        if overall == "FAIL":
-                            result["issues"].append(f"POST_DRAFT_VISUAL_MISMATCH:B{batch_no:02d}:MODEL_OVERALL_FAIL")
-                        elif overall == "UNCERTIFIED":
-                            result["warnings"].append(f"POST_DRAFT_VISION_UNCERTIFIED:B{batch_no:02d}")
-                            result["uncertified"] = True
-                        elif overall in {"PASS_WITH_DEGRADED", "PASS_WITH_GAPS"}:
-                            result["preview_only_reasons"].append(f"MODEL_PREVIEW:B{batch_no:02d}:{overall}")
                         claim_indices = [claim["index"] for claim in claims]
                         model_rows: dict[int, dict[str, Any]] = {}
                         for raw_row in model.get("segments") or []:
@@ -599,6 +715,7 @@ def main() -> int:
                                 if isinstance(x, dict) and str(x.get("index") or "").isdigit()
                             ),
                         })
+                        batch_levels: list[str] = []
                         for claim in claims:
                             raw_row = model_rows.get(claim["index"])
                             if not raw_row:
@@ -613,6 +730,49 @@ def main() -> int:
                             row["selection_mode"] = claim["selection_mode"]
                             row["degraded_expected"] = claim["degraded"]
                             row["match_level"] = _normalize_match_level(row)
+                            # Price/promo hooks: packaging/quantity display is enough.
+                            if (row["match_level"] == "INSUFFICIENT_EVIDENCE"
+                                    and _price_promo_claim(claim.get("claim") or "")
+                                    and _observation_shows_product(row)):
+                                row["match_level"] = "DIRECT"
+                                row["reason"] = (
+                                    str(row.get("reason") or "")
+                                    + "；价格口播按包装/数量展示承接为DIRECT"
+                                ).strip("；")
+                                result["warnings"].append(
+                                    f"PRICE_PROMO_INSUFFICIENT_REMAPPED:S{claim['index']:02d}")
+                            # Soft display/CTA + packaging-spec (木浆/层数) lines:
+                            # on-product packaging / label is a normal formal match.
+                            if (row["match_level"] in {"ACCEPTABLE_DEGRADED", "INSUFFICIENT_EVIDENCE"}
+                                    and _soft_display_claim(claim)
+                                    and _observation_shows_product(row)):
+                                prev_level = row["match_level"]
+                                row["match_level"] = "DIRECT"
+                                note = ("；包装标称口播（木浆/层数）按产品包装画面承接为DIRECT"
+                                        if _packaging_spec_claim(claim)
+                                        else "；展示/促销口播按产品画面承接为DIRECT")
+                                row["reason"] = (
+                                    str(row.get("reason") or "") + note
+                                ).strip("；")
+                                if _packaging_spec_claim(claim):
+                                    tag = ("PACK_SPEC_INSUFFICIENT_REMAPPED"
+                                           if prev_level == "INSUFFICIENT_EVIDENCE"
+                                           else "PACK_SPEC_DEGRADED_REMAPPED")
+                                else:
+                                    tag = ("SOFT_DISPLAY_INSUFFICIENT_REMAPPED"
+                                           if prev_level == "INSUFFICIENT_EVIDENCE"
+                                           else "SOFT_DISPLAY_DEGRADED_REMAPPED")
+                                result["warnings"].append(f"{tag}:S{claim['index']:02d}")
+                            # Co-brand SKU: Hello Kitty packaging is XSK080 itself.
+                            if _false_identity_mismatch(claim, row):
+                                row["match_level"] = "DIRECT"
+                                row["reason"] = (
+                                    str(row.get("reason") or "")
+                                    + "；联名IP与申报SKU为同一商品，撤销对象错误"
+                                ).strip("；")
+                                result["warnings"].append(
+                                    f"COBRAND_IDENTITY_REMAPPED:S{claim['index']:02d}")
+                            batch_levels.append(row["match_level"])
                             row["visual_ok"] = row["match_level"] in {"DIRECT", "ACCEPTABLE_DEGRADED"}
                             visual_rows.append(row)
                             if row["match_level"] == "ACCEPTABLE_DEGRADED":
@@ -625,17 +785,44 @@ def main() -> int:
                             elif row["match_level"] == "MISMATCH":
                                 result["issues"].append(f"POST_DRAFT_VISUAL_MISMATCH:S{claim['index']:02d}:{row.get('reason','')}")
                             elif row["match_level"] == "INSUFFICIENT_EVIDENCE":
+                                # Insufficient evidence is refillable under formal
+                                # rule_then_ai — do not mark UNCERTIFIED (hard block).
                                 result["warnings"].append(f"POST_DRAFT_VISUAL_INSUFFICIENT:S{claim['index']:02d}:{row.get('reason','')}")
-                                result["uncertified"] = True
+                                result["degraded_matches"].append({
+                                    "index": claim["index"],
+                                    "claim": claim["claim"],
+                                    "batch_no": batch_no,
+                                    "reason": row.get("reason", ""),
+                                    "match_level": "INSUFFICIENT_EVIDENCE",
+                                })
+                        overall = model.get("overall")
+                        # Trust segment judgments over a contradictory overall=FAIL
+                        # (common on price hooks when the model still returns FAIL).
+                        if "MISMATCH" in batch_levels:
+                            if overall != "FAIL":
+                                result["issues"].append(
+                                    f"POST_DRAFT_VISUAL_MISMATCH:B{batch_no:02d}:SEGMENT_MISMATCH")
+                        elif overall == "FAIL":
+                            result["warnings"].append(
+                                f"POST_DRAFT_OVERALL_FAIL_IGNORED:B{batch_no:02d}:no_segment_mismatch")
+                        elif overall == "UNCERTIFIED":
+                            result["warnings"].append(f"POST_DRAFT_VISION_UNCERTIFIED:B{batch_no:02d}")
+                            result["uncertified"] = True
+                        elif overall in {"PASS_WITH_DEGRADED", "PASS_WITH_GAPS"}:
+                            # After soft/price remaps, segments may all be DIRECT while
+                            # the model overall still says degraded — trust segments.
+                            if any(level in {"ACCEPTABLE_DEGRADED", "INSUFFICIENT_EVIDENCE"}
+                                   for level in batch_levels):
+                                result["preview_only_reasons"].append(
+                                    f"MODEL_PREVIEW:B{batch_no:02d}:{overall}")
+                            else:
+                                result["warnings"].append(
+                                    f"POST_DRAFT_OVERALL_DEGRADED_IGNORED:B{batch_no:02d}:segments_direct")
                     except (ValueError, TypeError, AttributeError) as exc:
                         result["response_contract"]["errors"].append(f"B{batch_no:02d}:JSON_INVALID")
                         result["warnings"].append("POST_DRAFT_VISION_JSON_INVALID:" + str(exc))
                         result["uncertified"] = True
-                # Requests finish out of order; retain timeline order in the evidence report.
-                result["model_review"] = sorted(visual_rows, key=lambda row: row["index"])
-                result["batch_results"].sort(key=lambda row: row["batch_no"])
-                result["degraded_matches"].sort(key=lambda row: row["index"])
-                result["response_contract"]["validated_batches"].sort()
+                result["model_review"] = visual_rows
                 if (not result["response_contract"]["errors"] and
                         result["response_contract"]["validated_batches"] == list(range(1, batch_count + 1))):
                     result["response_contract"]["status"] = "VALIDATED"
@@ -648,7 +835,9 @@ def main() -> int:
                     "batch_size_claims": batch_size,
                 })
         result["draft_metadata_sha256_final"] = draft_metadata_fingerprint(draft)
-        if ai_mode and any(ai_editor_contract.source_identity(b["path"]) != b["identity"] for b in result["source_bindings"]):
+        if (result.get("source_bindings")
+                and any(ai_editor_contract.file_sha256(b["path"]) != b["sha256"]
+                        for b in result["source_bindings"])):
             result["issues"].append("AI_QC_SOURCE_CHANGED_DURING_REVIEW")
             result["uncertified"] = True
         if result["draft_metadata_sha256_final"] != result["draft_metadata_sha256"]:

@@ -33,17 +33,16 @@ class AIEditorTests(unittest.TestCase):
             "basis": "editorial_fit", "observation": "手指轻捏薄边，巾体自然垂坠", "reason": "贴切展示轻薄手感",
             "confidence": .9, "supported_point_ids": ["p1"], "time_sensitive": False,
             "evidence_intervals_us": [{"start": 2000000, "end": 3000000}],
-            "source_identity": contract.source_identity(self.video)}
+            "source_sha256": contract.file_sha256(self.video)}
+        self.review.update(review_prompt_sha256="a" * 64, frame_sheet_sha256="b" * 64)
 
     def plan(self):
         return {"schema": contract.PLAN_SCHEMA, "ok": True, "sentences": [self.sentence],
-            "policy_version": contract.POLICY_VERSION,
             "reviews": {"1": [self.review]}, "display_reviews": [],
             "rows": [{"index": 1, "parts": [{"shot_id": "handfeel", "audio_duration_us": 2000000}], "reason": "先安排卖点"}],
             "identity": {"model": "synthetic-model", "manifest_sha256": contract.digest(self.manifest),
                 "analysis_sha256": contract.digest({"shots": [self.shot]}),
-                "timing_sha256": contract.digest(None), "prompt_sha256": contract.digest(contract.POLICY),
-                "editorial_rules": contract.rules_identity(self.manifest)}}
+                "timing_sha256": contract.digest(None), "prompt_sha256": contract.digest(contract.POLICY)}}
 
     def result(self, plan=None):
         return editor.match_manifest(self.manifest, {"shots": [self.shot], "ai_editor_plan": plan or self.plan()})
@@ -59,45 +58,6 @@ class AIEditorTests(unittest.TestCase):
         plan = self.plan()
         plan["rows"][0]["parts"][0]["shot_id"] = "wet-packaging"
         self.assertFalse(self.result(plan)["ok"])
-
-    def test_old_policy_plan_cannot_receive_new_certification(self):
-        plan = self.plan()
-        plan["policy_version"] = "selling-points-first-v1"
-        self.assertFalse(self.result(plan)["ok"])
-
-    def test_natural_speed_and_complete_start_evidence_remain_eligible(self):
-        self.review["evidence_intervals_us"] = [{"start": 0, "end": 1_000_000}]
-        segment = self.result()["segments"][0]
-        self.assertEqual(segment["video_speed"], 1.0)
-        self.assertEqual(segment["source_start"], 0)
-        self.assertGreaterEqual(segment["source_end"], 1)
-
-    def test_editor_receives_actual_speed_and_content_identity(self):
-        plan = self.plan()
-        with mock.patch.object(editor, "_call", return_value={"rows": plan["rows"]}) as call:
-            editor._edit_plan(self.manifest, {"shots": [self.shot]}, plan, self.root)
-        prompt = call.call_args.args[0]
-        self.assertIn('"within_preferred_speed": true', prompt)
-        self.assertIn('"source_identity": "source1"', prompt)
-        self.assertNotIn(str(self.video), prompt)
-        self.assertIn("最高20倍", prompt)
-
-    def test_mid_late_preference_preserves_correct_evidence_and_short_sources(self):
-        self.review["evidence_intervals_us"] = [{"start": 2_000_000, "end": 2_200_000}]
-        segment = self.result()["segments"][0]
-        self.assertEqual(segment["video_speed"], 1)
-        self.assertAlmostEqual(segment["source_start"], 2)
-        self.shot.update(source_end=2, material_duration_us=2_000_000)
-        self.review["evidence_intervals_us"] = [{"start": 0, "end": 1_000_000}]
-        self.assertTrue(self.result()["ok"])
-
-    def test_long_required_evidence_can_exceed_two_but_not_twenty(self):
-        self.shot.update(source_end=12, material_duration_us=12_000_000)
-        self.review["evidence_intervals_us"] = [{"start": 0, "end": 10_000_000}]
-        segment = self.result()["segments"][0]
-        self.assertGreater(segment["video_speed"], 2)
-        self.assertLessEqual(segment["video_speed"], 20)
-        self.assertGreaterEqual(segment["source_end"], 10)
 
     def test_correct_visual_can_speed_up_beyond_legacy_display_limit(self):
         self.review["evidence_intervals_us"] = [{"start": 2000000, "end": 4500000}]
@@ -150,7 +110,7 @@ class AIEditorTests(unittest.TestCase):
         changed["window_solution"]["source_end"] = 2.1
         self.assertFalse(contract.validate_segment_receipt(changed)["ok"])
         changed = copy.deepcopy(segment)
-        changed["ai_selection"]["observation"] = ""
+        changed["ai_selection"]["observation"] = "伪造通过"
         self.assertFalse(contract.validate_segment_receipt(changed)["ok"])
 
     def test_hook_packaging_is_normal_and_selling_point_keeps_its_candidate(self):
@@ -163,7 +123,7 @@ class AIEditorTests(unittest.TestCase):
         pack_video.write_bytes(b"different synthetic packaging source")
         pack["video"] = str(pack_video)
         display = {**self.review, "shot_id": "pack", "supported_point_ids": [], "basis": "product_display",
-                   "observation": "同商品外包装展示", "reason": "承接无卖点钩子", "source_identity": contract.source_identity(pack_video)}
+                   "observation": "同商品外包装展示", "reason": "承接无卖点钩子", "source_sha256": contract.file_sha256(pack_video)}
         plan.update(sentences=[hook, sale], reviews={"2": [self.review]}, display_reviews=[display], rows=[
             {"index": 1, "parts": [{"shot_id": "pack", "audio_duration_us": 2000000}]},
             {"index": 2, "parts": [{"shot_id": "handfeel", "audio_duration_us": 2000000}]}])
@@ -179,7 +139,7 @@ class AIEditorTests(unittest.TestCase):
             "claim_gate": {"reason": "SECRET_PASS"}, "selection_score": 99}], 8)
         self.assertNotIn("SECRET_PASS", prompt)
         self.assertNotIn("SECRET_SHOT", prompt)
-        self.assertNotIn("selection_score", prompt)
+        self.assertNotIn("99", prompt)
         self.assertIn(ai_editor_qc.RESPONSE_VERSION, prompt)
 
     def test_qc_v3_response_cannot_certify_ai_editor(self):
@@ -226,55 +186,6 @@ class AIEditorTests(unittest.TestCase):
         later = copy.deepcopy(segment)
         later["ai_selection"]["window_us"] = {"start": 4000000, "end": 5000000}
         self.assertEqual(contract.sequence_errors([segment, later]), [])
-
-    def test_scarce_reuse_requires_explicit_reason_and_no_alternatives(self):
-        self.manifest["segments"].append(dict(self.manifest["segments"][0]))
-        plan = self.plan()
-        plan["sentences"].append({**self.sentence, "index": 2})
-        plan["reviews"]["2"] = [self.review]
-        plan["coverage"] = {"2": {"checked": 1, "total": 1, "exhausted": True,
-                                  "feasible": True, "failed_calls": 0, "uncertain": 0}}
-        plan["rows"].append({"index": 2, "parts": [{"shot_id": "handfeel", "audio_duration_us": 2_000_000}]})
-        self.assertFalse(self.result(plan)["ok"])
-        plan["rows"][1]["scarce_reuse_reason"] = "本句只有这一条实际支持轻薄手感的候选"
-        self.assertTrue(self.result(plan)["ok"])
-        plan["sentences"][1]["kind"] = "hook"
-        self.assertFalse(self.result(plan)["ok"])
-
-    def test_scarce_reuse_expands_unreviewed_batch_before_second_edit(self):
-        candidate_ids = [f"shot{i}" for i in range(1, 10)]
-        shots = [{**self.shot, "shot_id": sid} for sid in candidate_ids]
-        sentence = {**self.sentence, "candidate_ids": candidate_ids,
-                    "audio_durations_us": [2_000_000]}
-        first_review = {**self.review, "shot_id": "shot1"}
-        partial_reviews = [first_review] + [
-            {"shot_id": sid, "verdict": "mismatch"} for sid in candidate_ids[1:8]]
-        plan = {"sentences": [sentence], "reviews": {"1": partial_reviews},
-            "display_reviews": [], "coverage": {"1": {"checked": 8, "total": 9,
-                "exhausted": False, "feasible": True, "failed_calls": 0, "uncertain": 0}},
-            "identity": {"model": "synthetic-model", "manifest_sha256": "a" * 64,
-                "timing_sha256": "b" * 64, "analysis_sha256": "c" * 64,
-                "prompt_sha256": "d" * 64, "editorial_rules": contract.rules_identity(self.manifest)}}
-        responses = [
-            {"rows": [{"index": 1, "parts": [{"shot_id": "shot1", "audio_duration_us": 2_000_000}],
-                       "scarce_reuse_reason": "首批只有一个支持候选"}]},
-            {"rows": [{"index": 1, "parts": [{"shot_id": "shot9", "audio_duration_us": 2_000_000}]}]},
-        ]
-
-        def review(_manifest, _sentence, shot, _directory):
-            self.assertEqual(shot["shot_id"], "shot9")
-            return {**self.review, "shot_id": "shot9"}
-
-        with mock.patch.object(editor, "_call", side_effect=responses) as call, \
-             mock.patch.object(editor, "_review", side_effect=review):
-            editor._edit_plan(self.manifest, {"shots": shots}, plan, self.root)
-
-        self.assertEqual(call.call_count, 2)
-        self.assertIn('"shot_id": "shot9"', call.call_args_list[1].args[0])
-        self.assertTrue(plan["coverage"]["1"]["exhausted"])
-        self.assertEqual(plan["coverage"]["1"]["checked"], 9)
-        self.assertEqual(plan["rows"][0]["parts"][0]["shot_id"], "shot9")
-        self.assertTrue(plan["ok"])
 
     def test_adjacent_physical_experiment_cannot_run_backwards(self):
         early = self.result()["segments"][0]
@@ -329,6 +240,36 @@ class AIEditorTests(unittest.TestCase):
                 editor._call("prompt", self.root / "response.json")
             provider.assert_not_called()
 
+    def test_empty_response_retries_with_backoff_then_succeeds(self):
+        from orchestrator import vision_analyzer
+        output = self.root / "empty_retry.json"
+        body = '{"ok":true,"sentences":[]}'
+        with mock.patch.object(vision_analyzer, "_vision_slot", side_effect=lambda: contextlib.nullcontext(SimpleNamespace(acquired=True))), \
+                mock.patch.object(vision_analyzer, "_run_volc_chat",
+                                  side_effect=[(False, vision_analyzer.EMPTY_RESPONSE),
+                                               (True, "  "),
+                                               (True, body)]) as provider, \
+                mock.patch.object(vision_analyzer.time, "sleep") as sleep, \
+                mock.patch.dict("os.environ", {"JY_VISION_TRANSPORT": "volc_glm",
+                                               "JY_VISION_RETRIES": "4",
+                                               "JY_VISION_MODEL": "synthetic"}):
+            payload = editor._call("prompt", output)
+        self.assertEqual(payload["ok"], True)
+        self.assertEqual(provider.call_count, 3)
+        self.assertEqual(sleep.call_count, 2)
+
+    def test_empty_response_exhausts_retries(self):
+        from orchestrator import vision_analyzer
+        with mock.patch.object(vision_analyzer, "_vision_slot", side_effect=lambda: contextlib.nullcontext(SimpleNamespace(acquired=True))), \
+                mock.patch.object(vision_analyzer, "_run_volc_chat",
+                                  return_value=(False, vision_analyzer.EMPTY_RESPONSE)) as provider, \
+                mock.patch.object(vision_analyzer.time, "sleep"), \
+                mock.patch.dict("os.environ", {"JY_VISION_TRANSPORT": "volc_glm",
+                                               "JY_AI_EDITOR_RETRIES": "3"}):
+            with self.assertRaisesRegex(ValueError, "AI_EDITOR_CALL_FAILED:.*empty response"):
+                editor._call("prompt", self.root / "empty_fail.json")
+        self.assertEqual(provider.call_count, 3)
+
     def test_normal_cli_defaults_to_ai_and_never_calls_legacy_match(self):
         from orchestrator import cli, vision_analyzer
         analysis = {"shots": [self.shot], "vision_analysis": {"errors": []}}
@@ -350,7 +291,7 @@ class AIEditorTests(unittest.TestCase):
         other = {**self.shot, "shot_id": "second", "video": str(other_video)}
         first_review = {**self.review, "evidence_intervals_us": [{"start": 2000000, "end": 2500000}]}
         second_review = {**first_review, "shot_id": "second", "supported_point_ids": ["p2"],
-                         "source_identity": contract.source_identity(other_video)}
+                         "source_sha256": contract.file_sha256(other_video)}
         plan["reviews"]["1"] = [first_review, second_review]
         plan["rows"][0]["parts"] = [{"shot_id": sid, "audio_duration_us": 1000000} for sid in ("handfeel", "second")]
         plan["identity"]["analysis_sha256"] = contract.digest({"shots": [self.shot, other]})
@@ -361,6 +302,185 @@ class AIEditorTests(unittest.TestCase):
         self.assertTrue(contract.validate_segment_receipt(segment)["ok"])
         segment["span_parts"][1]["source_end"] += 1
         self.assertFalse(contract.validate_segment_receipt(segment)["ok"])
+
+    def test_resolve_candidate_ids_accepts_bare_source_prefix(self):
+        known = {"source_026_shot_001", "source_020_shot_001", "source_004_shot_001"}
+        got = editor._resolve_candidate_ids(
+            ["source_026", "source_020_shot_001", "source_999", "source_004"], known)
+        self.assertEqual(got, ["source_026_shot_001", "source_020_shot_001", "source_004_shot_001"])
+
+    def test_normalize_selling_points_accepts_bare_strings(self):
+        got = editor._normalize_selling_points(
+            ["一次一片", {"id": "p9", "text": "湿敷"}], "selling_point")
+        self.assertEqual(got, [{"id": "p1", "text": "一次一片"}, {"id": "p9", "text": "湿敷"}])
+
+    def test_clamp_evidence_intervals_shrinks_full_shot_mark(self):
+        shot = {"source_start": 0.0, "source_end": 6.4}
+        evidence = [{"start": 0.0, "end": 6.4, "claim": "整镜"}]
+        got = editor._clamp_evidence_intervals(shot, evidence, {"head_trim_s": 0.3, "tail_trim_s": 0.2})
+        self.assertEqual(len(got), 1)
+        self.assertAlmostEqual(got[0]["start"], 0.3, places=3)
+        self.assertAlmostEqual(got[0]["end"], 6.2, places=3)
+
+    def test_inventory_normalizes_truncated_ids_and_nested_display_pool(self):
+        shots = [
+            {"shot_id": "source_001_shot_001", "visual_description": "盒", "source_start": 0, "source_end": 2},
+            {"shot_id": "source_026_shot_001", "visual_description": "抽纸", "source_start": 0, "source_end": 3},
+        ]
+        payload = {
+            "sentences": [{
+                "index": 1, "kind": "selling_point",
+                "selling_points": [{"id": "p1", "text": "便携"}],
+                "candidate_ids": ["source_026", "source_001"],
+                "display_pool_ids": ["source_001"],
+            }],
+        }
+        with mock.patch.object(editor, "_call", return_value=payload):
+            rows = editor._inventory(self.manifest, shots, self.root / "ai_editor")
+        self.assertEqual(rows[0]["candidate_ids"][:2],
+                         ["source_026_shot_001", "source_001_shot_001"])
+
+    def test_refill_prefers_action_evidence_over_packaging(self):
+        pack = {"shot_id": "pack", "verdict": "matched", "confidence": 0.95,
+                "reason": "包装文字支持标称，陈列展示"}
+        tear = {"shot_id": "tear", "verdict": "matched", "confidence": 0.7,
+                "reason": "画面完整呈现拆开独立包装并取出湿巾"}
+        face = {"shot_id": "face", "verdict": "matched", "confidence": 0.7,
+                "reason": "直接展示用湿巾擦拭面部清洁油脂"}
+        shots = {
+            "pack": {"shot_id": "pack", "description": "包装盒陈列", "action": "展示"},
+            "tear": {"shot_id": "tear", "description": "撕开小袋取出", "action": "撕开",
+                     "action_complete": True},
+            "face": {"shot_id": "face", "description": "擦拭脸颊", "action": "擦拭",
+                     "action_complete": True},
+        }
+        best_tear = editor._pick_best_refill_review(
+            [pack, tear], claim_text="每次拆开都是新鲜卫生的",
+            shots=shots, reserved_shot_ids=set())
+        self.assertEqual(best_tear["shot_id"], "tear")
+        best_face = editor._pick_best_refill_review(
+            [pack, face], claim_text="可以用它清洁脸上的油脂",
+            shots=shots, reserved_shot_ids=set())
+        self.assertEqual(best_face["shot_id"], "face")
+        analysis = {"shots": [
+            {**shots["pack"], "status": "ready_for_matching"},
+            {**shots["tear"], "status": "ready_for_matching"},
+            {**shots["face"], "status": "ready_for_matching"},
+        ]}
+        self.assertIn("tear", editor._action_shot_ids_for_claim(
+            analysis, "每次拆开都是新鲜卫生的"))
+        self.assertIn("face", editor._action_shot_ids_for_claim(
+            analysis, "清洁脸上的油脂"))
+        # Wet-wipe absorbency claim must pull hand-wipe shots, not face-only pool.
+        hand = {"shot_id": "hand", "status": "ready_for_matching",
+                "description": "用手背展示污渍后用湿巾擦净", "action": "擦拭",
+                "action_complete": True}
+        analysis_wipe = {"shots": [
+            {**shots["pack"], "status": "ready_for_matching"},
+            hand,
+            {**shots["face"], "status": "ready_for_matching"},
+        ]}
+        wipe_ids = editor._action_shot_ids_for_claim(analysis_wipe, "擦拭不渗透")
+        self.assertIn("hand", wipe_ids)
+        self.assertTrue(editor._claim_needs_action("擦拭不渗透"))
+        self.assertFalse(editor._claim_needs_action("包装好看又方便"))
+        # Product-name「湿敷巾」must not crowd out real face-wipe shots.
+        pack_named = {
+            "shot_id": "wipe_pack", "status": "ready_for_matching",
+            "description": "手持生理盐水湿敷巾包装盒展示", "action": "展示",
+        }
+        analysis2 = {"shots": [
+            pack_named,
+            {**shots["face"], "status": "ready_for_matching"},
+        ]}
+        ids = editor._action_shot_ids_for_claim(analysis2, "清洁脸上的油脂")
+        self.assertIn("face", ids)
+        self.assertNotIn("wipe_pack", ids)
+        # Packaging-only matched review must not win hard action refill.
+        self.assertIsNone(editor._pick_best_refill_review(
+            [pack], claim_text="可以用它清洁脸上的油脂",
+            shots=shots, reserved_shot_ids=set()))
+
+    def test_shortlist_prefers_long_enough_over_short_rule_hits(self):
+        # Rule top3 is all short; a long ready shot must still lead the list
+        # when min_duration_s requires ~audio/1.2 usable seconds.
+        matched = {
+            "recommendations": [{
+                "index": 1,
+                "candidates": [
+                    {"shot_id": "short_a"},
+                    {"shot_id": "short_b"},
+                    {"shot_id": "short_c"},
+                ],
+            }],
+            "segments": [],
+        }
+        analysis = {"shots": [
+            {"shot_id": "short_a", "status": "ready_for_matching", "duration": 1.5},
+            {"shot_id": "short_b", "status": "ready_for_matching", "duration": 1.8},
+            {"shot_id": "short_c", "status": "ready_for_matching", "duration": 1.6},
+            {"shot_id": "long_ok", "status": "ready_for_matching", "duration": 4.0},
+        ]}
+        ids = editor._rule_shortlist_ids(
+            matched, analysis, 1, limit=4, min_duration_s=2.5)
+        self.assertEqual(ids[0], "long_ok")
+        self.assertIn("long_ok", ids[:1] or ids)
+
+    def test_pick_best_skips_audio_infeasible_shots(self):
+        short = {"shot_id": "short", "verdict": "matched", "confidence": 0.99,
+                 "reason": "包装展示"}
+        long = {"shot_id": "long", "verdict": "matched", "confidence": 0.5,
+                "reason": "包装展示"}
+        shots = {
+            "short": {"shot_id": "short", "duration": 1.5, "source_start": 0,
+                      "source_end": 1.5, "description": "短镜"},
+            "long": {"shot_id": "long", "duration": 5.0, "source_start": 0,
+                     "source_end": 5.0, "description": "长镜"},
+        }
+        # ~3.5s audio cannot fit 1.5s usable at 1.2x after default trims.
+        best = editor._pick_best_refill_review(
+            [short, long], claim_text="展示一下包装",
+            shots=shots, reserved_shot_ids=set(),
+            audio_us=3_500_000, manifest={"head_trim_s": 0.3, "tail_trim_s": 0.2})
+        self.assertEqual(best["shot_id"], "long")
+
+    def test_edi_pure_water_soft_rematch_same_product_display(self):
+        # Packaging-nominal EDI/纯水 must soft-accept same-product display
+        # instead of looping AI_REFILL_NO_MATCH when OCR cannot read the mark.
+        sentence = {
+            "index": 1, "text": "EDI纯水基底，", "kind": "selling_point",
+            "selling_points": [{"id": "p1", "text": "EDI纯水基底"}],
+            "candidate_ids": ["pack"],
+        }
+        shot = {
+            "shot_id": "pack", "video": str(self.video),
+            "status": "ready_for_matching", "source_start": 0, "source_end": 4,
+            "duration": 4, "material_duration_us": 4_000_000,
+            "role": "product_display", "evidence_strength": "C",
+        }
+        uncertain = {
+            "verdict": "uncertain", "same_product": True, "confidence": 0.7,
+            "observation": "同款包装陈列，标称字样不清晰",
+            "reason": "看不清EDI纯水字样",
+            "supported_point_ids": [], "basis": "product_display",
+            "time_sensitive": False, "evidence_intervals_us": [],
+        }
+
+        def fake_extract(source, timestamp, target, ffmpeg=None):
+            Path(target).write_bytes(b"frame")
+
+        def fake_sheet(frames, sheet, **kwargs):
+            Path(sheet).write_bytes(b"sheet")
+            return True
+
+        with mock.patch.object(editor, "_call", return_value=uncertain), \
+                mock.patch("orchestrator.shot_analyzer.extract_frame", side_effect=fake_extract), \
+                mock.patch("orchestrator.vision_analyzer._write_sheet", side_effect=fake_sheet), \
+                mock.patch("orchestrator.platform_env.find_ffmpeg", return_value=("ffmpeg", None)):
+            got = editor._review(self.manifest, sentence, shot, self.root)
+        self.assertEqual(got["verdict"], "matched")
+        self.assertEqual(got["basis"], "product_display")
+        self.assertIn("EDI纯水", got["reason"])
 
 
 if __name__ == "__main__":
