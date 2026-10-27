@@ -226,7 +226,7 @@
       "更新时间"
     ],
     "revision_status": "已二次修改",
-    "initial_success_status": "未修改效果好",
+    "initial_success_status": "一次成片",
     "never_mark_success_for": [
       "FAIL",
       "UNCERTIFIED",
