@@ -48,7 +48,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Iterable
 
-from .file_safety import locked_json_update, private_temp_dir
+from .file_safety import file_lock, locked_json_update, private_temp_dir
 from .json_extract import extract_json, is_blank
 from .proc_slots import env_float, env_int, slot
 
@@ -84,6 +84,7 @@ _VISION_CACHE_FIELDS = (
     "pointing_to_text", "explicit_pointing", "pointing_action", "gesture",
     "evidence_intervals", "action_segments", "action_complete_source", "text_pass",
     "text_agreed", "pointed_agreed", "rule_checks",
+    "visual_observation_complete", "text_reads",
 )
 # A long take often holds several demonstrations (hang it, then pull one
 # sheet); two frames per shot missed them, so frames follow the shot length.
@@ -566,8 +567,64 @@ def _vision_cache_path(report_dir: Path) -> Path:
     persistent local/NAS cache without changing task manifests.
     """
     configured = str(os.environ.get("JY_VISION_CACHE_DIR") or "").strip()
-    root = Path(configured) if configured else report_dir.parent.parent / ".cache"
+    if configured:
+        root = Path(configured).expanduser()
+    else:
+        work_root = _queue_work_root(report_dir)
+        if work_root is not None:
+            root = work_root / ".cache"
+        else:
+            local = os.environ.get("LOCALAPPDATA", "").strip()
+            root = (Path(local) if local else Path.home() / ".cache") / "JianyingVideoAutomation" / "vision"
     return root / "material_vision.json"
+
+
+def _queue_work_root(report_dir: Path) -> Path | None:
+    for parent in report_dir.resolve().parents:
+        if parent.name.lower() == "work":
+            return parent
+    pipeline = os.environ.get("JY_PIPE_ROOT", "").strip()
+    return Path(pipeline).expanduser().resolve() / "work" if pipeline else None
+
+
+def _product_cache_lock(manifest: dict[str, Any], analysis: dict[str, Any], cache_path: Path) -> Path:
+    identity = {field: str(manifest.get(field) or "").strip()
+                for field in ("product_id", "product", "brand", "category", "sku")}
+    if not any(identity.values()):
+        identity["sources"] = sorted({str(row.get("video") or "")
+            for row in analysis.get("shots", []) if isinstance(row, dict)})
+    digest = hashlib.sha256(json.dumps(identity, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+    return cache_path.parent / "inflight" / digest
+
+
+def _seed_legacy_vision_cache(manifest: dict[str, Any], analysis: dict[str, Any],
+                              report_dir: Path, cache_path: Path, profile: str) -> None:
+    """Import matching observations from the old per-task caches, never task match decisions."""
+    shared = _load_vision_cache(cache_path)
+    wanted = {_vision_cache_key(manifest, row, profile) for row in analysis.get("shots", [])
+              if isinstance(row, dict)} - set(shared) - {""}
+    if not wanted:
+        return
+    paths = {report_dir.parent.parent / ".cache" / "material_vision.json"}
+    work_root = _queue_work_root(report_dir)
+    if work_root is not None and work_root.is_dir():
+        # Only the queue's immediate task directories, never a recursive report/media scan.
+        paths.update(task / ".cache" / "material_vision.json"
+                     for task in work_root.iterdir() if task.is_dir() and task.name != ".cache")
+    imported = {}
+    for path in sorted(paths):
+        if path == cache_path or not path.is_file():
+            continue
+        for key, row in _load_vision_cache(path).items():
+            if key in wanted and isinstance(row, dict):
+                projection = _cache_projection(row)
+                if projection is not None:
+                    imported[key] = projection
+        wanted.difference_update(imported)
+        if not wanted:
+            break
+    if imported:
+        _save_vision_cache(cache_path, imported)
 
 
 def _analysis_rules(manifest: dict[str, Any]) -> list[str]:
@@ -682,6 +739,8 @@ def _vision_cache_key(manifest: dict[str, Any], shot: dict[str, Any], profile: s
             "quality": frame_quality.FRAME_QUALITY_VERSION if frame_quality.enabled() else "off",
         },
     }
+    if str(manifest.get("sku") or "").strip():
+        identity["sku"] = str(manifest["sku"]).strip()
     transport = _vision_transport()
     if transport != "codex":
         # 非 Codex 缓存键带上传输与模型，避免不同后端观察互相复用。
@@ -778,7 +837,7 @@ def apply_cross_shot_text(shots: list[dict[str, Any]]) -> None:
 
 def _cache_projection(row: dict[str, Any]) -> dict[str, Any] | None:
     """Keep only stable visual facts; never cache task-local frame paths/status noise."""
-    if row.get("status") != "ready_for_matching" or row.get("action_complete") is not True:
+    if not _reusable_visual_observation(row):
         return None
     if row.get("text_pass") in ("pending", "failed"):
         return None
@@ -788,6 +847,19 @@ def _cache_projection(row: dict[str, Any]) -> dict[str, Any] | None:
             {k: v for k, v in item.items() if k != "frame_path"}
             for item in projection["evidence_intervals"] if isinstance(item, dict)]
     return projection
+
+
+def _reusable_visual_observation(row: dict[str, Any]) -> bool:
+    if row.get("status") == "ready_for_matching" and row.get("action_complete") is True:
+        return True
+    # An explicit unusable observation is still a completed model call. Reuse
+    # the rejection without promoting it into the matching pool or calling again.
+    return (row.get("visual_observation_complete") is True
+            and row.get("action_complete") is False
+            and row.get("status") == "pending_analysis"
+            and bool(row.get("description"))
+            and bool(row.get("visual_tags")) and bool(row.get("evidence_tags"))
+            and _number(row.get("analysis_confidence")) > 0)
 
 
 def _apply_cached_visual(row: dict[str, Any], cached: dict[str, Any], key: str) -> None:
@@ -1568,6 +1640,31 @@ def _primary_interval(raw: dict[str, Any], row: dict[str, Any],
 def enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], report_dir: Path,
                       *, profile: str | None = None, batch_size: int = 12,
                       timeout: int | None = None, ffmpeg: str | None = None) -> dict[str, Any]:
+    """One cold producer per product; other tasks re-read its completed shared observations."""
+    if not analysis.get("shots"):
+        return analysis
+    report_dir = Path(report_dir)
+    cache_path = _vision_cache_path(report_dir)
+    profile = _clean_profile(
+        profile if profile is not None else os.environ.get("JY_VISION_PROFILE", "volc"))
+    waiting = time.monotonic()
+    _progress(report_dir, phase="product_cache_wait", cache_path=str(cache_path),
+              cache_wait_s=0.0, finished_at=None)
+    with file_lock(_product_cache_lock(manifest, analysis, cache_path),
+                   timeout=env_float("JY_VISION_CACHE_WAIT_TIMEOUT", 7200.0)):
+        waited = round(time.monotonic() - waiting, 3)
+        _progress(report_dir, cache_wait_s=waited)
+        _seed_legacy_vision_cache(manifest, analysis, report_dir, cache_path, profile)
+        result = _enrich_with_vision(manifest, analysis, report_dir, profile=profile,
+                                    batch_size=batch_size, timeout=timeout, ffmpeg=ffmpeg)
+        result["vision_analysis"]["cache_wait_s"] = waited
+        _persist(report_dir, result)
+        return result
+
+
+def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], report_dir: Path,
+                       *, profile: str | None = None, batch_size: int = 12,
+                       timeout: int | None = None, ffmpeg: str | None = None) -> dict[str, Any]:
     """Use the configured image backend to fill and validate temporary shots."""
     if timeout is None:
         timeout = env_int("JY_VISION_TIMEOUT", 600, minimum=60)
@@ -1580,6 +1677,8 @@ def enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repor
     cache_path = _vision_cache_path(report_dir)
     cache = _load_vision_cache(cache_path)
     cache_hits = 0
+    text_cache_hits = 0
+    rejected_cache_hits = 0
     cache_misses = 0
     cache_keys: dict[str, str] = {}
     uncached_shots: list[dict[str, Any]] = []
@@ -1611,7 +1710,8 @@ def enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repor
             if key and isinstance(cached, dict):
                 cache[key] = cached
         if (isinstance(cached, dict)
-                and cached.get("status") == "ready_for_matching"
+                and _reusable_visual_observation(cached)
+                and cached.get("text_pass") not in ("pending", "failed")
                 and shot.get("frame_exists") is not False):
             _apply_cached_visual(shot, cached, key)
             if (shot.get("action_complete_source") == "evidence_interval"
@@ -1627,6 +1727,8 @@ def enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repor
                 except Exception:
                     pass
             cache_hits += 1
+            text_cache_hits += int(cached.get("text_pass") == "hires")
+            rejected_cache_hits += int(cached.get("action_complete") is False)
             continue
         # 本任务候选文件里做完的观察：只有产生它的输入签名（商品、素材、窗口、
         # 规则、分析版本）与当前一致才保留并回种全局缓存；对不上就整条重做。
@@ -1679,6 +1781,9 @@ def enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repor
         summary.update({
             "analysis_version": VISION_ANALYSIS_VERSION,
             "cache_hits": cache_hits,
+            "text_cache_hits": text_cache_hits,
+            "rejected_cache_hits": rejected_cache_hits,
+            "cache_scope": "shared_product",
             "cache_misses": cache_misses,
             "stale_local": stale,
             "rule_rechecked": rechecked,
@@ -1884,6 +1989,7 @@ def enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repor
                     "tail_waste": max(0.0, min(1.0, _number(raw.get("tail_waste")))),
                     "analysis_confidence": confidence,
                     "analysis_source": _contact_sheet_source(),
+                    "visual_observation_complete": True,
                     "status": "ready_for_matching" if action_complete else "pending_analysis",
                     # DEMO_ACTIONS V0.2 素材侧字段。缺失时**不写键**（而不是写
                     # None）—— demo_actions.judge() 靠「键不存在」区分「旧分析结果」

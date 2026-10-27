@@ -178,7 +178,7 @@ class RelatedProductCloseupTests(unittest.TestCase):
             root = Path(raw_root)
             source = root / "paper.mp4"
             source.write_bytes(b"stable-source")
-            report_dir = root / "task" / "report"
+            report_dir = root / "work" / "task" / "report"
             manifest = {"product_id": "paper-demo"}
             shot = {
                 "shot_id": "S1", "video": str(source), "source_start": 0.0,

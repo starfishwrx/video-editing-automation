@@ -50,6 +50,15 @@
 - 证据: docs/reviews/20261026-simplification.md、test_audio_captions.py。
 
 
+### L-20261026-CACHE 共享素材缓存必须跨任务落盘并协调冷启动
+- status: OPEN
+- hits: 1
+- 模块: visual-matching / runtime-and-recovery
+- 现象: 同产品、同一组素材的不同任务重复执行视觉识别和文字复核。
+- 根因: 默认路径跟随任务目录；并发任务各自看到缓存未命中；明确不可用的观察没有保存。
+- 以后怎么做: 缓存落到队列公共目录或显式持久目录，任务信息不进观察键；同产品加锁后重新读取，完成结果再共享。否定观察可复用但保持不可用，失败和未完成复核不当成功缓存；兼容导入旧缓存。
+- 证据: `test_shared_product_vision_cache.py`。
+
 ### L-20261026-01 API 槽位不是工作线程，媒体与请求阶段独立控制
 - status: OPEN
 - hits: 1

@@ -42,7 +42,8 @@ See [model and image-call details](https://github.com/starfishwrx/video-editing-
 | `JY_VISION_THINKING` | enabled | Do not set `disabled` for GLM-5.3-Flash |
 | `JY_VISION_THINKING_BUDGET` | `2048` | Enabled-thinking budget for direct Ark calls |
 | `JY_VISION_MAX_TOKENS` | `8192` for direct Ark | Completion token cap |
-| `JY_VISION_CACHE_DIR` | Derived from task/report location | Optional private material-understanding cache root |
+| `JY_VISION_CACHE_DIR` | Queue `work/.cache`; otherwise persistent user cache | Shared visual observations and completed text verification across tasks |
+| `JY_VISION_CACHE_WAIT_TIMEOUT` | `7200` seconds | Wait for another task recognizing the same product; timeout never starts duplicate calls |
 | `JY_VISION_RECHECK` | `reuse` | `reuse`, `vision` or `off`; explicit recheck policy |
 
 Media preparation and API calls run in separate stages: finish all frames and
@@ -61,6 +62,23 @@ machine's tested capacity. A larger slot limit alone does not create requests.
 include validation/checkpoint I/O). Source-code hashes are not collected at runtime.
 These counters do not measure provider-side in-flight requests or prove a real
 API speedup; offline tests exercise concurrency using synthetic responses.
+
+Visual and verified-text observations are shared by product and source window,
+not by task ID, script, draft name or shot numbering. The cache key checks the
+source path/size/mtime, product identity (including SKU when supplied), model,
+analysis rules and sampling/quality protocol. Matching completed observations
+skip both image understanding and text reads. Explicitly rejected observations
+are also reusable, but stay outside the matching pool. Provider failures and
+pending/failed text verification are not completed cache entries.
+
+Concurrent tasks for the same product coordinate through a file lock before
+reading and filling the cache. Only the first cold task recognizes the material;
+waiting tasks reload its saved results. Different products can still proceed
+independently. Matching entries from old per-task `.cache/material_vision.json`
+files in the same queue work root are imported without another model call.
+`vision_analysis` reports `text_cache_hits`, `rejected_cache_hits` and cache wait
+time. Source changes or incompatible observation protocols require fresh results.
+Task-specific selection and independent final-cut QC still use each task's inputs.
 
 Generic configuration is read from the **process environment**. There is no
 generic `.env` auto-loader. Copy `examples/config.example.ps1` to the ignored
