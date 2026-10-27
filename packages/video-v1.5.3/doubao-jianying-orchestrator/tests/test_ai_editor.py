@@ -400,6 +400,41 @@ class AIEditorTests(unittest.TestCase):
         self.assertIsNone(editor._pick_best_refill_review(
             [pack], claim_text="可以用它清洁脸上的油脂",
             shots=shots, reserved_shot_ids=set()))
+        # 「擦餐具」must rank bowl/plate wipe ahead of generic counter wipe.
+        bowl = {"shot_id": "bowl", "status": "ready_for_matching",
+                "description": "用手持巾体擦拭白碗内壁酱渍", "action": "擦拭",
+                "action_complete": True}
+        counter = {"shot_id": "counter", "status": "ready_for_matching",
+                   "description": "手持巾体擦拭厨房台面污渍", "action": "擦拭",
+                   "action_complete": True}
+        analysis_dish = {"shots": [
+            {**shots["pack"], "status": "ready_for_matching"},
+            counter, bowl,
+        ]}
+        dish_ids = editor._action_shot_ids_for_claim(analysis_dish, "平时用它擦餐具啊")
+        self.assertEqual(dish_ids[0], "bowl")
+        self.assertIn("bowl", dish_ids)
+        # Same-source basename stays reserved so refill cannot recreate
+        # DUPLICATE_VISUAL_SHOT across generic display sentences.
+        shared = str(self.video)
+        a = {"shot_id": "a", "verdict": "matched", "confidence": 0.9,
+             "reason": "包装展示"}
+        b = {"shot_id": "b", "verdict": "matched", "confidence": 0.8,
+             "reason": "包装展示"}
+        shot_map = {
+            "a": {"shot_id": "a", "video": shared, "duration": 4.0},
+            "b": {"shot_id": "b", "video": shared, "duration": 4.0},
+            "c": {"shot_id": "c", "video": str(self.root / "other.mp4"),
+                  "duration": 4.0},
+        }
+        (self.root / "other.mp4").write_bytes(b"other")
+        c = {"shot_id": "c", "verdict": "matched", "confidence": 0.7,
+             "reason": "包装展示"}
+        picked = editor._pick_best_refill_review(
+            [a, b, c], claim_text="挂厨房随手抽",
+            shots=shot_map, reserved_shot_ids=set(),
+            reserved_source_keys={editor._shot_source_key(shot_map["a"])})
+        self.assertEqual(picked["shot_id"], "c")
 
     def test_shortlist_prefers_long_enough_over_short_rule_hits(self):
         # Rule top3 is all short; a long ready shot must still lead the list

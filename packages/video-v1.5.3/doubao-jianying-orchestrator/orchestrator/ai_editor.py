@@ -30,12 +30,16 @@ _ACTION_CLAIM_CUES = (
     ("揉搓", "不掉纸屑", "掉屑", "掉絮", "掉毛", "纸屑"),
     # Lazy-wipe / kitchen rag pull-and-wipe claims.
     ("扯一张", "用一张就扯", "抽取"),
-    ("台面", "灶台", "擦镜子", "擦餐具", "水印", "锃光", "水渍不带留"),
+    # Tableware wipe must beat generic counter/stove wipe in the shortlist.
+    ("擦餐具", "擦碗", "擦盘", "擦碟子", "擦杯"),
+    ("台面", "灶台", "擦镜子", "水印", "锃光", "水渍不带留"),
     # Wet toilet paper / wipe absorbency demos (hand or surface wipe).
     ("不渗透", "不渗油", "不渗水", "擦拭不渗", "一次擦净", "轻轻一擦",
      "越擦越", "擦得更干净"),
     # Wipe-clean result lines (must show wipe + clean result, not dirty tissue only).
     ("一擦就干净", "一擦就净", "擦完就干净", "擦得干干净净", "擦完速干"),
+    # Wet-strength: need wet + intact result, not dry towel display.
+    ("湿水不容易破", "湿水不破", "遇水不破", "泡水不破", "浸水不破"),
     # Flushable / no-clog claims — need drop-in + flush/dissolve evidence.
     ("不会堵", "不堵塞", "扔马桶", "冲走", "可冲散", "冲得掉"),
 )
@@ -46,10 +50,12 @@ _ACTION_SHOT_CUES = (
      "湿敷面部", "敷于面", "贴在脸", "擦拭颊"),
     ("揉搓", "搓揉", "掉屑", "掉絮", "纸屑", "絮状", "屑"),
     ("扯出", "抽出", "抽取", "撕一张", "抽一张", "扯一张"),
-    ("擦拭", "擦台", "擦灶", "擦镜", "擦餐", "水槽", "水龙头", "污渍",
+    ("碗", "盘", "餐具", "碟子", "汤勺", "擦碗", "擦盘", "擦餐", "瓷盘", "白碗"),
+    ("擦拭", "擦台", "擦灶", "擦镜", "水槽", "水龙头", "污渍",
      "水印", "锃亮", "锃光", "擦净", "擦完"),
     ("擦拭", "擦净", "污渍", "手背", "酱渍", "擦过", "擦完", "按在"),
     ("擦拭", "擦净", "干净", "手背", "污渍", "酱渍", "擦完", "擦过"),
+    ("湿水", "浸湿", "冲淋", "水流", "水龙头", "拧干", "完整", "不破", "未散"),
     ("冲水", "冲散", "溶解", "投放", "丢入", "散开", "卷入", "排水"),
 )
 
@@ -102,6 +108,16 @@ def _shot_fits_audio(
     return int(audio_us) <= max_audio_us + 1
 
 
+def _shot_source_key(shot: dict | None) -> str:
+    """Basename used by engine duplicate gate (casefolded)."""
+    if not isinstance(shot, dict):
+        return ""
+    raw = str(shot.get("video") or shot.get("source") or shot.get("path") or "").strip()
+    if not raw:
+        return ""
+    return Path(raw).name.casefold()
+
+
 def _pick_best_refill_review(
     good: list[dict],
     *,
@@ -111,6 +127,7 @@ def _pick_best_refill_review(
     audio_us: int = 0,
     manifest: dict | None = None,
     min_duration_s: float = 0.0,
+    reserved_source_keys: set[str] | None = None,
 ) -> dict | None:
     def _shot_dur(sid: str) -> float:
         shot = shots.get(sid) or {}
@@ -119,6 +136,7 @@ def _pick_best_refill_review(
         except (TypeError, ValueError):
             return 0.0
 
+    reserved_sources = reserved_source_keys or set()
     ranked = sorted(
         good,
         key=lambda r: (
@@ -135,6 +153,11 @@ def _pick_best_refill_review(
         if not sid or sid in reserved_shot_ids:
             continue
         shot = shots.get(sid)
+        source_key = _shot_source_key(shot)
+        # Engine blocks same-source generic reuse; keep refill unique by source
+        # basename before allow_reuse last resort.
+        if source_key and source_key in reserved_sources:
+            continue
         # Skip matched reviews that cannot host the narration even at max
         # display speed — try-next would just re-hit AUDIO_LONGER_THAN_SHOT.
         if audio_us and not _shot_fits_audio(shot, audio_us, manifest=manifest):
@@ -154,15 +177,23 @@ def _pick_best_refill_review(
 def _action_shot_ids_for_claim(
     analysis: dict, claim_text: str, *, limit: int = 8
 ) -> list[str]:
-    """Pull ready shots whose analysis text matches hard action claims."""
+    """Pull ready shots whose analysis text matches hard action claims.
+
+    Rank by claim-object specificity so「擦餐具」prefers 碗/盘 footage over
+    generic counter/hand wipes that also match broad「擦拭」cues.
+    """
     claim = str(claim_text or "")
-    shot_keys: list[str] = []
+    # Prefer the most specific matched cue group first (e.g. tableware over
+    # generic kitchen wipe) when scoring candidates.
+    matched_groups: list[tuple[str, ...]] = []
     for claim_keys, keys in zip(_ACTION_CLAIM_CUES, _ACTION_SHOT_CUES):
         if any(k in claim for k in claim_keys):
-            shot_keys.extend(keys)
-    if not shot_keys:
+            matched_groups.append(tuple(keys))
+    if not matched_groups:
         return []
-    hits: list[str] = []
+    shot_keys = [k for group in matched_groups for k in group]
+    primary_keys = matched_groups[0]
+    scored: list[tuple[int, str]] = []
     pack_actions = ("展示", "指点", "指向", "举起", "举起展示", "摆放", "搭放展示", "陈列")
     for row in analysis.get("shots") or []:
         if not isinstance(row, dict) or row.get("status") != "ready_for_matching":
@@ -186,10 +217,12 @@ def _action_shot_ids_for_claim(
         # Packaging/icon callouts often contain「面部护理」text — skip those.
         if action in pack_actions or (action.startswith("指") and "擦" not in blob and "敷" not in action):
             continue
-        hits.append(sid)
-        if len(hits) >= limit:
-            break
-    return hits
+        primary_hits = sum(1 for k in primary_keys if k in blob)
+        any_hits = sum(1 for k in shot_keys if k in blob)
+        complete = 1 if row.get("action_complete") is True else 0
+        scored.append((primary_hits * 10 + any_hits + complete, sid))
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return [sid for _, sid in scored[: max(1, int(limit))]]
 
 
 _GIFT_PROP_CLAIM_CUES = ("送挂钩", "挂钩", "纸巾支架", "支架", "送一个", "还送", "定制支架")
@@ -481,7 +514,7 @@ EDI纯水/纯水基底、木浆层数、荧光剂、双重封口、可降解、�
         "EDI纯水", "EDI", "纯水基底", "纯水",
         "双重封口", "可降解", "印花", "压花",
         "干湿两用", "干湿可用", "加厚材质",
-        "品质", "好到没话说", "送挂钩", "挂钩", "够用",
+        "品质", "好到没话说", "干净又卫生", "又卫生", "送挂钩", "挂钩", "够用",
         # Gift / accessory hooks: same-product packaging or accessory display.
         "送一个", "还送", "定制", "纸巾支架", "支架"))
     if (soft_nonvisual and result.get("same_product") is True
@@ -1118,11 +1151,20 @@ def refill_indices(
     # Keep shots already committed on non-refill sentences, and ones claimed by
     # earlier refills in this pass, so the draft cannot land DUPLICATE_VISUAL_SHOT.
     reserved_shot_ids: set[str] = set()
+    reserved_source_keys: set[str] = set()
+
+    def _reserve_seg(seg: dict) -> None:
+        for sid in _seg_shot_ids(seg):
+            reserved_shot_ids.add(sid)
+            key = _shot_source_key(shots.get(sid))
+            if key:
+                reserved_source_keys.add(key)
+
     wanted_set = set(wanted)
     for key, seg in by_index.items():
         if key in wanted_set or not isinstance(seg, dict):
             continue
-        reserved_shot_ids.update(_seg_shot_ids(seg))
+        _reserve_seg(seg)
 
     refill_errors: list[str] = []
     # Action-hard claims first so wipe/tear demos reserve matching shots
@@ -1170,8 +1212,15 @@ def refill_indices(
         # Gift props ahead of generic packaging so「送支架/挂钩」does not land on
         # unrelated cooking/wipe demos when accessory footage exists.
         merged = list(dict.fromkeys([*fit_gift, *fit_action, *base_ids, *gift_ids, *action_ids]))
+
+        def _unused(sid: str) -> bool:
+            if sid in reserved_shot_ids:
+                return False
+            src = _shot_source_key(shots.get(sid))
+            return not (src and src in reserved_source_keys)
+
         sentence["candidate_ids"] = [
-            sid for sid in merged if sid not in reserved_shot_ids
+            sid for sid in merged if _unused(sid)
         ][:shortlist_limit]
         if not sentence["candidate_ids"]:
             # Fall back to the unfiltered shortlist only when every candidate is
@@ -1219,13 +1268,15 @@ def refill_indices(
                                        else (reserved_shot_ids | skip_ids)),
                     audio_us=int(audio_us or 0),
                     manifest=manifest,
+                    reserved_source_keys=(
+                        set() if allow_reuse else reserved_source_keys),
                 )
                 if best is None:
                     # All unique action/display matches already taken by earlier
                     # refill sentences (e.g. wipe demos). Last resort: allow a
                     # reserved matched shot so one hard claim does not BLOCK the
                     # whole draft; QC may still flag DUPLICATE for a later pass.
-                    if not allow_reuse and reserved_shot_ids:
+                    if not allow_reuse and (reserved_shot_ids or reserved_source_keys):
                         allow_reuse = True
                         continue
                     break
@@ -1276,7 +1327,7 @@ def refill_indices(
                     if not check["ok"]:
                         raise ValueError(";".join(check["reasons"]))
                     by_index[index] = new_seg
-                    reserved_shot_ids.update(_seg_shot_ids(new_seg))
+                    _reserve_seg(new_seg)
                     _save(directory / f"refill_{index:02d}.json", {
                         "index": index, "shot_id": best.get("shot_id"),
                         "coverage": coverage,

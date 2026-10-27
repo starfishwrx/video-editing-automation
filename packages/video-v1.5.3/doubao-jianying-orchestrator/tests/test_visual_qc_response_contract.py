@@ -145,9 +145,15 @@ class VisualQcResponseContractTests(unittest.TestCase):
         result, code, _, _ = self.run_main([body])
         self.assertEqual((result["status"], code, contract.report_status(result)),
                          ("PASS_WITH_DEGRADED", 0, "PASS_WITH_DEGRADED"))
-        # Model overall=UNCERTIFIED still hard-blocks.
-        self.assert_blocked(response([judgment(match_level="INSUFFICIENT_EVIDENCE", visual_ok=False,
-                                             confidence=0)], overall="UNCERTIFIED"))
+        # Model overall=UNCERTIFIED with judged segments is ignored (align with
+        # FAIL ignore); INSUFFICIENT stays refillable PASS_WITH_DEGRADED.
+        ignored, ignored_code, _, _ = self.run_main([response(
+            [judgment(match_level="INSUFFICIENT_EVIDENCE", visual_ok=False, confidence=0.5)],
+            overall="UNCERTIFIED")])
+        self.assertEqual((ignored["status"], ignored_code), ("PASS_WITH_DEGRADED", 0))
+        self.assertTrue(any(
+            str(w).startswith("POST_DRAFT_OVERALL_UNCERTIFIED_IGNORED:")
+            for w in (ignored.get("warnings") or [])))
         # Segment INSUFFICIENT alone is refillable PASS_WITH_DEGRADED (not UNCERTIFIED).
         insuf, insuf_code, _, _ = self.run_main([response(
             [judgment(match_level="INSUFFICIENT_EVIDENCE", visual_ok=False, confidence=0.5)],

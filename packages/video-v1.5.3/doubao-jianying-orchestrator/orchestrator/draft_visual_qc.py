@@ -309,6 +309,7 @@ def _soft_display_claim(claim: dict[str, Any]) -> bool:
     soft = ("用处", "修护", "尝鲜", "别错过", "小情绪", "姐妹", "新品", "必备",
             "推荐", "闭眼入", "闭眼囤", "都在用", "香味", "香氛", "雪松", "茶香",
             "清香", "淡淡的", "品质", "好到没话说", "没话说",
+            "干净又卫生", "又卫生", "真的得囤", "得囤起来", "囤起来",
             "送挂钩", "挂钩", "够用", "小半年", "囤一次", "囤一箱", "大牌子",
             "送一个", "还送", "定制", "纸巾支架", "支架",
             # Brand/print motif on product or packaging is enough; do not keep
@@ -806,8 +807,21 @@ def main() -> int:
                             result["warnings"].append(
                                 f"POST_DRAFT_OVERALL_FAIL_IGNORED:B{batch_no:02d}:no_segment_mismatch")
                         elif overall == "UNCERTIFIED":
-                            result["warnings"].append(f"POST_DRAFT_VISION_UNCERTIFIED:B{batch_no:02d}")
-                            result["uncertified"] = True
+                            # When segments already name refillable holes
+                            # (INSUFFICIENT/DEGRADED), trust them over a
+                            # contradictory overall=UNCERTIFIED. Unknown/invalid
+                            # overall coerced to UNCERTIFIED with only DIRECT
+                            # rows still hard-blocks (certification hole).
+                            refillable = any(
+                                level in {"INSUFFICIENT_EVIDENCE", "ACCEPTABLE_DEGRADED"}
+                                for level in batch_levels)
+                            if batch_levels and "MISMATCH" not in batch_levels and refillable:
+                                result["warnings"].append(
+                                    f"POST_DRAFT_OVERALL_UNCERTIFIED_IGNORED:B{batch_no:02d}:segments_judged")
+                            else:
+                                result["warnings"].append(
+                                    f"POST_DRAFT_VISION_UNCERTIFIED:B{batch_no:02d}")
+                                result["uncertified"] = True
                         elif overall in {"PASS_WITH_DEGRADED", "PASS_WITH_GAPS"}:
                             # After soft/price remaps, segments may all be DIRECT while
                             # the model overall still says degraded — trust segments.
