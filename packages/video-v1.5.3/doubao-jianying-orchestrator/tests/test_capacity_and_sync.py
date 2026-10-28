@@ -223,7 +223,7 @@ class CapacityTests(unittest.TestCase):
             self.assertEqual(blocker["status"], "MATERIAL_BATCH_LIMIT_EXCEEDED")
             self.assertEqual(blocker["safe_source_limit"], 1)
 
-    def test_upload_then_capacity_check_keeps_upload_and_blocks_before_tts(self):
+    def test_capacity_check_blocks_before_copy_and_tts(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             videos = []
@@ -246,7 +246,7 @@ class CapacityTests(unittest.TestCase):
                 blocker = eng._upload_videos_and_check_capacity(clips)
             self.assertEqual(blocker["status"], "MATERIAL_BATCH_LIMIT_EXCEEDED")
             self.assertIn("上传数量单次只支持最多传 1 条", blocker["message"])
-            self.assertTrue((root / "report" / "uploads" / "videos" / "a.mov").exists())
+            self.assertFalse((root / "report" / "uploads").exists())
 
 
 class VisualDuplicateGateTests(unittest.TestCase):

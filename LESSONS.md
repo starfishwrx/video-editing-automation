@@ -7,6 +7,15 @@
 
 ## 新增条目
 
+### L-20261028-08 提速不能改变证据与交付计数单位
+- status: OPEN
+- hits: 1
+- 模块: 抽帧 / 调度 / staging / preview / throughput
+- 现象: 全轮准备屏障、逐帧进程与中间复制增加成本；草稿PASS被误读成成片产量；部分预览收据丢掉未覆盖要求。
+- 根因: 执行顺序与语义顺序耦合、复制身份只按同名串行假设、统计未明确artifact类型。
+- 以后怎么做: 就绪执行按ID归并且有背压；抽帧先证明PTS对应；并发复制从一开始用独立目标名并原子发布；保留完整需求且只显式preview容忍不足；草稿与MP4分别计量，未知为null。
+- 证据: `test_bounded_frame_batch.py`、`test_ready_work.py`、`test_single_copy_staging.py`、`test_ai_editor.py`、`test_throughput_calibration.py`；详见 `docs/plans/20261028-production-optimization.md`。
+
 ### L-20261028-07 已选镜头的保护区与卖点覆盖
 - status: OPEN
 - hits: 1

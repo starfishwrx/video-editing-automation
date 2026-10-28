@@ -10,7 +10,9 @@ from .file_safety import locked_json_update
 
 def import_productless_observations(prior_task: dict[str, Any], prior_manifest: dict[str, Any],
                                     current_manifest: dict[str, Any], analysis: dict[str, Any],
-                                    cache_path: Path, *, profile: str = "volc") -> dict[str, int]:
+                                    cache_path: Path, *, profile: str = "volc",
+                                    prior_base_dir: Path | None = None,
+                                    current_base_dir: Path | None = None) -> dict[str, int]:
     """Import only exact-source/protocol observations with proven task identity.
 
     This is a one-time operator action, not implicit cross-product cache lookup.
@@ -26,10 +28,11 @@ def import_productless_observations(prior_task: dict[str, Any], prior_manifest: 
         raise ValueError("LEGACY_TASK_IDENTITY_MISMATCH")
     if any(str(prior_manifest.get(k) or "").strip() for k in ("product_id", "product", "brand", "sku")):
         raise ValueError("LEGACY_MANIFEST_NOT_PRODUCTLESS")
-    sources = {str(Path(str(s)).expanduser().resolve()).casefold()
-               for s in current_manifest.get("material_sources", []) if str(s).strip()}
-    prior_sources = {str(Path(str(s)).expanduser().resolve()).casefold()
-                     for s in prior_manifest.get("material_sources", []) if str(s).strip()}
+    from .shot_analyzer import manifest_sources
+    sources = {str(path).casefold() for path in
+               manifest_sources(current_manifest, current_base_dir or Path.cwd())}
+    prior_sources = {str(path).casefold() for path in
+                     manifest_sources(prior_manifest, prior_base_dir or Path.cwd())}
     if not sources or not prior_sources:
         raise ValueError("MATERIAL_SOURCES_REQUIRED")
     without_product = dict(current_manifest, product_id="", product="", brand="")
@@ -87,7 +90,9 @@ def main() -> int:
             raise ValueError("JSON_OBJECT_REQUIRED")
         return value
     result = import_productless_observations(read(args.prior_task), read(args.prior_manifest),
-        read(args.current_manifest), read(args.prior_analysis), args.cache, profile=args.profile)
+        read(args.current_manifest), read(args.prior_analysis), args.cache, profile=args.profile,
+        prior_base_dir=args.prior_manifest.resolve().parent,
+        current_base_dir=args.current_manifest.resolve().parent)
     print(json.dumps(result, ensure_ascii=False))
     return 0
 

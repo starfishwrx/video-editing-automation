@@ -17,7 +17,7 @@ from orchestrator import ai_editor_qc, semantic_gate, shot_analyzer, visual_qc_c
 
 class AIEditorTests(unittest.TestCase):
     def setUp(self):
-        prepare = mock.patch.object(editor, "_prepare_review_round")
+        prepare = mock.patch.object(editor, "_review_media")
         prepare.start()
         self.addCleanup(prepare.stop)
         self.temp = tempfile.TemporaryDirectory()
@@ -105,8 +105,42 @@ class AIEditorTests(unittest.TestCase):
         self.assertEqual(result["manifest"]["claim_gate_coverage"]["certification"], "UNCERTIFIED")
         self.assertEqual(result["claim_gate_coverage"]["certification"], "UNCERTIFIED")
         self.assertEqual(result["pending_items"][0]["type"], "PARTIAL_SELLING_POINTS")
+        segment = result["segments"][0]
+        self.assertEqual(len(segment["ai_selection"]["selling_points"]), 2)
+        self.assertTrue(contract.validate_segment_receipt(segment, manifest=self.manifest)["ok"])
+        formal = {**self.manifest, "delivery_mode": "formal"}
+        self.assertFalse(contract.validate_segment_receipt(segment, manifest=formal)["ok"])
+        self.assertFalse(semantic_gate.evaluate_segments([segment], require_explicit=True)["ok"])
+        legacy = copy.deepcopy(segment)
+        legacy["ai_selection"]["selling_points"] = legacy["ai_selection"]["selling_points"][:1]
+        self.assertFalse(contract.validate_segment_receipt(legacy, manifest=formal)["ok"])
         self.manifest["delivery_mode"] = "formal"
         self.assertFalse(self.result()["ok"])
+
+    def test_refinement_preparation_failure_retains_prior_observation(self):
+        original = {**self.review, "dense_required": True}
+        def prepare(shot, directory, *, dense=False):
+            if dense:
+                raise OSError("dense extraction failed")
+        with mock.patch.object(editor, "_review_media", side_effect=prepare), \
+                mock.patch.object(editor, "_review", return_value=original):
+            rows, _ = editor._review_pool(self.manifest, self.sentence,
+                {"handfeel": self.shot}, self.root, {})
+        self.assertEqual(rows[0]["verdict"], "matched")
+        self.assertEqual(rows[0]["refinement_status"], "retained_original")
+
+    def test_guarded_preparation_failure_retains_unconfirmed_original(self):
+        self.manifest["head_trim_s"] = 2.5
+        def prepare(shot, directory, *, dense=False):
+            if dense:
+                raise OSError("guarded extraction failed")
+        with mock.patch.object(editor, "_review_media", side_effect=prepare), \
+                mock.patch.object(editor, "_review", return_value=self.review):
+            rows, coverage = editor._review_pool(self.manifest, self.sentence,
+                {"handfeel": self.shot}, self.root, {})
+        self.assertEqual(rows[0]["verdict"], "matched")
+        self.assertEqual(rows[0]["guarded_review_status"], "unconfirmed")
+        self.assertEqual(coverage["uncertain"], 1)
 
     def test_partial_preview_stops_after_reviewed_supported_point(self):
         self.manifest.update(delivery_mode="preview", allow_partial_selling_points=True)

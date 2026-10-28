@@ -60,6 +60,25 @@ class LegacyCacheImportTest(unittest.TestCase):
         self.prior["material_sources"] = [str(other)]
         self.assertEqual(self.run_import()["rejected"], 1)
 
+    def test_relative_sources_use_each_manifest_directory(self):
+        prior_dir = self.root / "prior"
+        current_dir = self.root / "current"
+        prior_dir.mkdir()
+        current_dir.mkdir()
+        self.prior["material_sources"] = ["../video.mp4"]
+        self.current["material_sources"] = ["../video.mp4"]
+        result = legacy_cache_import.import_productless_observations(
+            self.task, self.prior, self.current, {"shots": [self.row]}, self.cache,
+            prior_base_dir=prior_dir, current_base_dir=current_dir)
+        self.assertEqual(result["added"], 1)
+        wrong = current_dir / "video.mp4"
+        wrong.write_bytes(b"different inventory")
+        self.current["material_sources"] = ["video.mp4"]
+        result = legacy_cache_import.import_productless_observations(
+            self.task, self.prior, self.current, {"shots": [self.row]}, self.cache,
+            prior_base_dir=prior_dir, current_base_dir=current_dir)
+        self.assertEqual(result["rejected"], 1)
+
     def test_existing_current_result_wins(self):
         key = vision._vision_cache_key(self.current, self.row, "volc")
         self.cache.write_text(json.dumps({key: {"text_pass": "hires"}}), encoding="utf-8")
