@@ -209,7 +209,10 @@ def _load_image(path: Path, width: int, height: int):
     """Load/resize a frame with OpenCV, falling back to Pillow."""
     try:
         import cv2  # type: ignore
-        image = cv2.imread(str(path))
+        import numpy as np  # type: ignore
+        # OpenCV's path APIs on Windows do not reliably support Unicode.
+        # Python opens the path; OpenCV only receives the encoded bytes.
+        image = cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_COLOR)
         if image is None:
             return None
         return cv2.resize(image, (width, height), interpolation=cv2.INTER_AREA)
@@ -327,7 +330,10 @@ def _write_sheet(items: list[dict[str, Any]], output: Path, *, columns: int = 4,
         row, col = divmod(index, columns)
         x, y = col * tile_width, row * tile_height
         if fit:
-            raw = cv2.imread(str(item["path"]))
+            try:
+                raw = cv2.imdecode(np.fromfile(item["path"], dtype=np.uint8), cv2.IMREAD_COLOR)
+            except (OSError, ValueError):
+                raw = None
             image = None
             if raw is not None:
                 w, h = _fit_size(raw.shape[1], raw.shape[0], tile_width, tile_height - 34)
@@ -350,7 +356,14 @@ def _write_sheet(items: list[dict[str, Any]], output: Path, *, columns: int = 4,
                     cv2.FONT_HERSHEY_SIMPLEX, font_size / 30 if font_size else 0.43,
                     (255, 255, 255), 2 if font_size else 1, cv2.LINE_AA)
     output.parent.mkdir(parents=True, exist_ok=True)
-    return bool(cv2.imwrite(str(output), canvas))
+    try:
+        ok, encoded = cv2.imencode(output.suffix or ".jpg", canvas)
+        if not ok:
+            return False
+        output.write_bytes(encoded.tobytes())
+        return output.is_file() and output.stat().st_size > 0
+    except (OSError, ValueError, cv2.error):
+        return False
 
 
 # The loop needs a shell to manufacture new images to look at, so removing

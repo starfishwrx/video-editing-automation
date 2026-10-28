@@ -36,6 +36,24 @@ def _textured(path: Path, size=(160, 90)) -> Path:
     return path
 
 
+class UnicodeContactSheetTests(unittest.TestCase):
+    def test_chinese_frame_and_output_paths_are_readable(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw) / "东方纸上"
+            root.mkdir()
+            frame = _save(root / "亲肤画面.jpg", (50, 100, 200))
+            for fit in (False, True):
+                output = root / ("质量检查贴合.jpg" if fit else "质量检查.jpg")
+                self.assertTrue(vision_analyzer._write_sheet(
+                    [{"path": str(frame), "label": "S01"}], output,
+                    columns=1, tile_width=160, tile_height=124, fit=fit))
+                with Image.open(output) as result:
+                    # A black/red unreadable placeholder would not retain blue.
+                    red, green, blue = result.convert("RGB").getpixel((80, 45))
+                    self.assertGreater(blue, red + 70)
+                    self.assertGreater(blue, green + 50)
+
+
 class ScoreTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="fq_score_")
