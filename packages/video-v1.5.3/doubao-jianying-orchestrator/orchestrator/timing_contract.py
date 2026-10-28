@@ -906,6 +906,51 @@ TIMING_CERTAINTY_SEGMENT = "segment"      # 段内已有音频参数，先于本
 _SENTENCE_SPLIT_RE = re.compile(r"[。！？!?；;\n\r]+")
 
 
+def _spoken_clauses(text: str) -> list[str]:
+    """Split at explicit natural pauses, preserving text and numeric punctuation.
+
+    A comma is only a candidate boundary, not proof of semantic independence.
+    Short lead-ins and dangling modifiers stay with the following clause. Long
+    unpunctuated text is deliberately left intact for the existing length gate.
+    """
+    parts: list[str] = []
+    start = 0
+    stack: list[str] = []
+    pairs = {"（": "）", "(": ")", "【": "】", "[": "]", "“": "”", "‘": "’", "《": "》"}
+    for i, char in enumerate(text):
+        if char in pairs:
+            stack.append(pairs[char])
+        elif stack and char == stack[-1]:
+            stack.pop()
+        elif char in "，,：:" and not stack:
+            if char in ",:" and i and i + 1 < len(text) and text[i-1].isdigit() and text[i+1].isdigit():
+                continue
+            part = text[start:i + 1]
+            if part.strip():
+                parts.append(part)
+            start = i + 1
+    if text[start:].strip():
+        parts.append(text[start:])
+    if not parts:
+        return [text] if text.strip() else []
+    out: list[str] = []
+    pending = ""
+    for part in parts:
+        pending += part
+        body = re.sub(r"[\s，,：:]+$", "", pending)
+        # Keep incomplete prefixes attached; do not make punctuation-only cues.
+        if len(re.sub(r"\s+", "", body)) <= 3 or body.endswith(("的", "着", "在", "如果", "因为", "虽然")):
+            continue
+        out.append(pending)
+        pending = ""
+    if pending.strip():
+        if out:
+            out[-1] += pending
+        else:
+            out.append(pending)
+    return out
+
+
 def _split_oversized_sentence(text: str) -> list[str]:
     """Split a long raw script at existing punctuation, never inside words.
 
@@ -963,7 +1008,8 @@ def split_sentences(manifest: Any) -> list[dict[str, Any]]:
     parts = [part.strip() for part in _SENTENCE_SPLIT_RE.split(text) if part.strip()]
     from .ai_editor_contract import selection_mode
     if selection_mode(m) in ("ai_editor", "rule_then_ai"):
-        parts = [clause for part in parts for clause in _split_oversized_sentence(part)]
+        parts = [piece for part in parts for clause in _spoken_clauses(part)
+                 for piece in _split_oversized_sentence(clause)]
     return [{"text": part} for part in parts]
 
 

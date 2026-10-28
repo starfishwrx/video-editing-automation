@@ -378,6 +378,23 @@ class SceneApplyTests(unittest.TestCase):
         self.assertEqual(segments[0]["scene_rule"]["status"], "unmet")
         self.assertTrue(segments[1]["visual_missing"])
 
+    def test_formal_does_not_retain_unverified_related_shot(self):
+        related = {**SHOT, "shot_id": "related", "status": "ready_for_matching", "action_complete": True}
+        seg = {"text": "吸收", "video": related["video"], "temporary_shot_id": "related",
+               "window_solution": {"ok": True}, "audio_duration_us": US}
+        manifest = {**MANIFEST, "category": "卫品", "retain_related_on_unmet_scene": True}
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(scene_rules, "_group_candidates", return_value=[(related, "selected")]), \
+                mock.patch.object(scene_rules, "_plan_group", return_value={"ok": False, "reason": scene_rules.SCENE_ACTION_TOO_LONG}), \
+                mock.patch("orchestrator.demo_actions.shot_fit", return_value=1), \
+                mock.patch("orchestrator.demo_actions.contradiction", return_value=""):
+            report = scene_rules._apply_group({"scene": SplitSpeedTests.SCENE, "positions": [0]}, [seg],
+                recs={}, shots_by_id={"related": related}, used=set(), manifest=manifest,
+                report_dir=Path(tmp), locate=mock.Mock(), preview=False)
+        self.assertNotIn(1, report.get("retained_related_indices", []))
+        self.assertFalse(seg.get("scene_preview_unresolved"))
+        self.assertEqual(report["status"], "unmet")
+
     def test_functional_scene_swap_cannot_bypass_action_verification(self):
         rules = rulepack.load("zhipin")
         scene = next(s for s in rules["scenes"] if s.get("id") == "usage_action")

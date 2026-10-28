@@ -637,7 +637,6 @@ def cmd_build(args) -> int:
         return _emit({"status": "VOICE_INPUT_INVALID", "terminal_state": "BLOCKED",
                       "failure_class": "environment", "retryable": False,
                       "safe_to_continue": False, "message": str(exc)}, 1)
-    manifest = shot_notes.apply(manifest)
     ledger = usage_ledger.ledger_path(manifest, report_dir)
     if ledger is not None and not manifest.get("usage_ledger_path"):
         manifest["usage_ledger_path"] = str(ledger)
@@ -696,6 +695,28 @@ def cmd_build(args) -> int:
         })
         return _emit(_compact_build_result(result), 1)
 
+    # Freeze one verified text plan before narration, matching and note binding.
+    # Existing segment/audio mappings and explicit notes are never reindexed.
+    from . import ai_editor_contract, sentence_planner
+    if (not manifest.get("segments") and not shot_notes._notes_of(manifest)
+            and not manifest.get("shot_notes_by_index")
+            and (manifest.get("temporary_material_analysis") or manifest.get("auto_match_shots"))
+            and ai_editor_contract.selection_mode(manifest) in ("ai_editor", "rule_then_ai")
+            and manifest.get("semantic_sentence_planning", True)):
+        try:
+            manifest = sentence_planner.plan(manifest, report_dir / "sentence_planning")
+            (report_dir / "sentence_planning" / "planned_manifest.json").write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        except (ValueError, TypeError, OSError) as exc:
+            return _emit(_compact_build_result(finalize({
+                "status": "SENTENCE_PLAN_REVIEW_REQUIRED", "terminal_state": "BLOCKED",
+                "failure_class": "semantic", "retryable": True,
+                "safe_to_continue": False, "next_action": "manual_review",
+                "message": "语义分句失败或未完整保留原文，未开始配音和选镜。",
+                "error": str(exc),
+            })), 1)
+    manifest = shot_notes.apply(manifest)
+
     # 音色先锁一次并回写 manifest：全流程只在这里决议音色，引擎后续只读锁。
     # 必须在 TTS 之前，否则「按哪个音色合成」和「按哪个音色选镜」可能不是同一个。
     locked_voice, voice_blocker = _lock_voice_once(manifest)
@@ -708,6 +729,10 @@ def cmd_build(args) -> int:
             # 装不下的镜头在**规划阶段**就被判 SHOT_TIMING_INFEASIBLE，
             # 而不是拖到 write_draft 才 AUDIO_VIDEO_MISMATCH。
             narration_timing = _pre_synthesize_narration(manifest, report_dir, locked_voice)
+            if manifest.get("sentence_plan_version") == "semantic-v1":
+                manifest["narration_timing_file"] = str(report_dir / "narration_timing.json")
+                (report_dir / "sentence_planning" / "planned_manifest.json").write_text(
+                    json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
             manifest, blocker = _temporary_match(manifest, input_path, report_dir,
                                                  narration_timing=narration_timing)
             shot_match_report = report_dir / "shot_match_report.json"
@@ -915,6 +940,37 @@ def cmd_recover(args) -> int:
         return _emit(_compact_control_result(result), 0 if diagnosis_ok else 1)
 
     if stage == "semantic_match":
+        from . import ai_editor_contract
+        timing = None
+        if manifest.get("sentence_plan_version") == "semantic-v1":
+            timing_path = Path(str(manifest.get("narration_timing_file") or ""))
+            try:
+                if not timing_path.is_file():
+                    raise ValueError("missing timing file")
+                timing = _read(timing_path)
+                rows = timing.get("rows") or []
+                sentences = timing_contract.split_sentences(manifest)
+                if len(rows) != len(sentences) or any(
+                    row.get("key") != timing_contract.sentence_key(sentence, i)
+                    or row.get("text") != timing_contract.sentence_text(sentence)
+                    or int(row.get("audio_duration_us") or 0) <= 0
+                    for i, (row, sentence) in enumerate(zip(rows, sentences), 1)
+                ):
+                    raise ValueError("sentence timing mismatch")
+            except (OSError, ValueError, TypeError, AttributeError):
+                result = finalize({"status": "RECOVERY_SENTENCE_TIMING_REQUIRED",
+                                   "failure_class": "semantic",
+                                   "message": "语义分句恢复需要与每句对应的原始配音时长文件。"})
+                return _emit(_compact_control_result(result), 1)
+        elif (not manifest.get("segments") and not shot_notes._notes_of(manifest)
+              and not manifest.get("shot_notes_by_index")
+              and (manifest.get("temporary_material_analysis") or manifest.get("auto_match_shots"))
+              and ai_editor_contract.selection_mode(manifest) in ("ai_editor", "rule_then_ai")
+              and manifest.get("semantic_sentence_planning", True)):
+            result = finalize({"status": "RECOVERY_SENTENCE_PLAN_REQUIRED",
+                               "failure_class": "semantic",
+                               "message": "请使用原任务 sentence_planning/planned_manifest.json 恢复，避免分句错位。"})
+            return _emit(_compact_control_result(result), 1)
         analysis = str(manifest.get("shot_analysis_file") or "").strip()
         analysis_path = Path(analysis).expanduser() if analysis else report_dir / "shot_candidates.json"
         if not analysis_path.is_absolute():
@@ -929,7 +985,8 @@ def cmd_recover(args) -> int:
             return _emit(_compact_control_result(result), 1)
         manifest["shot_analysis_file"] = str(analysis_path.resolve())
         try:
-            matched_manifest, blocker = _temporary_match(manifest, input_path, report_dir)
+            matched_manifest, blocker = _temporary_match(manifest, input_path, report_dir,
+                                                         narration_timing=timing)
         except Exception as exc:  # noqa: BLE001
             result = finalize({"status": "ERROR", "error_type": type(exc).__name__, "error": str(exc)})
             return _emit(_compact_control_result(result), 1)
