@@ -16,6 +16,9 @@ Mac 侧负责最终人工检查和成功交付回写；失败/部分失败可由
 """
 from __future__ import annotations
 
+from tools.process_liveness import assert_process_alive as _assert_process_alive
+from tools.process_liveness import process_created_at
+
 import json
 import hashlib
 import os
@@ -246,7 +249,10 @@ def log(*args):
 
 def progress(entry: dict):
     entry["ts"] = time.strftime("%Y-%m-%d %H:%M:%S")
-    with _OUTPUT_LOCK:
+    if str(SKILL) not in sys.path:
+        sys.path.insert(0, str(SKILL))
+    from orchestrator.file_safety import file_lock
+    with _OUTPUT_LOCK, file_lock(PROGRESS):
         with PROGRESS.open("a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     try:
@@ -267,7 +273,7 @@ def _read_json(path: pathlib.Path) -> dict:
 def _acquire_record_lock(task_dir: pathlib.Path, run_id: str) -> pathlib.Path:
     """Prevent two worker processes from touching one record at once."""
     lock_path = task_dir / ".task_run.lock"
-    payload = {"pid": os.getpid(), "run_id": run_id,
+    payload = {"pid": os.getpid(), "process_created_at": process_created_at(os.getpid()), "run_id": run_id,
                "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
                "pipeline_version": _pipeline_version()}
     for _ in range(2):
@@ -284,7 +290,7 @@ def _acquire_record_lock(task_dir: pathlib.Path, run_id: str) -> pathlib.Path:
                 if pid and int(pid) == os.getpid():
                     alive = True
                 elif pid:
-                    os.kill(int(pid), 0)
+                    _assert_process_alive(int(pid), current.get("process_created_at"))
                     alive = True
             except (OSError, TypeError, ValueError, ProcessLookupError):
                 alive = False
@@ -339,8 +345,30 @@ def _qc_state(task_dir: pathlib.Path, drafts: list[str], done: dict) -> tuple[st
     return "UNCERTIFIED", len(reports), reports
 
 
+def _record_lock_is_live(task_dir: pathlib.Path) -> bool:
+    """A lock owned by a live, matching process identifies another worker."""
+    owner = _read_json(task_dir / ".task_run.lock")
+    try:
+        pid = int(owner.get("pid") or 0)
+        if pid <= 0:
+            return False
+        _assert_process_alive(pid, owner.get("process_created_at"))
+        return True
+    except (OSError, TypeError, ValueError, ProcessLookupError):
+        return False
+
+
 def _write_status_snapshot() -> None:
-    """Publish authoritative status; terminal done.json beats old start events."""
+    """Serialize read, reduction and atomic publication across worker processes."""
+    if str(SKILL) not in sys.path:
+        sys.path.insert(0, str(SKILL))
+    from orchestrator.file_safety import file_lock
+    with file_lock(STATUS_SNAPSHOT):
+        _write_status_snapshot_locked()
+
+
+def _write_status_snapshot_locked() -> None:
+    """Terminal done.json beats old start events unless a fresh owner is live."""
     latest: dict[str, dict] = {}
     if PROGRESS.is_file():
         for raw in PROGRESS.read_text(encoding="utf-8", errors="replace").splitlines():
@@ -363,8 +391,9 @@ def _write_status_snapshot() -> None:
         qc_status, qc_count, qc_rows = _qc_state(task_dir, drafts, done)
         terminal = str(done.get("status") or "").upper()
         done_finished_at = str(done.get("finished_at") or "")
+        live_worker = rid == ACTIVE_RECORD_ID or _record_lock_is_live(task_dir)
         new_attempt = (
-            rid == ACTIVE_RECORD_ID
+            live_worker
             and str(event.get("event") or "").lower() == "start"
             and str(event.get("ts") or "") > done_finished_at
         )
@@ -373,7 +402,7 @@ def _write_status_snapshot() -> None:
         elif done_path.is_file() and terminal in {"OK", "PARTIAL", "PREVIEW_READY", "ERROR", "DEFERRED"}:
             state, source = terminal, "done.json"
         elif (str(event.get("event") or "").lower() == "start"
-              and rid == ACTIVE_RECORD_ID):
+              and live_worker):
             state, source = "RUNNING", "live_worker_event"
         elif event:
             state, source = "STALE_ORPHANED", "historical_progress_only"
@@ -406,9 +435,8 @@ def _write_status_snapshot() -> None:
         "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "tasks": tasks,
     }
-    tmp = STATUS_SNAPSHOT.with_suffix(".tmp")
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(STATUS_SNAPSHOT)
+    from orchestrator.file_safety import atomic_write_text
+    atomic_write_text(STATUS_SNAPSHOT, json.dumps(payload, ensure_ascii=False, indent=2))
 
 
 def mount_nas() -> bool:
