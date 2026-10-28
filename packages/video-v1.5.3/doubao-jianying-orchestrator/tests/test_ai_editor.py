@@ -133,6 +133,31 @@ class AIEditorTests(unittest.TestCase):
         self.assertEqual(row["ai_selection"]["index"], 2)
         self.assertTrue(contract.validate_segment_receipt(row, index=2, verify_source=True, manifest=manifest)["ok"])
 
+    def test_refill_combines_reviewed_claims_without_losing_timing_or_evidence(self):
+        text = "擦油污、擦水渍都好用，湿水不容易破。"
+        manifest = {**self.manifest, "selection_mode": "rule_then_ai", "delivery_mode": "preview",
+                    "allow_partial_selling_points": True, "ai_refill_indices": [1],
+                    "segments": [{"text": text, "audio_duration_us": 4500000}]}
+        matched = {"segments": [{"index": 1, "text": text}], "pending_items": []}
+        shots, reviews = [], []
+        for i in range(3):
+            video = self.root / f"source-{i}.mp4"
+            video.write_bytes(f"source-{i}".encode())
+            sid = f"claim-{i}"
+            shots.append({**self.shot, "shot_id": sid, "video": str(video)})
+            reviews.append({**self.review, "shot_id": sid, "source_identity": contract.source_identity(video),
+                            "supported_point_ids": [f"p{i+1}"]})
+        with mock.patch.object(editor, "_review_pool", return_value=(list(reversed(reviews)), {"feasible": True})) as review:
+            result = editor.refill_indices(manifest, {"shots": shots}, matched, [1], self.root)
+        self.assertFalse(review.call_args.args[0]["allow_partial_selling_points"])
+        self.assertTrue(result["ok"], result)
+        row = result["segments"][0]
+        self.assertEqual(len(row["span_parts"]), 3)
+        self.assertEqual([p["shot_id"] for p in row["span_parts"]], [s["shot_id"] for s in shots])
+        self.assertTrue(contract.validate_segment_receipt(row, index=1, verify_source=True, manifest=manifest)["ok"])
+        self.assertAlmostEqual(sum(p["segment_s"] for p in row["span_parts"]), 4.5, places=5)
+        self.assertFalse(row.get("uncovered_selling_points"))
+
     def test_refill_prioritizes_observed_specific_object_but_still_requires_review(self):
         text = "还送定制纸巾支架"
         manifest = {**self.manifest, "segments": [{"text": text, "audio_duration_us": 2000000}]}

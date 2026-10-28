@@ -774,7 +774,7 @@ def match_manifest(manifest: dict, analysis: dict, *, narration_timing: dict | N
 def _heuristic_sentence(index: int, text: str) -> dict:
     """Keep explicit clauses as separate possible points without inventing claims."""
     value = str(text or "").strip()
-    parts = [part.strip() for part in re.split(r"[，,；;]|以及|还有|并且|同时|和", value) if part.strip()]
+    parts = [part.strip() for part in re.split(r"[，,；;、]|以及|还有|并且|同时|和", value) if part.strip()]
     if len(parts) < 2 or any(len(part) < 2 for part in parts) or len(parts) > 6:
         parts = [value]
     return {
@@ -975,9 +975,15 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
         try:
             if not sentence["candidate_ids"]:
                 raise ValueError(f"AI_REFILL_NO_UNIQUE_CANDIDATES:{index}")
-            reviews, coverage = _review_pool(manifest, sentence, shots, directory, narration_timing or {})
+            # An explicit QC repair must seek all points before considering a
+            # preview fallback; otherwise the first partial match ends review.
+            explicit = any(str(raw).strip() == str(index) for raw in (manifest.get("ai_refill_indices") or []))
+            review_manifest = ({**manifest, "allow_partial_selling_points": False}
+                               if explicit and len(sentence["selling_points"]) > 1 else manifest)
+            reviews, coverage = _review_pool(review_manifest, sentence, shots, directory, narration_timing or {})
             good = [r for r in reviews if r.get("verdict") == "matched"]
-            if not good or not coverage.get("feasible"):
+            partial = manifest.get("delivery_mode") == "preview" and manifest.get("allow_partial_selling_points") is True
+            if not good or (not coverage.get("feasible") and not partial):
                 raise ValueError(f"AI_REFILL_NO_MATCH:{index}")
             mini_manifest = {k: v for k, v in manifest.items() if k not in ("segments", "full_script", "script")}
             mini_manifest.update(full_script=sentence["text"], selection_mode="ai_editor")
@@ -987,11 +993,53 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
                 timing_row = {**narration_timing["rows"][index - 1], **timing_row}
             mini_timing = {**(narration_timing or {}), "rows": [timing_row]}
             last_error = f"AI_REFILL_WINDOW_INFEASIBLE:{index}"
-            for best in sorted(good, key=lambda r: float(r.get("confidence", 0)), reverse=True):
+            from . import shot_analyzer
+            required = {p["id"] for p in sentence["selling_points"]}
+            point_order = {p["id"]: i for i, p in enumerate(sentence["selling_points"])}
+            ordered_good = sorted(good, key=lambda r: float(r.get("confidence", 0)), reverse=True)
+            # Singles stay first; multi-shot combinations are considered only
+            # when their real reviewed evidence covers the whole sentence.
+            def candidate_groups():
+                for size in range(1, min(len(ordered_good), int(manifest.get("span_max_parts", 3))) + 1):
+                    for group in combinations(ordered_good, size):
+                        covered = {p for review in group for p in review.get("supported_point_ids", [])}
+                        if required <= covered:
+                            yield group
+                if partial:
+                    yield from ((r,) for r in ordered_good if not required <= set(r.get("supported_point_ids", [])))
+            for group in candidate_groups():
+                def point_span(review):
+                    positions = [point_order[p] for p in review.get("supported_point_ids", []) if p in point_order]
+                    return (min(positions), max(positions)) if positions else (len(point_order), len(point_order))
+                group = tuple(sorted(group, key=point_span))
+                # A point first shown after a later point would reverse the
+                # spoken progression even if the union covers every claim.
+                assignment = [next((i for i, review in enumerate(group)
+                                    if point["id"] in review.get("supported_point_ids", [])), None)
+                              for point in sentence["selling_points"]]
+                present = [i for i in assignment if i is not None]
+                if present != sorted(present):
+                    continue
+                try:
+                    observed = [_observed_shot(shots[r["shot_id"]], r) for r in group]
+                    spans = tuple(shot_analyzer.span_segment_for(s, manifest=manifest,
+                        time_sensitive=r["time_sensitive"], video=s["video"], shot_id=s["shot_id"])
+                        for s, r in zip(observed, group))
+                    pad_us = round(float(manifest.get("tail_pad_s", 0) or 0) * 1e6)
+                    solution = timing_contract.solve_span(timing_contract.SpanRequest(segments=spans,
+                        audio_duration_us=audio_us, tail_pad_us=pad_us, fps=float(manifest.get("fps", 30))))
+                except (ValueError, KeyError, TypeError, OSError) as exc:
+                    last_error = str(exc)
+                    continue
+                if not solution.ok:
+                    continue
+                allocations = [int(part.segment_us) - (pad_us if i == len(group) - 1 else 0)
+                               for i, part in enumerate(solution.parts)]
                 plan = {"schema": contract.PLAN_SCHEMA, "policy_version": contract.POLICY_VERSION,
                         "sentences": [{**sentence, "index": 1}], "reviews": {"1": reviews},
-                        "display_reviews": [], "rows": [{"index": 1, "parts": [{
-                            "shot_id": best["shot_id"], "audio_duration_us": int(audio_us)}],
+                        "display_reviews": [], "rows": [{"index": 1, "parts": [
+                            {"shot_id": review["shot_id"], "audio_duration_us": duration}
+                            for review, duration in zip(group, allocations)],
                             "reason": f"rule_then_ai refill for S{index:02d}"}],
                         "identity": {"model": _editor_model(),
                                      "editorial_rules": contract.rules_identity(manifest)}, "ok": True}
@@ -1004,14 +1052,14 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
                     if not checked["ok"]:
                         raise ValueError(";".join(checked["reasons"]))
                     by_index[index] = row
-                    reserved.add(str(best["shot_id"]))
+                    reserved.update(str(review["shot_id"]) for review in group)
                     replaced.append(index)
                     if row.get("uncovered_selling_points"):
                         refill_unresolved.append({"index": index, "text": sentence["text"],
                             "type": "PARTIAL_SELLING_POINTS",
                             "missing_selling_points": row["uncovered_selling_points"]})
                     _save(directory / f"refill_{index:02d}.json", {
-                        "index": index, "shot_id": best["shot_id"], "coverage": coverage})
+                        "index": index, "shot_ids": [review["shot_id"] for review in group], "coverage": coverage})
                     break
                 except (ValueError, KeyError, TypeError, OSError) as exc:
                     last_error = str(exc)
