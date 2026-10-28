@@ -1196,7 +1196,7 @@ class _CapacityCalibrationEngine(OrchestrationEngine):
 
     def audio_selection_gate(self, clips):
         if (not self.capacity_guard and self.m.get("allow_silent") is True
-                and not self.m.get("voice") and not self.m.get("bgm")
+                and not self.m.get("voice")
                 and clips and all(c.audio_mode == "mute" and not c.text for c in clips)):
             return None
         return super().audio_selection_gate(clips)
@@ -1219,6 +1219,22 @@ def cmd_calibrate_capacity(args) -> int:
     reports = report_root / "capacity_calibration" / test_id
     assets.mkdir(parents=True, exist_ok=False)
     reports.mkdir(parents=True, exist_ok=False)
+    # The normal draft writer requires a real audio track even for muted clips.
+    # A deterministic local test tone keeps calibration self-contained and does
+    # not select a voice or music track for any production task.
+    import math
+    import struct
+    import wave
+    test_audio = isolated / "calibration_tone.wav"
+    sample_rate = 16000
+    second = b"".join(struct.pack("<h", round(4000 * math.sin(2 * math.pi * 440 * i / sample_rate)))
+                      for i in range(sample_rate))
+    with wave.open(str(test_audio), "wb") as audio:
+        audio.setnchannels(1)
+        audio.setsampwidth(2)
+        audio.setframerate(sample_rate)
+        for _ in range(max(1, args.max_sources) * 3):
+            audio.writeframesraw(second)
     profile_path = Path(args.profile_path).expanduser().resolve() if args.profile_path else None
     baseline = []
     for path in originals:
@@ -1253,6 +1269,8 @@ def cmd_calibrate_capacity(args) -> int:
             "draft_name": f"JYSkill_v131_capacity_{test_id}_{source_count:03d}",
             "segments": [{"video": str(path), "audio_mode": "mute", "duration": 0.0} for path in copied],
             "allow_silent": True,
+            "tail_pad_s": 0,
+            "bgm": {"path": str(test_audio)},
             "stabilize": False,
             "auto_transition": False,
             "execution_profile": "background_friendly",
