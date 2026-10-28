@@ -654,6 +654,23 @@ class AIEditorTests(unittest.TestCase):
         self.assertIsNone(blocker)
         self.assertEqual(refill.call_args.args[3], [1])
 
+    def test_rule_first_refills_blocked_claim_even_when_match_says_ok(self):
+        from orchestrator import cli
+        manifest = {"selection_mode": "rule_then_ai", "delivery_mode": "preview",
+                    "segments": [{"text": "普通介绍"}, {"text": "柔软又亲肤"}]}
+        analysis = {"shots": [self.shot], "vision_analysis": {"errors": []}}
+        matched = {"ok": True, "manifest": manifest, "segments": [
+            {"index": 1, "text": "普通介绍", "claim_gate": {"ok": True}},
+            {"index": 2, "text": "柔软又亲肤", "claim_gate": {"ok": False, "status": "blocked"}}],
+            "pending_items": [], "degraded_matches": []}
+        with mock.patch.object(cli, "_run_shot_analysis", return_value=analysis), \
+                mock.patch("orchestrator.material_corrections.apply", side_effect=lambda _m, a, _r: a), \
+                mock.patch.object(shot_analyzer, "match_manifest", return_value=matched), \
+                mock.patch("orchestrator.scene_rules.apply", return_value={}), \
+                mock.patch.object(editor, "refill_indices", side_effect=lambda _m, _a, m, *_args, **_kw: m) as refill:
+            cli._temporary_match(manifest, self.root / "input.json", self.root)
+        self.assertEqual(refill.call_args.args[3], [2])
+
     def test_multiple_shots_cover_distinct_points_and_bind_every_part(self):
         plan = self.plan()
         plan["sentences"][0]["selling_points"].append({"id": "p2", "text": "干爽"})

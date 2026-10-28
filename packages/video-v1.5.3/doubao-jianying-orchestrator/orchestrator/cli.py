@@ -515,6 +515,19 @@ def _temporary_match(manifest: dict, input_path: Path, report_dir: Path,
                     gap_indices.append(int(row.get("index")))
                 except (TypeError, ValueError):
                     continue
+        # A legacy recommendation can be structurally successful while its
+        # per-segment claim gate is blocked. Those rows also require pixel
+        # review; never let a top-level ok hide an uncovered selling point.
+        rule_segments = matched.get("segments") or (matched.get("manifest") or {}).get("segments") or []
+        for position, segment in enumerate(rule_segments, 1):
+            if not isinstance(segment, dict):
+                continue
+            gate = segment.get("claim_gate")
+            if isinstance(gate, dict) and (gate.get("ok") is False or gate.get("status") == "blocked"):
+                try:
+                    gap_indices.append(int(segment.get("index") or position))
+                except (TypeError, ValueError):
+                    gap_indices.append(position)
         need_ai = list(refill_indices)
         if not need_ai and gap_indices:
             # Preview can be structurally "ok" while still containing degraded
