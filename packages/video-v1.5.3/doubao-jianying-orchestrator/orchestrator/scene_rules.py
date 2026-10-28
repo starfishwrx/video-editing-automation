@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -120,6 +121,24 @@ def plan_split(shot: dict[str, Any], phases: dict[str, list[float]], scene: dict
     wipe_burst = max(wipe_rng[1], _number(speed.get("wipe_burst_max"), pour_burst))
     absorb_cap_us = _us(speed.get("absorb_max_output_s", 3.0))
     absorb_hi = max(1.0, _number(speed.get("absorb_max_speed"), 6.0))
+    # Optional editorial limit for the entire physical demonstration. If the
+    # evidenced interval no longer fits, let the caller try another source or
+    # report it unresolved; never speed it up past the requested limit.
+    raw_cap = manifest.get("max_absorb_demo_speed")
+    if raw_cap is not None:
+        try:
+            cap = float(raw_cap)
+        except (TypeError, ValueError):
+            return {"ok": False, "reason": "SCENE_SPEED_LIMIT_INVALID"}
+        if not math.isfinite(cap) or not 1.0 <= cap <= 20.0:
+            return {"ok": False, "reason": "SCENE_SPEED_LIMIT_INVALID"}
+        pour_rng = (pour_rng[0], min(pour_rng[1], cap))
+        wipe_rng = (wipe_rng[0], min(wipe_rng[1], cap))
+        if cap < max(pour_rng[0], wipe_rng[0]):
+            return {"ok": False, "reason": "SCENE_SPEED_LIMIT_INVALID"}
+        pour_burst = min(pour_burst, cap)
+        wipe_burst = min(wipe_burst, cap)
+        absorb_hi = min(absorb_hi, cap)
     fps = _fps(manifest)
     frame = timing_contract.frame_us(fps)
     names = [p["name"] for p in scene.get("phases") or []]
@@ -695,9 +714,10 @@ def _plan_for(scene: dict[str, Any], seg: dict[str, Any], shot: dict[str, Any], 
     if scene.get("text_forces_visual") and not rulepack.shot_has_visual(scene, shot):
         # 拆包句选到的只是袋面静态：不送相位打点，直接换下一个候选。
         return {"ok": False, "reason": SCENE_VISUAL_MISSING}
-    if (swapped and not scene.get("text_keywords")
+    if (swapped and not scene.get("text_keywords") and (contract or {}).get("kind") != "functional"
             and rulepack.scene_for({"scenes": [scene]}, str(seg.get("text") or ""), shot) is None):
-        # 只由画面触发的规则（正面指产品）：换上来的镜头本身不含该动作，规则就不适用。
+        # 展示句换到不含原动作的镜头时，原场景规则不再适用。功能句仍须核实
+        # 对应动作；不能把一个普通替换窗口称作完整演示。
         return _plain_swap(seg, shot, manifest=manifest, audio_us=audio_us)
     if kind == "single_shot":
         rng = _range(speed.get("range"), (0.85, 1.2))
@@ -1124,9 +1144,30 @@ def _apply_group(group: dict[str, Any], segments: list, *, recs: dict[int, dict]
         message = (f"{scene.get('label')}：素材池里没有{scene.get('label')}画面"
                    if code == SCENE_NO_FOOTAGE else
                    f"{scene.get('label')}：{scene.get('requirement')}，候选素材都演不完整")
+        retained = []
+        from . import demo_actions
         for position in positions:
-            segments[position] = _visual_missing(segments[position], message, code)
-        row.update({"status": "visual_missing", "reason": code})
+            member = segments[position]
+            shot = shots_by_id.get(str(member.get("temporary_shot_id") or ""))
+            contract = _contract(member, manifest)
+            related = (preview and manifest.get("retain_related_on_unmet_scene") is True and shot
+                       and shot.get("status") == "ready_for_matching"
+                       and shot.get("action_complete") is True
+                       and str(shot.get("video") or "") == str(member.get("video") or "")
+                       and bool(demo_actions.shot_fit(shot, contract))
+                       and not demo_actions.contradiction(shot, contract)
+                       and bool((member.get("window_solution") or {}).get("ok")))
+            if related:
+                member.update(preview_unresolved=True, scene_preview_unresolved=True,
+                              preview_reason=message, degraded_no_match=True,
+                              scene_rule={"id": scene.get("id"), "label": scene.get("label"),
+                                          "status": "unmet", "reason": code, "group": indices,
+                                          "operator_note": "保留相关画面供预览；完整实验和结果未获确认。"})
+                retained.append(position + 1)
+            else:
+                segments[position] = _visual_missing(member, message, code)
+        row.update({"status": "unmet" if len(retained) == len(positions) else "visual_missing",
+                    "reason": code, "retained_related_indices": retained})
     else:
         note = ""
         if forced and code == SCENE_NO_FOOTAGE:
@@ -1386,6 +1427,16 @@ def apply(manifest: dict[str, Any], matched: dict[str, Any], analysis: dict[str,
                 row.update({"status": "unmet", "reason": code})
         report["rows"].append(row)
     _sync_visual_missing(matched, out_manifest, segments)
+    if preview:
+        unresolved = list(matched.get("preview_unresolved") or [])
+        for position, seg in enumerate(segments, 1):
+            if isinstance(seg, dict) and seg.get("scene_preview_unresolved"):
+                unresolved.append({"index": position, "text": seg.get("text"),
+                                   "type": "SCENE_RELATED_PREVIEW_UNCERTIFIED",
+                                   "reason": seg.get("preview_reason")})
+        matched["preview_unresolved"] = unresolved
+        matched["preview_unresolved_count"] = len(unresolved)
+        out_manifest["preview_unresolved"] = unresolved
     report["applied"] = sum(1 for r in report["rows"] if r.get("status") == "applied")
     report["partial"] = sum(1 for r in report["rows"] if r.get("status") == "partial")
     report["unmet"] = sum(1 for r in report["rows"] if r.get("status") not in ("applied", "partial"))

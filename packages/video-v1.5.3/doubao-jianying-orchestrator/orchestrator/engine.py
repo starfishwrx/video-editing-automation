@@ -2724,10 +2724,13 @@ class OrchestrationEngine:
         if not draft_dir.is_dir():
             return {"status": "DRAFT_NOT_CREATED", "draft_path": str(draft_dir),
                     "reason": "保存后未在剪映当前草稿库发现新草稿目录。"}
-        if self.m.get("selection_mode") == "ai_editor":
+        if (self.m.get("selection_mode") == "ai_editor"
+                or (self.m.get("selection_mode") == "rule_then_ai"
+                    and any(isinstance(seg, dict) and seg.get("selection_mode") == "ai_editor"
+                            for seg in self.m.get("segments") or []))):
             from . import ai_editor_contract
             (draft_dir / "ai_selection_identity.json").write_text(json.dumps({
-                "schema": "chatcut-ai-draft-v1", "selection_mode": "ai_editor",
+                "schema": "chatcut-ai-draft-v1", "selection_mode": self.m.get("selection_mode"),
                 "selection_sha256": ai_editor_contract.digest(self.m.get("segments", [])),
                 "policy_version": ai_editor_contract.POLICY_VERSION,
                 "editorial_rules": ai_editor_contract.rules_identity(self.m),

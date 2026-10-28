@@ -529,12 +529,16 @@ def _temporary_match(manifest: dict, input_path: Path, report_dir: Path,
             if refill_limit:
                 from . import demo_actions
                 sentence_rows = timing_contract.split_sentences(manifest)
-                def _gap_priority(index: int) -> tuple[int, int]:
+                def _gap_priority(index: int) -> tuple[int, int, int]:
                     if not 1 <= index <= len(sentence_rows):
-                        return (0, index)
+                        return (0, 0, index)
                     text = timing_contract.sentence_text(sentence_rows[index - 1])
-                    claims = demo_actions.requirements_for(text, text, str(manifest.get("category") or ""))
-                    return (-sum(bool(claim.evidence_required) for claim in claims), index)
+                    category = str(manifest.get("category") or "")
+                    claims = demo_actions.requirements_for(text, text, category)
+                    sentence = demo_actions.sentence_contract(text, category=category,
+                                                               product=str(manifest.get("product") or ""))
+                    return (-int(sentence.get("kind") == "functional"),
+                            -sum(bool(claim.evidence_required) for claim in claims), index)
                 need_ai = sorted(need_ai, key=_gap_priority)[:refill_limit]
         rule_selected_count = len(matched.get("segments") or [])
         if need_ai:

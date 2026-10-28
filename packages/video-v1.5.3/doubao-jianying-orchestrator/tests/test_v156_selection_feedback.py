@@ -155,6 +155,16 @@ class SelectionFeedbackTests(unittest.TestCase):
         self.assertGreaterEqual(focused["evidence_intervals"][0]["start"], 4.67)
         self.assertLessEqual(focused["evidence_intervals"][0]["end"], 7.35)
 
+    def test_wet_strength_focus_prefers_wet_action_over_dry_unfold(self):
+        s = shot("wet", description="先展开干纸，随后浸水并提起湿纸仍完整",
+                 action_segments=[dict(start=0.72, end=2.17, action="展开干燥巾体", result="巾体展开"),
+                                  dict(start=3.62, end=5.65, action="将巾体按入水中浸湿后提起", result="湿透提起仍完整")],
+                 evidence_intervals=[dict(start=3.62, end=5.65, frame_time=5.075)])
+        c = demo_actions.sentence_contract("百分百原生木浆无荧光剂，湿水不破", category="纸品")
+        focused = sa.focus_on_topic(s, c)
+        self.assertEqual(focused["evidence_intervals"][0]["start"], 3.62)
+        self.assertEqual(focused["evidence_intervals"][0]["end"], 5.65)
+
     def test_model_contradiction_cannot_receive_qualifying_score(self):
         current = analysis([shot("package")], [("package", 99)])
         current["semantic_matches"][0]["top3"][0]["contradictions"] = ["画面与要求相反"]

@@ -272,6 +272,22 @@ class PhaseWiringTests(unittest.TestCase):
         self.assertEqual(phase_timing.PHASE_TIMING_VERSION, "phase-timing-v3")
         self.assertEqual(frame_quality.FRAME_QUALITY_VERSION, "frame-quality-v2")
 
+    def test_phase_cache_key_binds_model_endpoint_and_phase_description(self):
+        video = self.root / "clip.mp4"
+        video.write_bytes(b"abc")
+        shot = {"video": str(video), "source_start": 1.0, "source_end": 4.0}
+        scene = {"id": "absorb", "phases": [{"name": "result", "describe": "show the result"}]}
+        with mock.patch.dict(os.environ, {"JY_VISION_TRANSPORT": "qwen", "JY_QWEN_MODEL": "a",
+                                          "JY_QWEN_BASE_URL": "https://a.invalid/v1"}):
+            first = phase_timing._cache_key(shot, scene, "volc")
+            os.environ["JY_QWEN_MODEL"] = "b"
+            second = phase_timing._cache_key(shot, scene, "volc")
+            os.environ["JY_QWEN_BASE_URL"] = "https://b.invalid/v1"
+            third = phase_timing._cache_key(shot, scene, "volc")
+            changed = phase_timing._cache_key(shot, {**scene, "phases": [
+                {"name": "result", "describe": "show the complete action"}]}, "volc")
+        self.assertEqual(len({first, second, third, changed}), 4)
+
     def test_locate_all_hard_reject_does_not_build_sheet(self):
         video = self.root / "clip.mp4"
         video.write_bytes(b"abc")

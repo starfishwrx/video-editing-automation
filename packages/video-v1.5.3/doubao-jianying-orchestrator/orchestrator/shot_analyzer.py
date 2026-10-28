@@ -856,7 +856,12 @@ def focus_on_topic(shot: dict[str, Any], contract: dict[str, Any] | None) -> dic
     from .vision_analyzer import EVIDENCE_MAX_S, segment_completed
     if (contract or {}).get("kind") != "functional":
         return shot
-    rows = demo_actions.topic_segments(shot, contract)
+    topics = (contract or {}).get("topics") or []
+    priority = max((int(topic.get("focus_priority") or 0) for topic in topics), default=0)
+    focus_contract = ({**contract, "topics": [topic for topic in topics
+                       if int(topic.get("focus_priority") or 0) == priority]}
+                      if priority else contract)
+    rows = demo_actions.topic_segments(shot, focus_contract)
     if not rows:
         return shot
     rows = sorted(rows, key=lambda r: not segment_completed(r))

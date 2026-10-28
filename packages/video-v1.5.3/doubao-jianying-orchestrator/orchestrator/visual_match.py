@@ -106,14 +106,26 @@ def validate_source_intervals(segments: list[dict[str, Any]], *, probe: Callable
             start, end = _number(interval.get("start")), _number(interval.get("end"))
             valid = 0 <= start < end <= duration + 0.02
             frame = _frame_path(interval)
+            recreated = False
             if frame:
                 frame_path = Path(frame)
                 if not frame_path.is_absolute():
                     frame_path = report_dir / frame_path
                 frame_ok = frame_path.is_file() and frame_path.stat().st_size > 0
             else:
+                frame_ok = False
+            if not frame_ok and valid:
+                # Cached observations can refer to a deleted temporary frame.
+                # Re-extract the same audited timestamp from the still-bound
+                # source; this restores an image artifact, not a new model verdict.
                 frame_path = report_dir / "visual_evidence_frames" / f"shot_{index:03d}_{n:02d}.jpg"
-                frame_ok = _extract_frame(ffmpeg, str(item.get("video")), (start + end) / 2.0, frame_path)
+                stamp = _number(interval.get("frame_time"), (start + end) / 2.0)
+                if not start <= stamp <= end:
+                    stamp = (start + end) / 2.0
+                frame_ok = _extract_frame(ffmpeg, str(item.get("video")), stamp, frame_path)
+                recreated = frame_ok
+            elif not frame:
+                frame_path = report_dir / "visual_evidence_frames" / f"shot_{index:03d}_{n:02d}.jpg"
             if not valid:
                 issues.append({"index": index, "type": "evidence_interval_invalid",
                                "interval": {"start": start, "end": end},
@@ -124,7 +136,8 @@ def validate_source_intervals(segments: list[dict[str, Any]], *, probe: Callable
                                "interval": {"start": start, "end": end},
                                "message": "证据时间段没有可审计抽帧文件"})
             normalized.append({**interval, "start": start, "end": end,
-                               "frame_path": str(frame_path), "frame_exists": frame_ok})
+                               "frame_path": str(frame_path), "frame_exists": frame_ok,
+                               "frame_recreated": recreated})
         records.append({"index": index, "video": str(item.get("video", "")),
                         "text": text, "evidence_intervals": normalized,
                         # 被分析过的场景窗口边界，供最终切片做「不得越界」校验。

@@ -370,6 +370,7 @@ def sentence_contract(text: str, claim_text: str = "", *, category: str = "",
         if hits:
             topics.append({"id": topic.get("id"), "label": topic.get("label"),
                            "match": topic.get("match") or "keywords", "hits": hits,
+                           "focus_priority": int(topic.get("focus_priority") or 0),
                            "shot_keywords": list(topic.get("shot_keywords") or []),
                            "shot_exclude_keywords": list(topic.get("shot_exclude_keywords") or []),
                            "contradicts": dict(topic.get("contradicts") or {})})

@@ -464,16 +464,20 @@ def validate_visual_match(report_dir: pathlib.Path) -> tuple[bool, str]:
 
     vision = analysis.get("vision_analysis") or {}
     segments = match.get("segments") or []
+    mixed_rule_ai = match.get("selection_mode") == "rule_then_ai"
     if ((match.get("manifest") or {}).get("selection_mode") == "ai_editor"
             or match.get("selection_mode") == "ai_editor"
             or any(isinstance(s, dict) and "ai_selection" in s for s in segments)):
         contract = production_eval.ai_editor_contract
         if (match.get("ok") is not True or not isinstance(segments, list) or not segments
-                or match.get("selection_mode") != "ai_editor"
+                or match.get("selection_mode") not in ("ai_editor", "rule_then_ai")
+                or (mixed_rule_ai and (match.get("manifest") or {}).get("selection_mode") != "rule_then_ai")
                 or contract.digest(segments) != contract.digest((match.get("manifest") or {}).get("segments"))):
             return False, "VISUAL_MATCH_BLOCKED: AI selection report identity invalid"
         candidates = {s.get("shot_id"): s for s in analysis.get("shots", []) if isinstance(s, dict)}
         for index, segment in enumerate(segments, 1):
+            if mixed_rule_ai and isinstance(segment, dict) and segment.get("selection_mode") != "ai_editor" and "ai_selection" not in segment:
+                continue  # Rule segments still pass every legacy check below.
             if not isinstance(segment, dict) or segment.get("selection_mode") != "ai_editor":
                 return False, "VISUAL_MATCH_BLOCKED: mixed AI/legacy segments"
             check = contract.validate_segment_receipt(segment, index=index, verify_source=True, manifest=match.get("manifest"))
@@ -483,10 +487,11 @@ def validate_visual_match(report_dir: pathlib.Path) -> tuple[bool, str]:
                 sid = part.get("shot_id") or part.get("temporary_shot_id")
                 if sid not in candidates or str(part.get("video")) != str(candidates[sid].get("video")):
                     return False, "VISUAL_MATCH_BLOCKED: AI selection outside task source catalog"
-        sequence = contract.sequence_errors(segments)
+        sequence = contract.sequence_errors([s for s in segments if isinstance(s, dict) and s.get("selection_mode") == "ai_editor"])
         if sequence:
             return False, "VISUAL_MATCH_BLOCKED: " + ";".join(sequence)
-        return True, "ai_visual_match_valid_independent_qc_required"
+        if not mixed_rule_ai:
+            return True, "ai_visual_match_valid_independent_qc_required"
     errors = vision.get("errors") or []
     shots = analysis.get("shots") or []
     ready = [row for row in shots
