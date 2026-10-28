@@ -36,6 +36,27 @@ def _textured(path: Path, size=(160, 90)) -> Path:
     return path
 
 
+class QcFrameRecoveryTests(unittest.TestCase):
+    def test_last_regular_sample_retries_with_true_timestamp(self):
+        from orchestrator import draft_visual_qc
+        with mock.patch.object(draft_visual_qc, "_resume_frame", side_effect=[(False, "eof"), (True, "")]) as extract:
+            ok, error, actual = draft_visual_qc._resume_sample_frame(
+                "ffmpeg", Path("source"), 1.64, Path("frame"), source_start=0.3, suffix="p1_t7")
+        self.assertTrue(ok)
+        self.assertEqual(error, "")
+        self.assertAlmostEqual(actual, 1.60)
+        self.assertAlmostEqual(extract.call_args.args[2], actual)
+
+    def test_evidence_frame_never_shifts_to_invent_proof(self):
+        from orchestrator import draft_visual_qc
+        with mock.patch.object(draft_visual_qc, "_resume_frame", return_value=(False, "eof")) as extract:
+            ok, _, actual = draft_visual_qc._resume_sample_frame(
+                "ffmpeg", Path("source"), 1.64, Path("frame"), source_start=0.3, suffix="p1_ev0_result")
+        self.assertFalse(ok)
+        self.assertAlmostEqual(actual, 1.64)
+        extract.assert_called_once()
+
+
 class UnicodeContactSheetTests(unittest.TestCase):
     def test_chinese_frame_and_output_paths_are_readable(self):
         with tempfile.TemporaryDirectory() as raw:

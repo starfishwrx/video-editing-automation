@@ -431,6 +431,28 @@ def _resume_frame(ffmpeg: str, source: pathlib.Path, seconds: float, frame: path
     return ok, error
 
 
+def _resume_sample_frame(ffmpeg: str, source: pathlib.Path, seconds: float, frame: pathlib.Path,
+                         *, source_start: float, suffix: str):
+    """Retry ordinary sampling just before EOF; never move an evidence frame.
+
+    Some containers report an end time after the last decodable frame. Any
+    retry remains inside the placed source window and returns its actual seek
+    timestamp so the review prompt and checkpoint retain the true location.
+    """
+    ok, error = _resume_frame(ffmpeg, source, seconds, frame)
+    if ok or not re.fullmatch(r"p[0-9]+_t[0-9]+", suffix):
+        return ok, error, seconds
+    for delta in (0.04, 0.08):
+        candidate = seconds - delta
+        if candidate < source_start:
+            continue
+        ok, retry_error = _resume_frame(ffmpeg, source, candidate, frame)
+        if ok:
+            return True, "", candidate
+        error = retry_error or error
+    return False, error, seconds
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--draft", required=True)
@@ -570,7 +592,9 @@ def main() -> int:
                     continue
                 seconds = row["source_start"] + row["source_duration"] * fraction
                 frame = frame_dir / f"segment_{row['index']:03d}_{suffix}.jpg"
-                ok, error = _prepare_media(_resume_frame, ffmpeg, pathlib.Path(row["source"]), seconds, frame)
+                ok, error, seconds = _prepare_media(
+                    _resume_sample_frame, ffmpeg, pathlib.Path(row["source"]), seconds, frame,
+                    source_start=row["source_start"], suffix=suffix)
                 if not ok:
                     frame_issues.append(f"FRAME_EXTRACT_FAILED:S{row['index']:02d}:{suffix}:{error}")
                     continue

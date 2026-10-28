@@ -332,7 +332,7 @@ def _write_sheet(items: list[dict[str, Any]], output: Path, *, columns: int = 4,
         if fit:
             try:
                 raw = cv2.imdecode(np.fromfile(item["path"], dtype=np.uint8), cv2.IMREAD_COLOR)
-            except (OSError, ValueError):
+            except (OSError, ValueError, cv2.error):
                 raw = None
             image = None
             if raw is not None:
