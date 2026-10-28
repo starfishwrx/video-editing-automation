@@ -9,7 +9,10 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / 'doubao-jianying-orchestrator'))
 from tools import eval_stage, feedback_candidates as fc, production_eval as pe, sentence_review as sr
+import batch_worker
+from orchestrator.task_inputs import normalize_meeting_task
 
 
 class SentenceReviewTests(unittest.TestCase):
@@ -48,6 +51,28 @@ class SentenceReviewTests(unittest.TestCase):
 
     def _raw(self, reviews=None):
         return {**self.binding, 'sentence_reviews': reviews if reviews is not None else [self.review]}
+
+    def test_normalized_frozen_task_snapshot_prepares_real_review_input(self):
+        task = normalize_meeting_task({**self.task, 'retry_deferred': True, 'retry_error': True})
+        contract = pe.freeze(task, 'run-normalized', [self.source], self.contract['runtime'],
+                             pe.read(ROOT / 'gold-reference.json'))
+        self.assertNotEqual(pe.digest(self.task), contract['task_sha256'])
+        batch_worker._save_frozen_task(self.task_dir, task, contract)
+        (self.task_dir / 'eval' / 'active_contract.json').write_text(json.dumps(contract), encoding='utf-8')
+        prepared = eval_stage.prepare(self.task_dir, self.drafts)
+        self.assertEqual(prepared['status'], 'REVIEW_INPUTS_READY')
+        self.assertFalse(pe.read(Path(prepared['mac_review_input']))['approved'])
+        with self.assertRaisesRegex(ValueError, 'TASK_CONTRACT_CONTENT_MISMATCH'):
+            batch_worker._save_frozen_task(self.task_dir, {**task, 'script': 'changed'}, contract)
+        self.assertEqual(pe.digest(pe.read(self.task_dir / 'task.json')), contract['task_sha256'])
+
+    def test_record_id_fallback_matches_frozen_identity(self):
+        task = normalize_meeting_task({'record_id': 'fixture', 'script': '口播'})
+        contract = pe.freeze(task, 'run-fallback', [self.source], self.contract['runtime'],
+                             pe.read(ROOT / 'gold-reference.json'))
+        batch_worker._save_frozen_task(self.task_dir, task, contract)
+        (self.task_dir / 'eval' / 'active_contract.json').write_text(json.dumps(contract), encoding='utf-8')
+        self.assertEqual(eval_stage.prepare(self.task_dir, self.drafts)['status'], 'REVIEW_INPUTS_READY')
 
     def test_eval_collect_preserves_labels_without_approving_gold_or_mac(self):
         prepared = eval_stage.prepare(self.task_dir, self.drafts)

@@ -147,7 +147,13 @@ def run_task(task: dict, stage: str, env: dict, work: Path) -> dict:
     task_dir.mkdir(parents=True, exist_ok=True)
     path = task_dir / "task.json"
     prior_deliveries = formal_delivery_count(_read(task_dir / "done.json"))
-    atomic_write_text(path, json.dumps(task, ensure_ascii=False, indent=2))
+    if stage == "qc" and path.is_file():
+        # QC resumes the frozen run. Replacing its normalized task snapshot
+        # with a fresh queue row would invalidate the hash-bound review input.
+        if str(_read(path).get("record_id") or "") != str(task["record_id"]):
+            raise ValueError("TASK_SNAPSHOT_RECORD_MISMATCH")
+    else:
+        atomic_write_text(path, json.dumps(task, ensure_ascii=False, indent=2))
     env = dict(env, JY_WORK_ROOT=str(work))
     proc = subprocess.run([sys.executable, "-m", "tools.batch_dispatch", "_worker",
         "--task-file", str(path), "--stage", stage], cwd=str(ROOT), env=env,

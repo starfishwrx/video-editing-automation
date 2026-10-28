@@ -1020,6 +1020,15 @@ def _mac_approval_path(task_dir: pathlib.Path, draft_names: list[str], frozen: d
     return task_dir / ('mac_review_approved-' + output_sha256 + '.json')
 
 
+def _save_frozen_task(task_dir: pathlib.Path, task: dict, frozen: dict) -> None:
+    """Persist exactly the normalized task bound to the active run contract."""
+    if (str(task.get("task_id") or task.get("record_id") or "").strip() != str(frozen.get("task_id") or "")
+            or production_eval.digest(task) != frozen.get("task_sha256")):
+        raise ValueError("TASK_CONTRACT_CONTENT_MISMATCH")
+    from orchestrator.file_safety import atomic_write_text
+    atomic_write_text(task_dir / "task.json", json.dumps(task, ensure_ascii=False, indent=2))
+
+
 def finalize_closed_loop(task_dir: pathlib.Path, task: dict, drafts: list[str],
                          qc_reports: list[dict],
                          delivery_receipts: list[dict] | None = None) -> dict:
@@ -1602,6 +1611,7 @@ def process_task(task: dict, *, retry_partial: bool = False,
         # does not alter any retained historical contract or approval.
         frozen = production_eval.freeze(task, run_id, [pathlib.Path(p) for p in sources],
                                          runtime_identity, gold, eval_mode)
+        _save_frozen_task(tdir, task, frozen)
         frozen_path = tdir / "eval" / run_id / "contract.json"
         production_eval.write_once(frozen_path, frozen)
         active_contract = tdir / "eval" / "active_contract.json"

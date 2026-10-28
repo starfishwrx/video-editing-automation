@@ -4,7 +4,10 @@ from pathlib import Path
 import sys
 import tempfile
 import threading
+import time
 import unittest
+from unittest import mock
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -121,6 +124,19 @@ class BatchDispatchTests(unittest.TestCase):
         self.assertEqual(dispatch.formal_delivery_count({"status": "OK", "distribution_status": "SHIPPED_VERIFIED",
             "drafts": ["x"], "qc_reports": [{"draft": "x", "status": "UNCERTIFIED_TIMEOUT"}],
             "distribution_receipts": [{"draft_name": "x", "status": "VERIFIED"}]}), 0)
+
+    def test_qc_resume_preserves_frozen_task_snapshot(self):
+        task_dir = self.root / 'r1'
+        task_dir.mkdir()
+        frozen_task = {'record_id': 'r1', 'script': 'original', 'retry_deferred': True}
+        (task_dir / 'task.json').write_text(json.dumps(frozen_task), encoding='utf-8')
+        def invoke(args, **kwargs):
+            self.assertEqual(json.loads((task_dir / 'task.json').read_text(encoding='utf-8')), frozen_task)
+            return SimpleNamespace(returncode=0, stdout='', stderr='')
+        with mock.patch.object(dispatch.subprocess, 'run', side_effect=invoke):
+            dispatch.run_task({'record_id': 'r1', 'script': 'changed'}, 'qc',
+                              {'JY_TASK_DEADLINE_EPOCH': str(time.time() + 20)}, self.root)
+        self.assertEqual(json.loads((task_dir / 'task.json').read_text(encoding='utf-8')), frozen_task)
 
 
 if __name__ == "__main__":
