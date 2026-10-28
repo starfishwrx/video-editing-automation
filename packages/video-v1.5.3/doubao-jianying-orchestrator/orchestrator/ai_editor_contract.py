@@ -70,10 +70,16 @@ def rules_identity(manifest: dict | None = None) -> dict:
 
 
 def policy_prompt(manifest: dict) -> str:
-    if editorial_context(manifest)["category"] != "zhipin":
-        return POLICY
-    return POLICY + "\n本任务生效的品类制作与选镜合同（按口播含义适用，不能据此虚构画面）：\n" + json.dumps(
-        editorial_context(manifest), ensure_ascii=False, sort_keys=True)
+    policy = POLICY
+    if editorial_context(manifest)["category"] == "zhipin":
+        policy += "\n本任务生效的品类制作与选镜合同（按口播含义适用，不能据此虚构画面）：\n" + json.dumps(
+            editorial_context(manifest), ensure_ascii=False, sort_keys=True)
+    feedback = str(manifest.get("revision_feedback") or "").strip()
+    if feedback:
+        policy += ("\n以下是旧稿的历史反馈，时间码属于旧稿；把它作为修订线索，"
+                   "逐项对照当前文案和真实画面，不把反馈本身当画面证据：\n"
+                   + json.dumps(feedback, ensure_ascii=False))
+    return policy
 
 
 def selection_mode(manifest: dict | None = None) -> str:

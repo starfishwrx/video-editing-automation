@@ -1499,6 +1499,11 @@ def process_task(task: dict, *, retry_partial: bool = False,
             "record_id": rid,
             "parent_run_id": parent_run_id,
             "full_script": str(task.get("script") or "").strip(),
+            "product": str(task.get("product") or "").strip(),
+            "category": str(task.get("category") or "").strip(),
+            # Historical feedback is input for the editor and subsequent human
+            # review, not a certificate that every issue has been resolved.
+            "revision_feedback": str(task.get("revision_feedback") or "").strip(),
             "voice": str(task.get("voice") or "").strip(),
             "voice_tempo": task.get("voice_tempo"),
             **manifest_meeting_fields(task),

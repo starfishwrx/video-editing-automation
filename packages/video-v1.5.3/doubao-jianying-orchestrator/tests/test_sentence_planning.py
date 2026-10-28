@@ -74,6 +74,13 @@ class SentencePlanningTests(unittest.TestCase):
             sentence_planner.plan({'full_script': '正文'}, Path('.'),
                                   call=lambda prompt, path: {'segments': []})
 
+    def test_revision_feedback_is_context_not_evidence(self):
+        from orchestrator import ai_editor_contract
+        prompt = ai_editor_contract.policy_prompt({'category': '纸品', 'revision_feedback': '揉搓动作不完整'})
+        self.assertIn('揉搓动作不完整', prompt)
+        self.assertIn('时间码属于旧稿', prompt)
+        self.assertIn('不能据此虚构画面', prompt)
+
     def test_source_whitespace_is_preserved_inside_phrase(self):
         result = sentence_planner.validate('这款 Hello Kitty 纸巾\n厚实柔软',
                                            {'segments': ['这款HelloKitty纸巾', '厚实柔软']})
