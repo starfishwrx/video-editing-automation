@@ -22,6 +22,15 @@ class PriorDraftRecheckTests(unittest.TestCase):
         self.task_dir = self.root / "work" / "record-a"
         (self.task_dir / "report" / "report_2").mkdir(parents=True, exist_ok=True)
 
+    def test_completed_empty_scene_is_reusable_but_incomplete_result_is_not(self):
+        rejected = {"description": "空台面", "visual_tags": ["台面"], "evidence_tags": [],
+                    "action_complete": False, "visual_observation_complete": True,
+                    "status": "pending_analysis", "analysis_confidence": .95}
+        self.assertTrue(batch_worker._is_reusable_analysis_row(rejected))
+        self.assertFalse(batch_worker._is_reusable_analysis_row({**rejected, "visual_observation_complete": False}))
+        self.assertFalse(batch_worker._is_reusable_analysis_row({**rejected, "action_complete": True}))
+        self.assertFalse(batch_worker._is_reusable_analysis_row({**rejected, "evidence_tags": None}))
+
     def test_indexed_draft_name_is_checked_for_second_and_later_outputs(self):
         base = "deliver"
         index = 2

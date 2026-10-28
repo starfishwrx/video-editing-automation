@@ -885,7 +885,8 @@ def _reusable_visual_observation(row: dict[str, Any]) -> bool:
             and row.get("action_complete") is False
             and row.get("status") == "pending_analysis"
             and bool(row.get("description"))
-            and bool(row.get("visual_tags")) and bool(row.get("evidence_tags"))
+            and bool(row.get("visual_tags"))
+            and (bool(row.get("evidence_tags")) or row.get("evidence_tags") == [])
             and _number(row.get("analysis_confidence")) > 0)
 
 
@@ -2127,7 +2128,11 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
                 evidence_tags = _as_list(raw.get("evidence_tags"))
                 action_complete = raw.get("action_complete") is True
                 confidence = max(0.0, min(1.0, _number(raw.get("confidence"), 0.0)))
-                if not description or not visual_tags or not evidence_tags or confidence <= 0:
+                # A model can explicitly reject an empty scene with no visible
+                # selling point. Preserve that observation as unusable instead
+                # of repeatedly treating the absence of evidence as an error.
+                empty_rejection = raw.get("action_complete") is False and raw.get("evidence_tags") == []
+                if not description or not visual_tags or (not evidence_tags and not empty_rejection) or confidence <= 0:
                     row["status"] = "pending_analysis"
                     row["analysis_error"] = "vision response lacks auditable description/tags/confidence"
                     continue
@@ -2172,7 +2177,7 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
                     frame = frame or next(iter(frames), None)
                 row["evidence_intervals"], from_model = _primary_interval(
                     raw, row, frames, frame, evidence=bool(evidence_tags))
-                if (not action_complete and from_model and _certified_segment(row)
+                if (not action_complete and evidence_tags and from_model and _certified_segment(row)
                         and row.get("has_subject") is not False
                         and row.get("evidence_strength") in ("A", "B")):
                     # 模型整条判未完成，但审核帧落在一段写明了结果的动作里；

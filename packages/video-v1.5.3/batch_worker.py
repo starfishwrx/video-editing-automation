@@ -711,8 +711,12 @@ def classify_build_failure(text: str) -> dict:
 def _is_reusable_analysis_row(row: object) -> bool:
     if not isinstance(row, dict):
         return False
+    empty_rejection = (row.get("visual_observation_complete") is True
+                       and row.get("action_complete") is False
+                       and row.get("status") == "pending_analysis"
+                       and row.get("evidence_tags") == [])
     if not (str(row.get("description") or "").strip()
-            and row.get("visual_tags") and row.get("evidence_tags")):
+            and row.get("visual_tags") and (row.get("evidence_tags") or empty_rejection)):
         return False
     try:
         return float(row.get("analysis_confidence") or 0) > 0
