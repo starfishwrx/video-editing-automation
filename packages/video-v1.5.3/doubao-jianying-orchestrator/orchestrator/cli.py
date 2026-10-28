@@ -403,6 +403,48 @@ def _pre_synthesize_narration(manifest: dict, report_dir: Path, preset) -> dict:
     return timing
 
 
+def _validate_preserved_match(manifest: dict, analysis: dict, prior: dict,
+                              refill_indices: list[int], narration_timing: dict | None) -> str:
+    """Reject stale or unbound selections before reusing an existing cut."""
+    import math
+    from . import ai_editor_contract
+    rows = prior.get("segments") or []
+    sentences = timing_contract.split_sentences(manifest)
+    if (not isinstance(rows, list) or len(rows) != len(sentences)
+            or ai_editor_contract.digest(rows) != ai_editor_contract.digest((prior.get("manifest") or {}).get("segments"))):
+        return "PRIOR_SELECTION_IDENTITY_MISMATCH"
+    candidates = {str(s.get("shot_id")): s for s in analysis.get("shots", []) if isinstance(s, dict) and s.get("shot_id")}
+    for index, (row, sentence) in enumerate(zip(rows, sentences), 1):
+        if (not isinstance(row, dict) or int(row.get("index") or index) != index
+                or "".join(str(row.get("text") or "").split()) != "".join(timing_contract.sentence_text(sentence).split())):
+            return "PRIOR_SENTENCE_MISMATCH"
+        if index in refill_indices:
+            continue
+        if narration_timing:
+            duration, _ = timing_contract.duration_for(narration_timing, index, segment=sentence)
+            old_duration = row.get("audio_duration_us") or round(float(row.get("segment_s") or 0) * 1000000)
+            if not old_duration or abs(int(old_duration) - int(duration)) > 1000:
+                return "PRIOR_AUDIO_TIMING_MISMATCH"
+        if ai_editor_contract.is_ai_segment(row):
+            checked = ai_editor_contract.validate_segment_receipt(row, index=index, verify_source=True, manifest=manifest)
+            if not checked.get("ok"):
+                return "PRIOR_AI_RECEIPT_INVALID"
+        for part in row.get("span_parts") or [row]:
+            candidate = candidates.get(str(part.get("shot_id") or part.get("temporary_shot_id") or ""))
+            if not candidate or candidate.get("status") != "ready_for_matching" or str(part.get("video")) != str(candidate.get("video")):
+                return "PRIOR_SOURCE_CATALOG_MISMATCH"
+            try:
+                start, end = float(part["source_start"]), float(part["source_end"])
+                lower, upper = float(candidate["source_start"]), float(candidate["source_end"])
+                if (not all(math.isfinite(n) for n in (start, end, lower, upper))
+                        or not Path(str(part["video"])).is_file() or start < lower - 0.001
+                        or end > upper + 0.001 or end <= start):
+                    return "PRIOR_SOURCE_WINDOW_INVALID"
+            except (KeyError, ValueError, TypeError, OSError):
+                return "PRIOR_SOURCE_WINDOW_INVALID"
+    return ""
+
+
 def _temporary_match(manifest: dict, input_path: Path, report_dir: Path,
                      narration_timing: dict | None = None) -> tuple[dict, dict | None]:
     from . import ai_editor, ai_editor_contract
@@ -438,6 +480,7 @@ def _temporary_match(manifest: dict, input_path: Path, report_dir: Path,
         # Keep prior AI-refill sentences across rebuilds. A fresh rule pass would
         # otherwise overwrite them with degraded_fallback and trip FORMAL_EVIDENCE.
         prior_ai: dict[int, dict] = {}
+        prior_match: dict = {}
         prior_path = report_dir / "shot_match_report.json"
         if refill_indices and prior_path.is_file():
             try:
@@ -467,6 +510,21 @@ def _temporary_match(manifest: dict, input_path: Path, report_dir: Path,
             scene_report = scene_rules.apply(manifest, matched, analysis, report_dir)
             matched["scene_rules"] = {k: scene_report.get(k) for k in
                                       ("category", "rulepacks", "versions", "applied", "partial", "unmet")}
+        # A completed prior cut is the baseline for an explicit sentence repair.
+        # Re-running the rule matcher can otherwise move unrelated windows and
+        # reserve the one candidate needed by the requested sentence.
+        if refill_indices and prior_match.get("ok") is True:
+            try:
+                reason = _validate_preserved_match(manifest, analysis, prior_match, refill_indices, narration_timing)
+            except (ValueError, TypeError, KeyError):
+                reason = "PRIOR_SELECTION_IDENTITY_MISMATCH"
+            if reason:
+                return manifest, {"status": "SHOT_MATCH_BLOCKED", "message": reason,
+                                  "match_report": str(prior_path)}
+            matched = dict(prior_match)
+            matched["manifest"] = {**(prior_match.get("manifest") or {}), **manifest,
+                                   "segments": prior_match["segments"]}
+            prior_ai = {}  # All prior rows are already preserved, including rule rows.
         # Restore prior AI segments that are not being re-refilled this pass.
         if prior_ai:
             keep = set(prior_ai) - set(refill_indices)

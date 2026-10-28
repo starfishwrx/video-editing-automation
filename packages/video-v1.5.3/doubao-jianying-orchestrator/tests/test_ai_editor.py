@@ -694,6 +694,47 @@ class AIEditorTests(unittest.TestCase):
             cli._temporary_match(manifest, self.root / "input.json", self.root)
         self.assertEqual(refill.call_args.args[3], [2])
 
+    def test_explicit_refill_keeps_prior_rule_selection_and_rejects_stale_inputs(self):
+        from orchestrator import cli
+        video = self.root / "prior.mp4"
+        video.write_bytes(b"source")
+        manifest = {"selection_mode": "rule_then_ai", "delivery_mode": "preview",
+                    "draft_name": "new", "segments": [{"text": "第一句"}, {"text": "第二句"}],
+                    "ai_refill_indices": [2]}
+        rows = [{"index": i, "text": text, "shot_id": f"s{i}", "video": str(video),
+                 "source_start": 0.0, "source_end": 1.0, "segment_s": 1.0}
+                for i, text in enumerate(("第一句", "第二句"), 1)]
+        prior = {"ok": True, "segments": rows, "manifest": {"segments": rows, "draft_name": "old"},
+                 "pending_items": []}
+        analysis = {"shots": [{"shot_id": f"s{i}", "video": str(video), "source_start": 0.0,
+                               "source_end": 2.0, "status": "ready_for_matching"} for i in (1, 2)]}
+        path = self.root / "shot_match_report.json"
+        path.write_text(json.dumps(prior, ensure_ascii=False), encoding="utf-8")
+        fresh = {"ok": True, "segments": [{**rows[0], "shot_id": "changed"}, rows[1]],
+                 "manifest": manifest, "pending_items": []}
+        def refill(m, a, selected, indices, *_args, **_kwargs):
+            self.assertEqual(indices, [2])
+            self.assertEqual(selected["segments"], rows)
+            self.assertEqual(selected["manifest"]["draft_name"], "new")
+            return selected
+        with mock.patch.object(cli, "_run_shot_analysis", return_value=analysis), \
+                mock.patch("orchestrator.material_corrections.apply", side_effect=lambda _m, a, _r: a), \
+                mock.patch.object(shot_analyzer, "match_manifest", return_value=fresh), \
+                mock.patch("orchestrator.scene_rules.apply", return_value={}), \
+                mock.patch.object(editor, "refill_indices", side_effect=refill):
+            result, blocker = cli._temporary_match(manifest, self.root / "input.json", self.root)
+        self.assertIsNone(blocker)
+        self.assertEqual(result["segments"][0], rows[0])
+        stale = {**manifest, "segments": [{"text": "文案已变"}, {"text": "第二句"}]}
+        self.assertEqual(cli._validate_preserved_match(stale, analysis, prior, [2], None), "PRIOR_SENTENCE_MISMATCH")
+        self.assertEqual(cli._validate_preserved_match(manifest, {"shots": []}, prior, [2], None), "PRIOR_SOURCE_CATALOG_MISMATCH")
+        changed_window = {**analysis, "shots": [{**analysis["shots"][0], "source_end": 0.5}, analysis["shots"][1]]}
+        self.assertEqual(cli._validate_preserved_match(manifest, changed_window, prior, [2], None), "PRIOR_SOURCE_WINDOW_INVALID")
+        changed_timing = {"rows": [{"audio_duration_us": 2000000}, {"audio_duration_us": 1000000}]}
+        self.assertEqual(cli._validate_preserved_match(manifest, analysis, prior, [2], changed_timing), "PRIOR_AUDIO_TIMING_MISMATCH")
+        bad = {**prior, "manifest": {"segments": []}}
+        self.assertEqual(cli._validate_preserved_match(manifest, analysis, bad, [2], None), "PRIOR_SELECTION_IDENTITY_MISMATCH")
+
     def test_multiple_shots_cover_distinct_points_and_bind_every_part(self):
         plan = self.plan()
         plan["sentences"][0]["selling_points"].append({"id": "p2", "text": "干爽"})
