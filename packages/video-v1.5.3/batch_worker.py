@@ -123,7 +123,13 @@ def _batch_result_contract(status: str, *, run_id: str, failures: list[dict] | N
     lower = text.lower()
     first = rows[0] if rows else {}
     failure_type = str(first.get("type") or "").lower()
-    if any(marker in lower for marker in ("vision_call_failed", "vision_json_invalid")):
+    if "voice_selection_required" in lower:
+        failure_class, failure_code = "environment", "VOICE_SELECTION_REQUIRED"
+    elif "bgm_required" in lower:
+        failure_class, failure_code = "environment", "BGM_REQUIRED"
+    elif "sentence_plan_review_required" in lower:
+        failure_class, failure_code = "semantic", "SENTENCE_PLAN_REVIEW_REQUIRED"
+    elif any(marker in lower for marker in ("vision_call_failed", "vision_json_invalid")):
         failure_class, failure_code = "vision", "VISION_CALL_FAILED"
     elif any(marker in lower for marker in ("visual_match_blocked", "shot_match_blocked", "material gap", "visual-missing")):
         failure_class, failure_code = "semantic", "VISUAL_MATCH_BLOCKED"
@@ -660,7 +666,8 @@ def classify_build_failure(text: str) -> dict:
     deterministic_block = any(marker.lower() in lower_blob for marker in (
         "VISUAL_MATCH_BLOCKED", "SHOT_MATCH_BLOCKED", "AUDIO_VIDEO_MISMATCH",
         "TASK_BUDGET", "Invalid argument", "INVALID_ARGUMENT",
-        "DESKTOP_IMPORT_BLOCKED", "DRAFT_INVALID",
+        "DESKTOP_IMPORT_BLOCKED", "DRAFT_INVALID", "VOICE_SELECTION_REQUIRED",
+        "BGM_REQUIRED", "SENTENCE_PLAN_REVIEW_REQUIRED",
     )) or credential_or_input_block or ("vision_call_failed" in lower_blob and not transient)
     vision_hard = ("draft_visual_qc_blocked" in lower_blob) or (
         "no auditable visual top1" in lower_blob) or (
@@ -1703,10 +1710,12 @@ def process_task(task: dict, *, retry_partial: bool = False,
                                                    repair_visual_missing_indices)
                     previous_inputs = _read_json(attempt_state).get("input")
                     if previous_inputs == inputs and not (force_rebuild and attempt == 1):
-                        last_failure = last_failure or {"index": i, "draft": name,
-                            "phase": "build", "type": "blocked"}
-                        last_failure["message"] = "BUILD_NO_PROGRESS: no new candidates, windows or observations"
-                        log(last_failure["message"])
+                        if last_failure:
+                            last_failure["no_progress"] = True
+                        else:
+                            last_failure = {"index": i, "draft": name, "phase": "build", "type": "blocked",
+                                "message": "BUILD_NO_PROGRESS: no new candidates, windows or observations"}
+                        log("BUILD_NO_PROGRESS: no new candidates, windows or observations")
                         break
                     from orchestrator.file_safety import atomic_write_text
                     atomic_write_text(attempt_state, json.dumps({"input": inputs,
