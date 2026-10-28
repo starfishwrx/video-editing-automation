@@ -133,6 +133,29 @@ class AIEditorTests(unittest.TestCase):
         self.assertEqual(row["ai_selection"]["index"], 2)
         self.assertTrue(contract.validate_segment_receipt(row, index=2, verify_source=True, manifest=manifest)["ok"])
 
+    def test_refill_prioritizes_observed_specific_object_but_still_requires_review(self):
+        text = "还送定制纸巾支架"
+        manifest = {**self.manifest, "segments": [{"text": text, "audio_duration_us": 2000000}]}
+        generic = [{**self.shot, "shot_id": f"generic-{i}", "description": "展示绿色包装的厨房纸巾"}
+                   for i in range(20)]
+        holder = {**self.shot, "shot_id": "holder", "description": "双手将纸巾卷放在木质支架上"}
+        matched = {"segments": [{"index": 1, "text": text}], "recommendations": [{"index": 1,
+                    "top3": [{"shot_id": s["shot_id"]} for s in generic[:10]]}]}
+        with mock.patch.object(editor, "_review_pool", return_value=([], {"feasible": False})) as review:
+            result = editor.refill_indices(manifest, {"shots": generic + [holder]}, matched, [1], self.root)
+        order = review.call_args.args[1]["candidate_ids"]
+        self.assertEqual(order[:editor.ROUND_SIZE], [f"generic-{i}" for i in range(editor.ROUND_SIZE)])
+        self.assertLess(order.index("holder"), order.index("generic-8"))
+        self.assertEqual(set(order), {s["shot_id"] for s in generic + [holder]})
+        self.assertFalse(result["ok"])
+        self.assertIn("AI_REFILL_NO_MATCH:1", result["refill_errors"])
+
+    def test_observed_text_retrieval_is_empty_without_overlap_and_stable_on_ties(self):
+        shots = {"a": {"description": "手拿纸巾支架"}, "b": {"description": "展示纸巾支架"},
+                 "c": {"description": "展示产品包装"}}
+        self.assertEqual(editor._observed_text_shortlist("纸巾支架", shots), ["a", "b"])
+        self.assertEqual(editor._observed_text_shortlist("xyz", shots), [])
+
     def test_refill_does_not_certify_other_degraded_sentences(self):
         manifest = {**self.manifest, "selection_mode": "rule_then_ai", "delivery_mode": "preview",
                     "segments": [{"text": "保留原句", "audio_duration_us": 2000000}, self.manifest["segments"][0]]}

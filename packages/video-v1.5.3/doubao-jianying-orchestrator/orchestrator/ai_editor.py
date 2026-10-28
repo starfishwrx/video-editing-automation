@@ -10,6 +10,7 @@ import json
 import math
 import os
 import re
+from collections import Counter
 from itertools import combinations
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -888,6 +889,45 @@ def _reindex_ai_segment(segment: dict, index: int) -> dict:
     return result
 
 
+def _observed_text_shortlist(text: str, shots: dict, *, limit: int = 12) -> list[str]:
+    """Retrieve candidates only; descriptions never certify a visual match.
+
+    Prefer rare overlapping Chinese phrases, so a specific object such as a
+    paper holder is not buried behind hundreds of generic packaging clips.
+    The caller keeps the full pool for the pixel-review fallback.
+    """
+    def terms(value: str) -> set[str]:
+        result = set()
+        for word in re.findall(r"[\u4e00-\u9fff]+|[a-z0-9]+", value.lower()):
+            if "\u4e00" <= word[0] <= "\u9fff":
+                for size in (2, 3):
+                    result.update(word[i:i + size] for i in range(len(word) - size + 1))
+            elif len(word) > 1:
+                result.add(word)
+        return result
+
+    query = terms(text)
+    if not query or limit <= 0:
+        return []
+    fields = ("description", "visual_description", "visual_tags", "action",
+              "object", "result", "action_segments", "text_reads")
+    rows = []
+    frequency = Counter()
+    for sid, shot in shots.items():
+        observed = " ".join(str(shot.get(key) or "") for key in fields)
+        words = terms(observed) & query
+        rows.append((sid, words))
+        frequency.update(words)
+    size = len(rows)
+    ranked = []
+    for sid, words in rows:
+        score = math.fsum(math.log((size + 1) / (frequency[word] + 1)) + 1 for word in words)
+        if score > 0:
+            ranked.append((sid, score))
+    ranked.sort(key=lambda row: -row[1])  # stable ties keep source order
+    return [sid for sid, _ in ranked[:limit]]
+
+
 def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[int],
                    report_dir: Path, *, narration_timing: dict | None = None) -> dict:
     """Recover only failed sentences, preserving the other selected windows.
@@ -922,8 +962,12 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
             errors.append(f"AI_REFILL_INDEX_OOB:{index}")
             continue
         sentence = _heuristic_sentence(index, timing_contract.sentence_text(original[index - 1]))
-        preferred = _rule_shortlist_ids(matched, analysis, index, limit=max(ROUND_SIZE, 16))
-        sentence["candidate_ids"] = [sid for sid in dict.fromkeys([*preferred, *shots])
+        preferred = [sid for sid in _rule_shortlist_ids(matched, analysis, index, limit=max(ROUND_SIZE, 16))
+                     if sid in shots and sid not in reserved]
+        observed = _observed_text_shortlist(sentence["text"],
+                                             {sid: shot for sid, shot in shots.items() if sid not in reserved})
+        sentence["candidate_ids"] = [sid for sid in dict.fromkeys(
+            [*preferred[:ROUND_SIZE], *observed, *preferred[ROUND_SIZE:], *shots])
                                      if sid in shots and sid not in reserved]
         audio_us, certainty = timing_contract.duration_for(narration_timing, index,
                                                           segment=original[index - 1])
