@@ -2064,6 +2064,21 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
         if batches:
             _checkpoint()
         text_total = len(text_requests)
+        if vision_errors:
+            # A failed visual batch blocks the formal analysis. Save completed
+            # observations now and defer text calls until the failed visual
+            # evidence can be recovered, rather than spending calls on a run
+            # that cannot reach matching.
+            analysis["text_pass"] = {"requested": text_total, "failed": 0,
+                                     "errors": [], "status": "DEFERRED_VISUAL_ERRORS"}
+            analysis["pending_items"] = list(analysis.get("pending_items", [])) + vision_errors
+            analysis["ok"] = False
+            _set_cache_summary(_vision_summary(profile, batches, responses,
+                                               vision_errors, partial=True), partial=True)
+            _persist(report_dir, analysis)
+            _progress(report_dir, phase="blocked_vision", vision_left=len(vision_errors),
+                      text_left=text_total, finished_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"))
+            return analysis
         _progress(report_dir, phase="text_prepare", vision_left=0, text_left=text_total,
                   prepare_done=0, prepare_total=text_total, batch_workers=0)
 

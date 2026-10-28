@@ -126,6 +126,25 @@ class MaterialCacheTests(unittest.TestCase):
         self.assertTrue(vision.needs_vision(failed["shots"][0]))
         self.assertTrue(next(iter(vision._load_vision_cache(vision._vision_cache_path(self.root / "a")).values()))["action_complete"])
 
+    def test_visual_failure_defers_text_and_preserves_successful_observation(self):
+        self.seed_visual()
+        analysis = self.analysis()
+        second = dict(analysis["shots"][0], shot_id="second", source_start=10, source_end=19)
+        analysis["shots"].append(second)
+        with mock.patch.object(vision, "_write_sheet", return_value=True), \
+                mock.patch.object(vision, "_orientation", return_value="portrait"), \
+                mock.patch.object(vision, "_sample_frames", return_value=[{
+                    "path": str(self.frame), "timestamp": 17.4, "suffix": "t1"}]), \
+                mock.patch.object(vision, "_run_vision_with_retry", return_value=(False, "empty response")) as api:
+            failed = vision.enrich_with_vision(self.manifest, analysis, self.root / "a", profile="volc")
+        self.assertFalse(failed["ok"])
+        self.assertEqual(failed["text_pass"]["status"], "DEFERRED_VISUAL_ERRORS")
+        self.assertEqual(failed["text_pass"]["requested"], 1)
+        self.assertEqual(api.call_count, 1)  # only failed visual batch, no text request
+        self.assertEqual(failed["pending_items"][-1]["type"], "VISION_CALL_FAILED")
+        cached = vision._load_vision_cache(vision._vision_cache_path(self.root / "a"))
+        self.assertTrue(any(row.get("action_complete") for row in cached.values()))
+
     def test_candidate_frames_and_sheet_reuse_across_tasks_and_purposes(self):
         shot = self.analysis()["shots"][0]
         sentence = {"index": 1, "text": "first claim", "kind": "selling_point",
