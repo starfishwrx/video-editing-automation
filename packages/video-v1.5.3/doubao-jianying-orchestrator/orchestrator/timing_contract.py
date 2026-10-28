@@ -906,6 +906,48 @@ TIMING_CERTAINTY_SEGMENT = "segment"      # 段内已有音频参数，先于本
 _SENTENCE_SPLIT_RE = re.compile(r"[。！？!?；;\n\r]+")
 
 
+def _split_oversized_sentence(text: str) -> list[str]:
+    """Split a long raw script at existing punctuation, never inside words.
+
+    Clauses without safe punctuation are left intact for the engine's length
+    gate; character-count timing is never inferred from the split.
+    """
+    from .subtitle_units import MAX_SUBTITLE_CHARS, text_units
+
+    def units(value: str) -> int:
+        return text_units(re.sub(r"\s+", "", value))
+
+    if units(text) <= MAX_SUBTITLE_CHARS:
+        return [text]
+    parts, start = [], 0
+    for match in re.finditer(r"[，,：:]\s*", text):
+        i = match.start()
+        # Do not split numeric grouping or clock/ratio expressions.
+        if (text[i] in ",:" and i > 0 and i + 1 < len(text)
+                and text[i - 1].isdigit() and text[i + 1].isdigit()):
+            continue
+        part = text[start:match.end()]
+        if part.strip():
+            parts.append(part)
+        start = match.end()
+    tail = text[start:]
+    if tail.strip():
+        parts.append(tail)
+    if len(parts) < 2:
+        return [text]
+    out, current = [], ""
+    for part in parts:
+        combined = current + part
+        if current and units(combined) > MAX_SUBTITLE_CHARS:
+            out.append(current)
+            current = part
+        else:
+            current = combined
+    if current:
+        out.append(current)
+    return out
+
+
 def split_sentences(manifest: Any) -> list[dict[str, Any]]:
     """全流水线**唯一**的切句口径（规划层 `_sentences` 与 pre-TTS 共用）。
 
@@ -918,8 +960,11 @@ def split_sentences(manifest: Any) -> list[dict[str, Any]]:
                 if isinstance(s, dict)
                 and str(s.get("text", s.get("caption", ""))).strip()]
     text = str(m.get("full_script") or m.get("script") or "")
-    return [{"text": part.strip()} for part in _SENTENCE_SPLIT_RE.split(text)
-            if part.strip()]
+    parts = [part.strip() for part in _SENTENCE_SPLIT_RE.split(text) if part.strip()]
+    from .ai_editor_contract import selection_mode
+    if selection_mode(m) == "ai_editor":
+        parts = [clause for part in parts for clause in _split_oversized_sentence(part)]
+    return [{"text": part} for part in parts]
 
 
 def sentence_key(item: Any, index: int) -> str:

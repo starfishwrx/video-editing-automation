@@ -29,15 +29,13 @@ from . import rulepack
 from .voice_request import select_voice_tempo
 from .video_encode import run_h264_encode
 from .voice_catalog import recommend_voices, resolve_voice
-from .subtitle_units import text_units
+from .subtitle_units import text_units, MAX_SUBTITLE_CHARS, SUBTITLE_HARD_CHARS
 from .timing_contract import frame_speed
 
 US = 1_000_000
 TAIL_PAD = 0.12  # 每句口播尾部留白秒数，避免贴边
 # 15 字是软目标：按词拆开时尽量靠近。词表里的整词只算 1 个字。
 # 硬上限只拦完全没拆开的长段，避免一整段文案压在一个镜头里。
-MAX_SUBTITLE_CHARS = 15
-SUBTITLE_HARD_CHARS = 30
 
 # 探测缓存世代戳（v1.3.27.1）：换探针口径时 +1，老缓存重新探测。
 PROBE_KIND = "material_us_v1"

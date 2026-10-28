@@ -228,6 +228,32 @@ class AIEditorTests(unittest.TestCase):
         self.assertEqual(coverage["checked"], 9)
         self.assertEqual(reviews[-1]["verdict"], "matched")
 
+    def test_one_feasible_candidate_gets_one_more_round_for_editorial_choice(self):
+        ids = [f"candidate{i}" for i in range(24)]
+        sentence = {**self.sentence, "candidate_ids": ids, "audio_durations_us": [2_000_000]}
+        shots = {sid: {**self.shot, "shot_id": sid} for sid in ids}
+        def review(_m, _s, shot, _d):
+            sid = shot["shot_id"]
+            return {**self.review, "shot_id": sid,
+                    "verdict": "matched" if sid in {ids[0], ids[8]} else "mismatch"}
+        with mock.patch.object(editor, "_review", side_effect=review):
+            reviews, coverage = editor._review_pool(self.manifest, sentence, shots, self.root, {})
+        self.assertEqual(coverage["checked"], 16)
+        self.assertEqual(coverage["reason"], "READY")
+        self.assertEqual([r["shot_id"] for r in reviews if r["verdict"] == "matched"], [ids[0], ids[8]])
+
+    def test_missing_evidence_and_infeasible_windows_are_distinguished(self):
+        sentence = {**self.sentence, "audio_durations_us": [2_000_000]}
+        with mock.patch.object(editor, "_review", return_value={"shot_id": "handfeel", "verdict": "uncertain"}):
+            _, coverage = editor._review_pool(self.manifest, sentence, {"handfeel": self.shot}, self.root, {})
+        self.assertEqual(coverage["reason"], "EVIDENCE_UNKNOWN")
+        shot = {**self.shot, "source_end": 60, "material_duration_us": 60_000_000}
+        review = {**self.review, "evidence_intervals_us": [{"start": 0, "end": 50_000_000}]}
+        with mock.patch.object(editor, "_review", return_value=review):
+            _, coverage = editor._review_pool(self.manifest, sentence, {"handfeel": shot}, self.root, {})
+        self.assertFalse(coverage["feasible"])
+        self.assertEqual(coverage["reason"], "KNOWN_WINDOWS_INFEASIBLE")
+
     def test_no_ai_plan_cannot_activate_legacy_matcher(self):
         result = shot_analyzer.match_manifest(self.manifest, {"shots": [self.shot]})
         self.assertFalse(result["ok"])

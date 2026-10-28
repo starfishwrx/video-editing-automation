@@ -40,6 +40,16 @@ class MeetingVoiceRequestTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             voice_request.resolve_voice_request("female_sweet9.0")
 
+    def test_table_tempo_suffix_variants_use_same_locked_voice(self):
+        for suffix in ("1.6倍", "1.6倍数", "1.6倍速", "1.6"):
+            with self.subTest(suffix=suffix):
+                req = voice_request.resolve_voice_request("female_sweet" + suffix)
+                self.assertEqual(req.preset.sami, "zh_female_xiaopengyou")
+                self.assertEqual(req.tempo, 1.6)
+                self.assertEqual(rulepack.voice_name_speed("female_sweet" + suffix), 1.6)
+        self.assertEqual(voice_request.resolve_voice_request(
+            "female_sweet1.6倍", voice_tempo=1.0).tempo, 1.0)
+
     def test_explicit_tempo_overrides_suffix_without_mutating_voice(self):
         spec = "甜美年轻女声1.3倍速"
         req = voice_request.resolve_voice_request(spec, voice_tempo="1.4", category_tempo=1.1)

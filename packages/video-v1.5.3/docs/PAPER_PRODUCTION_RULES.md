@@ -48,7 +48,7 @@
 
 分析、候选看图、整稿编排和独立QC使用同一纸品规则源。选镜计划、逐片段收据、草稿身份及QC
 记录明确的规则版本，规则变化后重新检查实际结果；不要求规则内容哈希或收据自签。当前AI政策为
-`selling-points-first-meeting-paper-v1`；显式legacy保留旧运行接口，QC v3不升级为新版AI认证。
+`selling-points-first-reference-quality-v2`；显式legacy保留旧运行接口，QC v3不升级为新版AI认证。
 QC独立检查最终区间的新抽帧，只接收商品、口播和规则，不接收选镜分数、理由、场景结论或通过结论。
 
 ## 验证

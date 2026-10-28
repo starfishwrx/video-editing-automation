@@ -15,7 +15,7 @@ from typing import Any
 
 PLAN_SCHEMA = "chatcut-ai-selection-v1"
 RECEIPT_SCHEMA = "chatcut-ai-selection-evidence-v1"
-POLICY_VERSION = "selling-points-first-meeting-paper-v1"
+POLICY_VERSION = "selling-points-first-reference-quality-v2"
 KINDS = {"selling_point", "product_intro", "hook"}
 BASES = {"editorial_fit", "visible_result", "readable_label", "product_display"}
 AI_SPEED_MAX = 20.0

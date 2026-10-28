@@ -1073,12 +1073,14 @@ def finalize_closed_loop(task_dir: pathlib.Path, task: dict, drafts: list[str],
         done_path.write_text(json.dumps(provisional, ensure_ascii=False, indent=2), encoding="utf-8")
     if len(provisional['distribution_receipts']) != len(drafts):
         return {"ok": False, "status": "BLOCKED", "reason": "DISTRIBUTION_RECEIPT_COUNT_MISMATCH"}
-    provisional['status'] = 'OK'
-    provisional['local_only_drafts'] = []
-    done_path.write_text(json.dumps(provisional, ensure_ascii=False, indent=2), encoding="utf-8")
     if not CLOSED_LOOP_TOOL.is_file() or not CLOSED_LOOP_POLICY.is_file():
         return {"ok": False, "status": "BLOCKED", "reason": "CLOSED_LOOP_TOOL_OR_POLICY_MISSING"}
-    common = [PY, str(CLOSED_LOOP_TOOL), "--task-json", str(task_dir / "task.json"), "--done-json", str(done_path), "--policy", str(CLOSED_LOOP_POLICY)]
+    # The closed-loop tool needs an eligible input, but the authoritative
+    # done.json must remain pending until archive and table update succeed.
+    candidate_path = task_dir / "closed_loop_candidate.json"
+    candidate = dict(provisional, status='OK', local_only_drafts=[])
+    candidate_path.write_text(json.dumps(candidate, ensure_ascii=False, indent=2), encoding="utf-8")
+    common = [PY, str(CLOSED_LOOP_TOOL), "--task-json", str(task_dir / "task.json"), "--done-json", str(candidate_path), "--policy", str(CLOSED_LOOP_POLICY)]
     archive = subprocess.run(common[:2] + ["archive-parent"] + common[2:], cwd=str(PIPE), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
     if archive.returncode != 0:
         return {"ok": False, "status": "BLOCKED", "reason": "ARCHIVE_PARENT_FAILED", "output": (archive.stdout or archive.stderr)[-2000:]}
@@ -1088,7 +1090,13 @@ def finalize_closed_loop(task_dir: pathlib.Path, task: dict, drafts: list[str],
     try:
         receipt = json.loads(update.stdout)
     except (ValueError, TypeError):
-        receipt = {"raw": update.stdout[-2000:]}
+        return {"ok": False, "status": "BLOCKED", "reason": "TABLE_UPDATE_RECEIPT_INVALID"}
+    if not isinstance(receipt, dict) or receipt.get('ok') is not True:
+        return {"ok": False, "status": "BLOCKED", "reason": "TABLE_UPDATE_RECEIPT_INVALID"}
+    completed = _read_json(candidate_path)
+    if not completed or completed.get('status') != 'OK':
+        return {"ok": False, "status": "BLOCKED", "reason": "CLOSED_LOOP_CANDIDATE_INVALID"}
+    done_path.write_text(json.dumps(completed, ensure_ascii=False, indent=2), encoding="utf-8")
     return {"ok": True, "status": "CLOSED_LOOP_COMPLETE", "archive": archive.stdout[-2000:], "table": receipt}
 
 

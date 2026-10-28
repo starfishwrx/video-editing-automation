@@ -185,6 +185,52 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(result['reason'], 'DISTRIBUTION_MEDIA_REFERENCE_INVALID')
         ship.assert_not_called()
 
+    def test_closed_loop_publishes_success_only_after_archive_and_table(self):
+        import batch_worker as worker
+        tool = self.base / 'closed_loop.py'
+        policy = self.base / 'policy.json'
+        tool.touch()
+        policy.touch()
+        for failure in ('archive-parent', 'table-update', 'invalid-receipt', None):
+            with self.subTest(failure=failure):
+                task_dir = self.base / ('task-' + str(failure))
+                task_dir.mkdir()
+                receipt = {'draft_name': self.source.name, 'nas_target': 'verified-target'}
+
+                def run(command, **kwargs):
+                    authoritative = n.read_json(task_dir / 'done.json')
+                    self.assertEqual(authoritative['status'], 'PREVIEW_READY')
+                    candidate_path = Path(command[command.index('--done-json') + 1])
+                    self.assertEqual(candidate_path.name, 'closed_loop_candidate.json')
+                    self.assertEqual(n.read_json(candidate_path)['status'], 'OK')
+                    stage = command[2]
+                    if stage == failure:
+                        return subprocess.CompletedProcess(command, 1, '', 'failed')
+                    if stage == 'archive-parent':
+                        payload = n.read_json(candidate_path)
+                        payload['nas_parent_folder'] = 'verified-parent'
+                        n.write_json(candidate_path, payload)
+                    if stage == 'table-update' and failure == 'invalid-receipt':
+                        return subprocess.CompletedProcess(command, 0, '{}', '')
+                    return subprocess.CompletedProcess(command, 0, '{"ok": true}', '')
+
+                with patch.object(worker, 'DRAFTS', self.source.parent), \
+                        patch.object(worker, 'MAC_REVIEW_REQUIRED', False), \
+                        patch.object(worker, 'CLOSED_LOOP_TOOL', tool), \
+                        patch.object(worker, 'CLOSED_LOOP_POLICY', policy), \
+                        patch.dict(worker.os.environ, {'JY_EVAL_MODE': 'observe'}), \
+                        patch.object(worker, 'ship_one', return_value={'rc': 0, 'receipt': receipt}), \
+                        patch.object(worker.subprocess, 'run', side_effect=run):
+                    result = worker.finalize_closed_loop(task_dir, {}, [self.source.name], [])
+                done = n.read_json(task_dir / 'done.json')
+                if failure:
+                    self.assertFalse(result['ok'])
+                    self.assertEqual(done['status'], 'PREVIEW_READY')
+                else:
+                    self.assertTrue(result['ok'])
+                    self.assertEqual(done['status'], 'OK')
+                    self.assertEqual(done['nas_parent_folder'], 'verified-parent')
+
     def test_partial_copy_is_not_visible_as_final_delivery(self):
         target = self.base / 'published' / 'final-draft'
         def incomplete_copy(source, staging):

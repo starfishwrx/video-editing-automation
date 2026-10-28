@@ -17,6 +17,9 @@ from typing import Any
 from . import ai_editor_contract as contract, timing_contract
 
 ROUND_SIZE = 8
+# Explore at most one additional round for an editorial alternative after a
+# feasible selling-point match. Matching and evidence still take precedence.
+ALTERNATIVE_REVIEW_LIMIT = 2 * ROUND_SIZE
 
 
 def _save(path: Path, data: dict) -> None:
@@ -308,14 +311,29 @@ def _review_pool(manifest: dict, sentence: dict, shots: dict, directory: Path, a
         good = [r for r in reviewed if r["verdict"] == "matched"]
         covered = {p for r in good for p in r.get("supported_point_ids", [])}
         if not exhaustive and required and required <= covered and feasible(good):
-            break
+            if (len(good) >= 2 or len(reviewed) >= min(ALTERNATIVE_REVIEW_LIMIT, len(ids))
+                    or len(reviewed) == len(ids)):
+                break
         if not exhaustive and not required and len(good) >= min(3, len(ids)) and feasible(good):
             break
     reviewed = [reviewed_by_id[sid] for sid in ids if sid in reviewed_by_id]
-    return reviewed, {"checked": len(reviewed), "total": len(ids), "exhausted": len(reviewed) == len(ids),
-                      "feasible": feasible([r for r in reviewed if r["verdict"] == "matched"]),
+    good = [r for r in reviewed if r["verdict"] == "matched"]
+    supported = {point for row in good for point in row.get("supported_point_ids", [])}
+    is_feasible = feasible(good)
+    uncertain = sum(r["verdict"] == "uncertain" for r in reviewed)
+    exhausted = len(reviewed) == len(ids)
+    if is_feasible:
+        reason = "READY"
+    elif required and not required <= supported:
+        reason = "EVIDENCE_UNKNOWN" if uncertain or not exhausted else "NO_SUPPORT_AFTER_REVIEW"
+    elif not required and not good:
+        reason = "EVIDENCE_UNKNOWN" if uncertain or not exhausted else "NO_DISPLAY_AFTER_REVIEW"
+    else:
+        reason = "KNOWN_WINDOWS_INFEASIBLE"
+    return reviewed, {"checked": len(reviewed), "total": len(ids), "exhausted": exhausted,
+                      "feasible": is_feasible, "reason": reason,
                       "failed_calls": sum("error" in r for r in reviewed),
-                      "uncertain": sum(r["verdict"] == "uncertain" for r in reviewed)}
+                      "uncertain": uncertain}
 
 
 def _scene_preference(manifest: dict, sentence: dict, review: dict) -> float:
@@ -493,7 +511,8 @@ def _edit_plan(manifest: dict, analysis: dict, plan: dict, directory: Path,
     instructions = """
 输出JSON {"rows":[{"index":1,"parts":[{"shot_id":"...","audio_duration_us":2000000,"source_start_us":0}],"reason":"整稿选择理由"}]}。
 每句恰好一行，不能选择本句候选以外的镜头。parts的audio_duration_us为正整数且总和必须等于该句audio_duration_us。
-多卖点可组合多镜，支持的point_ids并集必须覆盖本句全部卖点；单镜足够时优先单镜。
+多卖点可组合多镜，支持的point_ids并集必须覆盖本句全部卖点。
+单镜或多镜根据句意与实际配音节奏选择：同等证据质量下，可以用多个已审镜头展示不同动作或画面，避免机械地每句一镜；不要为了镜头数量裁掉动作或重复播放。
 同源连续实验顺接后续区间，不每句重播。source_start_us可省略，提供时不得裁掉必需证据。
 镜头变化和去重只是质量接近时的偏好，不得抢走唯一卖点候选。没有合格候选返回空parts，不编造支持。
 technical_option是按本句完整配音求出的实际可行窗口；分配多镜后程序会重新求解，不可用单镜无解淘汰组合。
@@ -587,7 +606,7 @@ def prepare(manifest: dict, analysis: dict, report_dir: Path, *, narration_timin
                                  for r in row["candidates"] if r["verdict"] == "matched"]
             coverage = plan["coverage"].get(str(row["index"]) if row["kind"] == "selling_point" else "display_pool", {})
             if not coverage.get("feasible"):
-                raise ValueError(f"AI_EDITOR_OBSERVATION_OR_WINDOW_PENDING:{row['index']}")
+                raise ValueError(f"AI_EDITOR_OBSERVATION_OR_WINDOW_PENDING:{row['index']}:{coverage.get('reason', 'UNKNOWN')}")
         _edit_plan(manifest, analysis, plan, directory, narration_timing)
     except (ValueError, KeyError, TypeError, OSError) as exc:
         plan["ok"] = False
