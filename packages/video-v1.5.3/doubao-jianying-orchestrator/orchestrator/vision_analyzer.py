@@ -760,24 +760,26 @@ def _load_vision_cache(path: Path) -> dict[str, dict[str, Any]]:
         return {}
 
 
-def _save_vision_cache(path: Path, cache: dict[str, dict[str, Any]]) -> None:
+def _save_vision_cache(path: Path, cache: dict[str, dict[str, Any]],
+                       *, changed_keys: set[str] | None = None) -> bool:
     """并行任务共用这一份缓存：加锁合并写，不让后写的进程抹掉别人刚存的观察。"""
     def merge(disk: Any) -> dict[str, Any]:
         disk = dict(disk) if isinstance(disk, dict) else {}
-        disk.update(cache)
+        updates = cache if changed_keys is None else {k: cache[k] for k in changed_keys if k in cache}
+        disk.update(updates)
         cache.update({k: v for k, v in disk.items() if k not in cache})
         return disk
 
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         locked_json_update(path, merge, default={}, timeout=120)
+        return True
     except ValueError:
-        try:
-            _atomic_write(path, json.dumps(cache, ensure_ascii=False, indent=2))
-        except OSError:
-            pass
+        # A corrupt shared file is not permission to replace it with this
+        # process's potentially stale snapshot.
+        return False
     except (OSError, TimeoutError):
-        pass
+        return False
 
 
 def _text_pass_enabled() -> bool:
@@ -1631,6 +1633,11 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
     stage_seconds: dict[str, float] = {}
     cache_path = _vision_cache_path(report_dir)
     cache = _load_vision_cache(cache_path)
+    changed_cache_keys: set[str] = set()
+
+    def _flush_cache() -> None:
+        if changed_cache_keys and _save_vision_cache(cache_path, cache, changed_keys=changed_cache_keys):
+            changed_cache_keys.clear()
     cache_hits = 0
     text_cache_hits = 0
     rejected_cache_hits = 0
@@ -1657,6 +1664,7 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
             if (full != key and isinstance(cache.get(full), dict)
                     and cache[full].get("status") == "ready_for_matching"):
                 cached = cache[key] = {**cache[full], "rule_checks": sorted(checks)}
+                changed_cache_keys.add(key)
                 seeded += 1
         cached, cached_recheck = _resolve_recheck(cached, checks)
         if cached_recheck == "redo":
@@ -1665,6 +1673,7 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
             recheck_reused += 1
             if key and isinstance(cached, dict):
                 cache[key] = cached
+                changed_cache_keys.add(key)
         if (isinstance(cached, dict)
                 and _reusable_visual_observation(cached)
                 and shot.get("frame_exists") is not False):
@@ -1707,6 +1716,7 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
                 projection = _cache_projection(shot)
                 if projection is not None and (key not in cache or local_recheck == "stamp"):
                     cache[key] = projection
+                    changed_cache_keys.add(key)
                     seeded += 1
                 cache_hits += 1
                 continue
@@ -1754,11 +1764,7 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
         items = prepared_text_frames[index][:2]
         _hold_text(shot, items)
         text_resume[str(shot["shot_id"])] = items
-    if seeded:
-        try:
-            _save_vision_cache(cache_path, cache)
-        except (OSError, TimeoutError, ValueError):
-            pass
+    _flush_cache()
 
     def _set_cache_summary(summary: dict[str, Any], *, partial: bool = False) -> None:
         summary.update({
@@ -1832,6 +1838,7 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
         projection = _cache_projection(by_id[shot_id])
         if cache_key and projection is not None:
             cache[cache_key] = projection
+            changed_cache_keys.add(cache_key)
 
     def _apply_text(shot_id: str, items: list[dict[str, Any]],
                     payloads: list[dict[str, Any]], text: str) -> None:
@@ -1844,7 +1851,7 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
             text_errors.append({"type": "VISION_TEXT_PASS_FAILED", "shot_id": shot_id,
                                 "message": str(text)[-1000:]})
             _remember(shot_id)
-            _save_vision_cache(cache_path, cache)
+            _flush_cache()
             return
         row["text_agreed"] = agreed_text(
             [_as_list(p.get("readable_claims")) for p in payloads])
@@ -1858,7 +1865,7 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
         row["text_frames"] = [{"path": item["path"], "timestamp": item["timestamp"]}
                               for item in items]
         _remember(shot_id)
-        _save_vision_cache(cache_path, cache)
+        _flush_cache()
 
     def _attempts(phase: str, index: int, total: int, shot_ids: list[str]):
         started = time.time()
@@ -2058,7 +2065,7 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
                 _remember(shot_id)
             # Persist after every completed vision batch so a later timeout
             # does not discard the understanding work that already finished.
-            _save_vision_cache(cache_path, cache)
+            _flush_cache()
             _checkpoint()
         stage_seconds["vision_api_and_checkpoint"] = round(time.monotonic() - stage_started, 3)
         if batches:
