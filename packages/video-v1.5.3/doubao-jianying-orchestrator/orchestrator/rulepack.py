@@ -214,7 +214,7 @@ def apply_manifest_defaults(manifest: dict[str, Any]) -> dict[str, Any]:
     out.setdefault("voice_edge_trim", bool(voice.get("edge_trim", True)))
     if category == CATEGORY_ZHIPIN:
         position = (rules.get("editorial_contract") or {}).get("subtitle_position_px") or {
-            "x": 0, "y": -800}
+            "x": 0, "y": -528}
         out.setdefault("subtitle_position_px", position)
     max_gap = os.environ.get("JY_VOICE_MAX_GAP_FRAMES") or voice.get("max_gap_frames", 1)
     if out.get("tail_pad_s") is None:

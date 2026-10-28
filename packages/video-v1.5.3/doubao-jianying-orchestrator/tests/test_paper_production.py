@@ -22,14 +22,14 @@ class PaperProductionTests(unittest.TestCase):
         self.fixture.manifest.update(category="zhipin", product="合成棉柔巾")
 
     def test_subtitle_pixel_conversion_and_invalid_coordinates(self):
-        config = {"subtitle_position_px": {"x": 0, "y": -800}}
-        self.assertAlmostEqual(subtitle_transform(config, 1080, 1920)["y"], -800 / 960)
+        config = {"subtitle_position_px": {"x": 0, "y": -528}}
+        self.assertAlmostEqual(subtitle_transform(config, 1080, 1920)["y"], -0.55)
         self.assertEqual(subtitle_transform({}, 1080, 1920), {"x": 0, "y": -.55})
         for bad in ({"x": 0, "y": -2000}, {"x": False, "y": -800}, {"x": 0, "y": float("nan")}):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 subtitle_transform({"subtitle_position_px": bad}, 1080, 1920)
         with self.assertRaisesRegex(ValueError, "OUT_OF_CANVAS"):
-            subtitle_transform(config, 1920, 1080)
+            subtitle_transform({"subtitle_position_px": {"x": 0, "y": -800}}, 1920, 1080)
 
     def test_actual_gap_includes_silence_inside_files_and_timeline_gap(self):
         rows = [{"sentence": 0, "start_s": 0, "end_s": 2, "leading_s": 0, "trailing_s": .08},
@@ -101,6 +101,22 @@ class PaperProductionTests(unittest.TestCase):
         clip = Clip(str(fixture.video), item["source_start"], 2, preferred_speed=1.3,
             source_end=6, video_duration=6, visual_role="product_display", speed_range_override=[.85,20])
         self.assertEqual(engine._timing_request(clip, 2000000).preferred_speed, 1.3)
+
+    def test_selected_window_does_not_reapply_original_scene_guard(self):
+        engine = OrchestrationEngine.__new__(OrchestrationEngine)
+        engine.m = {"head_trim_s": .3, "tail_trim_s": .2, "tail_pad_s": 0}
+        engine._raw_segments = [{"ai_selection": {"schema": "test"},
+                                 "scene_source_start": 0.0, "scene_source_end": 10.0}]
+        clip = Clip("clip.mp4", 1.0, 2, source_end=4.0, video_duration=10, raw_index=0)
+        request = engine._timing_request(clip, 2_000_000)
+        self.assertEqual(request.lo_bound_us, 1_000_000)
+        self.assertEqual(request.hi_bound_us, 4_000_000)
+        clip.source_start = 0.1
+        request = engine._timing_request(clip, 2_000_000)
+        self.assertEqual(request.lo_bound_us, 300_000)
+        engine._raw_segments[0]["scene_source_start"] = 2.0
+        request = engine._timing_request(clip, 2_000_000)
+        self.assertEqual(request.lo_bound_us, 400_000)
 
     def test_failed_gap_probe_blocks_paper_but_other_categories_are_unchanged(self):
         fixture = self.fixture

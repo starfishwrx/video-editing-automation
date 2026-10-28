@@ -962,7 +962,7 @@ def split_sentences(manifest: Any) -> list[dict[str, Any]]:
     text = str(m.get("full_script") or m.get("script") or "")
     parts = [part.strip() for part in _SENTENCE_SPLIT_RE.split(text) if part.strip()]
     from .ai_editor_contract import selection_mode
-    if selection_mode(m) == "ai_editor":
+    if selection_mode(m) in ("ai_editor", "rule_then_ai"):
         parts = [clause for part in parts for clause in _split_oversized_sentence(part)]
     return [{"text": part} for part in parts]
 

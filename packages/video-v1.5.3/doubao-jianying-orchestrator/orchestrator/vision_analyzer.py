@@ -464,7 +464,7 @@ def _vision_summary(profile: str, batches: list[Any], responses: list[dict[str, 
     transport = _vision_transport()
     summary = {
         "provider": {"codex": "codex_exec_image", "anthropic": "anthropic_messages",
-                     "volc_glm": "volc_chat"}.get(transport, "volc_chat"),
+                     "volc_glm": "volc_chat", "qwen": "qwen_compatible"}.get(transport, "unknown"),
         "transport": transport,
         "profile": profile,
         "batch_count": len(batches),
@@ -474,6 +474,8 @@ def _vision_summary(profile: str, batches: list[Any], responses: list[dict[str, 
     }
     if transport == "volc_glm":
         summary["model"] = _volc_settings()["model"]
+    elif transport == "qwen":
+        summary["model"] = _qwen_settings()["model"]
     return summary
 
 
@@ -708,7 +710,8 @@ def _resolve_recheck(row: dict[str, Any] | None, checks: dict[str, list[str]]
 
 
 def _vision_cache_key(manifest: dict[str, Any], shot: dict[str, Any], profile: str,
-                      rules: list[str] | None = None) -> str:
+                      rules: list[str] | None = None, *, transport_override: str | None = None,
+                      model_override: str | None = None) -> str:
     source = str(shot.get("video") or "").strip()
     if not source:
         return ""
@@ -742,11 +745,16 @@ def _vision_cache_key(manifest: dict[str, Any], shot: dict[str, Any], profile: s
     }
     if str(manifest.get("sku") or "").strip():
         identity["sku"] = str(manifest["sku"]).strip()
-    transport = _vision_transport()
+    transport = transport_override or _vision_transport()
     if transport != "codex":
         # 非 Codex 缓存键带上传输与模型，避免不同后端观察互相复用。
         identity["transport"] = transport
-        identity["model"] = os.environ.get("JY_VISION_MODEL", "").strip() or "glm-5.3-flash"
+        if transport == "qwen":
+            cfg = _qwen_settings()
+            identity["model"] = cfg["model"]
+            identity["endpoint"] = cfg["base_url"]
+        else:
+            identity["model"] = model_override or os.environ.get("JY_VISION_MODEL", "").strip() or "glm-5.3-flash"
     raw = json.dumps(identity, ensure_ascii=False, sort_keys=True,
                      separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
@@ -1097,6 +1105,9 @@ def _run_vision(sheet: Path, prompt: str, output: Path, *, profile: str,
     if transport == "volc_glm":
         return _run_volc_chat(sheet, prompt, output, timeout=timeout,
                               validator=validator, max_attempts=max_attempts)
+    if transport == "qwen":
+        return _run_qwen_chat(sheet, prompt, output, timeout=timeout,
+                              validator=validator, max_attempts=max_attempts)
     ok, code, error = _run_codex_file(
         _codex_command(sheet, output, profile, workdir=workdir, schema=schema),
         prompt_path, stdout_path, stderr_path, timeout)
@@ -1120,6 +1131,7 @@ EMPTY_RESPONSE = "vision model returned an empty response"
 
 _ANTHROPIC_TRANSPORTS = {"anthropic", "ccswitch", "ccswitch_anthropic"}
 _VOLC_TRANSPORTS = {"volc_glm", "glm", "volc"}
+_QWEN_TRANSPORTS = {"qwen", "qwen_compatible"}
 
 
 def _vision_transport() -> str:
@@ -1131,11 +1143,13 @@ def _vision_transport() -> str:
         return "codex"
     if raw in _VOLC_TRANSPORTS or raw == "":
         return "volc_glm"
+    if raw in _QWEN_TRANSPORTS:
+        return "qwen"
     return raw or "volc_glm"
 
 
 def _direct_http_transport() -> bool:
-    return _vision_transport() == "volc_glm"
+    return _vision_transport() in {"volc_glm", "qwen"}
 
 
 def _contact_sheet_source() -> str:
@@ -1143,6 +1157,7 @@ def _contact_sheet_source() -> str:
         "codex": "codex_vision_contact_sheet_v3",
         "anthropic": "anthropic_vision_contact_sheet_v3",
         "volc_glm": "volc_glm_contact_sheet_v3",
+        "qwen": "qwen_contact_sheet_v3",
     }.get(_vision_transport(), "volc_glm_contact_sheet_v3")
 
 
@@ -1198,6 +1213,7 @@ def _prepare_indexed(jobs: list[Any], fn, *, on_done=None) -> dict[int, Any]:
 
 def _redact_secret(text: str) -> str:
     text = re.sub(r"ark-[A-Za-z0-9_\-]{8,}", "ark-***", text)
+    text = re.sub(r"sk-[A-Za-z0-9_\-\.]{8,}", "sk-***", text)
     text = re.sub(r"(?i)(bearer\s+)[A-Za-z0-9_\-\.]+", r"\1***", text)
     return text
 
@@ -1209,6 +1225,32 @@ def _volc_settings() -> dict[str, str]:
         "base_url": (os.environ.get("JY_VOLC_BASE_URL", "").strip()
                      or "https://ark.cn-beijing.volces.com/api/plan/v3").rstrip("/"),
         "model": os.environ.get("JY_VISION_MODEL", "").strip() or "glm-5.3-flash",
+    }
+
+
+def _text_settings() -> dict[str, str] | None:
+    """OpenAI-compatible route for high-res text reads only.
+
+    Visual observation and the AI editor keep ``_volc_settings``. Credentials
+    stay in the process environment; this function never records them.
+    """
+    base = os.environ.get("JY_VISION_TEXT_BASE_URL", "").strip().rstrip("/")
+    key = os.environ.get("JY_VISION_TEXT_API_KEY", "").strip()
+    model = os.environ.get("JY_VISION_TEXT_MODEL", "").strip()
+    if not base or not key or not model:
+        return None
+    return {"base_url": base, "api_key": key, "model": model}
+
+
+def _qwen_settings() -> dict[str, str]:
+    """Return the explicit Qwen route; missing credentials never imply GLM."""
+    return {
+        "base_url": (os.environ.get("JY_QWEN_BASE_URL", "").strip()
+                     or os.environ.get("JY_VISION_TEXT_BASE_URL", "").strip()).rstrip("/"),
+        "api_key": (os.environ.get("JY_QWEN_API_KEY", "").strip()
+                    or os.environ.get("JY_VISION_TEXT_API_KEY", "").strip()),
+        "model": (os.environ.get("JY_QWEN_MODEL", "").strip()
+                  or os.environ.get("JY_VISION_TEXT_MODEL", "").strip()),
     }
 
 
@@ -1239,6 +1281,65 @@ def _run_volc_chat(sheet: Path | None, prompt: str, output: Path,
         "thinking": {"type": "enabled"},
         "reasoning_effort": "low",
         "max_tokens": env_int("JY_VISION_MAX_TOKENS", 16384, minimum=1),
+        "temperature": 0,
+        "stream": False,
+    }
+    result = vision_client.post_chat(
+        cfg["base_url"] + "/chat/completions", cfg["api_key"], body, output,
+        timeout=min(float(timeout), runtime_policy.load_policy().request_timeout),
+        max_attempts=min(2, max(1, max_attempts)), validator=validator)
+    return result.legacy_tuple()
+
+
+def _image_content(sheet: Path | None, prompt: str) -> tuple[list[dict[str, Any]] | None, str]:
+    content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+    if sheet is None:
+        return content, ""
+    try:
+        image = base64.b64encode(sheet.read_bytes()).decode("ascii")
+    except OSError as exc:
+        return None, f"VOLC_IMAGE_READ_FAILED:{exc}"
+    media_type = mimetypes.guess_type(sheet.name)[0] or "image/jpeg"
+    content.append({"type": "image_url", "image_url": {
+        "url": f"data:{media_type};base64,{image}",
+    }})
+    return content, ""
+
+
+def _run_text_chat(sheet: Path | None, prompt: str, output: Path,
+                   *, timeout: int, validator=None, max_attempts: int = 2) -> tuple[bool, str]:
+    """High-res text read on the compatible-mode Qwen route, thinking off.
+
+    ``enable_thinking=false`` is the field this endpoint accepts. Visual
+    batches do not call this function.
+    """
+    cfg = _text_settings()
+    if not cfg:
+        return False, "TEXT_ROUTE_MISSING"
+    return _run_compatible_chat(cfg, sheet, prompt, output, timeout=timeout,
+                                validator=validator, max_attempts=max_attempts)
+
+
+def _run_qwen_chat(sheet: Path | None, prompt: str, output: Path,
+                   *, timeout: int, validator=None, max_attempts: int = 2) -> tuple[bool, str]:
+    cfg = _qwen_settings()
+    if not all(cfg.values()):
+        return False, "QWEN_CONFIG_MISSING"
+    return _run_compatible_chat(cfg, sheet, prompt, output, timeout=timeout,
+                                validator=validator, max_attempts=max_attempts)
+
+
+def _run_compatible_chat(cfg: dict[str, str], sheet: Path | None, prompt: str, output: Path,
+                         *, timeout: int, validator=None, max_attempts: int = 2) -> tuple[bool, str]:
+    from . import vision_client
+    content, error = _image_content(sheet, prompt)
+    if content is None:
+        return False, error
+    body = {
+        "model": cfg["model"],
+        "messages": [{"role": "user", "content": content}],
+        "enable_thinking": False,
+        "max_tokens": env_int("JY_VISION_TEXT_MAX_TOKENS", 16384, minimum=1),
         "temperature": 0,
         "stream": False,
     }
@@ -1639,6 +1740,7 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
         if changed_cache_keys and _save_vision_cache(cache_path, cache, changed_keys=changed_cache_keys):
             changed_cache_keys.clear()
     cache_hits = 0
+    prior_model_cache_hits = 0
     text_cache_hits = 0
     rejected_cache_hits = 0
     cache_misses = 0
@@ -1658,7 +1760,24 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
         if key:
             cache_keys[shot_id] = key
         cached = cache.get(key) if key else None
-        if key and checks and set((cached or {}).get("rule_checks") or []) != set(checks):
+        prior_origin = None
+        cached_key = key
+        # An explicitly named prior backend may supply its original observation.
+        # Never re-key it as Qwen: provenance and model-specific text stay intact.
+        prior_model = os.environ.get("JY_REUSE_VISION_MODEL", "").strip()
+        prior_transport = os.environ.get("JY_REUSE_VISION_TRANSPORT", "").strip().lower()
+        if (cached is None and _vision_transport() == "qwen" and prior_model
+                and prior_transport == "volc_glm" and shot.get("frame_exists") is not False):
+            prior_key = _vision_cache_key(manifest, shot, profile, transport_override=prior_transport,
+                                          model_override=prior_model)
+            prior = cache.get(prior_key) if prior_key else None
+            checked, prior_recheck = _resolve_recheck(prior, checks)
+            if (prior_recheck == "keep" and isinstance(checked, dict)
+                    and _reusable_visual_observation(checked) and not _needs_text_backfill(checked)):
+                cached = checked
+                cached_key = prior_key
+                prior_origin = {"transport": prior_transport, "model": prior_model}
+        if not prior_origin and key and checks and set((cached or {}).get("rule_checks") or []) != set(checks):
             # 分析要求曾经整份进缓存键时，按全部要求看过的观察存在另一个键下。
             full = _vision_cache_key(manifest, shot, profile, every_rule)
             if (full != key and isinstance(cache.get(full), dict)
@@ -1677,7 +1796,10 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
         if (isinstance(cached, dict)
                 and _reusable_visual_observation(cached)
                 and shot.get("frame_exists") is not False):
-            _apply_cached_visual(shot, cached, key)
+            _apply_cached_visual(shot, cached, cached_key)
+            if prior_origin:
+                shot["analysis_cache_origin"] = prior_origin
+                prior_model_cache_hits += 1
             if (shot.get("action_complete_source") == "evidence_interval"
                     and not _certified_segment(shot)):
                 shot.update({"action_complete": False, "status": "pending_analysis",
@@ -1770,6 +1892,7 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
         summary.update({
             "analysis_version": VISION_ANALYSIS_VERSION,
             "cache_hits": cache_hits,
+            "prior_model_cache_hits": prior_model_cache_hits,
             "text_cache_hits": text_cache_hits,
             "rejected_cache_hits": rejected_cache_hits,
             "cache_scope": "shared_product",
@@ -1897,7 +2020,11 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
         def _call_path(prompt: str, sheet: Path, prefix: str) -> Path:
             # This identity survives task/report-directory changes. The client
             # ledger retains the logical call's two-attempt budget on recovery.
-            identity = hashlib.sha256((prompt + "\n" + str(sheet)).encode("utf-8")).hexdigest()
+            route = ""
+            if _vision_transport() == "qwen":
+                cfg = _qwen_settings()
+                route = "\n" + cfg["base_url"] + "\n" + cfg["model"]
+            identity = hashlib.sha256((prompt + "\n" + str(sheet) + route).encode("utf-8")).hexdigest()
             return cache_path.parent / "calls" / f"{prefix}_{identity}.txt"
 
         def _call_batch(job: tuple[int, list[dict[str, Any]], Path]) -> tuple[int, tuple[bool, str]]:
@@ -2117,13 +2244,18 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
                                     all(isinstance(value, str) for value in data[key])
                                     for key in ("readable_claims", "pointed_text")))
                 for read in range(2):
-                    ok, text = _run_vision_with_retry(
-                        sheet, _text_prompt(shot_id, items),
-                        _call_path(_text_prompt(shot_id, items), sheet, f"text_read_{read + 1}"),
-                        profile=profile, timeout=timeout, workdir=temp_dir,
-                        validator=validate_text,
-                        on_attempt=_attempts(f"text_read_{read + 1}", text_index,
-                                             text_total, [shot_id]))
+                    prompt = _text_prompt(shot_id, items)
+                    output = _call_path(prompt, sheet, f"text_read_{read + 1}")
+                    note = _attempts(f"text_read_{read + 1}", text_index, text_total, [shot_id])
+                    if (_vision_transport() != "qwen" and _text_settings()
+                            and os.environ.get("JY_VISION_TEXT_DISABLE", "").strip() != "1"):
+                        note(1, 2, "")
+                        ok, text = _run_text_chat(
+                            sheet, prompt, output, timeout=timeout, validator=validate_text)
+                    else:
+                        ok, text = _run_vision_with_retry(
+                            sheet, prompt, output, profile=profile, timeout=timeout,
+                            workdir=temp_dir, validator=validate_text, on_attempt=note)
                     payload: Any = None
                     if ok:
                         try:
@@ -2262,8 +2394,9 @@ score 0-100；只有明确匹配并且证据足够才给 70 以上；`matched_cl
             response.parent.mkdir(parents=True, exist_ok=True)
             prompt_path = temp_dir / "prompt.txt"
             prompt_path.write_text(prompt, encoding="utf-8")
-            if _vision_transport() == "volc_glm":
-                ok, text = _run_volc_chat(None, prompt, response, timeout=timeout,
+            if _vision_transport() in {"volc_glm", "qwen"}:
+                caller = _run_qwen_chat if _vision_transport() == "qwen" else _run_volc_chat
+                ok, text = caller(None, prompt, response, timeout=timeout,
                     validator=lambda data: isinstance(data, list) or
                     (isinstance(data, dict) and isinstance(data.get("matches"), list)))
                 stderr_tail = ""

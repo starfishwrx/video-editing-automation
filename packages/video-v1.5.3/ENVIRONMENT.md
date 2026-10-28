@@ -27,11 +27,15 @@ See [model and image-call details](https://github.com/starfishwrx/video-editing-
 | --- | --- | --- |
 | `JY_SELECTION_MODE` | `ai_editor`; manifest `selection_mode` wins | `ai_editor`, `rule_then_ai` (rule recall plus pixel-reviewed gaps), or explicit `legacy` |
 | `JY_CONCURRENCY_POLICY_FILE` | Explicit JSON is authoritative | One host/account policy for every entry; see `examples/concurrency-policy.json` |
-| `JY_VISION_TRANSPORT` | `volc_glm` | Direct Ark chat completions; `glm`/`volc` are aliases |
+| `JY_VISION_TRANSPORT` | `volc_glm` | Direct Ark chat completions; `glm`/`volc` are aliases; `qwen` selects the Qwen-compatible route |
 | `JY_VISION_MODEL` | `glm-5.3-flash` | Exact model ID, shared by image review and text planning |
 | `ARK_API_KEY` | Required for direct calls | First credential source; process environment only |
 | `JY_VOLC_API_KEY` | Used only if `ARK_API_KEY` is empty | Alternative Ark credential; process environment only |
 | `JY_VOLC_BASE_URL` | `https://ark.cn-beijing.volces.com/api/plan/v3` | Base URL; code appends `/chat/completions` |
+| `JY_QWEN_BASE_URL`, `JY_QWEN_MODEL`, `JY_QWEN_API_KEY` | No default | Explicit Qwen-compatible endpoint, model, and process-only credential |
+| `JY_AI_EDITOR_QWEN` | Unset | Set to `1` to route AI editor planning and review to `JY_VISION_TEXT_BASE_URL`, `JY_VISION_TEXT_MODEL`, and `JY_VISION_TEXT_API_KEY` while retaining the selected material-analysis transport |
+| `JY_VISION_TEXT_DISABLE` | Unset | Set to `1` to keep high-resolution text reads on the selected material-analysis transport |
+| `JY_REUSE_VISION_TRANSPORT`, `JY_REUSE_VISION_MODEL` | Unset | Explicit prior observation identity for compatible Qwen runs; reused observations retain their original provenance |
 | `JY_VISION_BATCH_WORKERS` | `20` for direct Ark | Per-task API workers for material understanding and final QC |
 | `JY_VISION_SLOTS` | `20` by default | Cross-process vision slots; AI editor also shares these slots |
 | `JY_VISION_TEXT_WORKERS` | Same as batch workers; capped by batch workers | Concurrent text-review requests; both independent reads remain required |

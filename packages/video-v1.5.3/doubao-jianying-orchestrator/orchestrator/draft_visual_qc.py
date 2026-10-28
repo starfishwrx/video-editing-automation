@@ -356,11 +356,17 @@ def _checkpoint_binding(draft_identity: str, prompt: str, claims: list,
         stat = source.stat()
         sources.append({"path": str(source.resolve()), "size": stat.st_size,
                         "mtime_ns": stat.st_mtime_ns, "window": row})
-    return json.loads(json.dumps({"draft": draft_identity, "prompt": prompt,
+    binding = {"draft": draft_identity, "prompt": prompt,
         "claims": claims, "sources": sources,
         "frames": [{key: item.get(key) for key in
                     ("label", "source_start", "source_end", "timestamp", "draft_segment")}
-                   for item in items]}, ensure_ascii=False, default=str))
+                   for item in items]}
+    from orchestrator import vision_analyzer
+    if vision_analyzer._vision_transport() == "qwen":
+        cfg = vision_analyzer._qwen_settings()
+        binding["model_route"] = {"transport": "qwen", "model": cfg["model"],
+                                  "endpoint": cfg["base_url"], "thinking": False}
+    return json.loads(json.dumps(binding, ensure_ascii=False, default=str))
 
 
 def _load_batch_checkpoint(path: pathlib.Path, binding: dict, count: int,

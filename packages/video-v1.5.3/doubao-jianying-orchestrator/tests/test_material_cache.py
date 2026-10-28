@@ -99,6 +99,53 @@ class MaterialCacheTests(unittest.TestCase):
         cache = vision._vision_cache_path(self.root / "a")
         vision._save_vision_cache(cache, {key: row})
 
+    def test_explicit_prior_model_reuse_keeps_provenance_and_does_not_promote_cache(self):
+        with mock.patch.dict(os.environ, {"JY_VISION_TRANSPORT": "volc_glm", "JY_VISION_MODEL": "glm-5.3-flash"}):
+            self.seed_visual(text_pass="not_applicable")
+            old_key = vision._vision_cache_key(self.manifest, self.analysis()["shots"][0], "volc")
+        env = {"JY_VISION_TRANSPORT": "qwen", "JY_QWEN_MODEL": "qwen-test",
+               "JY_QWEN_BASE_URL": "https://example.test/v1", "JY_QWEN_API_KEY": "test",
+               "JY_REUSE_VISION_MODEL": "glm-5.3-flash", "JY_REUSE_VISION_TRANSPORT": "volc_glm"}
+        with mock.patch.dict(os.environ, env), \
+                mock.patch.object(vision, "_run_vision_with_retry") as api:
+            qwen_key = vision._vision_cache_key(self.manifest, self.analysis()["shots"][0], "volc")
+            result = vision.enrich_with_vision(self.manifest, self.analysis(), self.root / "a", profile="volc")
+        api.assert_not_called()
+        shot = result["shots"][0]
+        self.assertEqual(shot["analysis_cache_key"], old_key)
+        self.assertEqual(shot["analysis_cache_origin"], {"transport": "volc_glm", "model": "glm-5.3-flash"})
+        self.assertEqual(result["vision_analysis"]["prior_model_cache_hits"], 1)
+        self.assertNotIn(qwen_key, vision._load_vision_cache(vision._vision_cache_path(self.root / "a")))
+
+    def test_prior_model_reuse_keeps_action_interval_gate(self):
+        with mock.patch.dict(os.environ, {"JY_VISION_TRANSPORT": "volc_glm", "JY_VISION_MODEL": "glm-5.3-flash"}):
+            self.seed_visual(text_pass="not_applicable", action_complete_source="evidence_interval", evidence_intervals=[])
+        env = {"JY_VISION_TRANSPORT": "qwen", "JY_QWEN_MODEL": "qwen-test",
+               "JY_QWEN_BASE_URL": "https://example.test/v1", "JY_QWEN_API_KEY": "test",
+               "JY_REUSE_VISION_MODEL": "glm-5.3-flash", "JY_REUSE_VISION_TRANSPORT": "volc_glm"}
+        with mock.patch.dict(os.environ, env), mock.patch.object(vision, "_run_vision_with_retry") as api:
+            result = vision.enrich_with_vision(self.manifest, self.analysis(), self.root / "a", profile="volc")
+        api.assert_not_called()
+        self.assertFalse(result["shots"][0]["action_complete"])
+        self.assertEqual(result["shots"][0]["status"], "pending_analysis")
+
+    def test_prior_model_does_not_reuse_unverified_text_or_changed_product(self):
+        with mock.patch.dict(os.environ, {"JY_VISION_TRANSPORT": "volc_glm", "JY_VISION_MODEL": "glm-5.3-flash"}):
+            self.seed_visual()
+        env = {"JY_VISION_TRANSPORT": "qwen", "JY_QWEN_MODEL": "qwen-test",
+               "JY_QWEN_BASE_URL": "https://example.test/v1", "JY_QWEN_API_KEY": "test",
+               "JY_REUSE_VISION_MODEL": "glm-5.3-flash", "JY_REUSE_VISION_TRANSPORT": "volc_glm"}
+        with mock.patch.dict(os.environ, env), \
+                mock.patch.object(vision, "_write_sheet", return_value=True), \
+                mock.patch.object(vision, "_orientation", return_value="portrait"), \
+                mock.patch.object(vision, "_sample_frames", return_value=[{"path": str(self.frame), "timestamp": 7.4, "suffix": "t1"}]), \
+                mock.patch.object(vision, "_run_vision_with_retry", return_value=(False, "test failure")) as api:
+            first = vision.enrich_with_vision(self.manifest, self.analysis(), self.root / "a", profile="volc")
+            second = vision.enrich_with_vision({**self.manifest, "product_id": "other"}, self.analysis(), self.root / "b", profile="volc")
+        self.assertGreaterEqual(api.call_count, 2)
+        self.assertEqual(first["vision_analysis"]["prior_model_cache_hits"], 0)
+        self.assertEqual(second["vision_analysis"]["prior_model_cache_hits"], 0)
+
     def test_old_visual_cache_without_ocr_only_reads_text_then_warm_calls_zero(self):
         self.seed_visual()
         def response(sheet, prompt, *args, **kwargs):

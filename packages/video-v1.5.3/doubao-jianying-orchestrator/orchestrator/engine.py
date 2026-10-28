@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import math
 import os
 import re
 import shutil
@@ -1523,6 +1524,17 @@ class OrchestrationEngine:
         source_in = float(clip.source_start)
         scene_end = float(clip.source_end or 0.0)
         source_out = scene_end if scene_end > source_in else float(clip.video_duration)
+        raw = self._raw_segment_for(clip)
+        if isinstance(raw.get("ai_selection"), dict) and not isinstance(guards, (list, tuple)):
+            try:
+                original_in = float(raw["scene_source_start"])
+                original_out = float(raw["scene_source_end"])
+                if (math.isfinite(original_in) and math.isfinite(original_out)
+                        and 0 <= original_in <= source_in < source_out <= original_out):
+                    head_guard = max(0, head_guard - int(round((source_in - original_in) * US)))
+                    tail_guard = max(0, tail_guard - int(round((original_out - source_out) * US)))
+            except (KeyError, TypeError, ValueError, OverflowError):
+                pass
         # `stabilize` 选的稳定入点只作**提示**（定案第 3 条）：它进 `preferred_start_us`，
         # 求解器在可行集里找不到更好落点时优先落这里；找不到也行，绝不用它当边界。
         # 证据区间在场时求解器以证据覆盖优先，忽略此提示（见 `solve_window`）。

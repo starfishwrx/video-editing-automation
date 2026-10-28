@@ -42,7 +42,9 @@
 
 通用配置从进程环境变量读取，没有通用 `.env` 自动加载器。PowerShell 示例见[配置模板](../packages/video-v1.5.3/examples/config.example.ps1)，本机副本和任务数据放在忽略的 `work/`。
 
-`ai_editor` 当前要求 `volc_glm`；`codex` 和 `anthropic` 仅供显式 legacy 回滚。它们使用各自的模型/服务配置，不能套用 GLM-5.3-Flash 默认结论。旧函数 `match_with_codex` 的名称为兼容保留，实际 backend 仍取决于 transport。
+`ai_editor` 支持 `volc_glm` 和显式 `qwen` transport；千问需配置 `JY_QWEN_BASE_URL`、`JY_QWEN_MODEL` 和 `JY_QWEN_API_KEY`，请求关闭思考。也可保留素材分析 transport，设置 `JY_AI_EDITOR_QWEN=1` 并提供 `JY_VISION_TEXT_BASE_URL`、`JY_VISION_TEXT_MODEL` 和 `JY_VISION_TEXT_API_KEY`，仅将 AI 编辑流程切到兼容接口。凭据只从进程环境读取。跨模型复用观察须显式指定原 transport 和模型，保留原始来源，最终片段仍独立复核。
+
+`codex` 和 `anthropic` 仅供显式 legacy 回滚。它们使用各自的模型/服务配置，不能套用 GLM-5.3-Flash 默认结论。旧函数 `match_with_codex` 的名称为兼容保留，实际 backend 仍取决于 transport。
 
 ## 如何留下验证证据
 

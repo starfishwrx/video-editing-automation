@@ -20,7 +20,7 @@ class PaperRulepackTests(unittest.TestCase):
         self.assertEqual(defaults["rulepack"]["voice_max_gap_frames"], 1)
         self.assertEqual(defaults["rulepack"]["voice_acceptance_max_gap_frames"], 5)
         self.assertFalse(defaults["auto_transition"])
-        self.assertEqual(defaults["subtitle_position_px"], {"x": 0, "y": -800})
+        self.assertEqual(defaults["subtitle_position_px"], {"x": 0, "y": -528})
         overridden = rulepack.apply_manifest_defaults({
             "product": "奶杯纸", "voice_tempo": 1.15,
             "subtitle_position_px": {"x": 12, "y": -700}, "auto_transition": True,
@@ -78,6 +78,13 @@ class PaperRulepackTests(unittest.TestCase):
         self.assertNotIn("voice_acceptance_max_gap_frames", hygiene["rulepack"])
         self.assertNotIn("wipe_face_hands", {c["id"] for c in
                          rulepack.editorial_context({"category": "weipin"})["rules"]["semantic_contracts"]})
+
+    def test_paper_fallback_position_matches_configured_default(self):
+        rules = dict(rulepack.load("zhipin"))
+        rules["editorial_contract"] = {}
+        with mock.patch.object(rulepack, "load", return_value=rules):
+            result = rulepack.apply_manifest_defaults({"category": "zhipin"})
+        self.assertEqual(result["subtitle_position_px"], {"x": 0, "y": -528})
 
     def test_analysis_observes_every_contract_and_invalidates_old_cache(self):
         manifest = {"category": "zhipin"}
