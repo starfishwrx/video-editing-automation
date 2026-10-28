@@ -51,6 +51,35 @@ class AIEditorTests(unittest.TestCase):
     def result(self, plan=None):
         return editor.match_manifest(self.manifest, {"shots": [self.shot], "ai_editor_plan": plan or self.plan()})
 
+    def test_inventory_discards_unknown_ids_without_promoting_them(self):
+        model = {"sentences": [{**self.sentence, "candidate_ids": ["invented", "handfeel"]}],
+                 "display_pool_ids": ["invented-display", "handfeel"]}
+        with mock.patch.object(editor, "_call", return_value=model):
+            rows = editor._inventory(self.manifest, [self.shot], self.root)
+        self.assertEqual(rows[0]["candidate_ids"], ["handfeel"])
+        self.assertEqual(rows[0]["inventory_ignored_candidate_ids"], ["invented"])
+        self.assertEqual(rows[0]["inventory_ignored_display_ids"], ["invented-display"])
+
+    def test_inventory_still_blocks_malformed_id_types(self):
+        model = {"sentences": [{**self.sentence, "candidate_ids": [123]}],
+                 "display_pool_ids": ["handfeel"]}
+        with mock.patch.object(editor, "_call", return_value=model), \
+                self.assertRaisesRegex(ValueError, "AI_EDITOR_CANDIDATE_UNKNOWN"):
+            editor._inventory(self.manifest, [self.shot], self.root)
+
+    def test_inventory_resolves_only_unambiguous_source_aliases(self):
+        unique = {**self.shot, "shot_id": "source_001_shot_001"}
+        first = {**self.shot, "shot_id": "source_002_shot_001"}
+        second = {**self.shot, "shot_id": "source_002_shot_002"}
+        model = {"sentences": [{**self.sentence, "candidate_ids": ["source_001", "source_002", "source_999"]}],
+                 "display_pool_ids": ["source_001"]}
+        with mock.patch.object(editor, "_call", return_value=model):
+            row = editor._inventory(self.manifest, [unique, first, second], self.root)[0]
+        self.assertEqual(row["candidate_ids"][0], "source_001_shot_001")
+        self.assertEqual(row["inventory_resolved_candidate_ids"], {"source_001": "source_001_shot_001"})
+        self.assertEqual(row["inventory_ignored_candidate_ids"], ["source_002", "source_999"])
+        self.assertEqual(row["inventory_resolved_display_ids"], {"source_001": "source_001_shot_001"})
+
     def test_soft_claim_is_normal_match_without_old_strength_or_keyword_gate(self):
         result = self.result()
         self.assertTrue(result["ok"], result)

@@ -9,6 +9,7 @@ import copy
 import json
 import math
 import os
+import re
 from itertools import combinations
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -97,6 +98,25 @@ def _inventory(manifest: dict, shots: list[dict], directory: Path) -> list[dict]
         raise ValueError("AI_EDITOR_SENTENCE_COVERAGE")
     by_index = {}
     known = {str(s["shot_id"]) for s in shots}
+
+    def resolve_ids(ids: list[str]) -> tuple[list[str], list[str], dict[str, str]]:
+        resolved, ignored, aliases = [], [], {}
+        for item in ids:
+            if item in known:
+                resolved.append(item)
+                continue
+            # Some models abbreviate a source_###_shot_### ID to source_###.
+            # Only a unique exact source prefix is unambiguous; all candidates
+            # still go through the same independent pixel review afterwards.
+            matches = ([shot_id for shot_id in known
+                        if re.fullmatch(re.escape(item) + r"_shot_\d+", shot_id)]
+                       if re.fullmatch(r"source_\d+", item) else [])
+            if len(matches) == 1:
+                aliases[item] = matches[0]
+                resolved.append(matches[0])
+            else:
+                ignored.append(item)
+        return resolved, ignored, aliases
     for row in found:
         index = row.get("index") if isinstance(row, dict) else None
         if type(index) is not int or not 1 <= index <= len(rows) or index in by_index or row.get("kind") not in contract.KINDS:
@@ -112,15 +132,19 @@ def _inventory(manifest: dict, shots: list[dict], directory: Path) -> list[dict]
         if len({p["id"] for p in points}) != len(points) or (row["kind"] == "selling_point") != bool(points):
             raise ValueError("AI_EDITOR_POINTS_INVALID")
         ids = row.get("candidate_ids")
-        if not isinstance(ids, list) or any(not isinstance(s, str) or s not in known for s in ids):
+        if not isinstance(ids, list) or any(not isinstance(s, str) for s in ids):
             raise ValueError("AI_EDITOR_CANDIDATE_UNKNOWN")
+        ids, row["inventory_ignored_candidate_ids"], row["inventory_resolved_candidate_ids"] = resolve_ids(ids)
         by_index[index] = {**row, "text": timing_contract.sentence_text(rows[index - 1]),
                            "candidate_ids": list(dict.fromkeys(ids + [str(s["shot_id"]) for s in shots]))}
     display = data.get("display_pool_ids")
-    if not isinstance(display, list) or any(s not in known for s in display):
+    if not isinstance(display, list) or any(not isinstance(s, str) for s in display):
         raise ValueError("AI_EDITOR_DISPLAY_POOL_INVALID")
+    display, ignored_display, resolved_display = resolve_ids(display)
     result = [by_index[i] for i in range(1, len(rows) + 1)]
     for row in result:
+        row["inventory_ignored_display_ids"] = ignored_display
+        row["inventory_resolved_display_ids"] = resolved_display
         if row["kind"] != "selling_point":
             row["candidate_ids"] = list(dict.fromkeys(display + [str(s["shot_id"]) for s in shots]))
     return result
