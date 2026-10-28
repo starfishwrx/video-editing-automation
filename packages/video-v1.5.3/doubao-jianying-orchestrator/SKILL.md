@@ -6,7 +6,7 @@ description: Build and recover editable Jianying video drafts from task manifest
 # Doubao/Jianying orchestrator v1.5.6
 
 纸品生产规则见包根`docs/PAPER_PRODUCTION_RULES.md`：13类语义视觉合同共用于分析、AI选镜和独立QC；
-口播默认1.3倍、清洁画面优先1.3倍、硬切、实际气口不超过5帧、字幕像素X=0/Y=-800。
+口播默认1.3倍、清洁画面优先1.3倍、硬切、实际气口不超过5帧、字幕像素X=0/Y=-528。
 规则身份改变后旧AI观察和QC不自动复用。分段AI视频生成仅为素材制作规范，本包不新增生成服务。
 
 完成标准：产出可打开、媒体可读、旁白与画面时长匹配、字幕内容正确的剪映草稿，

@@ -454,7 +454,11 @@ def _temporary_match(manifest: dict, input_path: Path, report_dir: Path,
                 if ai_editor_contract.is_ai_segment(seg) or str(seg.get("selection_mode") or "") == "ai_editor":
                     prior_ai[key] = seg
         # 1) 规则/描述表初排（走 legacy matcher，不做整库 inventory）
-        rule_manifest = {**manifest, "selection_mode": "legacy"}
+        # Freeze the same clause boundaries used for pre-TTS before switching
+        # the matcher to legacy mode. Otherwise its legacy splitter merges
+        # clauses, misaligns audio durations and loses sentence-level cuts.
+        rule_manifest = {**manifest, "selection_mode": "legacy",
+                         "segments": timing_contract.split_sentences(manifest)}
         matched = shot_analyzer.match_manifest(
             rule_manifest, analysis, topk=int(manifest.get("shot_topk", 8) or 8),
             auto_accept_top1=bool(manifest.get("auto_accept_top1", True)),
@@ -512,15 +516,37 @@ def _temporary_match(manifest: dict, input_path: Path, report_dir: Path,
                 except (TypeError, ValueError):
                     continue
         need_ai = list(refill_indices)
-        if not need_ai and not matched.get("ok"):
-            # Rule first-pass left timing/material gaps: AI-refill those sentences
-            # before returning SHOT_MATCH_BLOCKED.
+        if not need_ai and gap_indices:
+            # Preview can be structurally "ok" while still containing degraded
+            # or missing evidence. Give the configured small set a pixel review.
             need_ai = [i for i in gap_indices if i >= 1]
         need_ai = sorted(set(need_ai))
+        if not refill_indices:
+            try:
+                refill_limit = max(0, int(manifest.get("ai_refill_max_sentences", 0) or 0))
+            except (TypeError, ValueError):
+                refill_limit = 0
+            if refill_limit:
+                from . import demo_actions
+                sentence_rows = timing_contract.split_sentences(manifest)
+                def _gap_priority(index: int) -> tuple[int, int]:
+                    if not 1 <= index <= len(sentence_rows):
+                        return (0, index)
+                    text = timing_contract.sentence_text(sentence_rows[index - 1])
+                    claims = demo_actions.requirements_for(text, text, str(manifest.get("category") or ""))
+                    return (-sum(bool(claim.evidence_required) for claim in claims), index)
+                need_ai = sorted(need_ai, key=_gap_priority)[:refill_limit]
+        rule_selected_count = len(matched.get("segments") or [])
         if need_ai:
             matched = ai_editor.refill_indices(
                 manifest, analysis, matched, need_ai, report_dir,
                 narration_timing=narration_timing)
+        matched["rule_selection_summary"] = {
+            "rule_segments": rule_selected_count,
+            "automatic_gap_indices": sorted(set(gap_indices)),
+            "ai_refill_requested": need_ai,
+            "ai_refill_replaced": list(matched.get("refill_replaced") or []),
+        }
         matched["selection_mode"] = "rule_then_ai"
         if isinstance(matched.get("manifest"), dict):
             matched["manifest"]["selection_mode"] = "rule_then_ai"

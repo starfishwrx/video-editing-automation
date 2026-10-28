@@ -1,7 +1,7 @@
 {
   "rulepack": "zhipin",
   "label": "纸品",
-  "version": "1.5.3-6",
+  "version": "1.5.3-7",
   "source": "纸品语义视觉合同与默认值；沿用历史抽取、擦拭、检测等判据并明确卖点对应证据",
   "product_keywords": ["湿厕纸", "湿巾", "纸巾", "抽纸", "卷纸", "棉柔巾", "洗脸巾", "厨房纸", "手帕纸", "面巾纸", "奶杯纸", "绒立方厨房纸"],
   "voice": {"tempo": 1.3, "edge_trim": true, "max_gap_frames": 1, "acceptance_max_gap_frames": 5},
@@ -264,7 +264,7 @@
     },
     "subtitle_position_px": {
       "x": 0,
-      "y": -800
+      "y": -528
     }
   }
 }

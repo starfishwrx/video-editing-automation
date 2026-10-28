@@ -51,12 +51,71 @@ class AIEditorTests(unittest.TestCase):
     def result(self, plan=None):
         return editor.match_manifest(self.manifest, {"shots": [self.shot], "ai_editor_plan": plan or self.plan()})
 
+    def test_inventory_discards_unknown_ids_without_promoting_them(self):
+        model = {"sentences": [{**self.sentence, "candidate_ids": ["invented", "handfeel"]}],
+                 "display_pool_ids": ["invented-display", "handfeel"]}
+        with mock.patch.object(editor, "_call", return_value=model):
+            rows = editor._inventory(self.manifest, [self.shot], self.root)
+        self.assertEqual(rows[0]["candidate_ids"], ["handfeel"])
+        self.assertEqual(rows[0]["inventory_ignored_candidate_ids"], ["invented"])
+        self.assertEqual(rows[0]["inventory_ignored_display_ids"], ["invented-display"])
+
+    def test_review_accepts_unambiguous_interval_pair(self):
+        media = {"start": 0, "end": 6, "before": contract.source_identity(self.video),
+                 "times": [0, 3, 5], "sheet": self.root / "sheet.jpg"}
+        model = {**self.review, "scene_ids": [], "evidence_intervals_us": [2_000_000, 3_000_000]}
+        with mock.patch.object(editor, "_review_media", return_value=media), mock.patch.object(editor, "_call", return_value=model) as call:
+            result = editor._review(self.manifest, self.sentence, self.shot, self.root)
+        self.assertEqual(result["evidence_intervals_us"], [{"start": 2_000_000, "end": 3_000_000}])
+        self.assertIn("不能证明某种具体香型", call.call_args.args[0])
+
+    def test_inventory_still_blocks_malformed_id_types(self):
+        model = {"sentences": [{**self.sentence, "candidate_ids": [123]}],
+                 "display_pool_ids": ["handfeel"]}
+        with mock.patch.object(editor, "_call", return_value=model), \
+                self.assertRaisesRegex(ValueError, "AI_EDITOR_CANDIDATE_UNKNOWN"):
+            editor._inventory(self.manifest, [self.shot], self.root)
+
+    def test_inventory_resolves_only_unambiguous_source_aliases(self):
+        unique = {**self.shot, "shot_id": "source_001_shot_001"}
+        first = {**self.shot, "shot_id": "source_002_shot_001"}
+        second = {**self.shot, "shot_id": "source_002_shot_002"}
+        model = {"sentences": [{**self.sentence, "candidate_ids": ["source_001", "source_002", "source_999"]}],
+                 "display_pool_ids": ["source_001"]}
+        with mock.patch.object(editor, "_call", return_value=model):
+            row = editor._inventory(self.manifest, [unique, first, second], self.root)[0]
+        self.assertEqual(row["candidate_ids"][0], "source_001_shot_001")
+        self.assertEqual(row["inventory_resolved_candidate_ids"], {"source_001": "source_001_shot_001"})
+        self.assertEqual(row["inventory_ignored_candidate_ids"], ["source_002", "source_999"])
+        self.assertEqual(row["inventory_resolved_display_ids"], {"source_001": "source_001_shot_001"})
+
     def test_soft_claim_is_normal_match_without_old_strength_or_keyword_gate(self):
         result = self.result()
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["degraded_count"], 0)
         with mock.patch("orchestrator.demo_actions.judge", side_effect=AssertionError("legacy gate")):
             self.assertTrue(semantic_gate.evaluate_segments(result["segments"], require_explicit=True, category="weipin")["ok"])
+
+    def test_partial_selling_points_are_preview_only_and_remain_unresolved(self):
+        self.sentence["selling_points"].append({"id": "p2", "text": "具体香型"})
+        self.manifest.update(delivery_mode="preview", allow_partial_selling_points=True)
+        result = self.result()
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["segments"][0]["uncovered_selling_points"], [{"id": "p2", "text": "具体香型"}])
+        self.assertEqual(result["manifest"]["claim_gate_coverage"]["certification"], "UNCERTIFIED")
+        self.assertEqual(result["claim_gate_coverage"]["certification"], "UNCERTIFIED")
+        self.assertEqual(result["pending_items"][0]["type"], "PARTIAL_SELLING_POINTS")
+        self.manifest["delivery_mode"] = "formal"
+        self.assertFalse(self.result()["ok"])
+
+    def test_partial_preview_stops_after_reviewed_supported_point(self):
+        self.manifest.update(delivery_mode="preview", allow_partial_selling_points=True)
+        sentence = {**self.sentence, "selling_points": self.sentence["selling_points"] + [{"id": "p2", "text": "具体香型"}],
+                    "audio_durations_us": [2_000_000]}
+        with mock.patch.object(editor, "_review", return_value=self.review):
+            rows, coverage = editor._review_pool(self.manifest, sentence, {"handfeel": self.shot}, self.root, {})
+        self.assertTrue(coverage["feasible"])
+        self.assertEqual(rows[0]["supported_point_ids"], ["p1"])
 
     def test_refill_preserves_other_sentences_and_reindexes_current_receipt(self):
         manifest = {**self.manifest, "selection_mode": "rule_then_ai", "segments": [
@@ -73,6 +132,38 @@ class AIEditorTests(unittest.TestCase):
         row = result["segments"][1]
         self.assertEqual(row["ai_selection"]["index"], 2)
         self.assertTrue(contract.validate_segment_receipt(row, index=2, verify_source=True, manifest=manifest)["ok"])
+
+    def test_refill_does_not_certify_other_degraded_sentences(self):
+        manifest = {**self.manifest, "selection_mode": "rule_then_ai", "delivery_mode": "preview",
+                    "segments": [{"text": "保留原句", "audio_duration_us": 2000000}, self.manifest["segments"][0]]}
+        kept = {"index": 1, "text": "保留原句", "temporary_shot_id": "keep",
+                "video": "kept.mp4", "source_start": 3, "duration": 2}
+        matched = {"segments": [kept, {"index": 2, "text": self.sentence["text"]}],
+                   "pending_items": [], "degraded_matches": [{"index": 1}, {"index": 2}]}
+        review = {**self.review, "source_identity": contract.source_identity(self.video)}
+        with mock.patch.object(editor, "_review_pool", return_value=([review], {"feasible": True})):
+            result = editor.refill_indices(manifest, {"shots": [self.shot]}, matched, [2], self.root)
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["claim_gate_coverage"]["validation_passed"])
+        self.assertEqual(result["claim_gate_coverage"]["certification"], "UNCERTIFIED")
+        self.assertEqual(result["manifest"]["claim_gate_coverage"], result["claim_gate_coverage"])
+
+    def test_refill_preserves_uncovered_compound_claim_for_preview(self):
+        text = "精致包装和好闻的雪松绿茶香"
+        manifest = {**self.manifest, "selection_mode": "rule_then_ai", "delivery_mode": "preview",
+                    "allow_partial_selling_points": True,
+                    "segments": [{"text": text, "audio_duration_us": 2000000}]}
+        matched = {"segments": [{"index": 1, "text": text}], "pending_items": [],
+                   "degraded_matches": [{"index": 1}]}
+        review = {**self.review, "source_identity": contract.source_identity(self.video),
+                  "supported_point_ids": ["p1"]}
+        with mock.patch.object(editor, "_review_pool", return_value=([review], {"feasible": True})):
+            result = editor.refill_indices(manifest, {"shots": [self.shot]}, matched, [1], self.root)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["segments"][0]["uncovered_selling_points"],
+                         [{"id": "p2", "text": "好闻的雪松绿茶香"}])
+        self.assertEqual(result["manifest"]["preview_unresolved"][0]["index"], 1)
+        self.assertEqual(result["claim_gate_coverage"]["certification"], "UNCERTIFIED")
 
     def test_selector_cannot_pick_packaging_that_pixel_review_rejected(self):
         plan = self.plan()
@@ -91,6 +182,18 @@ class AIEditorTests(unittest.TestCase):
         self.assertEqual(segment["source_start"], 0)
         self.assertGreaterEqual(segment["source_end"], 1)
 
+    def test_continuation_applies_head_guard_to_original_scene(self):
+        self.manifest["head_trim_s"] = 0.3
+        plan = self.plan()
+        plan["rows"][0]["parts"][0]["source_start_us"] = 2_000_000
+        result = self.result(plan)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["segments"][0]["source_start"], 2.0)
+        self.review["evidence_intervals_us"] = [{"start": 100_000, "end": 1_000_000}]
+        plan = self.plan()
+        plan["rows"][0]["parts"][0]["source_start_us"] = 100_000
+        self.assertFalse(self.result(plan)["ok"])
+
     def test_editor_receives_actual_speed_and_content_identity(self):
         plan = self.plan()
         with mock.patch.object(editor, "_call", return_value={"rows": plan["rows"]}) as call:
@@ -100,6 +203,16 @@ class AIEditorTests(unittest.TestCase):
         self.assertIn('"source_identity": "source1"', prompt)
         self.assertNotIn(str(self.video), prompt)
         self.assertIn("最高20倍", prompt)
+
+    def test_editor_repairs_duplicate_rows_without_silently_selecting_one(self):
+        plan = self.plan()
+        final = copy.deepcopy(plan["rows"])
+        duplicate = final + copy.deepcopy(final)
+        with mock.patch.object(editor, "_call", side_effect=[{"rows": duplicate}, {"rows": duplicate}, {"rows": final}]) as call:
+            editor._edit_plan(self.manifest, {"shots": [self.shot]}, plan, self.root)
+        self.assertTrue(plan["ok"])
+        self.assertEqual(call.call_count, 3)
+        self.assertIn("duplicate=[1]", call.call_args.args[0])
 
     def test_mid_late_preference_preserves_correct_evidence_and_short_sources(self):
         self.review["evidence_intervals_us"] = [{"start": 2_000_000, "end": 2_200_000}]
@@ -228,6 +341,85 @@ class AIEditorTests(unittest.TestCase):
         self.assertEqual(coverage["checked"], 9)
         self.assertEqual(reviews[-1]["verdict"], "matched")
 
+    def test_guarded_window_is_reobserved_not_silently_clipped(self):
+        self.manifest["head_trim_s"] = 0.3
+        sentence = {**self.sentence, "audio_durations_us": [2_000_000]}
+        previous = {**self.review, "scene_ids": [], "evidence_intervals_us": [{"start": 0, "end": 1_000_000}]}
+        observed = []
+        def review(_m, _s, shot, _d, *, dense=False):
+            observed.append((shot["source_start"], dense))
+            if dense:
+                return {**previous, "evidence_intervals_us": [{"start": 300_000, "end": 1_000_000}]}
+            return previous
+        with mock.patch.object(editor, "_review", side_effect=review):
+            rows, coverage = editor._review_pool(self.manifest, sentence, {"handfeel": self.shot}, self.root, {})
+        self.assertIn((0.3, True), observed)
+        self.assertEqual(rows[0]["guarded_review_status"], "confirmed")
+        self.assertTrue(coverage["feasible"])
+        def uncertain(_m, _s, shot, _d, *, dense=False):
+            return {"verdict": "uncertain"} if dense else previous
+        with mock.patch.object(editor, "_review", side_effect=uncertain):
+            rows, coverage = editor._review_pool(self.manifest, sentence, {"handfeel": self.shot}, self.root, {})
+        self.assertEqual(rows[0]["guarded_review_status"], "unconfirmed")
+        self.assertEqual(rows[0]["evidence_intervals_us"], previous["evidence_intervals_us"])
+        self.assertFalse(coverage["feasible"])
+        self.assertEqual(coverage["uncertain"], 1)
+        def lost_point(_m, _s, shot, _d, *, dense=False):
+            return {**previous, "supported_point_ids": [], "evidence_intervals_us": [{"start": 300_000, "end": 1_000_000}]} if dense else previous
+        with mock.patch.object(editor, "_review", side_effect=lost_point):
+            rows, coverage = editor._review_pool(self.manifest, sentence, {"handfeel": self.shot}, self.root, {})
+        self.assertEqual(rows[0]["guarded_review_status"], "unconfirmed")
+        self.assertFalse(coverage["feasible"])
+
+    def test_broad_evidence_gets_dense_review_without_losing_support(self):
+        sentence = {**self.sentence, "audio_durations_us": [1_000_000]}
+        media = {"start": 0, "end": 6, "before": contract.source_identity(self.video),
+                 "times": [0, 3, 5], "sheet": self.root / "sheet.jpg"}
+        broad = {**self.review, "scene_ids": [], "evidence_intervals_us": [{"start": 1_000_000, "end": 5_000_000}]}
+        with mock.patch.object(editor, "_review_media", return_value=media), mock.patch.object(editor, "_call", return_value=broad):
+            first = editor._review(self.manifest, sentence, self.shot, self.root)
+        self.assertTrue(first["dense_required"])
+        def review(_m, _s, _shot, _directory, *, dense=False):
+            return {**first, "verdict": "uncertain"} if dense else first
+        with mock.patch.object(editor, "_review", side_effect=review):
+            rows, _ = editor._review_pool(self.manifest, sentence, {"handfeel": self.shot}, self.root, {})
+        self.assertEqual(rows[0]["verdict"], "matched")
+        self.assertEqual(rows[0]["evidence_intervals_us"], broad["evidence_intervals_us"])
+        self.assertEqual(rows[0]["refinement_status"], "retained_original")
+        refined = {**first, "dense_required": False, "evidence_intervals_us": [{"start": 2_000_000, "end": 3_000_000}]}
+        def review_confirmed(_m, _s, _shot, _directory, *, dense=False):
+            return refined if dense else first
+        with mock.patch.object(editor, "_review", side_effect=review_confirmed):
+            rows, _ = editor._review_pool(self.manifest, sentence, {"handfeel": self.shot}, self.root, {})
+        self.assertEqual(rows[0]["evidence_intervals_us"], refined["evidence_intervals_us"])
+        self.assertEqual(rows[0]["refinement_status"], "dense_review")
+
+    def test_one_feasible_candidate_gets_one_more_round_for_editorial_choice(self):
+        ids = [f"candidate{i}" for i in range(24)]
+        sentence = {**self.sentence, "candidate_ids": ids, "audio_durations_us": [2_000_000]}
+        shots = {sid: {**self.shot, "shot_id": sid} for sid in ids}
+        def review(_m, _s, shot, _d):
+            sid = shot["shot_id"]
+            return {**self.review, "shot_id": sid,
+                    "verdict": "matched" if sid in {ids[0], ids[8]} else "mismatch"}
+        with mock.patch.object(editor, "_review", side_effect=review):
+            reviews, coverage = editor._review_pool(self.manifest, sentence, shots, self.root, {})
+        self.assertEqual(coverage["checked"], 16)
+        self.assertEqual(coverage["reason"], "READY")
+        self.assertEqual([r["shot_id"] for r in reviews if r["verdict"] == "matched"], [ids[0], ids[8]])
+
+    def test_missing_evidence_and_infeasible_windows_are_distinguished(self):
+        sentence = {**self.sentence, "audio_durations_us": [2_000_000]}
+        with mock.patch.object(editor, "_review", return_value={"shot_id": "handfeel", "verdict": "uncertain"}):
+            _, coverage = editor._review_pool(self.manifest, sentence, {"handfeel": self.shot}, self.root, {})
+        self.assertEqual(coverage["reason"], "EVIDENCE_UNKNOWN")
+        shot = {**self.shot, "source_end": 60, "material_duration_us": 60_000_000}
+        review = {**self.review, "evidence_intervals_us": [{"start": 0, "end": 50_000_000}]}
+        with mock.patch.object(editor, "_review", return_value=review):
+            _, coverage = editor._review_pool(self.manifest, sentence, {"handfeel": shot}, self.root, {})
+        self.assertFalse(coverage["feasible"])
+        self.assertEqual(coverage["reason"], "KNOWN_WINDOWS_INFEASIBLE")
+
     def test_no_ai_plan_cannot_activate_legacy_matcher(self):
         result = shot_analyzer.match_manifest(self.manifest, {"shots": [self.shot]})
         self.assertFalse(result["ok"])
@@ -339,6 +531,72 @@ class AIEditorTests(unittest.TestCase):
             editor._call("changed prompt", output, sheet)
             self.assertEqual(provider.call_count, 3)
 
+    def test_pixel_review_uses_qwen_and_keeps_completed_glm_reviews(self):
+        from orchestrator import vision_analyzer
+        output = self.root / "reviews" / "kept.json"
+        output.parent.mkdir()
+        sheet = self.root / "sheet.jpg"
+        sheet.write_bytes(b"synthetic image")
+        editor._save(output, {"verdict": "matched"})
+        editor._save(output.with_suffix(".request.json"), {
+            "prompt_sha256": contract.digest("prompt"),
+            "image_sha256": contract.file_sha256(sheet),
+            "model": "glm-5.3-flash",
+            "endpoint": "https://ark.cn-beijing.volces.com/api/plan/v3",
+        })
+        fresh = self.root / "reviews" / "fresh.json"
+        with mock.patch.object(vision_analyzer, "_run_text_chat", return_value=(True, '{"ok":true}')) as qwen, \
+                mock.patch.object(vision_analyzer, "_run_volc_chat", return_value=(True, '{"ok":true}')) as glm, \
+                mock.patch.dict("os.environ", {
+                    "JY_VISION_TRANSPORT": "volc_glm",
+                    "JY_VISION_MODEL": "glm-5.3-flash",
+                    "JY_VISION_TEXT_BASE_URL": "https://example.invalid/v1",
+                    "JY_VISION_TEXT_API_KEY": "sk-test-secret-value",
+                    "JY_VISION_TEXT_MODEL": "qwen3.8-flash",
+                }):
+            cached = editor._call("prompt", output, sheet)
+            editor._call("prompt", fresh, sheet)
+            editor._call("plan only", self.root / "edit.json")
+        self.assertEqual(cached["verdict"], "matched")
+        qwen.assert_called_once()
+        self.assertIs(qwen.call_args.args[0], sheet)
+        glm.assert_called_once()
+        self.assertIsNone(glm.call_args.args[0])
+        recorded = json.loads(fresh.with_suffix(".request.json").read_text(encoding="utf-8"))
+        self.assertEqual(recorded["model"], "qwen3.8-flash")
+        self.assertEqual(recorded["thinking"], "enable_thinking=false")
+
+    def test_explicit_qwen_editor_routes_text_and_invalidates_glm_cache(self):
+        from orchestrator import vision_analyzer
+        output = self.root / "response.json"
+        editor._save(output, {"old": True})
+        editor._save(output.with_suffix(".request.json"), {"prompt_sha256": contract.digest("prompt"),
+            "image_sha256": None, "model": "glm", "endpoint": "old"})
+        env = {"JY_VISION_TRANSPORT": "volc_glm", "JY_AI_EDITOR_QWEN": "1",
+               "JY_VISION_TEXT_BASE_URL": "https://example.invalid/v1",
+               "JY_VISION_TEXT_API_KEY": "sk-test-secret-value", "JY_VISION_TEXT_MODEL": "qwen"}
+        with mock.patch.object(vision_analyzer, "_run_text_chat", return_value=(True, '{"new":true}')) as qwen, \
+                mock.patch.object(vision_analyzer, "_run_volc_chat") as glm, mock.patch.dict("os.environ", env):
+            self.assertEqual(editor._call("prompt", output), {"new": True})
+            self.assertEqual(editor._call("prompt", output), {"new": True})
+        qwen.assert_called_once()
+        glm.assert_not_called()
+
+    def test_qwen_transport_used_for_text_and_image_editor_calls(self):
+        from orchestrator import vision_analyzer
+        sheet = self.root / "qwen-sheet.jpg"
+        sheet.write_bytes(b"image")
+        env = {"JY_VISION_TRANSPORT": "qwen", "JY_QWEN_BASE_URL": "https://example.invalid/v1",
+               "JY_QWEN_API_KEY": "sk-test-secret", "JY_QWEN_MODEL": "qwen-test"}
+        with mock.patch.dict("os.environ", env), \
+                mock.patch.object(vision_analyzer, "_run_qwen_chat", return_value=(True, '{"ok":true}')) as qwen, \
+                mock.patch.object(vision_analyzer, "_run_volc_chat") as glm:
+            editor._call("text", self.root / "text.json")
+            editor._call("image", self.root / "image.json", sheet)
+            self.assertEqual(editor._editor_model(), "qwen-test")
+        self.assertEqual(qwen.call_count, 2)
+        glm.assert_not_called()
+
     def test_slot_timeout_does_not_make_an_unthrottled_request(self):
         from orchestrator import vision_analyzer
         with mock.patch.object(vision_analyzer, "_run_volc_chat", return_value=(False, "VISION_SLOT_TIMEOUT")) as provider, \
@@ -372,6 +630,29 @@ class AIEditorTests(unittest.TestCase):
         self.assertEqual(prepare.call_args.args[0]["selection_mode"], "ai_editor")
         self.assertEqual(blocker["status"], "SHOT_MATCH_BLOCKED")
         legacy.assert_not_called()
+
+    def test_rule_first_keeps_tts_clause_boundaries_and_refills_preview_gaps(self):
+        from orchestrator import cli, timing_contract
+        manifest = {"selection_mode": "rule_then_ai", "delivery_mode": "preview",
+                    "full_script": "谁能拒绝精致包装和好闻的雪松绿茶香啊，尝鲜价整箱抱走美滋滋。"
+                                   "纸张厚实亲肤，四层加厚，随便揉搓不掉絮。",
+                    "ai_refill_max_sentences": 1}
+        expected = timing_contract.split_sentences(manifest)
+        self.assertGreater(len(expected), 2)
+        analysis = {"shots": [self.shot], "vision_analysis": {"errors": []}}
+        def fake_match(rule_manifest, _analysis, **_kwargs):
+            self.assertEqual(rule_manifest["selection_mode"], "legacy")
+            self.assertEqual(rule_manifest["segments"], expected)
+            return {"ok": True, "segments": expected, "manifest": {**rule_manifest},
+                    "degraded_matches": [{"index": 1}, {"index": 2}], "pending_items": []}
+        with mock.patch.object(cli, "_run_shot_analysis", return_value=analysis), \
+                mock.patch("orchestrator.material_corrections.apply", side_effect=lambda _m, a, _r: a), \
+                mock.patch.object(shot_analyzer, "match_manifest", side_effect=fake_match), \
+                mock.patch("orchestrator.scene_rules.apply", return_value={}), \
+                mock.patch.object(editor, "refill_indices", side_effect=lambda _m, _a, match, *_args, **_kw: match) as refill:
+            _, blocker = cli._temporary_match(manifest, self.root / "input.json", self.root)
+        self.assertIsNone(blocker)
+        self.assertEqual(refill.call_args.args[3], [1])
 
     def test_multiple_shots_cover_distinct_points_and_bind_every_part(self):
         plan = self.plan()

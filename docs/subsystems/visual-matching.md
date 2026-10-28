@@ -9,6 +9,8 @@
 - 调用失败、无可读图片或观察缺失保持待分析/未认证，不使用猜测标签。
 - 素材理解缓存可跨任务复用；缓存身份包含素材/源窗/分析规则和所选后端等，复用不等于写入持久素材库。
 
+旧任务清单未写商品时，可由操作者使用 `python -m orchestrator.legacy_cache_import` 显式导入：必填 `--prior-task`、`--prior-manifest`、`--current-manifest`、`--prior-analysis` 和 `--cache`（路径均为 JSON）；运行环境必须使用拟复用的 transport、模型和抽帧设置。工具要求旧任务与当前商品一致、旧任务和清单的 record 一致、素材在两份清单中，且旧键能由原清单及去掉商品字段的当前清单分别重算。源文件 stat、窗口、规则、模型和采样协议任何不一致都不会导入；已有当前键不覆盖。此操作只恢复视觉观察，未复核的文字仍需补验，选镜像素复核与独立 QC 不省略。导入影响新启动的分析，不会刷新已运行进程的内存快照。
+
 ## 2. 默认 AI 选镜与整稿编排
 
 调用链为 `cli._temporary_match → ai_editor.prepare → shot_analyzer.match_manifest`。

@@ -180,7 +180,7 @@ def recommend_voices(script_text: str = "", *, style: str = "", persona: str = "
 
 # 运营把语速写在音色名末尾：「猴哥1.6倍速」「真人播客女1.2倍速」。
 _SPEED_RE = re.compile(
-    r"^\s*(?P<name>.*?)[\s·]*?(?P<speed>\d+\.\d+|\d+(?=\s*倍速))\s*(?:倍速)?\s*$")
+    r"^\s*(?P<name>.*?)[\s·]*?(?P<speed>\d+\.\d+|\d+(?=\s*倍(?:速|数)?))\s*(?:倍(?:速|数)?)?\s*$")
 
 
 def _split_speed(spec: str) -> tuple[str, Optional[float]]:

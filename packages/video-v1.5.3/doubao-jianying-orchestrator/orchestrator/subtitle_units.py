@@ -1,6 +1,10 @@
 """口播长度。词表里的整词只算 1 个字，不把词内字符再加进去。"""
 from __future__ import annotations
 
+# Shared by the pre-TTS sentence planner and the engine's final length gate.
+MAX_SUBTITLE_CHARS = 15
+SUBTITLE_HARD_CHARS = 30
+
 KEEP_WORDS = (
     "HelloKitty", "hellokitty", "心相印", "七度空间", "生理盐水", "湿厕纸", "洗脸巾",
     "棉柔巾", "悬挂", "联名", "云感", "湿巾", "毛巾", "浴巾", "纸巾", "化妆巾", "卸妆棉",

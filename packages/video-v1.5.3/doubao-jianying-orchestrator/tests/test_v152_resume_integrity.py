@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import os
 import sys
@@ -243,6 +244,28 @@ class SharedCacheMergeTest(unittest.TestCase):
             disk = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(set(disk), {"a", "b"})
             self.assertIn("a", second)
+
+    def test_stale_snapshot_cannot_erase_other_products_text_review(self):
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "material_vision.json"
+            old = {"paper": {"text_pass": "pending"}}
+            self.assertTrue(vision_analyzer._save_vision_cache(path, old))
+            stale_pants = copy.deepcopy(old)
+            paper = {"paper": {"text_pass": "hires", "readable_claims": ["80抽"]}}
+            self.assertTrue(vision_analyzer._save_vision_cache(path, paper, changed_keys={"paper"}))
+            stale_pants["pants"] = {"text_pass": "pending"}
+            self.assertTrue(vision_analyzer._save_vision_cache(path, stale_pants, changed_keys={"pants"}))
+            disk = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(disk["paper"]["text_pass"], "hires")
+            self.assertEqual(disk["paper"]["readable_claims"], ["80抽"])
+            self.assertIn("pants", disk)
+
+    def test_invalid_shared_cache_is_not_replaced_by_stale_snapshot(self):
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "material_vision.json"
+            path.write_text("invalid", encoding="utf-8")
+            self.assertFalse(vision_analyzer._save_vision_cache(path, {"a": {}}, changed_keys={"a"}))
+            self.assertEqual(path.read_text(encoding="utf-8"), "invalid")
 
 
 class UnverifiedTextEvidenceTest(unittest.TestCase):

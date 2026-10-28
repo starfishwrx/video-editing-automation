@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import math
 import os
 import re
 import shutil
@@ -29,15 +30,13 @@ from . import rulepack
 from .voice_request import select_voice_tempo
 from .video_encode import run_h264_encode
 from .voice_catalog import recommend_voices, resolve_voice
-from .subtitle_units import text_units
+from .subtitle_units import text_units, MAX_SUBTITLE_CHARS, SUBTITLE_HARD_CHARS
 from .timing_contract import frame_speed
 
 US = 1_000_000
 TAIL_PAD = 0.12  # 每句口播尾部留白秒数，避免贴边
 # 15 字是软目标：按词拆开时尽量靠近。词表里的整词只算 1 个字。
 # 硬上限只拦完全没拆开的长段，避免一整段文案压在一个镜头里。
-MAX_SUBTITLE_CHARS = 15
-SUBTITLE_HARD_CHARS = 30
 
 # 探测缓存世代戳（v1.3.27.1）：换探针口径时 +1，老缓存重新探测。
 PROBE_KIND = "material_us_v1"
@@ -1525,6 +1524,17 @@ class OrchestrationEngine:
         source_in = float(clip.source_start)
         scene_end = float(clip.source_end or 0.0)
         source_out = scene_end if scene_end > source_in else float(clip.video_duration)
+        raw = self._raw_segment_for(clip)
+        if isinstance(raw.get("ai_selection"), dict) and not isinstance(guards, (list, tuple)):
+            try:
+                original_in = float(raw["scene_source_start"])
+                original_out = float(raw["scene_source_end"])
+                if (math.isfinite(original_in) and math.isfinite(original_out)
+                        and 0 <= original_in <= source_in < source_out <= original_out):
+                    head_guard = max(0, head_guard - int(round((source_in - original_in) * US)))
+                    tail_guard = max(0, tail_guard - int(round((original_out - source_out) * US)))
+            except (KeyError, TypeError, ValueError, OverflowError):
+                pass
         # `stabilize` 选的稳定入点只作**提示**（定案第 3 条）：它进 `preferred_start_us`，
         # 求解器在可行集里找不到更好落点时优先落这里；找不到也行，绝不用它当边界。
         # 证据区间在场时求解器以证据覆盖优先，忽略此提示（见 `solve_window`）。
