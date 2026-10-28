@@ -1191,6 +1191,17 @@ def _jianying_ui_probe() -> dict:
         return {"checked": False, "reason": type(exc).__name__}
 
 
+class _CapacityCalibrationEngine(OrchestrationEngine):
+    """Run the calibration's explicitly silent synthetic timeline."""
+
+    def audio_selection_gate(self, clips):
+        if (not self.capacity_guard and self.m.get("allow_silent") is True
+                and not self.m.get("voice") and not self.m.get("bgm")
+                and clips and all(c.audio_mode == "mute" and not c.text for c in clips)):
+            return None
+        return super().audio_selection_gate(clips)
+
+
 def cmd_calibrate_capacity(args) -> int:
     """Run isolated incremental source-count calibration and persist the safe limit."""
     input_path = Path(args.input).expanduser().resolve()
@@ -1255,8 +1266,8 @@ def cmd_calibrate_capacity(args) -> int:
         started = time.perf_counter()
         try:
             with contextlib.redirect_stdout(sys.stderr):
-                engine = OrchestrationEngine(manifest, isolated, trial_report, logger=logger,
-                                             capacity_guard=False)
+                engine = _CapacityCalibrationEngine(manifest, isolated, trial_report, logger=logger,
+                                                    capacity_guard=False)
                 result = engine.run()
         except Exception as exc:  # noqa: BLE001
             result = {"status": "ERROR", "error_type": type(exc).__name__, "error": str(exc)}

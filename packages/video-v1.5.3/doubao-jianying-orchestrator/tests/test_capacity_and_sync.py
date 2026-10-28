@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -11,6 +12,23 @@ from orchestrator import capacity, cli, draft_safety, migration, platform_env, s
 from orchestrator.engine import Clip, OrchestrationEngine
 from orchestrator import ship_distribute
 from tools import nas_portable
+
+
+class CalibrationAudioTests(unittest.TestCase):
+    def test_only_silent_calibration_bypasses_audio_selection(self):
+        engine = cli._CapacityCalibrationEngine.__new__(cli._CapacityCalibrationEngine)
+        engine.capacity_guard = False
+        engine.m = {"allow_silent": True}
+        silent = [SimpleNamespace(audio_mode="mute", text="")]
+        with mock.patch.object(OrchestrationEngine, "audio_selection_gate", return_value={"status": "AUDIO_SELECTION_REQUIRED"}) as parent:
+            self.assertIsNone(engine.audio_selection_gate(silent))
+            parent.assert_not_called()
+            self.assertEqual(engine.audio_selection_gate([SimpleNamespace(audio_mode="tts", text="文案")])["status"], "AUDIO_SELECTION_REQUIRED")
+            engine.capacity_guard = True
+            self.assertEqual(engine.audio_selection_gate(silent)["status"], "AUDIO_SELECTION_REQUIRED")
+            engine.capacity_guard = False
+            engine.m["voice"] = "some voice"
+            self.assertEqual(engine.audio_selection_gate(silent)["status"], "AUDIO_SELECTION_REQUIRED")
 
 
 class ShipMetadataGateTests(unittest.TestCase):
