@@ -802,6 +802,8 @@ def cmd_build(args) -> int:
             narration_timing = _pre_synthesize_narration(manifest, report_dir, locked_voice)
             if manifest.get("sentence_plan_version") == "semantic-v1":
                 manifest["narration_timing_file"] = str(report_dir / "narration_timing.json")
+                # Reused frozen plans have not run the planner in this report directory.
+                (report_dir / "sentence_planning").mkdir(parents=True, exist_ok=True)
                 (report_dir / "sentence_planning" / "planned_manifest.json").write_text(
                     json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
             manifest, blocker = _temporary_match(manifest, input_path, report_dir,

@@ -152,6 +152,59 @@ class AIEditorTests(unittest.TestCase):
         self.assertEqual(result["segments"][0]["shot_id"], "natural")
         self.assertLessEqual(result["segments"][0]["video_speed"], 2)
 
+    def test_absorb_speed_cap_blocks_refill_without_trimming_reviewed_evidence(self):
+        text = "吸水实验看看吸收效果"
+        manifest = {**self.manifest, "selection_mode": "rule_then_ai", "category": "weipin",
+                    "max_absorb_demo_speed": 2,
+                    "segments": [{"text": text, "audio_duration_us": 1_000_000}]}
+        shot = {**self.shot, "source_end": 12, "material_duration_us": 12_000_000}
+        review = {**self.review, "time_sensitive": True,
+                  "evidence_intervals_us": [{"start": 1_000_000, "end": 9_000_000}]}
+        matched = {"segments": [{"index": 1, "text": text}], "pending_items": []}
+        for cap in (2, 0.5, "invalid", float("inf")):
+            with self.subTest(cap=cap), mock.patch.object(editor, "_review_pool",
+                    return_value=([review], {"feasible": True})):
+                result = editor.refill_indices({**manifest, "max_absorb_demo_speed": cap},
+                    {"shots": [shot]}, matched, [1], self.root)
+            self.assertFalse(result["ok"], result)
+            self.assertEqual(result["refill_replaced"], [])
+        with mock.patch.object(editor, "_review_pool", return_value=([review], {"feasible": True})):
+            result = editor.refill_indices({**manifest, "max_absorb_demo_speed": 8},
+                {"shots": [shot]}, matched, [1], self.root)
+        self.assertTrue(result["ok"], result)
+        self.assertLessEqual(result["segments"][0]["video_speed"], 8)
+        self.assertTrue(contract.validate_segment_receipt(result["segments"][0],
+            index=1, verify_source=True, manifest={**manifest, "max_absorb_demo_speed": 8})["ok"])
+
+    def test_absorb_cap_applies_to_final_assembly_and_not_unrelated_display(self):
+        self.manifest.update(category="weipin", max_absorb_demo_speed=2)
+        self.shot.update(source_end=12, material_duration_us=12_000_000)
+        self.review["evidence_intervals_us"] = [{"start": 1_000_000, "end": 9_000_000}]
+        self.review["scene_ids"] = ["absorb_test"]
+        self.assertFalse(self.result()["ok"])
+        self.review["scene_ids"] = []
+        self.assertTrue(self.result()["ok"])
+        self.review["observation"] = "往产品表面倒蓝色液体，然后吸收"
+        self.assertFalse(self.result()["ok"])
+
+    def test_absorb_cap_feasibility_single_and_multi_share_same_bound(self):
+        manifest = {**self.manifest, "category": "weipin", "max_absorb_demo_speed": 2}
+        sentence = {**self.sentence, "text": "吸水实验", "audio_durations_us": [1_000_000]}
+        shot = {**self.shot, "source_end": 12, "material_duration_us": 12_000_000}
+        review = {**self.review, "evidence_intervals_us": [{"start": 1_000_000, "end": 9_000_000}]}
+        with mock.patch.object(editor, "_review", return_value=review):
+            _, coverage = editor._review_pool(manifest, sentence, {"handfeel": shot}, self.root, {})
+        self.assertFalse(coverage["feasible"])
+        observed = editor._observed_shot(shot, review, manifest=manifest, sentence=sentence)
+        single = shot_analyzer.candidate_window(observed, audio_duration_us=1_000_000,
+            manifest=manifest, time_sensitive=False)
+        span = shot_analyzer.span_segment_for(observed, manifest=manifest, time_sensitive=False)
+        self.assertFalse(single.ok)
+        self.assertEqual(span.speed_max, 2)
+        combined = editor.timing_contract.solve_span(editor.timing_contract.SpanRequest(
+            segments=(span, span), audio_duration_us=2_000_000, tail_pad_us=0))
+        self.assertFalse(combined.ok)
+
     def test_refill_preserves_repeated_sentences_and_rejects_duplicate_identity(self):
         manifest = {**self.manifest, "selection_mode": "rule_then_ai", "segments": [
             {"text": "囤纸了，", "audio_duration_us": 1_000_000},

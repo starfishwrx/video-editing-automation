@@ -103,6 +103,19 @@ def _notes_of(manifest: dict[str, Any]) -> Any:
     return None
 
 
+def has_indexed_notes(manifest: dict[str, Any]) -> bool:
+    """Whether note indices constrain the original punctuation boundaries.
+
+    Raw notes, when present, are authoritative: ``apply`` rebuilds their index
+    map on every call. A map derived from text fragments must therefore not
+    change the splitting policy on the next call.
+    """
+    notes = _notes_of(manifest)
+    if notes:
+        return any(_INDEX_PREFIX.match(line) for line in _lines(notes))
+    return bool(manifest.get("shot_notes_by_index"))
+
+
 def apply(manifest: dict[str, Any]) -> dict[str, Any]:
     notes = _notes_of(manifest)
     if not notes:

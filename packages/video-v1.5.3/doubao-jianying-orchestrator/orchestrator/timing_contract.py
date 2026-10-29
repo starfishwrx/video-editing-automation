@@ -1007,7 +1007,11 @@ def split_sentences(manifest: Any) -> list[dict[str, Any]]:
     text = str(m.get("full_script") or m.get("script") or "")
     parts = [part.strip() for part in _SENTENCE_SPLIT_RE.split(text) if part.strip()]
     from .ai_editor_contract import selection_mode
-    if selection_mode(m) in ("ai_editor", "rule_then_ai"):
+    from .shot_notes import has_indexed_notes
+    # Legacy note indices refer to sentence punctuation, not newly introduced
+    # comma clauses. Keep their boundaries stable through note binding and TTS.
+    if (selection_mode(m) in ("ai_editor", "rule_then_ai")
+            and not has_indexed_notes(m)):
         parts = [piece for part in parts for clause in _spoken_clauses(part)
                  for piece in _split_oversized_sentence(clause)]
     return [{"text": part} for part in parts]

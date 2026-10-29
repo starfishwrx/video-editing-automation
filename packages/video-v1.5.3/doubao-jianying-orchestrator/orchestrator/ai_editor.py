@@ -331,7 +331,7 @@ def _review_pool(manifest: dict, sentence: dict, shots: dict, directory: Path, a
                     group_points = {p for r in group for p in r.get("supported_point_ids", [])}
                     if required and not (bool(required & group_points) if partial_preview else required <= group_points):
                         continue
-                    observed = [_observed_shot(shots[r["shot_id"]], r) for r in group]
+                    observed = [_observed_shot(shots[r["shot_id"]], r, manifest=manifest, sentence=sentence) for r in group]
                     segments = tuple(shot_analyzer.span_segment_for(s, manifest=manifest,
                         time_sensitive=r["time_sensitive"], video=s["video"], shot_id=s["shot_id"])
                         for s, r in zip(observed, group))
@@ -507,14 +507,37 @@ def _scene_preference(manifest: dict, sentence: dict, review: dict) -> float:
         contract.editorial_context(manifest)["rules"].get("semantic_contracts", []) if scene["id"] in common), default=1.0)
 
 
-def _observed_shot(shot: dict, review: dict) -> dict:
+def _observed_shot(shot: dict, review: dict, *, manifest: dict | None = None,
+                   sentence: dict | None = None) -> dict:
     evidence = [{"start": ev["start"] / 1e6, "end": ev["end"] / 1e6,
                  "claim": review["observation"], "evidence_source": "ai_editor_pixel_review"}
                 for ev in review["evidence_intervals_us"]]
     role = "direct_evidence" if review.get("time_sensitive") else "product_display"
     minimum, _ = timing_contract.speed_range_for_role(role, time_sensitive=review.get("time_sensitive", False))
+    maximum = contract.AI_SPEED_MAX
+    raw_cap = (manifest or {}).get("max_absorb_demo_speed")
+    if raw_cap is not None:
+        from . import rulepack
+        scene = next((s for s in rulepack.for_manifest(manifest).get("scenes", [])
+                      if s.get("id") == "absorb_test"), None)
+        # These signals only narrow a technical limit; they never certify a
+        # claim. Keep the limit on AI recovery even when legacy scene planning
+        # rejected the same demonstration for being too long.
+        relevant = "absorb_test" in review.get("scene_ids", [])
+        if scene:
+            relevant = relevant or rulepack.text_hits_scene(scene, (sentence or {}).get("text", ""))
+            relevant = relevant or rulepack.shot_has_visual(scene,
+                {**shot, "visual_description": review.get("observation", "")})
+        if relevant:
+            try:
+                cap = float(raw_cap)
+            except (TypeError, ValueError):
+                raise ValueError("SCENE_SPEED_LIMIT_INVALID") from None
+            if not math.isfinite(cap) or not 1.0 <= cap <= contract.AI_SPEED_MAX:
+                raise ValueError("SCENE_SPEED_LIMIT_INVALID")
+            maximum = min(maximum, cap)
     return {**shot, "evidence_intervals": evidence,
-            "selection_mode": "ai_editor", "speed_range_override": [minimum, contract.AI_SPEED_MAX],
+            "selection_mode": "ai_editor", "speed_range_override": [minimum, maximum],
             "preferred_speed": review.get("preferred_speed", 1.0),
             "role": "direct_evidence" if review.get("time_sensitive") else "product_display",
             "visual_role": "direct_evidence" if review.get("time_sensitive") else "product_display",
@@ -574,7 +597,7 @@ def _assemble(manifest: dict, analysis: dict, plan: dict, *, narration_timing: d
             review = {**review, "preferred_speed": _scene_preference(manifest, sentence, review)}
             if verify_sources and review["source_identity"] != contract.source_identity(shot["video"]):
                 raise ValueError("AI_EDITOR_SOURCE_CONTENT_CHANGED")
-            observed = _observed_shot(shot, review)
+            observed = _observed_shot(shot, review, manifest=manifest, sentence=sentence)
             # A continuation requests a later in-point; it must retain every
             # evidence interval, otherwise the technical check rejects it.
             if "source_start_us" in part:
@@ -672,7 +695,7 @@ def _build_edit_inventory(manifest: dict, analysis: dict, plan: dict,
             review = next(r for r in reviews if r["shot_id"] == candidate["shot_id"])
             shot = shots[candidate["shot_id"]]
             review = {**review, "preferred_speed": _scene_preference(manifest, sentence, review)}
-            solution = shot_analyzer.candidate_window(_observed_shot(shot, review),
+            solution = shot_analyzer.candidate_window(_observed_shot(shot, review, manifest=manifest, sentence=sentence),
                 audio_duration_us=duration, manifest=manifest,
                 time_sensitive=review["time_sensitive"])
             candidate["source_identity"] = source_ids[shot["video"]]
@@ -1139,7 +1162,7 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
                 # Within the same fully reviewed claim coverage, let a feasible
                 # natural-speed option precede a higher-confidence fast one.
                 try:
-                    shot = _observed_shot(shots[review["shot_id"]], review)
+                    shot = _observed_shot(shots[review["shot_id"]], review, manifest=manifest, sentence=sentence)
                     solution = shot_analyzer.candidate_window(
                         shot, audio_duration_us=audio_us, manifest=manifest,
                         time_sensitive=review["time_sensitive"])
@@ -1172,7 +1195,7 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
                 if present != sorted(present):
                     continue
                 try:
-                    observed = [_observed_shot(shots[r["shot_id"]], r) for r in group]
+                    observed = [_observed_shot(shots[r["shot_id"]], r, manifest=manifest, sentence=sentence) for r in group]
                     spans = tuple(shot_analyzer.span_segment_for(s, manifest=manifest,
                         time_sensitive=r["time_sensitive"], video=s["video"], shot_id=s["shot_id"])
                         for s, r in zip(observed, group))

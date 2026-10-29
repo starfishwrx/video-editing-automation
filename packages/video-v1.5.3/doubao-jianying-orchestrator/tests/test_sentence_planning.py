@@ -45,6 +45,33 @@ class SentencePlanningTests(unittest.TestCase):
         self.assertEqual([x['text'] for x in timing_contract.split_sentences(planned)],
                          ['纸张厚实亲肤，', '湿水不破'])
 
+    def test_indexed_notes_preserve_legacy_sentence_boundaries(self):
+        script = '纸张厚实亲肤，湿水不破。立即下单'
+        for mode in ('ai_editor', 'rule_then_ai'):
+            for notes in ({'shot_notes_by_index': {'2': '购买链接'}},
+                          {'shot_notes': '第2句：购买链接'},
+                          {'shot_notes': '2. 购买链接'},
+                          {'画面备注': '第 2 句：购买链接'},
+                          {'shot_notes': [{'text': '第2句', 'note': '购买链接'}]}):
+                with self.subTest(mode=mode, notes=notes):
+                    manifest = {'full_script': script, 'selection_mode': mode, **notes}
+                    expected = ['纸张厚实亲肤，湿水不破', '立即下单']
+                    self.assertEqual([row['text'] for row in timing_contract.split_sentences(manifest)], expected)
+                    for _ in range(2):
+                        manifest = shot_notes.apply(manifest)
+                        self.assertEqual([row['text'] for row in timing_contract.split_sentences(manifest)], expected)
+                        self.assertEqual(shot_notes.note_for(manifest, 1), '')
+                        self.assertEqual(shot_notes.note_for(manifest, 2), '购买链接')
+
+    def test_fragment_notes_keep_clause_boundaries_after_repeated_binding(self):
+        manifest = {'full_script': '纸张厚实亲肤，湿水不破。立即下单',
+                    'selection_mode': 'rule_then_ai', 'shot_notes': '湿水不破：完整实验'}
+        for _ in range(2):
+            manifest = shot_notes.apply(manifest)
+            self.assertEqual([row['text'] for row in timing_contract.split_sentences(manifest)],
+                             ['纸张厚实亲肤，', '湿水不破', '立即下单'])
+            self.assertEqual(shot_notes.note_for(manifest, 2), '完整实验')
+
     def test_model_plans_unpunctuated_claims_without_rewriting(self):
         script = '纸张厚实柔软亲肤使劲揉搓也不掉絮不含荧光剂湿水不易破'
         plan = ['纸张厚实柔软亲肤', '使劲揉搓也不掉絮', '不含荧光剂', '湿水不易破']
