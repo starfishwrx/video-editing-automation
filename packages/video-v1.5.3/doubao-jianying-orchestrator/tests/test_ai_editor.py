@@ -158,6 +158,22 @@ class AIEditorTests(unittest.TestCase):
         self.assertAlmostEqual(sum(p["segment_s"] for p in row["span_parts"]), 4.5, places=5)
         self.assertFalse(row.get("uncovered_selling_points"))
 
+    def test_explicit_compound_refill_keeps_incomplete_evidence_preview_only(self):
+        text = "擦油污、擦水渍都好用"
+        manifest = {**self.manifest, "selection_mode": "rule_then_ai", "delivery_mode": "preview",
+                    "allow_partial_selling_points": True, "ai_refill_indices": ["1"],
+                    "segments": [{"text": text, "audio_duration_us": 2000000}]}
+        matched = {"segments": [{"index": 1, "text": text}], "pending_items": []}
+        with mock.patch.object(editor, "_review_pool", return_value=([self.review], {"feasible": False})) as review:
+            result = editor.refill_indices(manifest, {"shots": [self.shot]}, matched, [1], self.root)
+        self.assertFalse(review.call_args.args[0]["allow_partial_selling_points"])
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["segments"][0]["uncovered_selling_points"][0]["id"], "p2")
+        self.assertEqual(result["claim_gate_coverage"]["certification"], "UNCERTIFIED")
+        manifest["delivery_mode"] = "formal"
+        with mock.patch.object(editor, "_review_pool", return_value=([self.review], {"feasible": False})):
+            self.assertFalse(editor.refill_indices(manifest, {"shots": [self.shot]}, matched, [1], self.root)["ok"])
+
     def test_refill_prioritizes_observed_specific_object_but_still_requires_review(self):
         text = "还送定制纸巾支架"
         manifest = {**self.manifest, "segments": [{"text": text, "audio_duration_us": 2000000}]}
