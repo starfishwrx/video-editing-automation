@@ -59,6 +59,25 @@ def _normalize_match_level(row: dict[str, Any]) -> str:
     return normalize_match_level(row)
 
 
+def _review_consistency_problem(claim: str, row: dict[str, Any]) -> str:
+    """Catch explicit contradictions between the model's observation and verdict."""
+    if row.get("match_level") != "DIRECT":
+        return ""
+    observed = str(row.get("observed") or "")
+    reason = str(row.get("reason") or "")
+    face_requested = any(not re.search(r"(?:不用|无需|不必|不需要|不再|不)(?:再)?$",
+                                       claim[max(0, match.start() - 6):match.start()])
+                         for match in re.finditer(r"擦脸|洗脸(?!巾|纸|棉|用品)", claim))
+    if (face_requested
+            and any(word in observed for word in ("手背", "手腕", "擦手", "擦拭另一只手"))
+            and not any(word in observed for word in ("脸", "面部", "面颊"))):
+        return "口播要求面部清洁，复核观察仅明确擦手，不能作为直接匹配"
+    if (any(word in claim for word in ("无异味", "没有异味", "没异味"))
+            and re.search(r"(?:无异味|没有异味|没异味|异味).{0,20}(?:无法|不能|未能|看不出)", reason)):
+        return "复核理由明确表示异味卖点无法确认，不能忽略该卖点"
+    return ""
+
+
 def _hard_issue(issue: str) -> bool:
     return str(issue).startswith((
         "VIDEO_TRACK_MISSING",
@@ -249,7 +268,7 @@ def _prompt(claims: list[dict[str, Any]], frame_count: int, *, force_ai: bool = 
 3. MISMATCH：画面与文案无关，或出现相反/冲突事实；
 4. INSUFFICIENT_EVIDENCE：画面可能相关，但遮挡、分辨率、时序或证据不足，无法可靠判断。
 
-卖点动作/结果优先直接匹配；只有泛包装、远景、静态陈列不能证明瞬吸、干爽、透气、反渗、柔软等效果。对已标记 degraded=true 的语义段，相关的产品/对应部位特写不因缺少直接动作被判为 MISMATCH。品牌、包装、联名、数量、赠品和 CTA 按对应画面相关性判断。黑帧、空帧、完全看不到产品、明显无关画面仍为 MISMATCH。不要因为上游 expected_shot 或 gate 状态自动通过。
+卖点动作/结果优先直接匹配；一句包含多个具体卖点时，须逐项检查，不得因为其中一项成立而忽略其他项。擦脸与擦手按文案所说的部位判断，不能互相替代。只有泛包装、远景、静态陈列不能证明瞬吸、干爽、透气、反渗、柔软等效果。对已标记 degraded=true 的语义段，相关的产品/对应部位特写不因缺少直接动作被判为 MISMATCH。品牌、包装、联名、数量、赠品和 CTA 按对应画面相关性判断。黑帧、空帧、完全看不到产品、明显无关画面仍为 MISMATCH。不要因为上游 expected_shot 或 gate 状态自动通过。
 
 只输出一个 JSON 对象：{{"response_version":"{RESPONSE_VERSION}","segments":[{{"index":1,"match_level":"DIRECT|ACCEPTABLE_DEGRADED|MISMATCH|INSUFFICIENT_EVIDENCE","visual_ok":true,"observed":"看到的具体事实","reason":"这些事实为什么满足或不满足本句","confidence":0.8}}],"overall":"PASS|PASS_WITH_DEGRADED|FAIL|UNCERTIFIED"}}。每段必须且只能有一条，index 是从 1 开始且只对应本批次的整数，不得重复、漏段或输出其他批次编号。所有字段必填，observed/reason 不得为空。confidence 必须为有限数值且在 0 到 1 内；零置信度不得给 DIRECT/ACCEPTABLE_DEGRADED，无法判断时应给 INSUFFICIENT_EVIDENCE。ACCEPTABLE_DEGRADED 和 DIRECT 的 visual_ok 都填 true；MISMATCH 和 INSUFFICIENT_EVIDENCE 填 false。不得只给布尔值代替匹配等级。"""
 
@@ -773,6 +792,12 @@ def main() -> int:
                             row["selection_mode"] = claim["selection_mode"]
                             row["degraded_expected"] = claim["degraded"]
                             row["match_level"] = _normalize_match_level(row)
+                            problem = _review_consistency_problem(str(claim["claim"]), row)
+                            if problem:
+                                row["model_match_level"] = row["match_level"]
+                                row["match_level"] = "INSUFFICIENT_EVIDENCE"
+                                row["reason"] = str(row.get("reason") or "") + "；" + problem
+                                row["consistency_guard"] = problem
                             row["visual_ok"] = row["match_level"] in {"DIRECT", "ACCEPTABLE_DEGRADED"}
                             visual_rows.append(row)
                             if row["match_level"] == "ACCEPTABLE_DEGRADED":

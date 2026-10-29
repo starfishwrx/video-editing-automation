@@ -28,7 +28,8 @@ def response(rows=None, **changes):
 
 
 class VisualQcResponseContractTests(unittest.TestCase):
-    def run_main(self, responses, *, claims=1, batch_size=4, write_sheet=None, passes=1):
+    def run_main(self, responses, *, claims=1, batch_size=4, write_sheet=None, passes=1,
+                 claim_text="揉搓也不掉絮"):
         with tempfile.TemporaryDirectory(prefix="visual-qc-contract-") as raw:
             root = Path(raw)
             draft, report = root / "draft", root / "report"
@@ -45,7 +46,7 @@ class VisualQcResponseContractTests(unittest.TestCase):
             (draft / "draft_info.json").write_text(json.dumps({"duration": claims * 4_000_000,
                 "materials": {"videos": materials}, "tracks": [{"name": "video", "segments": segments}]}), encoding="utf-8")
             (report / "shot_match_report.json").write_text(json.dumps({"segments": [
-                {"text": "揉搓也不掉絮", "temporary_shot_id": str(index)} for index in range(claims)]}), encoding="utf-8")
+                {"text": claim_text, "temporary_shot_id": str(index)} for index in range(claims)]}), encoding="utf-8")
             def output_for_batch(vision, sheet, prompt, output, **kwargs):
                 if callable(responses):
                     return responses(vision, sheet, prompt, output, **kwargs)
@@ -125,6 +126,29 @@ class VisualQcResponseContractTests(unittest.TestCase):
 
     def test_positive_small_confidence_is_not_an_invented_quality_threshold(self):
         result, _, _, _ = self.run_main([response([judgment(confidence=0.01)])])
+        self.assertEqual(result["status"], "PASS")
+
+    def test_qc_cannot_certify_face_cleaning_from_its_own_hand_observation(self):
+        row = judgment(observed="手拿棉柔巾擦拭另一只手的手背和手腕", reason="虽然是擦手但可代表擦脸")
+        result, _, _, _ = self.run_main([response([row])], claim_text="平时用来洗脸擦脸")
+        self.assertNotEqual(result["status"], "PASS")
+        self.assertEqual(result["model_review"][0]["match_level"], "INSUFFICIENT_EVIDENCE")
+        self.assertEqual(result["model_review"][0]["model_match_level"], "DIRECT")
+        self.assertTrue(any("POST_DRAFT_VISUAL_INSUFFICIENT:S01" in x for x in result["warnings"]))
+        result, _, _, _ = self.run_main([response([row])], claim_text="洗脸巾擦手也好用")
+        self.assertEqual(result["status"], "PASS")
+        result, _, _, _ = self.run_main([response([row])], claim_text="不用洗脸，只擦手就好")
+        self.assertEqual(result["status"], "PASS")
+        result, _, _, _ = self.run_main([response([row])], claim_text="不用洗脸，但也能擦脸")
+        self.assertNotEqual(result["status"], "PASS")
+
+    def test_qc_cannot_ignore_an_explicitly_unverified_odor_claim(self):
+        row = judgment(observed="双手拉扯湿润的纸巾", reason="虽然没有异味无法直接通过视觉呈现，但不容易破得到了验证")
+        result, _, _, _ = self.run_main([response([row])], claim_text="没有异味也不容易破")
+        self.assertNotEqual(result["status"], "PASS")
+        self.assertEqual(result["model_review"][0]["match_level"], "INSUFFICIENT_EVIDENCE")
+        row = judgment(observed="包装清晰标注无异味", reason="无异味标识可见")
+        result, _, _, _ = self.run_main([response([row])], claim_text="没有异味")
         self.assertEqual(result["status"], "PASS")
 
     def test_boolean_only_never_becomes_direct(self):
