@@ -239,7 +239,16 @@ def validate_segment_receipt(item: dict, *, text: str | None = None,
             reasons.append("AI_SELECTION_POINTS_INVALID")
         elif receipt.get("sentence_kind") == "selling_point":
             required = {p["id"] for p in points if isinstance(p, dict) and p.get("id") and p.get("text")}
-            if len(required) != len(points) or not required or not required.issubset(set(receipt.get("supported_point_ids") or [])):
+            supported = set(receipt.get("supported_point_ids") or [])
+            partial_preview = (manifest is not None and manifest.get("delivery_mode") == "preview"
+                               and manifest.get("allow_partial_selling_points") is True)
+            if (len(required) != len(points) or not required
+                    or (not required.issubset(supported)
+                        and not (partial_preview and bool(required & supported)))):
+                reasons.append("AI_SELECTION_POINTS_UNCOVERED")
+            # Also reject older partial-preview receipts whose requirements were
+            # truncated by the writer. Default/no-context validation is formal.
+            if item.get("uncovered_selling_points") and not partial_preview:
                 reasons.append("AI_SELECTION_POINTS_UNCOVERED")
         intervals = receipt.get("evidence_intervals_us")
         window = _window(item)

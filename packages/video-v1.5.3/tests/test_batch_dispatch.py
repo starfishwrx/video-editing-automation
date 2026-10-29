@@ -8,6 +8,7 @@ import time
 import unittest
 from unittest import mock
 from types import SimpleNamespace
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -117,6 +118,47 @@ class BatchDispatchTests(unittest.TestCase):
             dispatch.wait = old
         self.assertTrue(any((t is not None and t > 0) for t in called["timeout_values"]),
                         f"expected wait to be called with a positive timeout; seen={called['timeout_values']}")
+
+    def test_stage_and_wait_timings_are_measured_and_mp4_is_unknown(self):
+        rows = dispatch.dispatch([{"record_id": "timed"}], work=self.root, policy=self.policy,
+            preparer=lambda *args: "shared.json",
+            runner=lambda *args: {"record_id": "timed", "formal_deliveries": 2})
+        material, task = rows
+        self.assertEqual(material["timing_scope"], "product_preparation")
+        self.assertEqual(task["stage"], "build")
+        self.assertGreaterEqual(task["elapsed_s"], 0)
+        self.assertAlmostEqual(task["queue_wait_s"],
+                               task["material_wait_s"] + task["worker_queue_wait_s"])
+        self.assertEqual(task["verified_draft_deliveries"], 2)
+        self.assertIsNone(task["final_mp4_deliveries"])
+        self.assertEqual(task["queue_wait_origin"], "supervisor_admission")
+
+    def test_submission_wait_starts_at_submission_not_supervisor_start(self):
+        submitted_at = dispatch.time.time() - 30
+        with patch.object(dispatch.time, "time", return_value=submitted_at):
+            dispatch.submit([{"record_id": "late"}], work=self.root, policy=self.policy,
+                            resume_stage="qc")
+        rows = dispatch.dispatch([], work=self.root, policy=self.policy,
+            preparer=lambda *args: self.fail("QC should not prepare material"),
+            runner=lambda *args: {"record_id": "late"})
+        self.assertEqual(rows[0]["queue_wait_origin"], "submission")
+        self.assertGreaterEqual(rows[0]["queue_wait_s"], 29.9)
+        self.assertEqual(rows[0]["material_wait_s"], 0)
+
+    def test_failed_preparation_and_runner_retain_measured_timings(self):
+        def fail(*args):
+            raise RuntimeError("offline injected failure")
+        rows = dispatch.dispatch([{"record_id": "bad-material"}], work=self.root,
+            policy=self.policy, preparer=fail, runner=lambda *args: self.fail("must not build"))
+        self.assertEqual([row["status"] for row in rows], ["ERROR", "BLOCKED"])
+        self.assertEqual(rows[0]["timing_scope"], "product_preparation")
+        self.assertGreaterEqual(rows[0]["elapsed_s"], 0)
+        rows = dispatch.dispatch([{"record_id": "bad-build"}], work=self.root,
+            policy=self.policy, preparer=lambda *args: "shared.json", runner=fail)
+        self.assertEqual(rows[-1]["status"], "ERROR")
+        self.assertEqual(rows[-1]["stage"], "build")
+        self.assertGreaterEqual(rows[-1]["elapsed_s"], 0)
+        self.assertEqual(rows[-1]["verified_draft_deliveries"], 0)
 
     def test_ok_or_preview_flags_without_certified_delivery_never_count(self):
         for status in ("OK", "PREVIEW_READY", "ERROR"):
