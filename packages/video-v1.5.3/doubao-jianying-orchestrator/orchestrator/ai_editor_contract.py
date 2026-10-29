@@ -70,10 +70,16 @@ def rules_identity(manifest: dict | None = None) -> dict:
 
 
 def policy_prompt(manifest: dict) -> str:
-    if editorial_context(manifest)["category"] != "zhipin":
-        return POLICY
-    return POLICY + "\n本任务生效的品类制作与选镜合同（按口播含义适用，不能据此虚构画面）：\n" + json.dumps(
-        editorial_context(manifest), ensure_ascii=False, sort_keys=True)
+    policy = POLICY
+    if editorial_context(manifest)["category"] == "zhipin":
+        policy += "\n本任务生效的品类制作与选镜合同（按口播含义适用，不能据此虚构画面）：\n" + json.dumps(
+            editorial_context(manifest), ensure_ascii=False, sort_keys=True)
+    feedback = str(manifest.get("revision_feedback") or "").strip()
+    if feedback:
+        policy += ("\n以下是旧稿的历史反馈，时间码属于旧稿；把它作为修订线索，"
+                   "逐项对照当前文案和真实画面，不把反馈本身当画面证据：\n"
+                   + json.dumps(feedback, ensure_ascii=False))
+    return policy
 
 
 def selection_mode(manifest: dict | None = None) -> str:
@@ -233,7 +239,16 @@ def validate_segment_receipt(item: dict, *, text: str | None = None,
             reasons.append("AI_SELECTION_POINTS_INVALID")
         elif receipt.get("sentence_kind") == "selling_point":
             required = {p["id"] for p in points if isinstance(p, dict) and p.get("id") and p.get("text")}
-            if len(required) != len(points) or not required or not required.issubset(set(receipt.get("supported_point_ids") or [])):
+            supported = set(receipt.get("supported_point_ids") or [])
+            partial_preview = (manifest is not None and manifest.get("delivery_mode") == "preview"
+                               and manifest.get("allow_partial_selling_points") is True)
+            if (len(required) != len(points) or not required
+                    or (not required.issubset(supported)
+                        and not (partial_preview and bool(required & supported)))):
+                reasons.append("AI_SELECTION_POINTS_UNCOVERED")
+            # Also reject older partial-preview receipts whose requirements were
+            # truncated by the writer. Default/no-context validation is formal.
+            if item.get("uncovered_selling_points") and not partial_preview:
                 reasons.append("AI_SELECTION_POINTS_UNCOVERED")
         intervals = receipt.get("evidence_intervals_us")
         window = _window(item)

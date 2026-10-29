@@ -1,4 +1,4 @@
-"""Compare completed production runs without issuing model requests."""
+"""Compare verified draft throughput (not final MP4s) without model requests."""
 from __future__ import annotations
 
 import argparse
@@ -8,6 +8,18 @@ import math
 from pathlib import Path
 
 
+def _timing_summary(values: list) -> dict | None:
+    measured = sorted(float(value) for value in values
+                      if isinstance(value, (int, float)) and not isinstance(value, bool)
+                      and math.isfinite(value) and value >= 0)
+    if not measured:
+        return None
+    # Nearest-rank percentiles; sums can exceed run time when workers overlap.
+    return {"samples": len(measured), "total_s": round(sum(measured), 3),
+            "p50_s": round(measured[math.ceil(len(measured) * .50) - 1], 3),
+            "p95_s": round(measured[math.ceil(len(measured) * .95) - 1], 3)}
+
+
 def summarize(path: Path) -> dict:
     run = json.loads(path.read_text(encoding="utf-8-sig"))
     policy = run["policy"]
@@ -15,8 +27,9 @@ def summarize(path: Path) -> dict:
     if not math.isfinite(elapsed) or elapsed <= 0:
         raise ValueError("run must have a positive completed duration")
     rows = run.get("results", [])
-    deliveries = sum(max(0, int(row.get("formal_deliveries", 0))) for row in rows)
-    tasks = [row for row in rows if row.get("status") != "ALREADY_DELIVERED" and
+    deliveries = sum(max(0, int(row.get("verified_draft_deliveries", row.get("formal_deliveries", 0)))) for row in rows)
+    tasks = [row for row in rows if row.get("status") != "ALREADY_DELIVERED"
+             and row.get("timing_scope") != "product_preparation" and
              (row.get("stage") != "material" or row.get("status") in {"ERROR", "BLOCKED"})]
     failures = sum(row.get("status") in {"ERROR", "BLOCKED", "PARTIAL", "UNCERTIFIED",
                    "PREVIEW_READY", "QC_READY_FOR_DELIVERY", "UNCERTIFIED_TIMEOUT"}
@@ -47,9 +60,21 @@ def summarize(path: Path) -> dict:
         inflight = call.get("metadata", {}).get("inflight")
         if isinstance(inflight, int):
             peak = max(peak or 0, inflight)
+    phase_timings = {stage: _timing_summary([row.get("elapsed_s") for row in rows
+                     if row.get("stage") == stage]) for stage in ("material", "build", "qc")}
+    wait_timings = {key: _timing_summary([row.get(key) for row in tasks])
+                    for key in ("queue_wait_s", "material_wait_s", "worker_queue_wait_s")}
     return {"run": str(path), "vision_slots": policy["vision_slots"],
             "prep_slots": policy["prep_slots"], "elapsed_s": round(elapsed, 3),
-            "formal_deliveries": deliveries,
+            "formal_deliveries": deliveries,  # legacy alias: drafts, never MP4s
+            "verified_draft_deliveries": deliveries,
+            "verified_drafts_per_hour": round(deliveries * 3600 / elapsed, 4),
+            "delivery_metric": "verified_draft_deliveries",
+            "final_mp4_deliveries": None, "final_mp4_per_hour": None,
+            "final_mp4_measurement": "not_measured",
+            "phase_timings": phase_timings, "wait_timings": wait_timings,
+            "timing_note": "Observed samples only; overlapping stage totals are not wall time. "
+                           "Queue wait includes material wait; missing samples remain unknown.",
             "qualified_per_hour": round(deliveries * 3600 / elapsed, 4),
             "task_failures": failures, "task_count": len(tasks),
             "failure_rate": failures / len(tasks) if tasks else None,
@@ -74,14 +99,15 @@ def compare(paths: list[Path], *, confirmed_account_capacity: int = 20) -> dict:
                and row["failure_rate"] <= other["failure_rate"] for other in lower):
             candidates.append(row)
     selected = min(candidates or eligible, key=lambda row: (
-        -row["qualified_per_hour"], row["vision_slots"], row["prep_slots"]))
-    return {"runs": rows, "selected_observation": selected["run"],
+        -row["verified_drafts_per_hour"], row["vision_slots"], row["prep_slots"]))
+    return {"runs": rows, "selection_metric": "verified_drafts_per_hour",
+            "selected_observation": selected["run"],
             "selected_policy": {"vision_slots": selected["vision_slots"],
                                 "prep_slots": selected["prep_slots"]},
             "confirmed_account_capacity": confirmed_account_capacity,
             "next_api_step": next((step for step in (20, 40, 80)
                                    if selected["vision_slots"] < step <= confirmed_account_capacity), None),
-            "note": "仅比较真实生产观察。素材、文案与缓存冷热不同会影响结果；本工具不发请求、不改配置。"}
+            "note": "仅比较已验证草稿交付吞吐，不代表已导出或已验收 MP4。素材、文案与缓存冷热不同会影响结果；本工具不发请求、不改配置。"}
 
 
 def main(argv=None) -> int:

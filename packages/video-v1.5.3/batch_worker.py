@@ -16,6 +16,9 @@ Mac 侧负责最终人工检查和成功交付回写；失败/部分失败可由
 """
 from __future__ import annotations
 
+from tools.process_liveness import assert_process_alive as _assert_process_alive
+from tools.process_liveness import process_created_at
+
 import json
 import hashlib
 import os
@@ -123,7 +126,13 @@ def _batch_result_contract(status: str, *, run_id: str, failures: list[dict] | N
     lower = text.lower()
     first = rows[0] if rows else {}
     failure_type = str(first.get("type") or "").lower()
-    if any(marker in lower for marker in ("vision_call_failed", "vision_json_invalid")):
+    if "voice_selection_required" in lower:
+        failure_class, failure_code = "environment", "VOICE_SELECTION_REQUIRED"
+    elif "bgm_required" in lower:
+        failure_class, failure_code = "environment", "BGM_REQUIRED"
+    elif "sentence_plan_review_required" in lower:
+        failure_class, failure_code = "semantic", "SENTENCE_PLAN_REVIEW_REQUIRED"
+    elif any(marker in lower for marker in ("vision_call_failed", "vision_json_invalid")):
         failure_class, failure_code = "vision", "VISION_CALL_FAILED"
     elif any(marker in lower for marker in ("visual_match_blocked", "shot_match_blocked", "material gap", "visual-missing")):
         failure_class, failure_code = "semantic", "VISUAL_MATCH_BLOCKED"
@@ -240,7 +249,10 @@ def log(*args):
 
 def progress(entry: dict):
     entry["ts"] = time.strftime("%Y-%m-%d %H:%M:%S")
-    with _OUTPUT_LOCK:
+    if str(SKILL) not in sys.path:
+        sys.path.insert(0, str(SKILL))
+    from orchestrator.file_safety import file_lock
+    with _OUTPUT_LOCK, file_lock(PROGRESS):
         with PROGRESS.open("a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     try:
@@ -261,7 +273,7 @@ def _read_json(path: pathlib.Path) -> dict:
 def _acquire_record_lock(task_dir: pathlib.Path, run_id: str) -> pathlib.Path:
     """Prevent two worker processes from touching one record at once."""
     lock_path = task_dir / ".task_run.lock"
-    payload = {"pid": os.getpid(), "run_id": run_id,
+    payload = {"pid": os.getpid(), "process_created_at": process_created_at(os.getpid()), "run_id": run_id,
                "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
                "pipeline_version": _pipeline_version()}
     for _ in range(2):
@@ -278,7 +290,7 @@ def _acquire_record_lock(task_dir: pathlib.Path, run_id: str) -> pathlib.Path:
                 if pid and int(pid) == os.getpid():
                     alive = True
                 elif pid:
-                    os.kill(int(pid), 0)
+                    _assert_process_alive(int(pid), current.get("process_created_at"))
                     alive = True
             except (OSError, TypeError, ValueError, ProcessLookupError):
                 alive = False
@@ -333,8 +345,30 @@ def _qc_state(task_dir: pathlib.Path, drafts: list[str], done: dict) -> tuple[st
     return "UNCERTIFIED", len(reports), reports
 
 
+def _record_lock_is_live(task_dir: pathlib.Path) -> bool:
+    """A lock owned by a live, matching process identifies another worker."""
+    owner = _read_json(task_dir / ".task_run.lock")
+    try:
+        pid = int(owner.get("pid") or 0)
+        if pid <= 0:
+            return False
+        _assert_process_alive(pid, owner.get("process_created_at"))
+        return True
+    except (OSError, TypeError, ValueError, ProcessLookupError):
+        return False
+
+
 def _write_status_snapshot() -> None:
-    """Publish authoritative status; terminal done.json beats old start events."""
+    """Serialize read, reduction and atomic publication across worker processes."""
+    if str(SKILL) not in sys.path:
+        sys.path.insert(0, str(SKILL))
+    from orchestrator.file_safety import file_lock
+    with file_lock(STATUS_SNAPSHOT):
+        _write_status_snapshot_locked()
+
+
+def _write_status_snapshot_locked() -> None:
+    """Terminal done.json beats old start events unless a fresh owner is live."""
     latest: dict[str, dict] = {}
     if PROGRESS.is_file():
         for raw in PROGRESS.read_text(encoding="utf-8", errors="replace").splitlines():
@@ -357,8 +391,9 @@ def _write_status_snapshot() -> None:
         qc_status, qc_count, qc_rows = _qc_state(task_dir, drafts, done)
         terminal = str(done.get("status") or "").upper()
         done_finished_at = str(done.get("finished_at") or "")
+        live_worker = rid == ACTIVE_RECORD_ID or _record_lock_is_live(task_dir)
         new_attempt = (
-            rid == ACTIVE_RECORD_ID
+            live_worker
             and str(event.get("event") or "").lower() == "start"
             and str(event.get("ts") or "") > done_finished_at
         )
@@ -367,7 +402,7 @@ def _write_status_snapshot() -> None:
         elif done_path.is_file() and terminal in {"OK", "PARTIAL", "PREVIEW_READY", "ERROR", "DEFERRED"}:
             state, source = terminal, "done.json"
         elif (str(event.get("event") or "").lower() == "start"
-              and rid == ACTIVE_RECORD_ID):
+              and live_worker):
             state, source = "RUNNING", "live_worker_event"
         elif event:
             state, source = "STALE_ORPHANED", "historical_progress_only"
@@ -400,9 +435,8 @@ def _write_status_snapshot() -> None:
         "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "tasks": tasks,
     }
-    tmp = STATUS_SNAPSHOT.with_suffix(".tmp")
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(STATUS_SNAPSHOT)
+    from orchestrator.file_safety import atomic_write_text
+    atomic_write_text(STATUS_SNAPSHOT, json.dumps(payload, ensure_ascii=False, indent=2))
 
 
 def mount_nas() -> bool:
@@ -464,16 +498,20 @@ def validate_visual_match(report_dir: pathlib.Path) -> tuple[bool, str]:
 
     vision = analysis.get("vision_analysis") or {}
     segments = match.get("segments") or []
+    mixed_rule_ai = match.get("selection_mode") == "rule_then_ai"
     if ((match.get("manifest") or {}).get("selection_mode") == "ai_editor"
             or match.get("selection_mode") == "ai_editor"
             or any(isinstance(s, dict) and "ai_selection" in s for s in segments)):
         contract = production_eval.ai_editor_contract
         if (match.get("ok") is not True or not isinstance(segments, list) or not segments
-                or match.get("selection_mode") != "ai_editor"
+                or match.get("selection_mode") not in ("ai_editor", "rule_then_ai")
+                or (mixed_rule_ai and (match.get("manifest") or {}).get("selection_mode") != "rule_then_ai")
                 or contract.digest(segments) != contract.digest((match.get("manifest") or {}).get("segments"))):
             return False, "VISUAL_MATCH_BLOCKED: AI selection report identity invalid"
         candidates = {s.get("shot_id"): s for s in analysis.get("shots", []) if isinstance(s, dict)}
         for index, segment in enumerate(segments, 1):
+            if mixed_rule_ai and isinstance(segment, dict) and segment.get("selection_mode") != "ai_editor" and "ai_selection" not in segment:
+                continue  # Rule segments still pass every legacy check below.
             if not isinstance(segment, dict) or segment.get("selection_mode") != "ai_editor":
                 return False, "VISUAL_MATCH_BLOCKED: mixed AI/legacy segments"
             check = contract.validate_segment_receipt(segment, index=index, verify_source=True, manifest=match.get("manifest"))
@@ -483,10 +521,11 @@ def validate_visual_match(report_dir: pathlib.Path) -> tuple[bool, str]:
                 sid = part.get("shot_id") or part.get("temporary_shot_id")
                 if sid not in candidates or str(part.get("video")) != str(candidates[sid].get("video")):
                     return False, "VISUAL_MATCH_BLOCKED: AI selection outside task source catalog"
-        sequence = contract.sequence_errors(segments)
+        sequence = contract.sequence_errors([s for s in segments if isinstance(s, dict) and s.get("selection_mode") == "ai_editor"])
         if sequence:
             return False, "VISUAL_MATCH_BLOCKED: " + ";".join(sequence)
-        return True, "ai_visual_match_valid_independent_qc_required"
+        if not mixed_rule_ai:
+            return True, "ai_visual_match_valid_independent_qc_required"
     errors = vision.get("errors") or []
     shots = analysis.get("shots") or []
     ready = [row for row in shots
@@ -655,7 +694,8 @@ def classify_build_failure(text: str) -> dict:
     deterministic_block = any(marker.lower() in lower_blob for marker in (
         "VISUAL_MATCH_BLOCKED", "SHOT_MATCH_BLOCKED", "AUDIO_VIDEO_MISMATCH",
         "TASK_BUDGET", "Invalid argument", "INVALID_ARGUMENT",
-        "DESKTOP_IMPORT_BLOCKED", "DRAFT_INVALID",
+        "DESKTOP_IMPORT_BLOCKED", "DRAFT_INVALID", "VOICE_SELECTION_REQUIRED",
+        "BGM_REQUIRED", "SENTENCE_PLAN_REVIEW_REQUIRED",
     )) or credential_or_input_block or ("vision_call_failed" in lower_blob and not transient)
     vision_hard = ("draft_visual_qc_blocked" in lower_blob) or (
         "no auditable visual top1" in lower_blob) or (
@@ -671,8 +711,12 @@ def classify_build_failure(text: str) -> dict:
 def _is_reusable_analysis_row(row: object) -> bool:
     if not isinstance(row, dict):
         return False
+    empty_rejection = (row.get("visual_observation_complete") is True
+                       and row.get("action_complete") is False
+                       and row.get("status") == "pending_analysis"
+                       and row.get("evidence_tags") == [])
     if not (str(row.get("description") or "").strip()
-            and row.get("visual_tags") and row.get("evidence_tags")):
+            and row.get("visual_tags") and (row.get("evidence_tags") or empty_rejection)):
         return False
     try:
         return float(row.get("analysis_confidence") or 0) > 0
@@ -974,6 +1018,15 @@ def _mac_approval_path(task_dir: pathlib.Path, draft_names: list[str], frozen: d
         return task_dir / 'mac_review_approved.json'
     output_sha256 = production_eval.output_identity([DRAFTS / name for name in draft_names])['sha256']
     return task_dir / ('mac_review_approved-' + output_sha256 + '.json')
+
+
+def _save_frozen_task(task_dir: pathlib.Path, task: dict, frozen: dict) -> None:
+    """Persist exactly the normalized task bound to the active run contract."""
+    if (str(task.get("task_id") or task.get("record_id") or "").strip() != str(frozen.get("task_id") or "")
+            or production_eval.digest(task) != frozen.get("task_sha256")):
+        raise ValueError("TASK_CONTRACT_CONTENT_MISMATCH")
+    from orchestrator.file_safety import atomic_write_text
+    atomic_write_text(task_dir / "task.json", json.dumps(task, ensure_ascii=False, indent=2))
 
 
 def finalize_closed_loop(task_dir: pathlib.Path, task: dict, drafts: list[str],
@@ -1494,6 +1547,11 @@ def process_task(task: dict, *, retry_partial: bool = False,
             "record_id": rid,
             "parent_run_id": parent_run_id,
             "full_script": str(task.get("script") or "").strip(),
+            "product": str(task.get("product") or "").strip(),
+            "category": str(task.get("category") or "").strip(),
+            # Historical feedback is input for the editor and subsequent human
+            # review, not a certificate that every issue has been resolved.
+            "revision_feedback": str(task.get("revision_feedback") or "").strip(),
             "voice": str(task.get("voice") or "").strip(),
             "voice_tempo": task.get("voice_tempo"),
             **manifest_meeting_fields(task),
@@ -1553,6 +1611,7 @@ def process_task(task: dict, *, retry_partial: bool = False,
         # does not alter any retained historical contract or approval.
         frozen = production_eval.freeze(task, run_id, [pathlib.Path(p) for p in sources],
                                          runtime_identity, gold, eval_mode)
+        _save_frozen_task(tdir, task, frozen)
         frozen_path = tdir / "eval" / run_id / "contract.json"
         production_eval.write_once(frozen_path, frozen)
         active_contract = tdir / "eval" / "active_contract.json"
@@ -1693,10 +1752,12 @@ def process_task(task: dict, *, retry_partial: bool = False,
                                                    repair_visual_missing_indices)
                     previous_inputs = _read_json(attempt_state).get("input")
                     if previous_inputs == inputs and not (force_rebuild and attempt == 1):
-                        last_failure = last_failure or {"index": i, "draft": name,
-                            "phase": "build", "type": "blocked"}
-                        last_failure["message"] = "BUILD_NO_PROGRESS: no new candidates, windows or observations"
-                        log(last_failure["message"])
+                        if last_failure:
+                            last_failure["no_progress"] = True
+                        else:
+                            last_failure = {"index": i, "draft": name, "phase": "build", "type": "blocked",
+                                "message": "BUILD_NO_PROGRESS: no new candidates, windows or observations"}
+                        log("BUILD_NO_PROGRESS: no new candidates, windows or observations")
                         break
                     from orchestrator.file_safety import atomic_write_text
                     atomic_write_text(attempt_state, json.dumps({"input": inputs,

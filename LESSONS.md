@@ -7,6 +7,32 @@
 
 ## 新增条目
 
+### L-20261028-09 混合选镜与缓存抽帧的证据身份
+- status: OPEN
+- hits: 1
+- 模块: visual-matching / independent-qc / draft
+- 现象: 规则与 AI 混排草稿缺 AI 身份收据；原始素材复制进草稿后路径变化被误报为内容变化；旧观察的临时帧被清理后又误报证据缺图。
+- 根因: 选镜、草稿复制和质检使用不同的身份口径，缓存观察绑定了临时路径。
+- 以后怎么做: 混排时封存选镜身份，复制素材同时核对原件状态和完整内容哈希；从匹配的源素材与已审时间重建缺失帧，仍需独立视觉和人工验收。
+- 证据: `test_ai_editor_qc.py`、`test_visual_match_recovery.py`。
+
+### L-20261028-08 功能动作聚焦不能落在前置展示
+- status: OPEN
+- hits: 1
+- 模块: visual-matching / scene-timing
+- 现象: 湿水句选中了包含实验的素材，但主题聚焦先命中干纸展开，最终切片漏掉浸水和提起。
+- 根因: 泛化“不破”主题与更具体的湿水主题共用候选动作，按时间顺序取到了前置动作。
+- 以后怎么做: 针对明确提及的具体动作优先定位对应已观察分段；未覆盖的其他卖点保留未认证。对完整动作不能在速度要求内放下的情况报告缺口或更换素材，不静默压到极高倍速。
+- 证据: `test_v156_selection_feedback.py`、`test_v152_meeting_rules.py`。
+### L-20261028-10 提速不能改变证据与交付计数单位
+- status: OPEN
+- hits: 1
+- 模块: 抽帧 / 调度 / staging / preview / throughput
+- 现象: 全轮准备屏障、逐帧进程与中间复制增加成本；草稿PASS被误读成成片产量；部分预览收据丢掉未覆盖要求。
+- 根因: 执行顺序与语义顺序耦合、复制身份只按同名串行假设、统计未明确artifact类型。
+- 以后怎么做: 就绪执行按ID归并且有背压；抽帧先证明PTS对应；并发复制从一开始用独立目标名并原子发布；保留完整需求且只显式preview容忍不足；草稿与MP4分别计量，未知为null。
+- 证据: `test_bounded_frame_batch.py`、`test_ready_work.py`、`test_single_copy_staging.py`、`test_ai_editor.py`、`test_throughput_calibration.py`；详见 `docs/plans/20261028-production-optimization.md`。
+
 ### L-20261028-07 已选镜头的保护区与卖点覆盖
 - status: OPEN
 - hits: 1

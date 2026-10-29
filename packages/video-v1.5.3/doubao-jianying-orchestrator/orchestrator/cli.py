@@ -403,6 +403,48 @@ def _pre_synthesize_narration(manifest: dict, report_dir: Path, preset) -> dict:
     return timing
 
 
+def _validate_preserved_match(manifest: dict, analysis: dict, prior: dict,
+                              refill_indices: list[int], narration_timing: dict | None) -> str:
+    """Reject stale or unbound selections before reusing an existing cut."""
+    import math
+    from . import ai_editor_contract
+    rows = prior.get("segments") or []
+    sentences = timing_contract.split_sentences(manifest)
+    if (not isinstance(rows, list) or len(rows) != len(sentences)
+            or ai_editor_contract.digest(rows) != ai_editor_contract.digest((prior.get("manifest") or {}).get("segments"))):
+        return "PRIOR_SELECTION_IDENTITY_MISMATCH"
+    candidates = {str(s.get("shot_id")): s for s in analysis.get("shots", []) if isinstance(s, dict) and s.get("shot_id")}
+    for index, (row, sentence) in enumerate(zip(rows, sentences), 1):
+        if (not isinstance(row, dict) or int(row.get("index") or index) != index
+                or "".join(str(row.get("text") or "").split()) != "".join(timing_contract.sentence_text(sentence).split())):
+            return "PRIOR_SENTENCE_MISMATCH"
+        if index in refill_indices:
+            continue
+        if narration_timing:
+            duration, _ = timing_contract.duration_for(narration_timing, index, segment=sentence)
+            old_duration = row.get("audio_duration_us") or round(float(row.get("segment_s") or 0) * 1000000)
+            if not old_duration or abs(int(old_duration) - int(duration)) > 1000:
+                return "PRIOR_AUDIO_TIMING_MISMATCH"
+        if ai_editor_contract.is_ai_segment(row):
+            checked = ai_editor_contract.validate_segment_receipt(row, index=index, verify_source=True, manifest=manifest)
+            if not checked.get("ok"):
+                return "PRIOR_AI_RECEIPT_INVALID"
+        for part in row.get("span_parts") or [row]:
+            candidate = candidates.get(str(part.get("shot_id") or part.get("temporary_shot_id") or ""))
+            if not candidate or candidate.get("status") != "ready_for_matching" or str(part.get("video")) != str(candidate.get("video")):
+                return "PRIOR_SOURCE_CATALOG_MISMATCH"
+            try:
+                start, end = float(part["source_start"]), float(part["source_end"])
+                lower, upper = float(candidate["source_start"]), float(candidate["source_end"])
+                if (not all(math.isfinite(n) for n in (start, end, lower, upper))
+                        or not Path(str(part["video"])).is_file() or start < lower - 0.001
+                        or end > upper + 0.001 or end <= start):
+                    return "PRIOR_SOURCE_WINDOW_INVALID"
+            except (KeyError, ValueError, TypeError, OSError):
+                return "PRIOR_SOURCE_WINDOW_INVALID"
+    return ""
+
+
 def _temporary_match(manifest: dict, input_path: Path, report_dir: Path,
                      narration_timing: dict | None = None) -> tuple[dict, dict | None]:
     from . import ai_editor, ai_editor_contract
@@ -438,6 +480,7 @@ def _temporary_match(manifest: dict, input_path: Path, report_dir: Path,
         # Keep prior AI-refill sentences across rebuilds. A fresh rule pass would
         # otherwise overwrite them with degraded_fallback and trip FORMAL_EVIDENCE.
         prior_ai: dict[int, dict] = {}
+        prior_match: dict = {}
         prior_path = report_dir / "shot_match_report.json"
         if refill_indices and prior_path.is_file():
             try:
@@ -467,6 +510,21 @@ def _temporary_match(manifest: dict, input_path: Path, report_dir: Path,
             scene_report = scene_rules.apply(manifest, matched, analysis, report_dir)
             matched["scene_rules"] = {k: scene_report.get(k) for k in
                                       ("category", "rulepacks", "versions", "applied", "partial", "unmet")}
+        # A completed prior cut is the baseline for an explicit sentence repair.
+        # Re-running the rule matcher can otherwise move unrelated windows and
+        # reserve the one candidate needed by the requested sentence.
+        if refill_indices and prior_match.get("ok") is True:
+            try:
+                reason = _validate_preserved_match(manifest, analysis, prior_match, refill_indices, narration_timing)
+            except (ValueError, TypeError, KeyError):
+                reason = "PRIOR_SELECTION_IDENTITY_MISMATCH"
+            if reason:
+                return manifest, {"status": "SHOT_MATCH_BLOCKED", "message": reason,
+                                  "match_report": str(prior_path)}
+            matched = dict(prior_match)
+            matched["manifest"] = {**(prior_match.get("manifest") or {}), **manifest,
+                                   "segments": prior_match["segments"]}
+            prior_ai = {}  # All prior rows are already preserved, including rule rows.
         # Restore prior AI segments that are not being re-refilled this pass.
         if prior_ai:
             keep = set(prior_ai) - set(refill_indices)
@@ -515,6 +573,19 @@ def _temporary_match(manifest: dict, input_path: Path, report_dir: Path,
                     gap_indices.append(int(row.get("index")))
                 except (TypeError, ValueError):
                     continue
+        # A legacy recommendation can be structurally successful while its
+        # per-segment claim gate is blocked. Those rows also require pixel
+        # review; never let a top-level ok hide an uncovered selling point.
+        rule_segments = matched.get("segments") or (matched.get("manifest") or {}).get("segments") or []
+        for position, segment in enumerate(rule_segments, 1):
+            if not isinstance(segment, dict):
+                continue
+            gate = segment.get("claim_gate")
+            if isinstance(gate, dict) and (gate.get("ok") is False or gate.get("status") == "blocked"):
+                try:
+                    gap_indices.append(int(segment.get("index") or position))
+                except (TypeError, ValueError):
+                    gap_indices.append(position)
         need_ai = list(refill_indices)
         if not need_ai and gap_indices:
             # Preview can be structurally "ok" while still containing degraded
@@ -529,12 +600,16 @@ def _temporary_match(manifest: dict, input_path: Path, report_dir: Path,
             if refill_limit:
                 from . import demo_actions
                 sentence_rows = timing_contract.split_sentences(manifest)
-                def _gap_priority(index: int) -> tuple[int, int]:
+                def _gap_priority(index: int) -> tuple[int, int, int]:
                     if not 1 <= index <= len(sentence_rows):
-                        return (0, index)
+                        return (0, 0, index)
                     text = timing_contract.sentence_text(sentence_rows[index - 1])
-                    claims = demo_actions.requirements_for(text, text, str(manifest.get("category") or ""))
-                    return (-sum(bool(claim.evidence_required) for claim in claims), index)
+                    category = str(manifest.get("category") or "")
+                    claims = demo_actions.requirements_for(text, text, category)
+                    sentence = demo_actions.sentence_contract(text, category=category,
+                                                               product=str(manifest.get("product") or ""))
+                    return (-int(sentence.get("kind") == "functional"),
+                            -sum(bool(claim.evidence_required) for claim in claims), index)
                 need_ai = sorted(need_ai, key=_gap_priority)[:refill_limit]
         rule_selected_count = len(matched.get("segments") or [])
         if need_ai:
@@ -633,7 +708,6 @@ def cmd_build(args) -> int:
         return _emit({"status": "VOICE_INPUT_INVALID", "terminal_state": "BLOCKED",
                       "failure_class": "environment", "retryable": False,
                       "safe_to_continue": False, "message": str(exc)}, 1)
-    manifest = shot_notes.apply(manifest)
     ledger = usage_ledger.ledger_path(manifest, report_dir)
     if ledger is not None and not manifest.get("usage_ledger_path"):
         manifest["usage_ledger_path"] = str(ledger)
@@ -692,6 +766,28 @@ def cmd_build(args) -> int:
         })
         return _emit(_compact_build_result(result), 1)
 
+    # Freeze one verified text plan before narration, matching and note binding.
+    # Existing segment/audio mappings and explicit notes are never reindexed.
+    from . import ai_editor_contract, sentence_planner
+    if (not manifest.get("segments") and not shot_notes._notes_of(manifest)
+            and not manifest.get("shot_notes_by_index")
+            and (manifest.get("temporary_material_analysis") or manifest.get("auto_match_shots"))
+            and ai_editor_contract.selection_mode(manifest) in ("ai_editor", "rule_then_ai")
+            and manifest.get("semantic_sentence_planning", True)):
+        try:
+            manifest = sentence_planner.plan(manifest, report_dir / "sentence_planning")
+            (report_dir / "sentence_planning" / "planned_manifest.json").write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        except (ValueError, TypeError, OSError) as exc:
+            return _emit(_compact_build_result(finalize({
+                "status": "SENTENCE_PLAN_REVIEW_REQUIRED", "terminal_state": "BLOCKED",
+                "failure_class": "semantic", "retryable": True,
+                "safe_to_continue": False, "next_action": "manual_review",
+                "message": "语义分句失败或未完整保留原文，未开始配音和选镜。",
+                "error": str(exc),
+            })), 1)
+    manifest = shot_notes.apply(manifest)
+
     # 音色先锁一次并回写 manifest：全流程只在这里决议音色，引擎后续只读锁。
     # 必须在 TTS 之前，否则「按哪个音色合成」和「按哪个音色选镜」可能不是同一个。
     locked_voice, voice_blocker = _lock_voice_once(manifest)
@@ -704,6 +800,10 @@ def cmd_build(args) -> int:
             # 装不下的镜头在**规划阶段**就被判 SHOT_TIMING_INFEASIBLE，
             # 而不是拖到 write_draft 才 AUDIO_VIDEO_MISMATCH。
             narration_timing = _pre_synthesize_narration(manifest, report_dir, locked_voice)
+            if manifest.get("sentence_plan_version") == "semantic-v1":
+                manifest["narration_timing_file"] = str(report_dir / "narration_timing.json")
+                (report_dir / "sentence_planning" / "planned_manifest.json").write_text(
+                    json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
             manifest, blocker = _temporary_match(manifest, input_path, report_dir,
                                                  narration_timing=narration_timing)
             shot_match_report = report_dir / "shot_match_report.json"
@@ -911,6 +1011,37 @@ def cmd_recover(args) -> int:
         return _emit(_compact_control_result(result), 0 if diagnosis_ok else 1)
 
     if stage == "semantic_match":
+        from . import ai_editor_contract
+        timing = None
+        if manifest.get("sentence_plan_version") == "semantic-v1":
+            timing_path = Path(str(manifest.get("narration_timing_file") or ""))
+            try:
+                if not timing_path.is_file():
+                    raise ValueError("missing timing file")
+                timing = _read(timing_path)
+                rows = timing.get("rows") or []
+                sentences = timing_contract.split_sentences(manifest)
+                if len(rows) != len(sentences) or any(
+                    row.get("key") != timing_contract.sentence_key(sentence, i)
+                    or row.get("text") != timing_contract.sentence_text(sentence)
+                    or int(row.get("audio_duration_us") or 0) <= 0
+                    for i, (row, sentence) in enumerate(zip(rows, sentences), 1)
+                ):
+                    raise ValueError("sentence timing mismatch")
+            except (OSError, ValueError, TypeError, AttributeError):
+                result = finalize({"status": "RECOVERY_SENTENCE_TIMING_REQUIRED",
+                                   "failure_class": "semantic",
+                                   "message": "语义分句恢复需要与每句对应的原始配音时长文件。"})
+                return _emit(_compact_control_result(result), 1)
+        elif (not manifest.get("segments") and not shot_notes._notes_of(manifest)
+              and not manifest.get("shot_notes_by_index")
+              and (manifest.get("temporary_material_analysis") or manifest.get("auto_match_shots"))
+              and ai_editor_contract.selection_mode(manifest) in ("ai_editor", "rule_then_ai")
+              and manifest.get("semantic_sentence_planning", True)):
+            result = finalize({"status": "RECOVERY_SENTENCE_PLAN_REQUIRED",
+                               "failure_class": "semantic",
+                               "message": "请使用原任务 sentence_planning/planned_manifest.json 恢复，避免分句错位。"})
+            return _emit(_compact_control_result(result), 1)
         analysis = str(manifest.get("shot_analysis_file") or "").strip()
         analysis_path = Path(analysis).expanduser() if analysis else report_dir / "shot_candidates.json"
         if not analysis_path.is_absolute():
@@ -925,7 +1056,8 @@ def cmd_recover(args) -> int:
             return _emit(_compact_control_result(result), 1)
         manifest["shot_analysis_file"] = str(analysis_path.resolve())
         try:
-            matched_manifest, blocker = _temporary_match(manifest, input_path, report_dir)
+            matched_manifest, blocker = _temporary_match(manifest, input_path, report_dir,
+                                                         narration_timing=timing)
         except Exception as exc:  # noqa: BLE001
             result = finalize({"status": "ERROR", "error_type": type(exc).__name__, "error": str(exc)})
             return _emit(_compact_control_result(result), 1)
@@ -1059,6 +1191,17 @@ def _jianying_ui_probe() -> dict:
         return {"checked": False, "reason": type(exc).__name__}
 
 
+class _CapacityCalibrationEngine(OrchestrationEngine):
+    """Run the calibration's explicitly silent synthetic timeline."""
+
+    def audio_selection_gate(self, clips):
+        if (not self.capacity_guard and self.m.get("allow_silent") is True
+                and not self.m.get("voice")
+                and clips and all(c.audio_mode == "mute" and not c.text for c in clips)):
+            return None
+        return super().audio_selection_gate(clips)
+
+
 def cmd_calibrate_capacity(args) -> int:
     """Run isolated incremental source-count calibration and persist the safe limit."""
     input_path = Path(args.input).expanduser().resolve()
@@ -1076,6 +1219,22 @@ def cmd_calibrate_capacity(args) -> int:
     reports = report_root / "capacity_calibration" / test_id
     assets.mkdir(parents=True, exist_ok=False)
     reports.mkdir(parents=True, exist_ok=False)
+    # The normal draft writer requires a real audio track even for muted clips.
+    # A deterministic local test tone keeps calibration self-contained and does
+    # not select a voice or music track for any production task.
+    import math
+    import struct
+    import wave
+    test_audio = isolated / "calibration_tone.wav"
+    sample_rate = 16000
+    second = b"".join(struct.pack("<h", round(4000 * math.sin(2 * math.pi * 440 * i / sample_rate)))
+                      for i in range(sample_rate))
+    with wave.open(str(test_audio), "wb") as audio:
+        audio.setnchannels(1)
+        audio.setsampwidth(2)
+        audio.setframerate(sample_rate)
+        for _ in range(max(1, args.max_sources) * 3):
+            audio.writeframesraw(second)
     profile_path = Path(args.profile_path).expanduser().resolve() if args.profile_path else None
     baseline = []
     for path in originals:
@@ -1110,6 +1269,8 @@ def cmd_calibrate_capacity(args) -> int:
             "draft_name": f"JYSkill_v131_capacity_{test_id}_{source_count:03d}",
             "segments": [{"video": str(path), "audio_mode": "mute", "duration": 0.0} for path in copied],
             "allow_silent": True,
+            "tail_pad_s": 0,
+            "bgm": {"path": str(test_audio)},
             "stabilize": False,
             "auto_transition": False,
             "execution_profile": "background_friendly",
@@ -1123,8 +1284,8 @@ def cmd_calibrate_capacity(args) -> int:
         started = time.perf_counter()
         try:
             with contextlib.redirect_stdout(sys.stderr):
-                engine = OrchestrationEngine(manifest, isolated, trial_report, logger=logger,
-                                             capacity_guard=False)
+                engine = _CapacityCalibrationEngine(manifest, isolated, trial_report, logger=logger,
+                                                    capacity_guard=False)
                 result = engine.run()
         except Exception as exc:  # noqa: BLE001
             result = {"status": "ERROR", "error_type": type(exc).__name__, "error": str(exc)}

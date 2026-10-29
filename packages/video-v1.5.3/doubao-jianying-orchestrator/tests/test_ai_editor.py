@@ -17,7 +17,7 @@ from orchestrator import ai_editor_qc, semantic_gate, shot_analyzer, visual_qc_c
 
 class AIEditorTests(unittest.TestCase):
     def setUp(self):
-        prepare = mock.patch.object(editor, "_prepare_review_round")
+        prepare = mock.patch.object(editor, "_review_media")
         prepare.start()
         self.addCleanup(prepare.stop)
         self.temp = tempfile.TemporaryDirectory()
@@ -105,8 +105,42 @@ class AIEditorTests(unittest.TestCase):
         self.assertEqual(result["manifest"]["claim_gate_coverage"]["certification"], "UNCERTIFIED")
         self.assertEqual(result["claim_gate_coverage"]["certification"], "UNCERTIFIED")
         self.assertEqual(result["pending_items"][0]["type"], "PARTIAL_SELLING_POINTS")
+        segment = result["segments"][0]
+        self.assertEqual(len(segment["ai_selection"]["selling_points"]), 2)
+        self.assertTrue(contract.validate_segment_receipt(segment, manifest=self.manifest)["ok"])
+        formal = {**self.manifest, "delivery_mode": "formal"}
+        self.assertFalse(contract.validate_segment_receipt(segment, manifest=formal)["ok"])
+        self.assertFalse(semantic_gate.evaluate_segments([segment], require_explicit=True)["ok"])
+        legacy = copy.deepcopy(segment)
+        legacy["ai_selection"]["selling_points"] = legacy["ai_selection"]["selling_points"][:1]
+        self.assertFalse(contract.validate_segment_receipt(legacy, manifest=formal)["ok"])
         self.manifest["delivery_mode"] = "formal"
         self.assertFalse(self.result()["ok"])
+
+    def test_refinement_preparation_failure_retains_prior_observation(self):
+        original = {**self.review, "dense_required": True}
+        def prepare(shot, directory, *, dense=False):
+            if dense:
+                raise OSError("dense extraction failed")
+        with mock.patch.object(editor, "_review_media", side_effect=prepare), \
+                mock.patch.object(editor, "_review", return_value=original):
+            rows, _ = editor._review_pool(self.manifest, self.sentence,
+                {"handfeel": self.shot}, self.root, {})
+        self.assertEqual(rows[0]["verdict"], "matched")
+        self.assertEqual(rows[0]["refinement_status"], "retained_original")
+
+    def test_guarded_preparation_failure_retains_unconfirmed_original(self):
+        self.manifest["head_trim_s"] = 2.5
+        def prepare(shot, directory, *, dense=False):
+            if dense:
+                raise OSError("guarded extraction failed")
+        with mock.patch.object(editor, "_review_media", side_effect=prepare), \
+                mock.patch.object(editor, "_review", return_value=self.review):
+            rows, coverage = editor._review_pool(self.manifest, self.sentence,
+                {"handfeel": self.shot}, self.root, {})
+        self.assertEqual(rows[0]["verdict"], "matched")
+        self.assertEqual(rows[0]["guarded_review_status"], "unconfirmed")
+        self.assertEqual(coverage["uncertain"], 1)
 
     def test_partial_preview_stops_after_reviewed_supported_point(self):
         self.manifest.update(delivery_mode="preview", allow_partial_selling_points=True)
@@ -132,6 +166,70 @@ class AIEditorTests(unittest.TestCase):
         row = result["segments"][1]
         self.assertEqual(row["ai_selection"]["index"], 2)
         self.assertTrue(contract.validate_segment_receipt(row, index=2, verify_source=True, manifest=manifest)["ok"])
+
+    def test_refill_combines_reviewed_claims_without_losing_timing_or_evidence(self):
+        text = "擦油污、擦水渍都好用，湿水不容易破。"
+        manifest = {**self.manifest, "selection_mode": "rule_then_ai", "delivery_mode": "preview",
+                    "allow_partial_selling_points": True, "ai_refill_indices": [1],
+                    "segments": [{"text": text, "audio_duration_us": 4500000}]}
+        matched = {"segments": [{"index": 1, "text": text}], "pending_items": []}
+        shots, reviews = [], []
+        for i in range(3):
+            video = self.root / f"source-{i}.mp4"
+            video.write_bytes(f"source-{i}".encode())
+            sid = f"claim-{i}"
+            shots.append({**self.shot, "shot_id": sid, "video": str(video)})
+            reviews.append({**self.review, "shot_id": sid, "source_identity": contract.source_identity(video),
+                            "supported_point_ids": [f"p{i+1}"]})
+        with mock.patch.object(editor, "_review_pool", return_value=(list(reversed(reviews)), {"feasible": True})) as review:
+            result = editor.refill_indices(manifest, {"shots": shots}, matched, [1], self.root)
+        self.assertFalse(review.call_args.args[0]["allow_partial_selling_points"])
+        self.assertTrue(result["ok"], result)
+        row = result["segments"][0]
+        self.assertEqual(len(row["span_parts"]), 3)
+        self.assertEqual([p["shot_id"] for p in row["span_parts"]], [s["shot_id"] for s in shots])
+        self.assertTrue(contract.validate_segment_receipt(row, index=1, verify_source=True, manifest=manifest)["ok"])
+        self.assertAlmostEqual(sum(p["segment_s"] for p in row["span_parts"]), 4.5, places=5)
+        self.assertFalse(row.get("uncovered_selling_points"))
+
+    def test_explicit_compound_refill_keeps_incomplete_evidence_preview_only(self):
+        text = "擦油污、擦水渍都好用"
+        manifest = {**self.manifest, "selection_mode": "rule_then_ai", "delivery_mode": "preview",
+                    "allow_partial_selling_points": True, "ai_refill_indices": ["1"],
+                    "segments": [{"text": text, "audio_duration_us": 2000000}]}
+        matched = {"segments": [{"index": 1, "text": text}], "pending_items": []}
+        with mock.patch.object(editor, "_review_pool", return_value=([self.review], {"feasible": False})) as review:
+            result = editor.refill_indices(manifest, {"shots": [self.shot]}, matched, [1], self.root)
+        self.assertFalse(review.call_args.args[0]["allow_partial_selling_points"])
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["segments"][0]["uncovered_selling_points"][0]["id"], "p2")
+        self.assertEqual(result["claim_gate_coverage"]["certification"], "UNCERTIFIED")
+        manifest["delivery_mode"] = "formal"
+        with mock.patch.object(editor, "_review_pool", return_value=([self.review], {"feasible": False})):
+            self.assertFalse(editor.refill_indices(manifest, {"shots": [self.shot]}, matched, [1], self.root)["ok"])
+
+    def test_refill_prioritizes_observed_specific_object_but_still_requires_review(self):
+        text = "还送定制纸巾支架"
+        manifest = {**self.manifest, "segments": [{"text": text, "audio_duration_us": 2000000}]}
+        generic = [{**self.shot, "shot_id": f"generic-{i}", "description": "展示绿色包装的厨房纸巾"}
+                   for i in range(20)]
+        holder = {**self.shot, "shot_id": "holder", "description": "双手将纸巾卷放在木质支架上"}
+        matched = {"segments": [{"index": 1, "text": text}], "recommendations": [{"index": 1,
+                    "top3": [{"shot_id": s["shot_id"]} for s in generic[:10]]}]}
+        with mock.patch.object(editor, "_review_pool", return_value=([], {"feasible": False})) as review:
+            result = editor.refill_indices(manifest, {"shots": generic + [holder]}, matched, [1], self.root)
+        order = review.call_args.args[1]["candidate_ids"]
+        self.assertEqual(order[:editor.ROUND_SIZE], [f"generic-{i}" for i in range(editor.ROUND_SIZE)])
+        self.assertLess(order.index("holder"), order.index("generic-8"))
+        self.assertEqual(set(order), {s["shot_id"] for s in generic + [holder]})
+        self.assertFalse(result["ok"])
+        self.assertIn("AI_REFILL_NO_MATCH:1", result["refill_errors"])
+
+    def test_observed_text_retrieval_is_empty_without_overlap_and_stable_on_ties(self):
+        shots = {"a": {"description": "手拿纸巾支架"}, "b": {"description": "展示纸巾支架"},
+                 "c": {"description": "展示产品包装"}}
+        self.assertEqual(editor._observed_text_shortlist("纸巾支架", shots), ["a", "b"])
+        self.assertEqual(editor._observed_text_shortlist("xyz", shots), [])
 
     def test_refill_does_not_certify_other_degraded_sentences(self):
         manifest = {**self.manifest, "selection_mode": "rule_then_ai", "delivery_mode": "preview",
@@ -653,6 +751,64 @@ class AIEditorTests(unittest.TestCase):
             _, blocker = cli._temporary_match(manifest, self.root / "input.json", self.root)
         self.assertIsNone(blocker)
         self.assertEqual(refill.call_args.args[3], [1])
+
+    def test_rule_first_refills_blocked_claim_even_when_match_says_ok(self):
+        from orchestrator import cli
+        manifest = {"selection_mode": "rule_then_ai", "delivery_mode": "preview",
+                    "segments": [{"text": "普通介绍"}, {"text": "柔软又亲肤"}]}
+        analysis = {"shots": [self.shot], "vision_analysis": {"errors": []}}
+        matched = {"ok": True, "manifest": manifest, "segments": [
+            {"index": 1, "text": "普通介绍", "claim_gate": {"ok": True}},
+            {"index": 2, "text": "柔软又亲肤", "claim_gate": {"ok": False, "status": "blocked"}}],
+            "pending_items": [], "degraded_matches": []}
+        with mock.patch.object(cli, "_run_shot_analysis", return_value=analysis), \
+                mock.patch("orchestrator.material_corrections.apply", side_effect=lambda _m, a, _r: a), \
+                mock.patch.object(shot_analyzer, "match_manifest", return_value=matched), \
+                mock.patch("orchestrator.scene_rules.apply", return_value={}), \
+                mock.patch.object(editor, "refill_indices", side_effect=lambda _m, _a, m, *_args, **_kw: m) as refill:
+            cli._temporary_match(manifest, self.root / "input.json", self.root)
+        self.assertEqual(refill.call_args.args[3], [2])
+
+    def test_explicit_refill_keeps_prior_rule_selection_and_rejects_stale_inputs(self):
+        from orchestrator import cli
+        video = self.root / "prior.mp4"
+        video.write_bytes(b"source")
+        manifest = {"selection_mode": "rule_then_ai", "delivery_mode": "preview",
+                    "draft_name": "new", "segments": [{"text": "第一句"}, {"text": "第二句"}],
+                    "ai_refill_indices": [2]}
+        rows = [{"index": i, "text": text, "shot_id": f"s{i}", "video": str(video),
+                 "source_start": 0.0, "source_end": 1.0, "segment_s": 1.0}
+                for i, text in enumerate(("第一句", "第二句"), 1)]
+        prior = {"ok": True, "segments": rows, "manifest": {"segments": rows, "draft_name": "old"},
+                 "pending_items": []}
+        analysis = {"shots": [{"shot_id": f"s{i}", "video": str(video), "source_start": 0.0,
+                               "source_end": 2.0, "status": "ready_for_matching"} for i in (1, 2)]}
+        path = self.root / "shot_match_report.json"
+        path.write_text(json.dumps(prior, ensure_ascii=False), encoding="utf-8")
+        fresh = {"ok": True, "segments": [{**rows[0], "shot_id": "changed"}, rows[1]],
+                 "manifest": manifest, "pending_items": []}
+        def refill(m, a, selected, indices, *_args, **_kwargs):
+            self.assertEqual(indices, [2])
+            self.assertEqual(selected["segments"], rows)
+            self.assertEqual(selected["manifest"]["draft_name"], "new")
+            return selected
+        with mock.patch.object(cli, "_run_shot_analysis", return_value=analysis), \
+                mock.patch("orchestrator.material_corrections.apply", side_effect=lambda _m, a, _r: a), \
+                mock.patch.object(shot_analyzer, "match_manifest", return_value=fresh), \
+                mock.patch("orchestrator.scene_rules.apply", return_value={}), \
+                mock.patch.object(editor, "refill_indices", side_effect=refill):
+            result, blocker = cli._temporary_match(manifest, self.root / "input.json", self.root)
+        self.assertIsNone(blocker)
+        self.assertEqual(result["segments"][0], rows[0])
+        stale = {**manifest, "segments": [{"text": "文案已变"}, {"text": "第二句"}]}
+        self.assertEqual(cli._validate_preserved_match(stale, analysis, prior, [2], None), "PRIOR_SENTENCE_MISMATCH")
+        self.assertEqual(cli._validate_preserved_match(manifest, {"shots": []}, prior, [2], None), "PRIOR_SOURCE_CATALOG_MISMATCH")
+        changed_window = {**analysis, "shots": [{**analysis["shots"][0], "source_end": 0.5}, analysis["shots"][1]]}
+        self.assertEqual(cli._validate_preserved_match(manifest, changed_window, prior, [2], None), "PRIOR_SOURCE_WINDOW_INVALID")
+        changed_timing = {"rows": [{"audio_duration_us": 2000000}, {"audio_duration_us": 1000000}]}
+        self.assertEqual(cli._validate_preserved_match(manifest, analysis, prior, [2], changed_timing), "PRIOR_AUDIO_TIMING_MISMATCH")
+        bad = {**prior, "manifest": {"segments": []}}
+        self.assertEqual(cli._validate_preserved_match(manifest, analysis, bad, [2], None), "PRIOR_SELECTION_IDENTITY_MISMATCH")
 
     def test_multiple_shots_cover_distinct_points_and_bind_every_part(self):
         plan = self.plan()

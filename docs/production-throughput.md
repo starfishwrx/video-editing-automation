@@ -32,7 +32,7 @@ QC逐批保存已验证响应和当前最终切片输入，阶段超时保留草
 
 ## 观察与校准
 
-每轮进度重置，完整运行记录在 `work/dispatch_runs/`。请求账本及账户槽目录内的每日请求事件记录结束原因、token、等待与耗时、客户端在途采样，不保存密钥、图片正文或思考文本。统计只增加本轮新完成的、独立QC为PASS且已验证交付的视频；预览、历史OK标记或失败子进程不能增加合格产量。
+每轮进度重置，完整运行记录在 `work/dispatch_runs/`。请求账本及账户槽目录内的每日请求事件记录结束原因、token、等待与耗时、客户端在途采样，不保存密钥、图片正文或思考文本。统计只增加本轮新完成的、独立QC为PASS且已验证交付的草稿（不是已导出MP4）；预览、历史OK标记或失败子进程不能增加合格产量。
 
 ```powershell
 uv run --frozen python -m tools.throughput_calibration --run work/dispatch_runs/<run>.json
@@ -45,3 +45,9 @@ uv run --frozen python -m tools.throughput_calibration --run <run20.json> --run 
 ## 安装边界
 
 源码目录仍是 `packages/video-v1.5.3`，实际版本读 `VERSION`。本次属于源码PR，不刷新历史发布清单。部署前先让现有批次排空，备份必要本机修订，再统一更新pipeline、skills及依赖；运行中不替换代码或策略。未启用的历史JyPoll队列继续保持关闭。真实成片、人工审核和生产吞吐需在安装后的正常任务中另行验收。
+
+## 2026-10-28 优化候选
+
+整体方案与PR取舍见 [生产优化方案](plans/20261028-production-optimization.md)。候选像素复审在同一句同一轮内采用就绪媒体/API独立池；不改变整稿编排顺序、8/16帧或共享账户额度。其他视觉阶段原有准备合同不变。
+
+`verified_draft_deliveries` / `verified_drafts_per_hour` 为明确的草稿指标；`formal_deliveries` / `qualified_per_hour` 是兼容别名。`final_mp4_deliveries` / `final_mp4_per_hour` 保持null与not_measured，直到独立导出验收链接入。阶段统计含失败耗时，p50/p95注明样本数；并行耗时总和不是墙钟。material_wait包括准备准入等待；build阶段包括整个worker，不能解释成单一引擎子阶段。

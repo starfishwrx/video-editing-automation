@@ -28,7 +28,7 @@ See [model and image-call details](https://github.com/starfishwrx/video-editing-
 | `JY_SELECTION_MODE` | `ai_editor`; manifest `selection_mode` wins | `ai_editor`, `rule_then_ai` (rule recall plus pixel-reviewed gaps), or explicit `legacy` |
 | `JY_CONCURRENCY_POLICY_FILE` | Explicit JSON is authoritative | One host/account policy for every entry; see `examples/concurrency-policy.json` |
 | `JY_VISION_TRANSPORT` | `volc_glm` | Direct Ark chat completions; `glm`/`volc` are aliases; `qwen` selects the Qwen-compatible route |
-| `JY_VISION_MODEL` | `glm-5.3-flash` | Exact model ID, shared by image review and text planning |
+| `JY_VISION_MODEL` | `glm-5.3-flash` | Exact Ark model ID; the Qwen transport uses `JY_QWEN_MODEL` instead |
 | `ARK_API_KEY` | Required for direct calls | First credential source; process environment only |
 | `JY_VOLC_API_KEY` | Used only if `ARK_API_KEY` is empty | Alternative Ark credential; process environment only |
 | `JY_VOLC_BASE_URL` | `https://ark.cn-beijing.volces.com/api/plan/v3` | Base URL; code appends `/chat/completions` |
@@ -46,12 +46,28 @@ See [model and image-call details](https://github.com/starfishwrx/video-editing-
 | `JY_AI_EDITOR_TIMEOUT_S` | `JY_VISION_TIMEOUT`, otherwise `360` | Can tighten the policy's request deadline |
 | `JY_POST_QC_STAGE_TIMEOUT_S` | `900` seconds | Separate QC stage budget; parent reserves another 30 seconds for cleanup |
 | `JY_STAGE_DEADLINE_TS`, `JY_TASK_DEADLINE_TS` | Inherited epoch deadlines | Requests can use only the remaining stage/task budget |
-| `JY_VISION_THINKING` | Always enabled for this model | Direct Ark uses `reasoning_effort=low`; legacy disable/budget overrides are ignored |
+| `JY_VISION_THINKING` | Depends on selected transport | Direct Ark uses `reasoning_effort=low`; the Qwen-compatible transport explicitly sends `enable_thinking=false` |
 | `JY_VISION_MAX_TOKENS` | `16384` | Initial completion cap; token semantics depend on the actual endpoint |
 | `JY_VISION_LENGTH_RETRY_VERIFIED` | off | Set `1` only after this endpoint is verified to support a 16384→32768 length retry |
 | `JY_VISION_CACHE_DIR` | Queue `work/.cache`; otherwise persistent user cache | Shared visual observations and completed text verification across tasks |
 | `JY_VISION_CACHE_WAIT_TIMEOUT` | `7200` seconds | Wait for another task recognizing the same product; timeout never starts duplicate calls |
 | `JY_VISION_RECHECK` | `reuse` | `reuse`, `vision` or `off`; explicit recheck policy |
+
+For `rule_then_ai`, the optional manifest field `ai_refill_max_sentences` limits
+automatic gap review (`0` or omitted means unlimited); explicit refill indices
+are not truncated. When capped, functional claims are reviewed before general
+display and promotion sentences. Unreviewed or partially supported claims remain preview-only.
+The optional `max_absorb_demo_speed` bounds the pour, absorption and wipe speeds
+for that task (finite value from 1 to 20). If a full observed action does not fit,
+the scene must try another candidate or remain unresolved; the limit never
+authorizes inventing or silently clipping the missing action.
+An explicitly enabled `retain_related_on_unmet_scene` keeps a relevant, already
+observed shot in preview when a complete group cannot fit; the scene remains
+unresolved and cannot be represented as complete evidence.
+
+Qwen visual and phase caches bind the model and endpoint; phase keys also bind
+the described actions. Explicitly reused observations from the older configured
+backend retain their original identity and are never relabelled as Qwen results.
 
 Media preparation and API calls run in separate stages: finish all frames and
 contact sheets, then start the API pool. Text review and final QC follow the

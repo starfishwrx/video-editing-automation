@@ -53,11 +53,17 @@ def _cache_key(shot: dict[str, Any], scene: dict[str, Any], profile: str) -> str
         source = str(path)
     except OSError:
         return ""
-    from . import frame_quality
+    from . import frame_quality, vision_analyzer
+    transport = vision_analyzer._vision_transport()
+    provider = (vision_analyzer._qwen_settings() if transport == "qwen" else
+                vision_analyzer._volc_settings() if transport == "volc_glm" else {})
     identity = {
         "version": PHASE_TIMING_VERSION, "profile": profile, "video": source,
         "signature": signature, "scene": scene.get("id"),
-        "phases": [p.get("name") for p in scene.get("phases") or []],
+        "scene_label": scene.get("label"),
+        "phases": [{k: p.get(k) for k in ("name", "label", "describe")}
+                   for p in scene.get("phases") or []],
+        "transport": transport, "model": provider.get("model"), "endpoint": provider.get("base_url"),
         "start_us": int(round(_number(shot.get("source_start")) * 1e6)),
         "end_us": int(round(_number(shot.get("source_end")) * 1e6)),
         "max_frames": MAX_FRAMES,

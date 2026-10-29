@@ -36,6 +36,45 @@ def _textured(path: Path, size=(160, 90)) -> Path:
     return path
 
 
+class QcFrameRecoveryTests(unittest.TestCase):
+    def test_last_regular_sample_retries_with_true_timestamp(self):
+        from orchestrator import draft_visual_qc
+        with mock.patch.object(draft_visual_qc, "_resume_frame", side_effect=[(False, "eof"), (True, "")]) as extract:
+            ok, error, actual = draft_visual_qc._resume_sample_frame(
+                "ffmpeg", Path("source"), 1.64, Path("frame"), source_start=0.3, suffix="p1_t7")
+        self.assertTrue(ok)
+        self.assertEqual(error, "")
+        self.assertAlmostEqual(actual, 1.60)
+        self.assertAlmostEqual(extract.call_args.args[2], actual)
+
+    def test_evidence_frame_never_shifts_to_invent_proof(self):
+        from orchestrator import draft_visual_qc
+        with mock.patch.object(draft_visual_qc, "_resume_frame", return_value=(False, "eof")) as extract:
+            ok, _, actual = draft_visual_qc._resume_sample_frame(
+                "ffmpeg", Path("source"), 1.64, Path("frame"), source_start=0.3, suffix="p1_ev0_result")
+        self.assertFalse(ok)
+        self.assertAlmostEqual(actual, 1.64)
+        extract.assert_called_once()
+
+
+class UnicodeContactSheetTests(unittest.TestCase):
+    def test_chinese_frame_and_output_paths_are_readable(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw) / "东方纸上"
+            root.mkdir()
+            frame = _save(root / "亲肤画面.jpg", (50, 100, 200))
+            for fit in (False, True):
+                output = root / ("质量检查贴合.jpg" if fit else "质量检查.jpg")
+                self.assertTrue(vision_analyzer._write_sheet(
+                    [{"path": str(frame), "label": "S01"}], output,
+                    columns=1, tile_width=160, tile_height=124, fit=fit))
+                with Image.open(output) as result:
+                    # A black/red unreadable placeholder would not retain blue.
+                    red, green, blue = result.convert("RGB").getpixel((80, 45))
+                    self.assertGreater(blue, red + 70)
+                    self.assertGreater(blue, green + 50)
+
+
 class ScoreTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="fq_score_")
@@ -271,6 +310,22 @@ class PhaseWiringTests(unittest.TestCase):
         self.assertNotEqual(key_on, key_off)
         self.assertEqual(phase_timing.PHASE_TIMING_VERSION, "phase-timing-v3")
         self.assertEqual(frame_quality.FRAME_QUALITY_VERSION, "frame-quality-v2")
+
+    def test_phase_cache_key_binds_model_endpoint_and_phase_description(self):
+        video = self.root / "clip.mp4"
+        video.write_bytes(b"abc")
+        shot = {"video": str(video), "source_start": 1.0, "source_end": 4.0}
+        scene = {"id": "absorb", "phases": [{"name": "result", "describe": "show the result"}]}
+        with mock.patch.dict(os.environ, {"JY_VISION_TRANSPORT": "qwen", "JY_QWEN_MODEL": "a",
+                                          "JY_QWEN_BASE_URL": "https://a.invalid/v1"}):
+            first = phase_timing._cache_key(shot, scene, "volc")
+            os.environ["JY_QWEN_MODEL"] = "b"
+            second = phase_timing._cache_key(shot, scene, "volc")
+            os.environ["JY_QWEN_BASE_URL"] = "https://b.invalid/v1"
+            third = phase_timing._cache_key(shot, scene, "volc")
+            changed = phase_timing._cache_key(shot, {**scene, "phases": [
+                {"name": "result", "describe": "show the complete action"}]}, "volc")
+        self.assertEqual(len({first, second, third, changed}), 4)
 
     def test_locate_all_hard_reject_does_not_build_sheet(self):
         video = self.root / "clip.mp4"

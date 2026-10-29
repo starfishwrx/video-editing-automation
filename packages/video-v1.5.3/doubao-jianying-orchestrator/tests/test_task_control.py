@@ -143,6 +143,20 @@ class ResultContractTests(unittest.TestCase):
 
 
 class BatchContinuationTests(unittest.TestCase):
+    def test_voice_bgm_and_sentence_blockers_keep_their_reason(self):
+        for code, kind in (("VOICE_SELECTION_REQUIRED", "environment"),
+                           ("BGM_REQUIRED", "environment"),
+                           ("SENTENCE_PLAN_REVIEW_REQUIRED", "semantic")):
+            with self.subTest(code=code):
+                classified = batch_worker.classify_build_failure(code)
+                self.assertTrue(classified["deterministic_block"])
+                self.assertFalse(classified["transient"])
+                result = batch_worker._batch_result_contract("ERROR", run_id="test",
+                    failures=[{"message": code}])
+                self.assertEqual(result["failure_code"], code)
+                self.assertEqual(result["failure_class"], kind)
+                self.assertFalse(result["retryable"])
+
     def test_deterministic_block_is_not_retried_as_provider_failure(self):
         classified = batch_worker.classify_build_failure(
             "SHOT_MATCH_BLOCKED: material gaps reported")

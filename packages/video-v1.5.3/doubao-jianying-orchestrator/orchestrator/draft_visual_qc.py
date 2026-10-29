@@ -229,8 +229,8 @@ def _expected_claims(report_dir: pathlib.Path) -> list[dict[str, Any]]:
     return result
 
 
-def _prompt(claims: list[dict[str, Any]], frame_count: int) -> str:
-    if any(c.get("selection_mode") == "ai_editor" for c in claims):
+def _prompt(claims: list[dict[str, Any]], frame_count: int, *, force_ai: bool = False) -> str:
+    if force_ai or any(c.get("selection_mode") == "ai_editor" for c in claims):
         from orchestrator import ai_editor_qc
         return ai_editor_qc.prompt(claims, frame_count)
     mapping = "\n".join(
@@ -431,6 +431,28 @@ def _resume_frame(ffmpeg: str, source: pathlib.Path, seconds: float, frame: path
     return ok, error
 
 
+def _resume_sample_frame(ffmpeg: str, source: pathlib.Path, seconds: float, frame: pathlib.Path,
+                         *, source_start: float, suffix: str):
+    """Retry ordinary sampling just before EOF; never move an evidence frame.
+
+    Some containers report an end time after the last decodable frame. Any
+    retry remains inside the placed source window and returns its actual seek
+    timestamp so the review prompt and checkpoint retain the true location.
+    """
+    ok, error = _resume_frame(ffmpeg, source, seconds, frame)
+    if ok or not re.fullmatch(r"p[0-9]+_t[0-9]+", suffix):
+        return ok, error, seconds
+    for delta in (0.04, 0.08):
+        candidate = seconds - delta
+        if candidate < source_start:
+            continue
+        ok, retry_error = _resume_frame(ffmpeg, source, candidate, frame)
+        if ok:
+            return True, "", candidate
+        error = retry_error or error
+    return False, error, seconds
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--draft", required=True)
@@ -462,20 +484,27 @@ def main() -> int:
         response_version = RESPONSE_VERSION
         if ai_mode:
             from orchestrator import ai_editor_qc, ai_editor_contract
-            result.update(version=ai_editor_qc.REPORT_VERSION, selection_mode="ai_editor")
+            match_data = json.loads((report_dir / "shot_match_report.json").read_text(encoding="utf-8-sig"))
+            selection_mode = str(match_data.get("selection_mode") or "ai_editor")
+            mixed = any(c.get("selection_mode") != "ai_editor" for c in claims)
+            if mixed and selection_mode != "rule_then_ai":
+                raise ValueError("MIXED_SELECTION_MODES")
+            result.update(version=ai_editor_qc.REPORT_VERSION, selection_mode=selection_mode)
             response_version = ai_editor_qc.RESPONSE_VERSION
             result["response_contract"]["version"] = response_version
-            match_data = json.loads((report_dir / "shot_match_report.json").read_text(encoding="utf-8-sig"))
             result["selection_sha256"] = ai_editor_contract.digest(match_data.get("segments", []))
             result["editorial_rules"] = ai_editor_contract.rules_identity(match_data.get("manifest"))
             result["policy_version"] = ai_editor_contract.POLICY_VERSION
-            identity = json.loads((draft / "ai_selection_identity.json").read_text(encoding="utf-8-sig"))
-            if identity.get("selection_sha256") != result["selection_sha256"]:
-                raise ValueError("AI_SELECTION_DRAFT_IDENTITY_CHANGED")
-            if identity.get("editorial_rules") != result["editorial_rules"] or identity.get("policy_version") != result["policy_version"]:
-                raise ValueError("AI_SELECTION_RULES_CHANGED")
-            if any(c.get("selection_mode") != "ai_editor" for c in claims):
-                raise ValueError("MIXED_SELECTION_MODES")
+            identity_path = draft / "ai_selection_identity.json"
+            if not identity_path.is_file() and mixed and os.environ.get("JY_ALLOW_UNSEALED_MIXED_QC") == "1":
+                result["warnings"].append("MIXED_DRAFT_IDENTITY_NOT_SEALED_PREVIEW_ONLY")
+                result["uncertified"] = True
+            else:
+                identity = json.loads(identity_path.read_text(encoding="utf-8-sig"))
+                if identity.get("selection_mode") != selection_mode or identity.get("selection_sha256") != result["selection_sha256"]:
+                    raise ValueError("AI_SELECTION_DRAFT_IDENTITY_CHANGED")
+                if identity.get("editorial_rules") != result["editorial_rules"] or identity.get("policy_version") != result["policy_version"]:
+                    raise ValueError("AI_SELECTION_RULES_CHANGED")
         result["preview_only_reasons"] = [
             f"UPSTREAM_PREVIEW:S{claim['index']:02d}" for claim in claims if claim["degraded"]]
         active_claims = [claim for claim in claims if not claim["visual_missing"]]
@@ -509,10 +538,12 @@ def main() -> int:
                 claim_rows.append((claim, active_rows[cursor:cursor + claim["slots"]]))
                 cursor += claim["slots"]
         if ai_mode:
-            cut_errors = [error for claim, cut_rows in claim_rows
+            ai_claim_rows = [(claim, rows) for claim, rows in claim_rows if claim.get("selection_mode") == "ai_editor"]
+            cut_errors = [error for claim, cut_rows in ai_claim_rows
                           for error in ai_editor_qc.validate_cut(claim, cut_rows)]
             issues.extend(cut_errors)
-            result["final_windows_verified"] = bool(claim_rows) and not cut_errors
+            result["final_windows_verified"] = bool(ai_claim_rows) and not cut_errors and not mixed
+            result["ai_final_windows_verified"] = bool(ai_claim_rows) and not cut_errors
             result["uncertified"] = result["uncertified"] or bool(cut_errors)
             result["source_bindings"] = [{"path": row["source"], "identity": ai_editor_contract.source_identity(row["source"])}
                                          for _, cut_rows in claim_rows for row in cut_rows]
@@ -544,8 +575,11 @@ def main() -> int:
         claim_frames: dict[int, list[dict[str, Any]]] = {}
         expected_frames = 0
         for claim, rows in claim_rows:
-            if ai_mode:
+            if ai_mode and claim.get("selection_mode") == "ai_editor":
                 plan = ai_editor_qc.frame_plan(claim, rows)
+            elif ai_mode:
+                plan = [(row, f"p{n}_{label}", fraction) for n, row in enumerate(rows, 1)
+                        for label, fraction in (("start", 0.05), ("mid", 0.5), ("end", 0.95))]
             elif len(rows) == 1:
                 plan = [(rows[0], "mid", 0.5), (rows[0], "end", 0.9)]
             else:
@@ -558,7 +592,9 @@ def main() -> int:
                     continue
                 seconds = row["source_start"] + row["source_duration"] * fraction
                 frame = frame_dir / f"segment_{row['index']:03d}_{suffix}.jpg"
-                ok, error = _prepare_media(_resume_frame, ffmpeg, pathlib.Path(row["source"]), seconds, frame)
+                ok, error, seconds = _prepare_media(
+                    _resume_sample_frame, ffmpeg, pathlib.Path(row["source"]), seconds, frame,
+                    source_start=row["source_start"], suffix=suffix)
                 if not ok:
                     frame_issues.append(f"FRAME_EXTRACT_FAILED:S{row['index']:02d}:{suffix}:{error}")
                     continue
@@ -623,7 +659,7 @@ def main() -> int:
                         "frame_labels": [item["label"] for item in items],
                         "prompt_version": response_version,
                     }, ensure_ascii=False, indent=2), encoding="utf-8")
-                    prompt = _prompt(claims, len(items))
+                    prompt = _prompt(claims, len(items), force_ai=ai_mode)
                     indices = {claim["index"] for claim in claims}
                     windows = [row for claim, cut_rows in claim_rows
                                if claim["index"] in indices for row in cut_rows]

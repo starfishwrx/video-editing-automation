@@ -26,7 +26,7 @@ def _context(task_dir: Path, draft_root: Path) -> tuple[dict, dict, dict, list[s
         raise ValueError('TASK_DRAFTS_MISSING_OR_INVALID')
     outputs = [draft_root / name for name in names]
     identity = pe.output_identity(outputs)
-    if task.get('task_id') != contract.get('task_id'):
+    if str(task.get('task_id') or task.get('record_id') or '').strip() != contract.get('task_id'):
         raise ValueError('TASK_CONTRACT_IDENTITY_MISMATCH')
     if pe.digest(task) != contract.get('task_sha256'):
         raise ValueError('TASK_CONTRACT_CONTENT_MISMATCH')

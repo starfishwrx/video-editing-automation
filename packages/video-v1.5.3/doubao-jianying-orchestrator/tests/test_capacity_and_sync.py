@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -11,6 +12,23 @@ from orchestrator import capacity, cli, draft_safety, migration, platform_env, s
 from orchestrator.engine import Clip, OrchestrationEngine
 from orchestrator import ship_distribute
 from tools import nas_portable
+
+
+class CalibrationAudioTests(unittest.TestCase):
+    def test_only_silent_calibration_bypasses_audio_selection(self):
+        engine = cli._CapacityCalibrationEngine.__new__(cli._CapacityCalibrationEngine)
+        engine.capacity_guard = False
+        engine.m = {"allow_silent": True}
+        silent = [SimpleNamespace(audio_mode="mute", text="")]
+        with mock.patch.object(OrchestrationEngine, "audio_selection_gate", return_value={"status": "AUDIO_SELECTION_REQUIRED"}) as parent:
+            self.assertIsNone(engine.audio_selection_gate(silent))
+            parent.assert_not_called()
+            self.assertEqual(engine.audio_selection_gate([SimpleNamespace(audio_mode="tts", text="文案")])["status"], "AUDIO_SELECTION_REQUIRED")
+            engine.capacity_guard = True
+            self.assertEqual(engine.audio_selection_gate(silent)["status"], "AUDIO_SELECTION_REQUIRED")
+            engine.capacity_guard = False
+            engine.m["voice"] = "some voice"
+            self.assertEqual(engine.audio_selection_gate(silent)["status"], "AUDIO_SELECTION_REQUIRED")
 
 
 class ShipMetadataGateTests(unittest.TestCase):
@@ -223,7 +241,7 @@ class CapacityTests(unittest.TestCase):
             self.assertEqual(blocker["status"], "MATERIAL_BATCH_LIMIT_EXCEEDED")
             self.assertEqual(blocker["safe_source_limit"], 1)
 
-    def test_upload_then_capacity_check_keeps_upload_and_blocks_before_tts(self):
+    def test_capacity_check_blocks_before_copy_and_tts(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             videos = []
@@ -246,7 +264,7 @@ class CapacityTests(unittest.TestCase):
                 blocker = eng._upload_videos_and_check_capacity(clips)
             self.assertEqual(blocker["status"], "MATERIAL_BATCH_LIMIT_EXCEEDED")
             self.assertIn("上传数量单次只支持最多传 1 条", blocker["message"])
-            self.assertTrue((root / "report" / "uploads" / "videos" / "a.mov").exists())
+            self.assertFalse((root / "report" / "uploads").exists())
 
 
 class VisualDuplicateGateTests(unittest.TestCase):

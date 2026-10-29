@@ -135,11 +135,14 @@ def report_matches_draft(report: Any, draft: Path) -> bool:
         expected = Path(draft).resolve(strict=True)
         recorded = Path(report["draft"]).resolve(strict=True)
         ai_identity = expected / "ai_selection_identity.json"
-        if ai_identity.exists() or report.get("selection_mode") == "ai_editor":
-            if not ai_identity.is_file() or report.get("selection_mode") != "ai_editor":
+        mode = report.get("selection_mode")
+        if ai_identity.exists() or (mode in {"ai_editor", "rule_then_ai"}
+                                    and report.get("version") == "chatcut-visual-qc-v4"):
+            if not ai_identity.is_file() or mode not in {"ai_editor", "rule_then_ai"}:
                 return False
             identity = json.loads(ai_identity.read_text(encoding="utf-8"))
-            if (identity.get("selection_sha256") != report.get("selection_sha256")
+            if (identity.get("selection_mode") != mode
+                    or identity.get("selection_sha256") != report.get("selection_sha256")
                     or report.get("response_contract", {}).get("version") != "chatcut-visual-qc-response-v4"):
                 return False
             if (not _current_editorial_rules(report) or identity.get("editorial_rules") != report.get("editorial_rules")
@@ -168,7 +171,8 @@ def _report_status(report: Any) -> str:
     if status not in {"PASS", "PASS_WITH_DEGRADED", "PASS_WITH_GAPS"}:
         return "UNCERTIFIED"
     contract = report.get("response_contract") or {}
-    ai_mode = report.get("selection_mode") == "ai_editor"
+    mode = report.get("selection_mode")
+    ai_mode = (mode == "ai_editor" or (mode == "rule_then_ai" and report.get("version") == "chatcut-visual-qc-v4"))
     expected_report = "chatcut-visual-qc-v4" if ai_mode else REPORT_VERSION
     expected_response = "chatcut-visual-qc-response-v4" if ai_mode else RESPONSE_VERSION
     if (report.get("version") != expected_report or not isinstance(contract, dict)
@@ -184,7 +188,7 @@ def _report_status(report: Any) -> str:
     if ai_mode:
         if (not _current_editorial_rules(report)
                 or not re.fullmatch(r"[0-9a-f]{64}", str(report.get("selection_sha256") or ""))
-                or report.get("final_windows_verified") is not True
+                or report.get("ai_final_windows_verified" if mode == "rule_then_ai" else "final_windows_verified") is not True
                 or report.get("issues")
                 or any(row.get("confidence", 0) < .6 for row in rows)):
             return "UNCERTIFIED"

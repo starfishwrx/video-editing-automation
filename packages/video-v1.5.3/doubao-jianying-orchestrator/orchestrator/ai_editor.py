@@ -10,8 +10,8 @@ import json
 import math
 import os
 import re
+from collections import Counter
 from itertools import combinations
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -203,10 +203,13 @@ def _review_media(shot: dict, directory: Path, *, dense: bool = False) -> dict:
         with media_slot(timeout=600) as handle:
             if not handle.acquired:
                 raise ValueError("AI_EDITOR_MEDIA_SLOT_TIMEOUT")
-            for i, timestamp in enumerate(times):
-                target = frame_dir / f"{i:02d}.jpg"
-                shot_analyzer.extract_frame(source, timestamp, target, ffmpeg=ffmpeg)
-                if not target.is_file() or target.stat().st_size == 0:
+            requests = [(timestamp, frame_dir / f"{i:02d}.jpg")
+                        for i, timestamp in enumerate(times)]
+            flags = shot_analyzer.extract_frames_batch(source, requests, ffmpeg=ffmpeg)
+            if len(flags) != len(requests):
+                raise ValueError("AI_EDITOR_FRAME_EXTRACTION_FAILED")
+            for (timestamp, target), ok in zip(requests, flags):
+                if not ok or not target.is_file() or target.stat().st_size == 0:
                     raise ValueError("AI_EDITOR_FRAME_EXTRACTION_FAILED")
                 frames.append({"path": str(target), "timestamp": timestamp})
         return frames
@@ -228,17 +231,22 @@ def _review_media(shot: dict, directory: Path, *, dense: bool = False) -> dict:
     return {"start": start, "end": end, "before": before, "times": times, "sheet": sheet}
 
 
-def _prepare_review_round(shots: list[dict], directory: Path, *, dense: bool = False) -> None:
+def _iter_review_round(ids, shots, directory, review, *, dense=False, on_error=None):
     from .runtime_policy import load_policy
-    with ThreadPoolExecutor(max_workers=load_policy().prep_workers) as pool:
-        futures = [pool.submit(_review_media, shot, directory, dense=dense) for shot in shots]
-        # Finish every preparation before the first review request is admitted.
-        # A preparation error is reported by that candidate's review below.
-        for future in futures:
-            try:
-                future.result()
-            except (ValueError, OSError, TypeError, KeyError, TimeoutError):
-                pass
+    from .ready_work import iter_ready
+    policy = load_policy()
+    def prepare(sid):
+        # _review revalidates the source and reads the same cached media. A slow
+        # peer's preparation must not delay this already prepared candidate.
+        return _review_media(shots[sid], directory, dense=dense)
+    def error(sid, exc):
+        if not isinstance(exc, (ValueError, OSError, TypeError, KeyError, TimeoutError)):
+            raise exc
+        if on_error is not None:
+            return on_error(sid, exc)
+        return {"shot_id": sid, "verdict": "uncertain", "error": str(exc)}
+    return iter_ready(ids, prepare, review, prep_workers=policy.prep_workers,
+                      api_workers=min(policy.api_workers, len(ids)), on_error=error)
 
 
 def _review(manifest: dict, sentence: dict, shot: dict, directory: Path, *, dense: bool = False) -> dict:
@@ -349,28 +357,24 @@ def _review_pool(manifest: dict, sentence: dict, shots: dict, directory: Path, a
         chunk = [sid for sid in ids[offset:offset + ROUND_SIZE] if sid not in reviewed_by_id]
         if not chunk:
             continue
-        _prepare_review_round([shots[sid] for sid in chunk], directory)
         def review(sid: str) -> dict:
             try:
                 return _review(manifest, sentence, shots[sid], directory)
             except (ValueError, OSError, TypeError, KeyError) as exc:
                 return {"shot_id": sid, "verdict": "uncertain", "error": str(exc)}
-        with ThreadPoolExecutor(max_workers=min(20, len(chunk))) as pool:
-            futures = {pool.submit(review, sid): sid for sid in chunk}
-            completed = {}
-            for future in as_completed(futures):
-                completed[futures[future]] = future.result()
-                _save(directory / f"review_checkpoint_{sentence['index']}.json", {
-                    "sentence_index": sentence["index"], "round": offset // ROUND_SIZE + 1,
-                    "completed": len(reviewed_by_id) + len(completed),
-                    "pending": len(ids) - len(reviewed_by_id) - len(completed),
-                    "total": len(ids),
-                    "reviews": [reviewed_by_id[s] for s in ids if s in reviewed_by_id] +
-                               [completed[s] for s in chunk if s in completed]})
-            reviewed_by_id.update(completed)
+        completed = {}
+        for sid, result in _iter_review_round(chunk, shots, directory, review):
+            completed[sid] = result
+            _save(directory / f"review_checkpoint_{sentence['index']}.json", {
+                "sentence_index": sentence["index"], "round": offset // ROUND_SIZE + 1,
+                "completed": len(reviewed_by_id) + len(completed),
+                "pending": len(ids) - len(reviewed_by_id) - len(completed),
+                "total": len(ids),
+                "reviews": [reviewed_by_id[s] for s in ids if s in reviewed_by_id] +
+                           [completed[s] for s in chunk if s in completed]})
+        reviewed_by_id.update(completed)
         dense_ids = [sid for sid in chunk if reviewed_by_id[sid].get("dense_required")]
         if dense_ids:
-            _prepare_review_round([shots[sid] for sid in dense_ids], directory, dense=True)
             def dense_review(sid):
                 previous = reviewed_by_id[sid]
                 try:
@@ -385,8 +389,12 @@ def _review_pool(manifest: dict, sentence: dict, shots: dict, directory: Path, a
                         or previous.get("time_sensitive") != refined.get("time_sensitive")):
                     return {**previous, "dense_required": False, "refinement_status": "retained_original"}
                 return {**refined, "refinement_status": "dense_review"}
-            with ThreadPoolExecutor(max_workers=min(20, len(dense_ids))) as pool:
-                reviewed_by_id.update(zip(dense_ids, pool.map(dense_review, dense_ids)))
+            reviewed_by_id.update(_iter_review_round(
+                dense_ids, shots, directory, dense_review, dense=True,
+                on_error=lambda sid, exc: ({**reviewed_by_id[sid], "dense_required": False,
+                    "refinement_status": "retained_original"}
+                    if reviewed_by_id[sid]["verdict"] == "matched" else
+                    {"shot_id": sid, "verdict": "uncertain", "error": str(exc)})))
         # Re-observe guarded-out evidence inside the actual usable scene; never
         # clip an existing evidence interval and treat it as a new observation.
         guarded = {}
@@ -404,7 +412,6 @@ def _review_pool(manifest: dict, sentence: dict, shots: dict, directory: Path, a
                    for ev in previous.get("evidence_intervals_us", [])):
                 guarded[sid] = {**shot, "source_start": lo, "source_end": hi}
         if guarded:
-            _prepare_review_round(list(guarded.values()), directory, dense=True)
             def guarded_review(sid):
                 previous = reviewed_by_id[sid]
                 try:
@@ -418,8 +425,9 @@ def _review_pool(manifest: dict, sentence: dict, shots: dict, directory: Path, a
                         and previous.get("time_sensitive") == refined.get("time_sensitive")):
                     return {**refined, "guarded_review_status": "confirmed"}
                 return {**previous, "guarded_review_status": "unconfirmed"}
-            with ThreadPoolExecutor(max_workers=min(20, len(guarded))) as pool:
-                reviewed_by_id.update(zip(guarded, pool.map(guarded_review, guarded)))
+            reviewed_by_id.update(_iter_review_round(
+                list(guarded), guarded, directory, guarded_review, dense=True,
+                on_error=lambda sid, exc: {**reviewed_by_id[sid], "guarded_review_status": "unconfirmed"}))
         reviewed = [reviewed_by_id[sid] for sid in ids if sid in reviewed_by_id]
         good = [r for r in reviewed if r["verdict"] == "matched"]
         covered = {p for r in good for p in r.get("supported_point_ids", [])}
@@ -575,7 +583,7 @@ def _assemble(manifest: dict, analysis: dict, plan: dict, *, narration_timing: d
                           "time_sensitive": any(good[p["shot_id"]]["time_sensitive"] for p in parts),
                           "observation": segment["visual_description"], "reason": row.get("reason") or good[first["shot_id"]]["reason"]}
         segment["time_sensitive"] = overall_review["time_sensitive"]
-        receipt_sentence = {**sentence, "selling_points": [p for p in sentence["selling_points"] if p["id"] in supported]}
+        receipt_sentence = sentence  # Keep requirements even in an uncertified partial preview.
         segment["ai_selection"] = contract.make_receipt(segment, index=index, sentence=receipt_sentence,
             observation=overall_review, source_identity=good[first["shot_id"]]["source_identity"], identity=plan["identity"])
         check = contract.validate_segment_receipt(segment, index=index, manifest=manifest)
@@ -773,7 +781,7 @@ def match_manifest(manifest: dict, analysis: dict, *, narration_timing: dict | N
 def _heuristic_sentence(index: int, text: str) -> dict:
     """Keep explicit clauses as separate possible points without inventing claims."""
     value = str(text or "").strip()
-    parts = [part.strip() for part in re.split(r"[，,；;]|以及|还有|并且|同时|和", value) if part.strip()]
+    parts = [part.strip() for part in re.split(r"[，,；;、]|以及|还有|并且|同时|和", value) if part.strip()]
     if len(parts) < 2 or any(len(part) < 2 for part in parts) or len(parts) > 6:
         parts = [value]
     return {
@@ -888,6 +896,45 @@ def _reindex_ai_segment(segment: dict, index: int) -> dict:
     return result
 
 
+def _observed_text_shortlist(text: str, shots: dict, *, limit: int = 12) -> list[str]:
+    """Retrieve candidates only; descriptions never certify a visual match.
+
+    Prefer rare overlapping Chinese phrases, so a specific object such as a
+    paper holder is not buried behind hundreds of generic packaging clips.
+    The caller keeps the full pool for the pixel-review fallback.
+    """
+    def terms(value: str) -> set[str]:
+        result = set()
+        for word in re.findall(r"[\u4e00-\u9fff]+|[a-z0-9]+", value.lower()):
+            if "\u4e00" <= word[0] <= "\u9fff":
+                for size in (2, 3):
+                    result.update(word[i:i + size] for i in range(len(word) - size + 1))
+            elif len(word) > 1:
+                result.add(word)
+        return result
+
+    query = terms(text)
+    if not query or limit <= 0:
+        return []
+    fields = ("description", "visual_description", "visual_tags", "action",
+              "object", "result", "action_segments", "text_reads")
+    rows = []
+    frequency = Counter()
+    for sid, shot in shots.items():
+        observed = " ".join(str(shot.get(key) or "") for key in fields)
+        words = terms(observed) & query
+        rows.append((sid, words))
+        frequency.update(words)
+    size = len(rows)
+    ranked = []
+    for sid, words in rows:
+        score = math.fsum(math.log((size + 1) / (frequency[word] + 1)) + 1 for word in words)
+        if score > 0:
+            ranked.append((sid, score))
+    ranked.sort(key=lambda row: -row[1])  # stable ties keep source order
+    return [sid for sid, _ in ranked[:limit]]
+
+
 def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[int],
                    report_dir: Path, *, narration_timing: dict | None = None) -> dict:
     """Recover only failed sentences, preserving the other selected windows.
@@ -922,8 +969,12 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
             errors.append(f"AI_REFILL_INDEX_OOB:{index}")
             continue
         sentence = _heuristic_sentence(index, timing_contract.sentence_text(original[index - 1]))
-        preferred = _rule_shortlist_ids(matched, analysis, index, limit=max(ROUND_SIZE, 16))
-        sentence["candidate_ids"] = [sid for sid in dict.fromkeys([*preferred, *shots])
+        preferred = [sid for sid in _rule_shortlist_ids(matched, analysis, index, limit=max(ROUND_SIZE, 16))
+                     if sid in shots and sid not in reserved]
+        observed = _observed_text_shortlist(sentence["text"],
+                                             {sid: shot for sid, shot in shots.items() if sid not in reserved})
+        sentence["candidate_ids"] = [sid for sid in dict.fromkeys(
+            [*preferred[:ROUND_SIZE], *observed, *preferred[ROUND_SIZE:], *shots])
                                      if sid in shots and sid not in reserved]
         audio_us, certainty = timing_contract.duration_for(narration_timing, index,
                                                           segment=original[index - 1])
@@ -931,9 +982,15 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
         try:
             if not sentence["candidate_ids"]:
                 raise ValueError(f"AI_REFILL_NO_UNIQUE_CANDIDATES:{index}")
-            reviews, coverage = _review_pool(manifest, sentence, shots, directory, narration_timing or {})
+            # An explicit QC repair must seek all points before considering a
+            # preview fallback; otherwise the first partial match ends review.
+            explicit = any(str(raw).strip() == str(index) for raw in (manifest.get("ai_refill_indices") or []))
+            review_manifest = ({**manifest, "allow_partial_selling_points": False}
+                               if explicit and len(sentence["selling_points"]) > 1 else manifest)
+            reviews, coverage = _review_pool(review_manifest, sentence, shots, directory, narration_timing or {})
             good = [r for r in reviews if r.get("verdict") == "matched"]
-            if not good or not coverage.get("feasible"):
+            partial = manifest.get("delivery_mode") == "preview" and manifest.get("allow_partial_selling_points") is True
+            if not good or (not coverage.get("feasible") and not partial):
                 raise ValueError(f"AI_REFILL_NO_MATCH:{index}")
             mini_manifest = {k: v for k, v in manifest.items() if k not in ("segments", "full_script", "script")}
             mini_manifest.update(full_script=sentence["text"], selection_mode="ai_editor")
@@ -943,11 +1000,53 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
                 timing_row = {**narration_timing["rows"][index - 1], **timing_row}
             mini_timing = {**(narration_timing or {}), "rows": [timing_row]}
             last_error = f"AI_REFILL_WINDOW_INFEASIBLE:{index}"
-            for best in sorted(good, key=lambda r: float(r.get("confidence", 0)), reverse=True):
+            from . import shot_analyzer
+            required = {p["id"] for p in sentence["selling_points"]}
+            point_order = {p["id"]: i for i, p in enumerate(sentence["selling_points"])}
+            ordered_good = sorted(good, key=lambda r: float(r.get("confidence", 0)), reverse=True)
+            # Singles stay first; multi-shot combinations are considered only
+            # when their real reviewed evidence covers the whole sentence.
+            def candidate_groups():
+                for size in range(1, min(len(ordered_good), int(manifest.get("span_max_parts", 3))) + 1):
+                    for group in combinations(ordered_good, size):
+                        covered = {p for review in group for p in review.get("supported_point_ids", [])}
+                        if required <= covered:
+                            yield group
+                if partial:
+                    yield from ((r,) for r in ordered_good if not required <= set(r.get("supported_point_ids", [])))
+            for group in candidate_groups():
+                def point_span(review):
+                    positions = [point_order[p] for p in review.get("supported_point_ids", []) if p in point_order]
+                    return (min(positions), max(positions)) if positions else (len(point_order), len(point_order))
+                group = tuple(sorted(group, key=point_span))
+                # A point first shown after a later point would reverse the
+                # spoken progression even if the union covers every claim.
+                assignment = [next((i for i, review in enumerate(group)
+                                    if point["id"] in review.get("supported_point_ids", [])), None)
+                              for point in sentence["selling_points"]]
+                present = [i for i in assignment if i is not None]
+                if present != sorted(present):
+                    continue
+                try:
+                    observed = [_observed_shot(shots[r["shot_id"]], r) for r in group]
+                    spans = tuple(shot_analyzer.span_segment_for(s, manifest=manifest,
+                        time_sensitive=r["time_sensitive"], video=s["video"], shot_id=s["shot_id"])
+                        for s, r in zip(observed, group))
+                    pad_us = round(float(manifest.get("tail_pad_s", 0) or 0) * 1e6)
+                    solution = timing_contract.solve_span(timing_contract.SpanRequest(segments=spans,
+                        audio_duration_us=audio_us, tail_pad_us=pad_us, fps=float(manifest.get("fps", 30))))
+                except (ValueError, KeyError, TypeError, OSError) as exc:
+                    last_error = str(exc)
+                    continue
+                if not solution.ok:
+                    continue
+                allocations = [int(part.segment_us) - (pad_us if i == len(group) - 1 else 0)
+                               for i, part in enumerate(solution.parts)]
                 plan = {"schema": contract.PLAN_SCHEMA, "policy_version": contract.POLICY_VERSION,
                         "sentences": [{**sentence, "index": 1}], "reviews": {"1": reviews},
-                        "display_reviews": [], "rows": [{"index": 1, "parts": [{
-                            "shot_id": best["shot_id"], "audio_duration_us": int(audio_us)}],
+                        "display_reviews": [], "rows": [{"index": 1, "parts": [
+                            {"shot_id": review["shot_id"], "audio_duration_us": duration}
+                            for review, duration in zip(group, allocations)],
                             "reason": f"rule_then_ai refill for S{index:02d}"}],
                         "identity": {"model": _editor_model(),
                                      "editorial_rules": contract.rules_identity(manifest)}, "ok": True}
@@ -960,14 +1059,14 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
                     if not checked["ok"]:
                         raise ValueError(";".join(checked["reasons"]))
                     by_index[index] = row
-                    reserved.add(str(best["shot_id"]))
+                    reserved.update(str(review["shot_id"]) for review in group)
                     replaced.append(index)
                     if row.get("uncovered_selling_points"):
                         refill_unresolved.append({"index": index, "text": sentence["text"],
                             "type": "PARTIAL_SELLING_POINTS",
                             "missing_selling_points": row["uncovered_selling_points"]})
                     _save(directory / f"refill_{index:02d}.json", {
-                        "index": index, "shot_id": best["shot_id"], "coverage": coverage})
+                        "index": index, "shot_ids": [review["shot_id"] for review in group], "coverage": coverage})
                     break
                 except (ValueError, KeyError, TypeError, OSError) as exc:
                     last_error = str(exc)

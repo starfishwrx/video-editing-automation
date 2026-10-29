@@ -86,6 +86,42 @@ class MaterialCacheTests(unittest.TestCase):
         self.assertEqual(api.call_count, 3)
         self.assertTrue(first["material_cache"]["ready"] and warm["material_cache"]["ready"])
 
+    def test_explicit_empty_evidence_rejection_is_cached_but_not_matchable(self):
+        response = json.loads(_first_pass())
+        response["shots"][0].update(description="空厨房台面，无产品或动作", visual_tags=["厨房台面"],
+                                    evidence_tags=[], action_complete=False, confidence=.95)
+        with mock.patch.object(shot_analyzer, "analyze_manifest", side_effect=self.raw), \
+                mock.patch.object(vision, "_sample_frames", return_value=[{
+                    "path": str(self.frame), "timestamp": 7.4, "suffix": "t1"}]), \
+                mock.patch.object(vision, "_orientation", return_value="portrait"), \
+                mock.patch.object(vision, "_write_sheet", return_value=True), \
+                mock.patch.object(vision, "_run_vision_with_retry", return_value=(True, json.dumps(response))) as api:
+            first = material_cache.analyze_product(self.manifest, self.root, self.root / "a")
+            warm = material_cache.analyze_product(self.manifest, self.root, self.root / "b")
+        self.assertEqual(api.call_count, 1)
+        self.assertTrue(first["material_cache"]["ready"] and warm["material_cache"]["ready"])
+        for result in (first, warm):
+            shot = result["shots"][0]
+            self.assertEqual(shot["evidence_tags"], [])
+            self.assertFalse(shot["action_complete"])
+            self.assertEqual(shot["status"], "pending_analysis")
+            self.assertTrue(vision._reusable_visual_observation(shot))
+
+    def test_empty_evidence_does_not_certify_missing_or_positive_action(self):
+        for action in (True, None):
+            with self.subTest(action=action), mock.patch.dict(os.environ, {"JY_VISION_CACHE_DIR": str(self.root / str(action))}):
+                response = json.loads(_first_pass())
+                response["shots"][0].update(evidence_tags=[], action_complete=action)
+                with mock.patch.object(vision, "_sample_frames", return_value=[{
+                        "path": str(self.frame), "timestamp": 7.4, "suffix": "t1"}]), \
+                        mock.patch.object(vision, "_orientation", return_value="portrait"), \
+                        mock.patch.object(vision, "_write_sheet", return_value=True), \
+                        mock.patch.object(vision, "_run_vision_with_retry", return_value=(True, json.dumps(response))):
+                    result = vision.enrich_with_vision(self.manifest, self.analysis(), self.root / str(action), profile="volc")
+                shot = result["shots"][0]
+                self.assertEqual(shot["status"], "pending_analysis")
+                self.assertFalse(vision._reusable_visual_observation(shot))
+
     def analysis(self):
         return {"shots": [{"shot_id": SHOT_ID, "video": str(self.video), "source_start": 0,
             "source_end": 9.4, "frame_path": str(self.frame), "frame_paths": [str(self.frame)],

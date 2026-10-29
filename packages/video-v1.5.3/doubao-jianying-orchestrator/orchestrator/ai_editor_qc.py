@@ -8,6 +8,24 @@ RESPONSE_VERSION = "chatcut-visual-qc-response-v4"
 REPORT_VERSION = "chatcut-visual-qc-v4"
 
 
+def source_matches_receipt(actual_path: str, expected: dict) -> bool:
+    """Accept a staged copy only after proving byte identity and stable stats."""
+    try:
+        actual_before = contract.source_identity(actual_path)
+        if actual_before == expected:
+            return True
+        if not isinstance(expected, dict) or actual_before["size"] != expected.get("size"):
+            return False
+        original_path = expected.get("path")
+        if not original_path or contract.source_identity(original_path) != expected:
+            return False
+        same = contract.file_sha256(actual_path) == contract.file_sha256(original_path)
+        return (same and contract.source_identity(actual_path) == actual_before
+                and contract.source_identity(original_path) == expected)
+    except (OSError, TypeError, ValueError, KeyError):
+        return False
+
+
 def prompt(claims: list[dict], frame_count: int) -> str:
     # Purpose is an instruction to inspect, never the selector's pass verdict.
     mapping = "\n".join(f"S{i:02d}: 商品={c.get('product', '')}；口播={c['claim']}；建议用途={c.get('sentence_kind', '')}；物理片段数={c.get('slots', 1)}"
@@ -45,7 +63,7 @@ def validate_cut(claim: dict, rows: list[dict]) -> list[str]:
         return issues + ["AI_QC_PART_COUNT_CHANGED"]
     for part, actual in zip(expected, rows):
         receipt = part.get("ai_selection") or {}
-        if contract.source_identity(actual["source"]) != receipt.get("source_identity"):
+        if not source_matches_receipt(actual["source"], receipt.get("source_identity")):
             issues.append("AI_QC_SOURCE_CONTENT_CHANGED")
         start = round(actual["source_start"] * 1e6)
         end = round((actual["source_start"] + actual["source_duration"]) * 1e6)

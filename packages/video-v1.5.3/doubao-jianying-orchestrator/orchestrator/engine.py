@@ -15,6 +15,7 @@ import subprocess
 import time
 import contextlib
 import threading
+import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -2399,63 +2400,65 @@ class OrchestrationEngine:
         return overrides
 
     def _stage(self, source: Path, media_dir: Path) -> str:
+        """Copy once into self-contained draft media, never link mutable inputs."""
+        from .file_safety import atomic_write_text
         media_dir.mkdir(parents=True, exist_ok=True)
         source = Path(source).resolve()
-        dst = media_dir / source.name
-        # Avoid cross-directory same-name collisions while keeping repeat runs stable.
-        try:
-            st = source.stat()
-            source_identity = f"{source}|{st.st_size}|{st.st_mtime_ns}"
-        except OSError:
-            source_identity = str(source)
-        source_hash = hashlib.sha256(source_identity.encode()).hexdigest()
-        marker = dst.with_name(dst.name + ".source.sha256")
-        if dst.exists() and marker.exists():
+        before = self._file_signature(source)
+        admitted = getattr(self, "_admitted_source_stats", {}).get(str(source))
+        if admitted is not None and admitted != before:
+            raise ValueError("MATERIAL_SOURCE_CHANGED_AFTER_ADMISSION")
+        source_hash = hashlib.sha256(f"{source}|{before[0]}|{before[1]}".encode()).hexdigest()
+        dst = media_dir / f"{source.stem}_{source_hash[:16]}{source.suffix}"
+        marker = dst.with_name(dst.name + ".stage.json")
+        def reusable():
             try:
-                if marker.read_text(encoding="utf-8") == source_hash:
-                    return str(dst)
-            except OSError:
-                pass
-            dst = media_dir / f"{source.stem}_{source_hash[:8]}{source.suffix}"
-            marker = dst.with_name(dst.name + ".source.sha256")
-        # A same-sized source may still have changed; marker mismatch forces refresh.
-        if not dst.exists() or not marker.exists() or marker.read_text(encoding="utf-8") != source_hash:
-            shutil.copy2(source, dst)
+                saved = json.loads(marker.read_text(encoding="utf-8"))
+                return (dst.is_file() and dst.stat().st_size == before[0]
+                        and saved.get("source") == source_hash
+                        and saved.get("destination_stat") == list(self._file_signature(dst)))
+            except (OSError, ValueError, AttributeError):
+                return False
+        if reusable():
+            return str(dst)
+        fd, temporary = tempfile.mkstemp(prefix=".stage-", suffix=source.suffix, dir=media_dir)
+        os.close(fd)
+        temporary = Path(temporary)
         try:
-            marker.write_text(source_hash, encoding="utf-8")
-        except OSError:
-            pass
+            shutil.copy2(source, temporary)
+            if self._file_signature(source) != before or temporary.stat().st_size != before[0]:
+                raise ValueError("MATERIAL_SOURCE_CHANGED_DURING_STAGING")
+            os.replace(temporary, dst)
+            atomic_write_text(marker, json.dumps({"source": source_hash,
+                "destination_stat": list(self._file_signature(dst))}))
+        finally:
+            temporary.unlink(missing_ok=True)
         return str(dst)
 
     def _upload_videos_and_check_capacity(self, clips: list[Clip]) -> Optional[dict]:
-        """Copy the actual video inputs first, then apply the host limit.
+        """Admit original inputs before the only copy, into portable draft media.
 
-        The upload session lives under the task report directory, so an
-        over-limit submission never creates a JianYing draft and never starts
-        TTS.  Only unique video sources are counted.
+        Keep the historical method name for recover callers. The stat snapshot
+        is rechecked during staging; no report/uploads copy or hardlink is made.
         """
-        upload_dir = self.report_dir / "uploads" / "videos"
-        upload_dir.mkdir(parents=True, exist_ok=True)
         unique = list(dict.fromkeys(str(Path(c.video).resolve()) for c in clips))
-        copied: dict[str, str] = {}
         started = time.perf_counter()
-        for source in unique:
-            copied[source] = self._stage(Path(source), upload_dir)
-        self._uploaded_videos = copied
-        detail = capacity.summarize_sources([Path(p) for p in copied.values()])
-        detail["upload_elapsed_s"] = round(time.perf_counter() - started, 3)
-        detail["upload_dir"] = str(upload_dir)
+        self._admitted_source_stats = {source: self._file_signature(Path(source)) for source in unique}
+        self._uploaded_videos = {source: source for source in unique}
+        detail = capacity.summarize_sources([Path(p) for p in unique])
+        detail["admission_elapsed_s"] = round(time.perf_counter() - started, 3)
+        detail["staging_mode"] = "copy_once_at_draft_write"
+        detail["intermediate_copy_bytes"] = 0
         if not self.capacity_guard:
             self._event("capacity_admission_bypassed", reason="calibration_only", sources=detail)
             return None
         blocker, _ = capacity.admission_result(
-            [Path(p) for p in copied.values()], storage_path=self._drafts_root)
-        self._event("capacity_admission", **detail, blocked=bool(blocker), check_stage="after_upload")
+            [Path(p) for p in unique], storage_path=self._drafts_root)
+        self._event("capacity_admission", **detail, blocked=bool(blocker), check_stage="before_staging")
         if blocker:
             limit = blocker.get("safe_source_limit")
             if limit:
                 blocker["message"] = f"上传数量单次只支持最多传 {limit} 条，请重新调整后再试～"
-            blocker["uploaded_dir"] = str(upload_dir)
             return blocker
         return None
 
@@ -2724,10 +2727,13 @@ class OrchestrationEngine:
         if not draft_dir.is_dir():
             return {"status": "DRAFT_NOT_CREATED", "draft_path": str(draft_dir),
                     "reason": "保存后未在剪映当前草稿库发现新草稿目录。"}
-        if self.m.get("selection_mode") == "ai_editor":
+        if (self.m.get("selection_mode") == "ai_editor"
+                or (self.m.get("selection_mode") == "rule_then_ai"
+                    and any(isinstance(seg, dict) and seg.get("selection_mode") == "ai_editor"
+                            for seg in self.m.get("segments") or []))):
             from . import ai_editor_contract
             (draft_dir / "ai_selection_identity.json").write_text(json.dumps({
-                "schema": "chatcut-ai-draft-v1", "selection_mode": "ai_editor",
+                "schema": "chatcut-ai-draft-v1", "selection_mode": self.m.get("selection_mode"),
                 "selection_sha256": ai_editor_contract.digest(self.m.get("segments", [])),
                 "policy_version": ai_editor_contract.POLICY_VERSION,
                 "editorial_rules": ai_editor_contract.rules_identity(self.m),

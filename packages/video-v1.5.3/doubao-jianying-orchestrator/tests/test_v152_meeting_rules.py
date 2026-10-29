@@ -309,6 +309,20 @@ class SplitSpeedTests(unittest.TestCase):
         self.assertGreater(parts[0]["speed"], 1.0)
         self.assertLessEqual(parts[0]["speed"], 1.6 + 1e-6)
 
+    def test_optional_demo_speed_limit_does_not_accelerate_long_absorption_to_fit(self):
+        shot = {**SHOT, "source_start": 0.0, "source_end": 40.0, "material_duration_us": 40 * US}
+        phases = {"pour": [3.141, 7.249], "absorb": [7.251, 39.203]}
+        before = scene_rules.plan_split(shot, phases, self.SCENE, audio_us=4_570_000, manifest=MANIFEST)
+        limited = scene_rules.plan_split(shot, phases, self.SCENE, audio_us=4_570_000,
+                                         manifest={**MANIFEST, "max_absorb_demo_speed": 2.0})
+        self.assertTrue(before["ok"], before)
+        self.assertGreater(max(p["speed"] for p in before["parts"]), 2.0)
+        self.assertFalse(limited["ok"])
+        self.assertEqual(limited["reason"], scene_rules.SCENE_ACTION_TOO_LONG)
+        invalid = scene_rules.plan_split(shot, phases, self.SCENE, audio_us=4_570_000,
+                                         manifest={**MANIFEST, "max_absorb_demo_speed": "nan"})
+        self.assertEqual(invalid["reason"], "SCENE_SPEED_LIMIT_INVALID")
+
     def test_short_sentence_uses_pour_burst_instead_of_failing(self):
         # 约 4.7s 口播 + 只有倒水/吸收（无擦拭）：常规倒水 1.6× 不够，提到 burst 4× 仍用真实验。
         shot = {**SHOT, "source_start": 0.0, "source_end": 70.0, "material_duration_us": 70 * US}
@@ -341,6 +355,60 @@ class SceneApplyTests(unittest.TestCase):
                "evidence_intervals": [{"start": 19.0, "end": 21.0}]}
         return {"ok": True, "manifest": {"segments": [seg]},
                 "recommendations": [{"index": 1, "top3": top3 or []}]}
+
+    def test_unmet_group_keeps_only_explicitly_related_preview_shots(self):
+        scene = SplitSpeedTests.SCENE
+        related = {**SHOT, "shot_id": "related", "status": "ready_for_matching", "action_complete": True}
+        unrelated = {**related, "shot_id": "unrelated", "video": "other.mp4"}
+        segments = [{"text": "吸收", "video": row["video"], "temporary_shot_id": row["shot_id"],
+                     "window_solution": {"ok": True}, "audio_duration_us": US}
+                    for row in (related, unrelated)]
+        manifest = {**MANIFEST, "category": "卫品", "retain_related_on_unmet_scene": True}
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(scene_rules, "_group_candidates", return_value=[(related, "selected")]), \
+                mock.patch.object(scene_rules, "_plan_group", return_value={"ok": False, "reason": scene_rules.SCENE_ACTION_TOO_LONG}), \
+                mock.patch("orchestrator.demo_actions.shot_fit", side_effect=[1, 0]), \
+                mock.patch("orchestrator.demo_actions.contradiction", return_value=""):
+            report = scene_rules._apply_group({"scene": scene, "positions": [0, 1]}, segments,
+                recs={}, shots_by_id={s["shot_id"]: s for s in (related, unrelated)}, used=set(),
+                manifest=manifest, report_dir=Path(tmp), locate=mock.Mock(), preview=True)
+        self.assertEqual(report["retained_related_indices"], [1])
+        self.assertEqual(segments[0]["temporary_shot_id"], "related")
+        self.assertTrue(segments[0]["scene_preview_unresolved"])
+        self.assertEqual(segments[0]["scene_rule"]["status"], "unmet")
+        self.assertTrue(segments[1]["visual_missing"])
+
+    def test_formal_does_not_retain_unverified_related_shot(self):
+        related = {**SHOT, "shot_id": "related", "status": "ready_for_matching", "action_complete": True}
+        seg = {"text": "吸收", "video": related["video"], "temporary_shot_id": "related",
+               "window_solution": {"ok": True}, "audio_duration_us": US}
+        manifest = {**MANIFEST, "category": "卫品", "retain_related_on_unmet_scene": True}
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(scene_rules, "_group_candidates", return_value=[(related, "selected")]), \
+                mock.patch.object(scene_rules, "_plan_group", return_value={"ok": False, "reason": scene_rules.SCENE_ACTION_TOO_LONG}), \
+                mock.patch("orchestrator.demo_actions.shot_fit", return_value=1), \
+                mock.patch("orchestrator.demo_actions.contradiction", return_value=""):
+            report = scene_rules._apply_group({"scene": SplitSpeedTests.SCENE, "positions": [0]}, [seg],
+                recs={}, shots_by_id={"related": related}, used=set(), manifest=manifest,
+                report_dir=Path(tmp), locate=mock.Mock(), preview=False)
+        self.assertNotIn(1, report.get("retained_related_indices", []))
+        self.assertFalse(seg.get("scene_preview_unresolved"))
+        self.assertEqual(report["status"], "unmet")
+
+    def test_functional_scene_swap_cannot_bypass_action_verification(self):
+        rules = rulepack.load("zhipin")
+        scene = next(s for s in rules["scenes"] if s.get("id") == "usage_action")
+        shot = {**SHOT, "description": "手持纸巾静态展示", "action_segments": []}
+        seg = {"text": "随便揉搓不掉絮", "audio_duration_us": US}
+        from orchestrator import demo_actions
+        contract = demo_actions.sentence_contract(seg["text"], category="纸品")
+        locate = mock.Mock(return_value={"ok": False, "reason": "PHASE_INCOMPLETE"})
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(scene_rules, "_plain_swap") as plain:
+            result = scene_rules._plan_for(scene, seg, shot, swapped=True, manifest=MANIFEST,
+                                           report_dir=Path(tmp), locate=locate, contract=contract)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], scene_rules.SCENE_PHASE_UNVERIFIED)
+        plain.assert_not_called()
 
     def test_absorb_split_applied(self):
         manifest = {**MANIFEST, "product": "萌睡裤", "delivery_mode": "preview"}

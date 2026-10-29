@@ -209,7 +209,10 @@ def _load_image(path: Path, width: int, height: int):
     """Load/resize a frame with OpenCV, falling back to Pillow."""
     try:
         import cv2  # type: ignore
-        image = cv2.imread(str(path))
+        import numpy as np  # type: ignore
+        # OpenCV's path APIs on Windows do not reliably support Unicode.
+        # Python opens the path; OpenCV only receives the encoded bytes.
+        image = cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_COLOR)
         if image is None:
             return None
         return cv2.resize(image, (width, height), interpolation=cv2.INTER_AREA)
@@ -327,7 +330,10 @@ def _write_sheet(items: list[dict[str, Any]], output: Path, *, columns: int = 4,
         row, col = divmod(index, columns)
         x, y = col * tile_width, row * tile_height
         if fit:
-            raw = cv2.imread(str(item["path"]))
+            try:
+                raw = cv2.imdecode(np.fromfile(item["path"], dtype=np.uint8), cv2.IMREAD_COLOR)
+            except (OSError, ValueError, cv2.error):
+                raw = None
             image = None
             if raw is not None:
                 w, h = _fit_size(raw.shape[1], raw.shape[0], tile_width, tile_height - 34)
@@ -350,7 +356,14 @@ def _write_sheet(items: list[dict[str, Any]], output: Path, *, columns: int = 4,
                     cv2.FONT_HERSHEY_SIMPLEX, font_size / 30 if font_size else 0.43,
                     (255, 255, 255), 2 if font_size else 1, cv2.LINE_AA)
     output.parent.mkdir(parents=True, exist_ok=True)
-    return bool(cv2.imwrite(str(output), canvas))
+    try:
+        ok, encoded = cv2.imencode(output.suffix or ".jpg", canvas)
+        if not ok:
+            return False
+        output.write_bytes(encoded.tobytes())
+        return output.is_file() and output.stat().st_size > 0
+    except (OSError, ValueError, cv2.error):
+        return False
 
 
 # The loop needs a shell to manufacture new images to look at, so removing
@@ -872,7 +885,8 @@ def _reusable_visual_observation(row: dict[str, Any]) -> bool:
             and row.get("action_complete") is False
             and row.get("status") == "pending_analysis"
             and bool(row.get("description"))
-            and bool(row.get("visual_tags")) and bool(row.get("evidence_tags"))
+            and bool(row.get("visual_tags"))
+            and (bool(row.get("evidence_tags")) or row.get("evidence_tags") == [])
             and _number(row.get("analysis_confidence")) > 0)
 
 
@@ -2114,7 +2128,11 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
                 evidence_tags = _as_list(raw.get("evidence_tags"))
                 action_complete = raw.get("action_complete") is True
                 confidence = max(0.0, min(1.0, _number(raw.get("confidence"), 0.0)))
-                if not description or not visual_tags or not evidence_tags or confidence <= 0:
+                # A model can explicitly reject an empty scene with no visible
+                # selling point. Preserve that observation as unusable instead
+                # of repeatedly treating the absence of evidence as an error.
+                empty_rejection = raw.get("action_complete") is False and raw.get("evidence_tags") == []
+                if not description or not visual_tags or (not evidence_tags and not empty_rejection) or confidence <= 0:
                     row["status"] = "pending_analysis"
                     row["analysis_error"] = "vision response lacks auditable description/tags/confidence"
                     continue
@@ -2159,7 +2177,7 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
                     frame = frame or next(iter(frames), None)
                 row["evidence_intervals"], from_model = _primary_interval(
                     raw, row, frames, frame, evidence=bool(evidence_tags))
-                if (not action_complete and from_model and _certified_segment(row)
+                if (not action_complete and evidence_tags and from_model and _certified_segment(row)
                         and row.get("has_subject") is not False
                         and row.get("evidence_strength") in ("A", "B")):
                     # 模型整条判未完成，但审核帧落在一段写明了结果的动作里；
