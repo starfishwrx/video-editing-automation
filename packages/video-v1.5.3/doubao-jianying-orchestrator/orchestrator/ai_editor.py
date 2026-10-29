@@ -446,27 +446,30 @@ def _review_pool(manifest: dict, sentence: dict, shots: dict, directory: Path, a
                     intervals = previous["evidence_intervals_us"]
                     lo_us = min(ev["start"] for ev in intervals)
                     hi_us = max(ev["end"] for ev in intervals)
-                    start_us = (lo_us + hi_us - target_us) // 2
-                    end_us = start_us + target_us
-                    compact_shot = {**shots[sid], "source_start": start_us / 1e6,
-                                    "source_end": end_us / 1e6, "_compact_probe": True}
-                    try:
-                        refined = _review(manifest, sentence, compact_shot, directory, dense=True)
-                        refined_intervals = refined.get("evidence_intervals_us") or []
-                        inside = bool(refined_intervals) and all(
-                            type(ev.get("start")) is int and type(ev.get("end")) is int
-                            and start_us <= ev["start"] < ev["end"] <= end_us
-                            for ev in refined_intervals if isinstance(ev, dict))
-                        inside = inside and all(isinstance(ev, dict) for ev in refined_intervals)
-                        if (refined.get("verdict") == "matched" and refined.get("same_product") is True
-                                and refined.get("shot_id") == sid and inside
-                                and refined.get("source_identity") == previous.get("source_identity")
-                                and set(previous.get("supported_point_ids", [])) <= set(refined.get("supported_point_ids", []))
-                                and set(previous.get("scene_ids", [])) <= set(refined.get("scene_ids", []))
-                                and previous.get("time_sensitive") == refined.get("time_sensitive")):
-                            reviewed_by_id[sid] = {**refined, "compact_review_status": "confirmed"}
-                    except (ValueError, OSError, TypeError, KeyError):
-                        pass
+                    # Probe bounded, distinct windows; each needs a fresh review.
+                    starts = dict.fromkeys(((lo_us + hi_us - target_us) // 2, lo_us, hi_us - target_us))
+                    for start_us in starts:
+                        end_us = start_us + target_us
+                        compact_shot = {**shots[sid], "source_start": start_us / 1e6,
+                                        "source_end": end_us / 1e6, "_compact_probe": True}
+                        try:
+                            refined = _review(manifest, sentence, compact_shot, directory, dense=True)
+                            refined_intervals = refined.get("evidence_intervals_us") or []
+                            inside = bool(refined_intervals) and all(
+                                type(ev.get("start")) is int and type(ev.get("end")) is int
+                                and start_us <= ev["start"] < ev["end"] <= end_us
+                                for ev in refined_intervals if isinstance(ev, dict))
+                            inside = inside and all(isinstance(ev, dict) for ev in refined_intervals)
+                            if (refined.get("verdict") == "matched" and refined.get("same_product") is True
+                                    and refined.get("shot_id") == sid and inside
+                                    and refined.get("source_identity") == previous.get("source_identity")
+                                    and set(previous.get("supported_point_ids", [])) <= set(refined.get("supported_point_ids", []))
+                                    and set(previous.get("scene_ids", [])) <= set(refined.get("scene_ids", []))
+                                    and previous.get("time_sensitive") == refined.get("time_sensitive")):
+                                reviewed_by_id[sid] = {**refined, "compact_review_status": "confirmed"}
+                                break
+                        except (ValueError, OSError, TypeError, KeyError):
+                            pass
                     break
         reviewed = [reviewed_by_id[sid] for sid in ids if sid in reviewed_by_id]
         good = [r for r in reviewed if r["verdict"] == "matched"]
@@ -1034,8 +1037,10 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
                      if sid in shots and sid not in reserved]
         observed = _observed_text_shortlist(sentence["text"],
                                              {sid: shot for sid, shot in shots.items() if sid not in reserved})
+        # Both retrieval signals reach the first round; all candidates still need review.
+        first = [sid for pair in zip(preferred[:ROUND_SIZE], observed[:ROUND_SIZE]) for sid in pair]
         sentence["candidate_ids"] = [sid for sid in dict.fromkeys(
-            [*preferred[:ROUND_SIZE], *observed, *preferred[ROUND_SIZE:], *shots])
+            [*first, *preferred, *observed, *shots])
                                      if sid in shots and sid not in reserved]
         audio_us, certainty = timing_contract.duration_for(narration_timing, index,
                                                           segment=original[index - 1])
@@ -1130,7 +1135,19 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
             from . import shot_analyzer
             required = {p["id"] for p in sentence["selling_points"]}
             point_order = {p["id"]: i for i, p in enumerate(sentence["selling_points"])}
-            ordered_good = sorted(good, key=lambda r: float(r.get("confidence", 0)), reverse=True)
+            def reviewed_candidate_rank(review):
+                # Within the same fully reviewed claim coverage, let a feasible
+                # natural-speed option precede a higher-confidence fast one.
+                try:
+                    shot = _observed_shot(shots[review["shot_id"]], review)
+                    solution = shot_analyzer.candidate_window(
+                        shot, audio_duration_us=audio_us, manifest=manifest,
+                        time_sensitive=review["time_sensitive"])
+                    natural = solution.ok and solution.speed <= 2.0
+                except (ValueError, KeyError, TypeError, OSError):
+                    natural = False
+                return (not natural, -float(review.get("confidence", 0)))
+            ordered_good = sorted(good, key=reviewed_candidate_rank)
             # Singles stay first; multi-shot combinations are considered only
             # when their real reviewed evidence covers the whole sentence.
             def candidate_groups():

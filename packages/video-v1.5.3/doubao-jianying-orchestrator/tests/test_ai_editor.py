@@ -133,6 +133,25 @@ class AIEditorTests(unittest.TestCase):
         self.assertEqual(row["ai_selection"]["index"], 2)
         self.assertTrue(contract.validate_segment_receipt(row, index=2, verify_source=True, manifest=manifest)["ok"])
 
+    def test_refill_prefers_reviewed_natural_speed_when_claim_coverage_matches(self):
+        manifest = {**self.manifest, "selection_mode": "rule_then_ai",
+                    "segments": [{"text": self.sentence["text"], "audio_duration_us": 1_000_000}]}
+        second = self.root / "natural.mp4"
+        second.write_bytes(b"natural source identity")
+        fast = {**self.shot, "shot_id": "fast", "source_end": 12, "duration": 12, "material_duration_us": 12_000_000}
+        natural = {**self.shot, "shot_id": "natural", "video": str(second)}
+        fast_review = {**self.review, "shot_id": "fast", "confidence": .99,
+                       "evidence_intervals_us": [{"start": 1_000_000, "end": 9_000_000}]}
+        natural_review = {**self.review, "shot_id": "natural", "confidence": .85,
+                          "source_identity": contract.source_identity(second),
+                          "evidence_intervals_us": [{"start": 2_000_000, "end": 2_800_000}]}
+        matched = {"segments": [{"index": 1, "text": self.sentence["text"]}], "pending_items": []}
+        with mock.patch.object(editor, "_review_pool", return_value=([fast_review, natural_review], {"feasible": True})):
+            result = editor.refill_indices(manifest, {"shots": [fast, natural]}, matched, [1], self.root)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["segments"][0]["shot_id"], "natural")
+        self.assertLessEqual(result["segments"][0]["video_speed"], 2)
+
     def test_refill_preserves_repeated_sentences_and_rejects_duplicate_identity(self):
         manifest = {**self.manifest, "selection_mode": "rule_then_ai", "segments": [
             {"text": "囤纸了，", "audio_duration_us": 1_000_000},
@@ -237,7 +256,8 @@ class AIEditorTests(unittest.TestCase):
         with mock.patch.object(editor, "_review_pool", return_value=([], {"feasible": False})) as review:
             result = editor.refill_indices(manifest, {"shots": generic + [holder]}, matched, [1], self.root)
         order = review.call_args.args[1]["candidate_ids"]
-        self.assertEqual(order[:editor.ROUND_SIZE], [f"generic-{i}" for i in range(editor.ROUND_SIZE)])
+        self.assertIn("holder", order[:editor.ROUND_SIZE])
+        self.assertEqual(order[0], "generic-0")
         self.assertLess(order.index("holder"), order.index("generic-8"))
         self.assertEqual(set(order), {s["shot_id"] for s in generic + [holder]})
         self.assertFalse(result["ok"])
@@ -537,6 +557,25 @@ class AIEditorTests(unittest.TestCase):
                 rows, _ = editor._review_pool(self.manifest, sentence, {"handfeel": self.shot}, self.root, {})
                 self.assertEqual(rows[0]["evidence_intervals_us"], broad["evidence_intervals_us"])
                 self.assertNotIn("compact_review_status", rows[0])
+
+    def test_compact_probe_checks_edge_when_center_misses_action(self):
+        sentence = {**self.sentence, "audio_durations_us": [1_000_000]}
+        broad = {**self.review, "scene_ids": [], "dense_required": False,
+                 "evidence_intervals_us": [{"start": 1_000_000, "end": 5_000_000}]}
+        calls = []
+        def review(_m, _s, shot, _d, *, dense=False):
+            if not shot.get("_compact_probe"):
+                return broad
+            calls.append((shot["source_start"], shot["source_end"]))
+            if shot["source_start"] == 1.0:
+                return {**broad, "evidence_intervals_us": [{"start": 1_200_000, "end": 2_300_000}]}
+            return {**broad, "verdict": "mismatch"}
+        with mock.patch.object(editor, "_review", side_effect=review):
+            rows, coverage = editor._review_pool(self.manifest, sentence, {"handfeel": self.shot}, self.root, {})
+        self.assertEqual(calls, [(2.0, 4.0), (1.0, 3.0)])
+        self.assertEqual(rows[0]["compact_review_status"], "confirmed")
+        self.assertEqual(rows[0]["evidence_intervals_us"], [{"start": 1_200_000, "end": 2_300_000}])
+        self.assertTrue(coverage["feasible"])
 
     def test_one_feasible_candidate_gets_one_more_round_for_editorial_choice(self):
         ids = [f"candidate{i}" for i in range(24)]
