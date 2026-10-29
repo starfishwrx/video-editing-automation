@@ -29,7 +29,7 @@ def response(rows=None, **changes):
 
 class VisualQcResponseContractTests(unittest.TestCase):
     def run_main(self, responses, *, claims=1, batch_size=4, write_sheet=None, passes=1,
-                 claim_text="揉搓也不掉絮"):
+                 claim_text="揉搓也不掉絮", speed=1):
         with tempfile.TemporaryDirectory(prefix="visual-qc-contract-") as raw:
             root = Path(raw)
             draft, report = root / "draft", root / "report"
@@ -40,7 +40,7 @@ class VisualQcResponseContractTests(unittest.TestCase):
                 media = root / f"synthetic-{index}.mp4"
                 media.touch()
                 materials.append({"id": str(index), "path": str(media)})
-                segments.append({"material_id": str(index),
+                segments.append({"material_id": str(index), "speed": speed,
                                  "source_timerange": {"start": 2_000_000, "duration": 4_000_000},
                                  "target_timerange": {"start": index * 4_000_000, "duration": 4_000_000}})
             (draft / "draft_info.json").write_text(json.dumps({"duration": claims * 4_000_000,
@@ -81,6 +81,16 @@ class VisualQcResponseContractTests(unittest.TestCase):
         self.assertEqual(result["response_contract"]["status"], "VALIDATED")
         self.assertIn(contract.RESPONSE_VERSION, calls[0].args[2])
         self.assertIn("不得重复", calls[0].args[2])
+
+    def test_high_playback_speed_is_reported_separately_from_visual_match(self):
+        result, code, _, _ = self.run_main([response()], speed=9.68)
+        self.assertEqual((result["status"], code), ("PASS", 0))
+        self.assertEqual(result["timeline"]["fast_segments_for_playback_review"],
+                         [{"draft_segment": 1, "speed": 9.68}])
+        self.assertIn("PLAYBACK_SPEED_REVIEW:segment_1=9.68x", result["warnings"])
+        result, _, _, _ = self.run_main([response()], speed=3)
+        self.assertEqual(result["timeline"]["fast_segments_for_playback_review"], [])
+        self.assertFalse(any(x.startswith("PLAYBACK_SPEED_REVIEW:") for x in result["warnings"]))
 
     def test_partial_success_resumes_only_missing_qc_batch(self):
         attempts = {}

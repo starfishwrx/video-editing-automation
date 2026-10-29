@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import pathlib
 import re
@@ -541,6 +542,17 @@ def main() -> int:
             "distinct_materials": len({r["material_id"] for r in active_rows}),
             "intentional_visual_gaps": intentional_gaps,
         }
+        # An advisory is based on the final timeline, never on the planned cut.
+        # Three times normal speed is a review threshold, not a pass/fail rule.
+        fast_segments = []
+        for row in active_rows:
+            speed = row["segment"].get("speed")
+            if isinstance(speed, (int, float)) and not isinstance(speed, bool) and math.isfinite(speed) and speed > 3:
+                fast_segments.append({"draft_segment": row["index"], "speed": speed})
+        result["timeline"]["fast_segments_for_playback_review"] = fast_segments
+        if fast_segments:
+            result["warnings"].append("PLAYBACK_SPEED_REVIEW:" + ",".join(
+                f"segment_{item['draft_segment']}={item['speed']:.2f}x" for item in fast_segments))
         expected_rows = sum(claim["slots"] for claim in active_claims)
         result["timeline"]["expected_active_video_segments"] = expected_rows
         if not claims:
