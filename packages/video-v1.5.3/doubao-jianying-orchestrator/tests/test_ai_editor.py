@@ -133,6 +133,25 @@ class AIEditorTests(unittest.TestCase):
         self.assertEqual(row["ai_selection"]["index"], 2)
         self.assertTrue(contract.validate_segment_receipt(row, index=2, verify_source=True, manifest=manifest)["ok"])
 
+    def test_refill_preserves_repeated_sentences_and_rejects_duplicate_identity(self):
+        manifest = {**self.manifest, "selection_mode": "rule_then_ai", "segments": [
+            {"text": "囤纸了，", "audio_duration_us": 1_000_000},
+            {"text": "囤纸了，", "audio_duration_us": 1_000_000}, self.manifest["segments"][0]]}
+        first = {"index": 1, "text": "囤纸了，", "temporary_shot_id": "first", "video": "first.mp4"}
+        second = {"index": 2, "text": "囤纸了，", "temporary_shot_id": "second", "video": "second.mp4"}
+        matched = {"segments": [first, second, {"index": 3, "text": self.sentence["text"]}], "pending_items": []}
+        with mock.patch.object(editor, "_review_pool", return_value=([self.review], {"feasible": True})):
+            result = editor.refill_indices(manifest, {"shots": [self.shot]}, matched, [3], self.root)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["segments"][:2], [first, second])
+        self.assertEqual(result["segments"][2]["ai_selection"]["index"], 3)
+        broken = {**matched, "segments": [first, {**second, "index": 1}, matched["segments"][2]]}
+        with mock.patch.object(editor, "_review_pool", side_effect=AssertionError("must not review ambiguous input")):
+            result = editor.refill_indices(manifest, {"shots": [self.shot]}, broken, [3], self.root)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["refill_errors"], ["AI_REFILL_SEGMENT_INDEX_DUPLICATE:1"])
+        self.assertEqual(result["segments"], broken["segments"])
+
     def test_refill_combines_reviewed_claims_without_losing_timing_or_evidence(self):
         text = "擦油污、擦水渍都好用，湿水不容易破。"
         manifest = {**self.manifest, "selection_mode": "rule_then_ai", "delivery_mode": "preview",

@@ -991,13 +991,34 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
              and s.get("shot_id") and s.get("text_pass") not in ("pending", "failed")}
     directory = report_dir / "ai_editor_refill"
     directory.mkdir(parents=True, exist_ok=True)
-    script_indices = {"".join(timing_contract.sentence_text(s).split()): i
-                      for i, s in enumerate(original, 1)}
+    # Repeated sentences are distinct timeline positions. Prefer a validated
+    # explicit index, then the original position; text alone is safe only when
+    # it occurs exactly once. Never let a dictionary overwrite another clip.
+    script_texts = ["".join(timing_contract.sentence_text(s).split()) for s in original]
+    script_indices = {}
+    for i, text in enumerate(script_texts, 1):
+        script_indices.setdefault(text, []).append(i)
     by_index = {}
     for enum_i, segment in enumerate(matched.get("segments", []), 1):
         row = copy.deepcopy(segment)
-        index = script_indices.get("".join(str(row.get("text") or row.get("claim") or "").split()))
-        index = index or int(row.get("index") or enum_i)
+        text = "".join(str(row.get("text") or row.get("claim") or "").split())
+        explicit = row.get("index")
+        if type(explicit) is int and 1 <= explicit <= len(original) and script_texts[explicit - 1] == text:
+            index = explicit
+        elif 1 <= enum_i <= len(original) and script_texts[enum_i - 1] == text:
+            index = enum_i
+        elif len(script_indices.get(text, [])) == 1:
+            index = script_indices[text][0]
+        else:
+            reason = f"AI_REFILL_SEGMENT_IDENTITY_AMBIGUOUS:{enum_i}"
+            return {**matched, "ok": False, "refill_indices": wanted, "refill_replaced": [],
+                    "refill_errors": [reason], "pending_items": [*(matched.get("pending_items") or []),
+                        {"type": "AI_EDITOR_UNCERTIFIED", "message": reason}]}
+        if index in by_index:
+            reason = f"AI_REFILL_SEGMENT_INDEX_DUPLICATE:{index}"
+            return {**matched, "ok": False, "refill_indices": wanted, "refill_replaced": [],
+                    "refill_errors": [reason], "pending_items": [*(matched.get("pending_items") or []),
+                        {"type": "AI_EDITOR_UNCERTIFIED", "message": reason}]}
         row["index"] = index
         by_index[index] = row
     reserved = {str(part.get("shot_id") or part.get("temporary_shot_id"))
