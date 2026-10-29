@@ -245,7 +245,10 @@ def _prepare_review_round(shots: list[dict], directory: Path, *, dense: bool = F
 def _review(manifest: dict, sentence: dict, shot: dict, directory: Path, *, dense: bool = False) -> dict:
     media = _review_media(shot, directory, dense=dense)
     start, end, before, times, sheet = (media[k] for k in ("start", "end", "before", "times", "sheet"))
-    key = contract.digest([sentence["index"], shot["shot_id"], before, dense])[:24]
+    key_parts = [sentence["index"], shot["shot_id"], before, dense]
+    if shot.get("_compact_probe"):
+        key_parts.extend([start, end, "compact_probe_v1"])
+    key = contract.digest(key_parts)[:24]
     prompt = contract.policy_prompt(manifest) + "\n只根据附图判断，所有时间戳均为原素材秒数。\n" + json.dumps({
         "product": manifest.get("product"), "category": manifest.get("category"),
         "sentence": sentence, "shot_id": shot["shot_id"],
@@ -421,6 +424,50 @@ def _review_pool(manifest: dict, sentence: dict, shots: dict, directory: Path, a
                 return {**previous, "guarded_review_status": "unconfirmed"}
             with ThreadPoolExecutor(max_workers=min(20, len(guarded))) as pool:
                 reviewed_by_id.update(zip(guarded, pool.map(guarded_review, guarded)))
+        # A broad interval can force very fast playback even when a shorter
+        # part shows the same action. Probe at most one candidate per round;
+        # never silently clip an existing observation or sacrifice its claims.
+        durations = sentence.get("audio_durations_us") or []
+        durations = [v for v in durations if type(v) is int and v > 0]
+        if durations:
+            target_us = 2 * min(durations)
+            def evidence_span(review):
+                intervals = review.get("evidence_intervals_us") or []
+                if not intervals:
+                    return 0
+                return max(ev["end"] for ev in intervals) - min(ev["start"] for ev in intervals)
+            already_compact = any(review.get("verdict") == "matched" and 0 < evidence_span(review) <= target_us
+                                  for review in reviewed_by_id.values())
+            if not already_compact:
+                for sid in chunk:
+                    previous = reviewed_by_id[sid]
+                    if previous.get("verdict") != "matched" or evidence_span(previous) <= 3 * min(durations):
+                        continue
+                    intervals = previous["evidence_intervals_us"]
+                    lo_us = min(ev["start"] for ev in intervals)
+                    hi_us = max(ev["end"] for ev in intervals)
+                    start_us = (lo_us + hi_us - target_us) // 2
+                    end_us = start_us + target_us
+                    compact_shot = {**shots[sid], "source_start": start_us / 1e6,
+                                    "source_end": end_us / 1e6, "_compact_probe": True}
+                    try:
+                        refined = _review(manifest, sentence, compact_shot, directory, dense=True)
+                        refined_intervals = refined.get("evidence_intervals_us") or []
+                        inside = bool(refined_intervals) and all(
+                            type(ev.get("start")) is int and type(ev.get("end")) is int
+                            and start_us <= ev["start"] < ev["end"] <= end_us
+                            for ev in refined_intervals if isinstance(ev, dict))
+                        inside = inside and all(isinstance(ev, dict) for ev in refined_intervals)
+                        if (refined.get("verdict") == "matched" and refined.get("same_product") is True
+                                and refined.get("shot_id") == sid and inside
+                                and refined.get("source_identity") == previous.get("source_identity")
+                                and set(previous.get("supported_point_ids", [])) <= set(refined.get("supported_point_ids", []))
+                                and set(previous.get("scene_ids", [])) <= set(refined.get("scene_ids", []))
+                                and previous.get("time_sensitive") == refined.get("time_sensitive")):
+                            reviewed_by_id[sid] = {**refined, "compact_review_status": "confirmed"}
+                    except (ValueError, OSError, TypeError, KeyError):
+                        pass
+                    break
         reviewed = [reviewed_by_id[sid] for sid in ids if sid in reviewed_by_id]
         good = [r for r in reviewed if r["verdict"] == "matched"]
         covered = {p for r in good for p in r.get("supported_point_ids", [])}

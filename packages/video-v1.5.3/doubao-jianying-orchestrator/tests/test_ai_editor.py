@@ -491,6 +491,34 @@ class AIEditorTests(unittest.TestCase):
         self.assertEqual(rows[0]["evidence_intervals_us"], refined["evidence_intervals_us"])
         self.assertEqual(rows[0]["refinement_status"], "dense_review")
 
+    def test_compact_window_requires_new_pixel_review_and_preserves_support(self):
+        sentence = {**self.sentence, "audio_durations_us": [1_000_000]}
+        broad = {**self.review, "scene_ids": [], "dense_required": False,
+                 "evidence_intervals_us": [{"start": 1_000_000, "end": 5_000_000}]}
+        calls = []
+        def review(_m, _s, shot, _d, *, dense=False):
+            if not shot.get("_compact_probe"):
+                return broad
+            calls.append((shot["source_start"], shot["source_end"], dense))
+            return {**broad, "evidence_intervals_us": [{"start": 2_000_000, "end": 4_000_000}]}
+        with mock.patch.object(editor, "_review", side_effect=review):
+            rows, coverage = editor._review_pool(self.manifest, sentence, {"handfeel": self.shot}, self.root, {})
+        self.assertEqual(calls, [(2.0, 4.0, True)])
+        self.assertTrue(coverage["feasible"])
+        self.assertEqual(rows[0]["compact_review_status"], "confirmed")
+        self.assertEqual(rows[0]["evidence_intervals_us"], [{"start": 2_000_000, "end": 4_000_000}])
+        for changes in ({"verdict": "uncertain"}, {"same_product": False},
+                        {"supported_point_ids": []}, {"source_identity": {"changed": True}},
+                        {"evidence_intervals_us": [{"start": 1_000_000, "end": 4_000_000}]}):
+            def failed(_m, _s, shot, _d, *, dense=False):
+                if not shot.get("_compact_probe"):
+                    return broad
+                return {**broad, "evidence_intervals_us": [{"start": 2_000_000, "end": 4_000_000}], **changes}
+            with self.subTest(changes=changes), mock.patch.object(editor, "_review", side_effect=failed):
+                rows, _ = editor._review_pool(self.manifest, sentence, {"handfeel": self.shot}, self.root, {})
+                self.assertEqual(rows[0]["evidence_intervals_us"], broad["evidence_intervals_us"])
+                self.assertNotIn("compact_review_status", rows[0])
+
     def test_one_feasible_candidate_gets_one_more_round_for_editorial_choice(self):
         ids = [f"candidate{i}" for i in range(24)]
         sentence = {**self.sentence, "candidate_ids": ids, "audio_durations_us": [2_000_000]}
