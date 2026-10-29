@@ -1,7 +1,9 @@
 import copy
 import json
+import os
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -51,6 +53,40 @@ class SentenceReviewTests(unittest.TestCase):
 
     def _raw(self, reviews=None):
         return {**self.binding, 'sentence_reviews': reviews if reviews is not None else [self.review]}
+
+    def test_windows_mode_forces_local_handoff_even_when_ship_requested(self):
+        env = dict(os.environ, JY_REVIEW_SURFACE='windows_manual', JY_SKIP_SHIP='0', JY_MAC_REVIEW_REQUIRED='1')
+        code = 'import json,batch_worker as w;print(json.dumps([w.SKIP_SHIP,w.MAC_REVIEW_REQUIRED,w.WINDOWS_MANUAL_REVIEW]))'
+        run = subprocess.run([sys.executable, '-c', code], cwd=ROOT, env=env,
+                             capture_output=True, text=True, check=True)
+        self.assertEqual(json.loads(run.stdout), [True, False, True])
+        env['JY_REVIEW_SURFACE'] = 'mac'
+        run = subprocess.run([sys.executable, '-c', code], cwd=ROOT, env=env,
+                             capture_output=True, text=True, check=True)
+        self.assertEqual(json.loads(run.stdout), [False, True, False])
+
+    def test_windows_handoff_is_hash_bound_and_does_not_approve_or_ship(self):
+        with mock.patch.object(batch_worker, 'DRAFTS', self.drafts), \
+                mock.patch.object(batch_worker, 'WINDOWS_MANUAL_REVIEW', True), \
+                mock.patch.object(batch_worker, 'ship_one') as ship:
+            path = batch_worker.prepare_windows_review(self.task_dir, self.task, ['draft-fixture'], [])
+            self.assertEqual(path, batch_worker.prepare_windows_review(self.task_dir, self.task, ['draft-fixture'], []))
+            package = pe.read(path)
+            self.assertEqual(package['status'], 'AWAITING_WINDOWS_REVIEW')
+            self.assertFalse(package['approved'])
+            self.assertEqual(package['output_sha256'], self.identity['sha256'])
+            self.assertEqual(package['contract_hash'], self.contract['contract_hash'])
+            self.assertEqual(batch_worker.finalize_closed_loop(self.task_dir, self.task, ['draft-fixture'], [])['reason'],
+                             'WINDOWS_MANUAL_REVIEW_PENDING')
+            ship.assert_not_called()
+            with self.assertRaisesRegex(ValueError, 'WINDOWS_REVIEW_TASK_MISMATCH'):
+                batch_worker.prepare_windows_review(self.task_dir, {**self.task, 'script': '改动'}, ['draft-fixture'], [])
+            with self.assertRaisesRegex(ValueError, 'WINDOWS_REVIEW_TASK_MISMATCH'):
+                batch_worker.prepare_windows_review(self.task_dir, self.task, ['../draft-fixture'], [])
+            (self.task_dir / 'eval' / 'active_contract.json').write_text(
+                json.dumps({**self.contract, 'run_id': 'tampered'}), encoding='utf-8')
+            with self.assertRaises(ValueError):
+                batch_worker.prepare_windows_review(self.task_dir, self.task, ['draft-fixture'], [])
 
     def test_normalized_frozen_task_snapshot_prepares_real_review_input(self):
         task = normalize_meeting_task({**self.task, 'retry_deferred': True, 'retry_error': True})

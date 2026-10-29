@@ -130,7 +130,8 @@ class VisualQcDeliveryContractTests(unittest.TestCase):
                 mock.patch.object(worker, "run_build", side_effect=AssertionError("unexpected rebuild")):
             result = worker.resume_task_qc(self.task)
         self.assertEqual(review.call_count, 1)
-        self.assertEqual(result["resume_stage"], "delivery")
+        self.assertEqual(result["resume_stage"], "windows_review")
+        self.assertEqual(result["distribution_status"], "PENDING_WINDOWS_REVIEW")
         self.assertNotEqual(result.get("distribution_status"), "SHIPPED_VERIFIED")
 
     def test_rebuild_progress_changes_only_with_new_inputs(self):

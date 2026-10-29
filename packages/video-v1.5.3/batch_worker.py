@@ -5,7 +5,8 @@
   enumerate materials -> manifest -> build(preview管线, 1.3.29 已无画面标注) x count
   -> ship(unс 分发) -> 进度写 `work/batch_progress.jsonl` -> 结果写
   `work/<record_id>/done.json`。
-Mac 侧负责最终人工检查和成功交付回写；失败/部分失败可由 worker 在有
+默认在 Windows 保留草稿，等待用户手动验收；Mac 验收流程仅作冻结的兼容选项。
+失败/部分失败可由 worker 在有
 `LARK_BASE_TOKEN` 时即时回写表格，缺少凭据则落盘回执供监控侧重试。
 
 原则：
@@ -58,13 +59,19 @@ LOG = WORK / "batch_worker.log"
 NAS_PROBE = os.environ.get("JY_NAS_PROBE", str(PIPE_ROOT / "probe_mount2.ps1"))
 NAS_TEST = os.environ.get("JY_NAS_TEST_ROOT", "").strip()
 VIDEO_EXTS = (".mp4", ".mov", ".m4v")
-SKIP_SHIP = os.environ.get("JY_SKIP_SHIP", "").strip() == "1"
+REVIEW_SURFACE = os.environ.get("JY_REVIEW_SURFACE", "windows_manual").strip().lower()
+if REVIEW_SURFACE not in {"windows_manual", "mac"}:
+    raise ValueError("REVIEW_SURFACE_INVALID")
+WINDOWS_MANUAL_REVIEW = REVIEW_SURFACE == "windows_manual"
+# Windows review is a local, human-operated handoff.  It never grants shipping
+# or table-write permission just because Mac review is frozen.
+SKIP_SHIP = WINDOWS_MANUAL_REVIEW or os.environ.get("JY_SKIP_SHIP", "").strip() == "1"
 _OUTPUT_LOCK = threading.Lock()
 ACTIVE_RECORD_ID = ""
 PIPE = WORK.parent
 CLOSED_LOOP_TOOL = PIPE / "tools" / "closed_loop.py"
 CLOSED_LOOP_POLICY = PIPE / "WINDOWS_VIDEO_CLOSED_LOOP_RULES_20260930.json"
-MAC_REVIEW_REQUIRED = os.environ.get("JY_MAC_REVIEW_REQUIRED", "1").strip() != "0"
+MAC_REVIEW_REQUIRED = not WINDOWS_MANUAL_REVIEW and os.environ.get("JY_MAC_REVIEW_REQUIRED", "1").strip() != "0"
 
 
 def _pipeline_version() -> str:
@@ -922,6 +929,15 @@ def resume_task_qc(task: dict) -> dict:
                        terminal_state="QC_READY_FOR_DELIVERY" if all_pass else "QC_PENDING",
                        failed_stage=None if all_pass else "qc", safe_to_continue=True,
                        finished_at=time.strftime("%Y-%m-%d %H:%M:%S"))
+        if WINDOWS_MANUAL_REVIEW:
+            payload["distribution_status"] = "PENDING_WINDOWS_REVIEW"
+            payload["resume_stage"] = "windows_review" if all_pass else "qc"
+            payload["terminal_state"] = "AWAITING_WINDOWS_REVIEW" if all_pass else "QC_PENDING"
+            payload["review_surface"] = "windows_jianying"
+            try:
+                payload["windows_review_package"] = str(prepare_windows_review(task_dir, task, list(retained), reports))
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                payload["windows_review_package_error"] = str(exc)
         atomic_write_text(task_dir / "done.json", json.dumps(payload, ensure_ascii=False, indent=2))
         if all_pass and len(retained) >= max(1, int(task.get("count") or 1)) and not SKIP_SHIP:
             result = finalize_closed_loop(task_dir, task, list(retained), reports)
@@ -988,6 +1004,36 @@ def ship_one(draft_dir: pathlib.Path, task_dir: pathlib.Path | None = None,
             "distribution": payload}
 
 
+def prepare_windows_review(task_dir: pathlib.Path, task: dict, draft_names: list[str],
+                           qc_reports: list[dict]) -> pathlib.Path:
+    """Prepare a local, hash-bound handoff without recording human approval."""
+    frozen = production_eval.read(task_dir / "eval" / "active_contract.json")
+    production_eval.verify_contract(frozen)
+    if (not draft_names or any(pathlib.Path(name).name != name for name in draft_names)
+            or str(task.get("task_id") or task.get("record_id") or "").strip() != frozen.get("task_id")
+            or production_eval.digest(task) != frozen.get("task_sha256")):
+        raise ValueError("WINDOWS_REVIEW_TASK_MISMATCH")
+    outputs = [DRAFTS / name for name in draft_names]
+    if any(not p.is_dir() for p in outputs):
+        raise ValueError("WINDOWS_REVIEW_DRAFT_MISSING")
+    identity = production_eval.output_identity(outputs)
+    reports = []
+    for row in qc_reports:
+        if not isinstance(row, dict) or row.get("draft") not in draft_names:
+            continue
+        path = pathlib.Path(str(row.get("report") or ""))
+        reports.append({"draft": row["draft"], "status": row.get("status"),
+                        "path": str(path), "sha256": production_eval.file_hash(path) if path.is_file() else None})
+    payload = {"schema_version": 1, "status": "AWAITING_WINDOWS_REVIEW", "approved": False,
+               "record_id": task.get("record_id"), "task_id": frozen["task_id"],
+               "run_id": frozen["run_id"], "contract_hash": frozen["contract_hash"],
+               "output_sha256": identity["sha256"], "drafts": [str(p) for p in outputs],
+               "qc_reports": reports, "review_surface": "windows_jianying"}
+    package = task_dir / ("windows_review_package-" + production_eval.digest(payload) + ".json")
+    production_eval.write_once(package, payload)
+    return package
+
+
 def prepare_mac_review(task_dir: pathlib.Path, task: dict, draft_names: list[str]) -> pathlib.Path:
     """Persist an exact Mac review handoff before NAS distribution."""
     outputs = [DRAFTS / name for name in draft_names]
@@ -1033,6 +1079,8 @@ def finalize_closed_loop(task_dir: pathlib.Path, task: dict, drafts: list[str],
                          qc_reports: list[dict],
                          delivery_receipts: list[dict] | None = None) -> dict:
     """Evaluate first, then ship hash-verified copies and write back the table."""
+    if WINDOWS_MANUAL_REVIEW:
+        return {"ok": False, "status": "BLOCKED", "reason": "WINDOWS_MANUAL_REVIEW_PENDING"}
     done_path = task_dir / "done.json"
     existing_done = _read_json(done_path)
     provisional = dict(existing_done)
@@ -1944,7 +1992,7 @@ def process_task(task: dict, *, retry_partial: bool = False,
                                                "status": qc_result.get("status"),
                                                "report": qc_result.get("output")})
                         draft_ok = True
-                        log("DRAFT %d/%d ready locally; NAS shipping skipped pending Mac/Eval review: %s" % (
+                        log("DRAFT %d/%d ready locally; NAS shipping skipped pending manual review: %s" % (
                             i, count, a_name))
                         break
                     sh = ship_one(DRAFTS / a_name, task_dir=tdir, frozen=frozen)
@@ -2056,15 +2104,18 @@ def process_task(task: dict, *, retry_partial: bool = False,
             if SKIP_SHIP and drafts:
                 all_issues.append({
                     "phase": "distribution",
-                    "type": "pending_mac_review",
-                    "message": "草稿已生成并保留在 Windows，待 Mac 检查确认后再分发 NAS",
+                    "type": "pending_windows_review" if WINDOWS_MANUAL_REVIEW else "pending_mac_review",
+                    "message": ("草稿已保留在 Windows，等待用户手动验收；未自动分发或回写"
+                                if WINDOWS_MANUAL_REVIEW else "草稿已生成并保留在 Windows，待 Mac 检查确认后再分发 NAS"),
                 })
             persisted_done = _read_json(done)
             distribution_receipts = (persisted_done.get("distribution_receipts")
                                      or distribution_receipts)
             verified_by_name = {row.get("draft_name"): row for row in distribution_receipts}
             shipped_drafts = [name for name in drafts if name in verified_by_name]
-            if review_pending:
+            if WINDOWS_MANUAL_REVIEW and local_only_drafts:
+                distribution_status = "PENDING_WINDOWS_REVIEW"
+            elif review_pending:
                 distribution_status = "AWAITING_MAC_REVIEW"
             elif SKIP_SHIP:
                 distribution_status = "PENDING_MAC_REVIEW"
@@ -2095,8 +2146,16 @@ def process_task(task: dict, *, retry_partial: bool = False,
             from orchestrator.task_inputs import done_meeting_fields
             payload.update(done_meeting_fields(task))
             payload.update(contract(status, failures=all_issues))
+            if WINDOWS_MANUAL_REVIEW and drafts:
+                payload["review_surface"] = "windows_jianying"
+                payload["review_status"] = "AWAITING_WINDOWS_REVIEW"
             if drafts:
                 payload["eval_receipt"] = evaluate_task(tdir, task, drafts, qc_reports, frozen)
+            if drafts and WINDOWS_MANUAL_REVIEW:
+                try:
+                    payload["windows_review_package"] = str(prepare_windows_review(tdir, task, drafts, qc_reports))
+                except (OSError, ValueError, KeyError, TypeError) as exc:
+                    payload["windows_review_package_error"] = str(exc)
             done.write_text(json.dumps(payload, ensure_ascii=False, indent=2),
                             encoding="utf-8")
             if drafts and status == "PREVIEW_READY" and MAC_REVIEW_REQUIRED:

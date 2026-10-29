@@ -178,6 +178,7 @@ class DeliveryTests(unittest.TestCase):
                    'transformed_tree_sha256': tree_identity(target)['sha256']}
         n.write_json(task_dir / 'done.json', {'distribution_receipts': [receipt]})
         with patch.object(worker, 'DRAFTS', self.source.parent), \
+                patch.object(worker, 'WINDOWS_MANUAL_REVIEW', False), \
                 patch.object(worker, 'MAC_REVIEW_REQUIRED', False), \
                 patch.dict(worker.os.environ, {'JY_EVAL_MODE': 'observe'}), \
                 patch.object(worker, 'ship_one') as ship:
@@ -215,6 +216,7 @@ class DeliveryTests(unittest.TestCase):
                     return subprocess.CompletedProcess(command, 0, '{"ok": true}', '')
 
                 with patch.object(worker, 'DRAFTS', self.source.parent), \
+                        patch.object(worker, 'WINDOWS_MANUAL_REVIEW', False), \
                         patch.object(worker, 'MAC_REVIEW_REQUIRED', False), \
                         patch.object(worker, 'CLOSED_LOOP_TOOL', tool), \
                         patch.object(worker, 'CLOSED_LOOP_POLICY', policy), \
