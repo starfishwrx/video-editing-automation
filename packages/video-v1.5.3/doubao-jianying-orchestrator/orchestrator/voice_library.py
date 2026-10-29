@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import csv
 import functools
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -217,6 +218,21 @@ def load_library() -> list[LibraryVoice]:
                 tags = tuple(t for t in (row[4].split("/") if len(row) > 4 else []) if t)
                 add(sid, title, _gender_from_tags(tags), sid in VALIDATED_SAMI,
                     True, tags=tags or (title,))
+    elif os.environ.get("LOCALAPPDATA"):
+        # Fresh worktrees may not contain the locally generated CSV. Use a
+        # complete cached panel without writing the editor's database; never
+        # guess an identity when the cache is missing or incomplete.
+        from .voice_cache import find_latest_panel
+        root = Path(os.environ["LOCALAPPDATA"]) / "JianyingPro/User Data/Cache/ressdk_db"
+        try:
+            rows, _ = find_latest_panel(root)
+        except (OSError, ValueError):
+            rows = []
+        for row in rows:
+            sid, title = row["voice_type"], row["title"]
+            tags = tuple(t for t in row["tags"].split("/") if t)
+            add(sid, title, _gender_from_tags(tags), sid in VALIDATED_SAMI,
+                True, tags=tags or (title,))
     # 3) 历史 name_hint（保留兼容）
     path = _csv_path()
     if path:

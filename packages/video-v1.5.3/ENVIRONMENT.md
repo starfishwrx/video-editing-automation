@@ -16,6 +16,28 @@ against the system interpreter for this package or its deployment host.
 
 Python must be **>=3.11,<3.13**, as declared in `pyproject.toml`.
 
+## Jianying voice catalog
+
+The generated `jianying-editor/data/jianying_voice_catalog.csv` is a local
+snapshot and is not stored in Git. When it is absent, voice resolution can read
+the most recent complete cached text-to-speech panel from Jianying's local
+`ressdk_db` in read-only mode. An absent or incomplete cache does not authorize
+guessing a speaker. Existing CSV snapshots continue to take precedence.
+
+To inspect a fresh snapshot without overwriting an existing table, run from this
+package directory:
+
+```powershell
+python -m tools.extract_voice_catalog --output D:\work\voice-catalog-new.csv
+```
+
+The output includes only display name, voice ID, effect ID, category and tags.
+The reported cache timestamp and response hash identify the source snapshot;
+`has_more=false` means the cached categories are complete, not that every voice
+is currently available to the signed-in account. Compare snapshots and resolve
+ambiguous names before replacing any production catalog or changing a locked
+task's voice.
+
 ## Vision and selection (current defaults)
 
 The exact default model is **GLM-5.3-Flash**, API ID `glm-5.3-flash`.
