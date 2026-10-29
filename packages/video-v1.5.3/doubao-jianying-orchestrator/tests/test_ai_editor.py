@@ -197,6 +197,15 @@ class AIEditorTests(unittest.TestCase):
         stale = {**review, "source_identity": {"path": "unrelated"}}
         with mock.patch.object(editor, "_review_pool", return_value=([stale], {"feasible": False})):
             self.assertFalse(editor.refill_indices(manifest, {"shots": [shot]}, matched, [1], self.root)['ok'])
+        other_product = {**review, "same_product": False}
+        with mock.patch.object(editor, "_review_pool", return_value=([other_product], {"feasible": False})):
+            self.assertFalse(editor.refill_indices(manifest, {"shots": [shot]}, matched, [1], self.root)['ok'])
+        paper = {**manifest, "user_display_fallbacks": [{"index": 1, "kind": "paper", "user_authorized": True}]}
+        with mock.patch.object(editor, "_review_pool", return_value=([review], {"feasible": False})):
+            self.assertFalse(editor.refill_indices(paper, {"shots": [shot]}, matched, [1], self.root)['ok'])
+        shown = {**review, "observation": "双手展开一张白色纸巾"}
+        with mock.patch.object(editor, "_review_pool", return_value=([shown], {"feasible": False})):
+            self.assertTrue(editor.refill_indices(paper, {"shots": [shot]}, matched, [1], self.root)['ok'])
 
     def test_refill_prioritizes_observed_specific_object_but_still_requires_review(self):
         text = "还送定制纸巾支架"

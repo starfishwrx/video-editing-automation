@@ -1001,9 +1001,17 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
                     if (not shot or sid in reserved or review.get("same_product") is not True
                             or not str(review.get("observation") or "").strip()):
                         continue
-                    description = str(shot.get("description") or "") + " " + str(review["observation"])
-                    keywords = ("包装", "包装盒", "包装袋") if fallback["kind"] == "packaging" else ("纸", "巾", "抹布")
-                    if not any(word in description for word in keywords):
+                    observation = str(review["observation"])
+                    # Use the pixel observation, not library text alone: a
+                    # paper package is not a view of the paper itself.
+                    if fallback["kind"] == "packaging":
+                        suitable = "包装" in observation
+                    else:
+                        suitable = (any(word in observation for word in ("纸", "巾", "抹布"))
+                                    and any(word in observation for word in
+                                            ("一张", "纸张", "巾体", "纸面", "白色纸", "白色巾",
+                                             "纸巾展开", "展开纸", "展开的纸", "抽出纸", "纸巾表面")))
+                    if not suitable:
                         continue
                     try:
                         if review.get("source_identity") != contract.source_identity(shot["video"]):
