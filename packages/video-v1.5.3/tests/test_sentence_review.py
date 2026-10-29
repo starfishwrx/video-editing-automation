@@ -76,6 +76,12 @@ class SentenceReviewTests(unittest.TestCase):
             self.assertFalse(package['approved'])
             self.assertEqual(package['output_sha256'], self.identity['sha256'])
             self.assertEqual(package['contract_hash'], self.contract['contract_hash'])
+            forged = self.root / 'unbound-qc.json'
+            forged.write_text(json.dumps({'status': 'PASS'}), encoding='utf-8')
+            unbound = batch_worker.prepare_windows_review(self.task_dir, self.task, ['draft-fixture'],
+                [{'draft': 'draft-fixture', 'status': 'PASS', 'report': str(forged)}])
+            self.assertEqual(pe.read(unbound)['qc_reports'][0]['status'], 'UNCERTIFIED')
+            self.assertFalse(pe.read(unbound)['qc_reports'][0]['verified'])
             self.assertEqual(batch_worker.finalize_closed_loop(self.task_dir, self.task, ['draft-fixture'], [])['reason'],
                              'WINDOWS_MANUAL_REVIEW_PENDING')
             ship.assert_not_called()

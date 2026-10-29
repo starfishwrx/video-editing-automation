@@ -1017,13 +1017,23 @@ def prepare_windows_review(task_dir: pathlib.Path, task: dict, draft_names: list
     if any(not p.is_dir() for p in outputs):
         raise ValueError("WINDOWS_REVIEW_DRAFT_MISSING")
     identity = production_eval.output_identity(outputs)
+    from orchestrator.visual_qc_contract import report_matches_draft, report_status
     reports = []
     for row in qc_reports:
         if not isinstance(row, dict) or row.get("draft") not in draft_names:
             continue
         path = pathlib.Path(str(row.get("report") or ""))
-        reports.append({"draft": row["draft"], "status": row.get("status"),
-                        "path": str(path), "sha256": production_eval.file_hash(path) if path.is_file() else None})
+        verified, status, sha = False, "UNCERTIFIED", None
+        if path.is_file():
+            try:
+                report = production_eval.read(path)
+                verified = report_matches_draft(report, DRAFTS / row["draft"])
+                status = report_status(report) if verified else "UNCERTIFIED"
+                sha = production_eval.file_hash(path)
+            except (OSError, ValueError, TypeError):
+                pass
+        reports.append({"draft": row["draft"], "status": status, "verified": verified,
+                        "path": str(path), "sha256": sha})
     payload = {"schema_version": 1, "status": "AWAITING_WINDOWS_REVIEW", "approved": False,
                "record_id": task.get("record_id"), "task_id": frozen["task_id"],
                "run_id": frozen["run_id"], "contract_hash": frozen["contract_hash"],
