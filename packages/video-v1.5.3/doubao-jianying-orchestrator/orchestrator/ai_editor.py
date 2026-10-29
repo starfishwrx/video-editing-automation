@@ -956,7 +956,7 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
     reserved = {str(part.get("shot_id") or part.get("temporary_shot_id"))
                 for index, row in by_index.items() if index not in wanted
                 for part in (row.get("span_parts") or [row])}
-    replaced, errors, refill_unresolved = [], [], []
+    replaced, errors, refill_unresolved, refill_degraded = [], [], [], []
     for index in wanted:
         if index > len(original):
             errors.append(f"AI_REFILL_INDEX_OOB:{index}")
@@ -983,6 +983,64 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
             reviews, coverage = _review_pool(review_manifest, sentence, shots, directory, narration_timing or {})
             good = [r for r in reviews if r.get("verdict") == "matched"]
             partial = manifest.get("delivery_mode") == "preview" and manifest.get("allow_partial_selling_points") is True
+            # An explicit user direction may permit a related product display
+            # when a precise claim cannot be shown. It is never evidence that
+            # the claim is true and is never allowed in formal mode.
+            fallback = next((x for x in manifest.get("user_display_fallbacks") or []
+                if isinstance(x, dict) and str(x.get("index")) == str(index)
+                and x.get("user_authorized") is True and x.get("kind") in {"packaging", "paper"}), None)
+            if fallback and manifest.get("delivery_mode") == "preview" and (not good or not coverage.get("feasible")):
+                from . import shot_analyzer
+                preferred_ids = fallback.get("preferred_shot_ids") or []
+                preferred_ids = [str(x) for x in preferred_ids] if isinstance(preferred_ids, list) else []
+                order = {sid: i for i, sid in enumerate(preferred_ids)}
+                ordered_reviews = sorted(reviews, key=lambda review: order.get(str(review.get("shot_id") or ""), len(order)))
+                for review in ordered_reviews:
+                    sid = str(review.get("shot_id") or "")
+                    shot = shots.get(sid)
+                    if (not shot or sid in reserved or review.get("same_product") is not True
+                            or not str(review.get("observation") or "").strip()):
+                        continue
+                    description = str(shot.get("description") or "") + " " + str(review["observation"])
+                    keywords = ("包装", "包装盒", "包装袋") if fallback["kind"] == "packaging" else ("纸", "巾", "抹布")
+                    if not any(word in description for word in keywords):
+                        continue
+                    try:
+                        if review.get("source_identity") != contract.source_identity(shot["video"]):
+                            continue
+                        display = {k: v for k, v in shot.items() if k not in ("evidence_intervals", "action_segments")}
+                        solution = shot_analyzer.candidate_window(display, audio_duration_us=audio_us,
+                                                                  manifest=manifest, time_sensitive=False)
+                        if not solution.ok:
+                            continue
+                        note = "用户允许相关展示；原句具体卖点未获画面证实，待 Windows 人工验收。"
+                        row = {**original[index - 1], **solution.to_dict(), "index": index,
+                               "text": sentence["text"], "claim_text": sentence["text"],
+                               "video": shot["video"], "shot_id": sid, "temporary_shot_id": sid,
+                               "source_start": solution.source_start_us / 1e6,
+                               "source_end": solution.source_end_us / 1e6,
+                               "duration": solution.material_us / 1e6, "video_speed": solution.speed,
+                               "audio_duration_us": audio_us, "timing_certainty": certainty,
+                               "scene_source_start": shot["source_start"], "scene_source_end": shot["source_end"],
+                               "window_solution": solution.to_dict(), "visual_description": review["observation"],
+                               "selection_mode": "auto_top1_degraded_substitute", "degraded_no_match": True,
+                               "visual_missing": False, "preview_unresolved": True, "operator_note": note,
+                               "evidence_intervals": [], "claim_gate": {"ok": False, "status": "blocked"},
+                               "user_display_kind": fallback["kind"]}
+                        by_index[index] = row
+                        reserved.add(sid)
+                        replaced.append(index)
+                        item = {"index": index, "text": sentence["text"],
+                                "type": "USER_AUTHORIZED_DISPLAY_UNVERIFIED", "message": note}
+                        refill_unresolved.append(item)
+                        refill_degraded.append(item)
+                        _save(directory / f"refill_{index:02d}.json", {"index": index, "shot_id": sid,
+                              "coverage": coverage, "user_display_kind": fallback["kind"], "certified": False})
+                        break
+                    except (OSError, ValueError, KeyError, TypeError):
+                        continue
+                if index in replaced:
+                    continue
             if not good or (not coverage.get("feasible") and not partial):
                 raise ValueError(f"AI_REFILL_NO_MATCH:{index}")
             mini_manifest = {k: v for k, v in manifest.items() if k not in ("segments", "full_script", "script")}
@@ -1077,6 +1135,7 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
     for field in ("pending_items", "material_gaps", "degraded_matches", "visual_missing_matches", "preview_unresolved"):
         result[field] = [row for row in matched.get(field, []) if keep(row)]
     result["preview_unresolved"].extend(refill_unresolved)
+    result["degraded_matches"].extend(refill_degraded)
     result["pending_items"].extend({"type": "AI_EDITOR_UNCERTIFIED", "message": error} for error in errors)
     result["ok"] = (bool(ordered) and len(ordered) == len(original) and not result["pending_items"]
                     and set(wanted) <= set(replaced)

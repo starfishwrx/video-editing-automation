@@ -174,6 +174,30 @@ class AIEditorTests(unittest.TestCase):
         with mock.patch.object(editor, "_review_pool", return_value=([self.review], {"feasible": False})):
             self.assertFalse(editor.refill_indices(manifest, {"shots": [self.shot]}, matched, [1], self.root)["ok"])
 
+    def test_user_directed_display_is_preview_only_and_never_certifies_claim(self):
+        text = "自带玫瑰花香"
+        manifest = {**self.manifest, "selection_mode": "rule_then_ai", "delivery_mode": "preview",
+                    "segments": [{"text": text, "audio_duration_us": 2000000}],
+                    "user_display_fallbacks": [{"index": 1, "kind": "packaging", "user_authorized": True}]}
+        matched = {"segments": [{"index": 1, "text": text}], "pending_items": []}
+        shot = {**self.shot, "description": "产品包装正面"}
+        review = {**self.review, "verdict": "mismatch", "same_product": True,
+                  "observation": "手持展示同商品包装，香型文字看不清"}
+        with mock.patch.object(editor, "_review_pool", return_value=([review], {"feasible": False})):
+            result = editor.refill_indices(manifest, {"shots": [shot]}, matched, [1], self.root)
+        self.assertTrue(result['ok'], result)
+        self.assertTrue(result['segments'][0]['degraded_no_match'])
+        self.assertEqual(result['segments'][0]['evidence_intervals'], [])
+        self.assertNotIn('ai_selection', result['segments'][0])
+        self.assertEqual(result['claim_gate_coverage']['certification'], 'UNCERTIFIED')
+        self.assertEqual(result['preview_unresolved'][0]['type'], 'USER_AUTHORIZED_DISPLAY_UNVERIFIED')
+        for changes in ({"delivery_mode": "formal"}, {"user_display_fallbacks": []}):
+            with mock.patch.object(editor, "_review_pool", return_value=([review], {"feasible": False})):
+                self.assertFalse(editor.refill_indices({**manifest, **changes}, {"shots": [shot]}, matched, [1], self.root)['ok'])
+        stale = {**review, "source_identity": {"path": "unrelated"}}
+        with mock.patch.object(editor, "_review_pool", return_value=([stale], {"feasible": False})):
+            self.assertFalse(editor.refill_indices(manifest, {"shots": [shot]}, matched, [1], self.root)['ok'])
+
     def test_refill_prioritizes_observed_specific_object_but_still_requires_review(self):
         text = "还送定制纸巾支架"
         manifest = {**self.manifest, "segments": [{"text": text, "audio_duration_us": 2000000}]}
