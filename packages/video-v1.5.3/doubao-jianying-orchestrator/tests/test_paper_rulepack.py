@@ -22,7 +22,7 @@ class PaperRulepackTests(unittest.TestCase):
         self.assertFalse(defaults["auto_transition"])
         self.assertEqual(defaults["subtitle_position_px"], {"x": 0, "y": -528})
         overridden = rulepack.apply_manifest_defaults({
-            "product": "奶杯纸", "voice_tempo": 1.15,
+            "product": "奶被纸", "voice_tempo": 1.15,
             "subtitle_position_px": {"x": 12, "y": -700}, "auto_transition": True,
         })
         self.assertEqual(overridden["voice_tempo"], 1.15)
