@@ -12,13 +12,21 @@ EXCLUDED_PARTS = {"__pycache__", ".pytest_cache", ".venv", ".uv-cache", ".git",
 EXCLUDED_SUFFIXES = {".pyc", ".pyo", ".mp4", ".mov", ".m4v", ".wav", ".mp3",
                      ".ogg", ".m4a", ".aac", ".flac", ".zip"}
 EXCLUDED_PREFIXES = {("jianying-editor", "data")}  # 本机同步的音色、云音乐缓存。
+SOURCE_MEDIA_PREFIX = ("doubao-jianying-orchestrator", "orchestrator", "media")
 
 
 def files() -> list[Path]:
     values = []
     for path in ROOT.rglob("*"):
         rel = path.relative_to(ROOT)
-        if path.name in EXCLUDED_NAMES or any(part in EXCLUDED_PARTS for part in rel.parts):
+        # The media feature contains source code. Other media directories are
+        # private task assets and must remain excluded, including nested ones.
+        excluded_part = any(
+            part in EXCLUDED_PARTS and not (
+                index == 2 and rel.parts[:3] == SOURCE_MEDIA_PREFIX
+            ) for index, part in enumerate(rel.parts)
+        )
+        if path.name in EXCLUDED_NAMES or excluded_part:
             continue
         if rel.parts[:2] in EXCLUDED_PREFIXES:
             continue

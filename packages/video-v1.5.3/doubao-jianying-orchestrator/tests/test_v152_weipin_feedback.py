@@ -413,7 +413,7 @@ class SubtitleDefaultTests(unittest.TestCase):
         self.assertNotRegex(source, r"(?m)^DEFAULT_SUBTITLE_Y = -1000")
 
     def test_engine_and_validator_agree(self):
-        engine = (PACKAGE_ROOT / "doubao-jianying-orchestrator/orchestrator/engine.py").read_text(
+        engine = (PACKAGE_ROOT / "doubao-jianying-orchestrator/orchestrator/application/engine.py").read_text(
             encoding="utf-8")
         from orchestrator.production_parameters import subtitle_transform
         self.assertEqual(subtitle_transform({"category": "weipin"}, 1080, 1920)["y"], -0.55)

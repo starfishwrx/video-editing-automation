@@ -40,6 +40,8 @@ jobs:
         run: uv sync --frozen
       - name: Check CLI entrypoint
         run: uv run --frozen python -X utf8 doubao-jianying-orchestrator/run.py --help
+      - name: Check feature boundaries
+        run: uv run --frozen python -X utf8 -m tools.check_architecture
       - name: Check example JSON
         run: uv run --frozen python -X utf8 -m json.tool examples/manifest.preview.json
       - name: Prepare portable FFmpeg for media fixtures

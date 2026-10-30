@@ -1,0 +1,78 @@
+{
+  "features": {
+    "application": [
+      "cli",
+      "engine",
+      "task_inputs"
+    ],
+    "audio": [
+      "audio_captions",
+      "audio_loudness",
+      "bgm_selector",
+      "voice_catalog",
+      "voice_library",
+      "voice_request",
+      "voice_tts",
+      "subtitle_units"
+    ],
+    "media": [
+      "ffmpeg_bootstrap",
+      "frame_quality",
+      "gpu_runtime",
+      "stability",
+      "video_decode",
+      "video_encode"
+    ],
+    "runtime": [
+      "capacity",
+      "file_safety",
+      "json_extract",
+      "platform_env",
+      "proc_slots",
+      "ready_work",
+      "resource_profile",
+      "runtime_policy",
+      "task_log"
+    ],
+    "policy": [
+      "demo_actions",
+      "feedback_policy",
+      "production_parameters",
+      "scene_rules",
+      "script_polish",
+      "semantic_gate"
+    ],
+    "selection": [
+      "ai_editor",
+      "sentence_planner",
+      "shot_analyzer",
+      "shot_notes",
+      "timing_contract",
+      "usage_ledger"
+    ],
+    "vision": [
+      "legacy_cache_import",
+      "material_cache",
+      "material_corrections",
+      "phase_timing",
+      "vision_analyzer",
+      "vision_client"
+    ],
+    "quality": [
+      "ai_editor_qc",
+      "diagnostics",
+      "draft_safety",
+      "draft_visual_qc",
+      "visual_match"
+    ],
+    "delivery": [
+      "migration"
+    ]
+  },
+  "anchored": [
+    "ai_editor_contract",
+    "visual_qc_contract",
+    "rulepack",
+    "ship_distribute"
+  ]
+}

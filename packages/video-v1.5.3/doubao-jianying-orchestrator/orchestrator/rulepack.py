@@ -176,9 +176,9 @@ def voice_name_speed(voice: Any) -> Optional[float]:
         raw = voice.get("speed")
         if raw in (None, ""):
             return None
-        from .voice_request import validate_tempo
+        from .audio.voice_request import validate_tempo
         return validate_tempo(raw)
-    from .voice_catalog import _split_speed
+    from .audio.voice_catalog import _split_speed
     return _split_speed(str(voice or ""))[1]
 
 
@@ -189,7 +189,7 @@ def voice_has_speed(voice: Any) -> bool:
 
 def default_voice_tempo(rules: dict[str, Any], voice: Any) -> float:
     """口播后处理倍速：名称写了用名称的，否则用品类默认（卫品 1.2）。不叠加两次。"""
-    from .voice_request import select_voice_tempo
+    from .audio.voice_request import select_voice_tempo
     tempo, _, _ = select_voice_tempo(
         voice, category_tempo=(rules.get("voice") or {}).get("tempo", 1.0))
     return tempo
@@ -204,7 +204,7 @@ def apply_manifest_defaults(manifest: dict[str, Any]) -> dict[str, Any]:
     out["category"] = category
     out.setdefault("auto_transition", rules.get("auto_transition", False))
     out.setdefault("avoid_similar_shots", rules.get("avoid_similar_shots", False))
-    from .voice_request import select_voice_tempo
+    from .audio.voice_request import select_voice_tempo
     tempo, _, _ = select_voice_tempo(
         out.get("voice"), voice_tempo=out.get("voice_tempo"),
         category_tempo=(rules.get("voice") or {}).get("tempo", 1.0))

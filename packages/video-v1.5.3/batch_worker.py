@@ -32,6 +32,7 @@ import time
 import traceback
 import uuid
 from tools import production_eval, material_index
+from tools.queueing import contracts as queue_contracts
 from tools.delivery_identity import tree_identity
 from tools.draft_delivery import verify_shared
 from tools.delivery_runtime import require_ship_dependencies
@@ -97,21 +98,7 @@ def _payload_sha256(payload: object) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _meeting_bgm_spec(value: object) -> dict:
-    """Preserve an explicit worker BGM choice; strings never become random auto."""
-    if isinstance(value, dict):
-        return dict(value) if value else {"auto": True}
-    text = str(value or "").strip()
-    if not text:
-        return {"auto": True}
-    path_like = (pathlib.Path(text).is_absolute()
-                 or bool(re.match(r"^[A-Za-z]:[\\/]", text))
-                 or text.startswith("\\\\")
-                 or ("/" in text or "\\" in text)
-                 or pathlib.Path(text).suffix.lower() in {".mp3", ".m4a", ".wav", ".aac", ".flac"})
-    if path_like:
-        return {"path": text}
-    return {"music_id": text}
+_meeting_bgm_spec = queue_contracts.meeting_bgm_spec
 
 
 def _batch_result_contract(status: str, *, run_id: str, failures: list[dict] | None = None,
@@ -120,76 +107,11 @@ def _batch_result_contract(status: str, *, run_id: str, failures: list[dict] | N
                            manifest_sha256: str | None = None,
                            runtime: dict | None = None,
                            task_log: str | None = None) -> dict:
-    """Return the monitor contract used to decide whether another task is safe."""
-    rows = failures or []
-    text = " ".join(str(row) for row in rows) + " " + str(error)
-    lower = text.lower()
-    first = rows[0] if rows else {}
-    failure_type = str(first.get("type") or "").lower()
-    if "voice_selection_required" in lower:
-        failure_class, failure_code = "environment", "VOICE_SELECTION_REQUIRED"
-    elif "bgm_required" in lower:
-        failure_class, failure_code = "environment", "BGM_REQUIRED"
-    elif "sentence_plan_review_required" in lower:
-        failure_class, failure_code = "semantic", "SENTENCE_PLAN_REVIEW_REQUIRED"
-    elif any(marker in lower for marker in ("vision_call_failed", "vision_json_invalid")):
-        failure_class, failure_code = "vision", "VISION_CALL_FAILED"
-    elif any(marker in lower for marker in ("visual_match_blocked", "shot_match_blocked", "material gap", "visual-missing")):
-        failure_class, failure_code = "semantic", "VISUAL_MATCH_BLOCKED"
-    elif "audio_video_mismatch" in lower or "shot_timing" in lower:
-        failure_class, failure_code = "timing", "AUDIO_VIDEO_MISMATCH"
-    elif "invalid argument" in lower or "task_budget" in lower or "budget" in lower:
-        failure_class, failure_code = "environment", "INVALID_ARGUMENT" if "invalid argument" in lower else "TASK_BUDGET_EXHAUSTED"
-    elif "task_already_running" in lower or "task_lock" in lower:
-        failure_class, failure_code = "environment", "TASK_ALREADY_RUNNING"
-    elif failure_type in {"environment", "preflight"} or "environment_precheck" in lower:
-        failure_class, failure_code = "environment", "ENVIRONMENT_PRECHECK_FAILED"
-    elif any(marker in lower for marker in (
-        "nas mount", "material_dir", "no video files", "script empty",
-        "draft root", "pipeline version",
-    )):
-        failure_class, failure_code = "environment", "ENVIRONMENT_PRECHECK_FAILED"
-    elif "qc" in lower or "draft" in lower:
-        failure_class, failure_code = "draft", "DRAFT_INVALID"
-    elif failure_type == "transient":
-        failure_class, failure_code = "provider", "TRANSIENT_BUILD_FAILURE"
-    elif rows or error:
-        failure_class, failure_code = "unknown", "TASK_FAILED"
-    else:
-        failure_class, failure_code = None, None
-
-    retryable = bool(
-        failure_class in {"vision", "provider"}
-        and any(token in lower for token in (
-            "timeout", "timed out", "429", "502", "503", "network",
-            "connection reset", "temporarily unavailable",
-        ))
-    )
-    if status == "OK":
-        terminal_state, next_action = "SUCCESS", "complete"
-    elif status == "DEFERRED":
-        terminal_state, next_action = "DEFERRED", "skip_task"
-    elif status in {"PARTIAL", "PREVIEW_READY"}:
-        terminal_state, next_action = "UNCERTIFIED", "manual_review"
-    elif failure_class in {"environment", "semantic", "timing", "draft"}:
-        terminal_state, next_action = "BLOCKED", "fix_environment" if failure_class == "environment" else "manual_review"
-    else:
-        terminal_state, next_action = "ERROR", "retry_stage" if retryable else "manual_review"
-    return {
-        "task_id": task_id,
-        "run_id": run_id,
-        "parent_run_id": parent_run_id,
-        "pipeline_version": _pipeline_version(),
-        "terminal_state": terminal_state,
-        "failure_class": failure_class,
-        "failure_code": failure_code,
-        "retryable": retryable,
-        "safe_to_continue": terminal_state == "SUCCESS",
-        "next_action": next_action,
-        "manifest_sha256": manifest_sha256,
-        "runtime": runtime,
-        "task_log": task_log,
-    }
+    return queue_contracts.batch_result_contract(
+        status, pipeline_version=_pipeline_version(), run_id=run_id,
+        failures=failures, error=error, parent_run_id=parent_run_id,
+        task_id=task_id, manifest_sha256=manifest_sha256, runtime=runtime,
+        task_log=task_log)
 
 
 def _nas_path(name: str) -> str:
@@ -219,14 +141,7 @@ MAX_DRAFT_ATTEMPTS = _env_int("JY_MAX_DRAFT_ATTEMPTS", 3, 1)
 # genuinely large but healthy task to finish.
 TASK_BUDGET_SECONDS = _env_int("JY_TASK_BUDGET_S", 1200, 60)
 TIMEOUT_ESCALATION_MULT = _env_int("JY_TIMEOUT_ESCALATION", 2, 1)
-TRANSIENT_BUILD_MARKERS = (
-    "402", "502", "503", "429", "Too Many Requests", "temporarily unavailable",
-    "Insufficient Balance", "timed out", "SHOT_ANALYSIS_PENDING",
-    "VISION_CALL_FAILED", "SHOT_MATCH_BLOCKED", "Connection reset",
-    "VISION_JSON_INVALID",
-    "Connection refused", "could not resolve host", "network",
-    "vision analysis incomplete", "empty description",
-)
+TRANSIENT_BUILD_MARKERS = queue_contracts.TRANSIENT_BUILD_MARKERS
 
 
 def log(*args):
@@ -659,69 +574,15 @@ def validate_visual_match(report_dir: pathlib.Path) -> tuple[bool, str]:
             return False, "VISUAL_MATCH_BLOCKED: segment %d claim gate blocked/uncovered" % index
     return True, "visual_match_valid"
 
-def safe_manifest_stem(name: str) -> str:
-    """Make a Windows-safe manifest filename without changing the draft name.
-
-    Only the on-disk manifest file is sanitized; the Jianying draft_name inside
-    the manifest keeps its original title, so drafts and their display names are
-    never altered or renamed.
-    """
-    stem = re.sub(r"[\\/:*?\"<>|\r\n\t]+", "_", str(name)).strip(" .")
-    return stem or "draft"
+safe_manifest_stem = queue_contracts.safe_manifest_stem
 
 
 def classify_build_failure(text: str) -> dict:
-    """Auto-classify a build failure so the loop can pick a repair strategy.
-
-    Transient = retryable with a different strategy (fresh vision, analysis
-    reuse, or a longer timeout).  Hard = a genuine visual-analysis blocker that
-    must be recorded, never faked as OK.
-    """
-    blob = text or ""
-    lower_blob = blob.lower()
-    hits = [m for m in TRANSIENT_BUILD_MARKERS if m.lower() in lower_blob]
-    transient_signals = (
-        "502", "503", "429", "too many requests", "temporarily unavailable",
-        "timed out", "timeout", "connection reset", "connection refused",
-        "could not resolve host", "network", "provider unavailable",
-    )
-    transient = any(marker in lower_blob for marker in transient_signals)
-    credential_or_input_block = any(marker in lower_blob for marker in (
-        "credential", "unauthorized", "forbidden", "invalid api key",
-        "insufficient balance", "401", "403", "invalid path", "path not found",
-        "file not found", "no such file", "encoding error", "unicode decode",
-    ))
-    deterministic_block = any(marker.lower() in lower_blob for marker in (
-        "VISUAL_MATCH_BLOCKED", "SHOT_MATCH_BLOCKED", "AUDIO_VIDEO_MISMATCH",
-        "TASK_BUDGET", "Invalid argument", "INVALID_ARGUMENT",
-        "DESKTOP_IMPORT_BLOCKED", "DRAFT_INVALID", "VOICE_SELECTION_REQUIRED",
-        "BGM_REQUIRED", "SENTENCE_PLAN_REVIEW_REQUIRED",
-    )) or credential_or_input_block or ("vision_call_failed" in lower_blob and not transient)
-    vision_hard = ("draft_visual_qc_blocked" in lower_blob) or (
-        "no auditable visual top1" in lower_blob) or (
-        "visual_match_blocked" in lower_blob and not hits)
-    return {
-        "transient": bool(hits and transient and not credential_or_input_block),
-        "vision_hard": vision_hard,
-        "deterministic_block": deterministic_block,
-        "markers": hits,
-    }
+    return queue_contracts.classify_build_failure(
+        text, transient_markers=TRANSIENT_BUILD_MARKERS)
 
 
-def _is_reusable_analysis_row(row: object) -> bool:
-    if not isinstance(row, dict):
-        return False
-    empty_rejection = (row.get("visual_observation_complete") is True
-                       and row.get("action_complete") is False
-                       and row.get("status") == "pending_analysis"
-                       and row.get("evidence_tags") == [])
-    if not (str(row.get("description") or "").strip()
-            and row.get("visual_tags") and (row.get("evidence_tags") or empty_rejection)):
-        return False
-    try:
-        return float(row.get("analysis_confidence") or 0) > 0
-    except (TypeError, ValueError):
-        return False
+_is_reusable_analysis_row = queue_contracts.is_reusable_analysis_row
 
 
 def run_build(manifest: dict, report_dir: pathlib.Path, draft_name: str, *,
@@ -2211,15 +2072,7 @@ def _parallel_eligible(task: dict) -> bool:
                 or task.get("retry_deferred") or status in {"ERROR", "PARTIAL"})
 
 
-def _parallel_pair_safe(left: dict, right: dict) -> bool:
-    """Avoid same-title draft collisions and same-pool cache contention."""
-    left_title = str(left.get("title") or left.get("record_id") or "").strip().casefold()
-    right_title = str(right.get("title") or right.get("record_id") or "").strip().casefold()
-    left_material = str(left.get("material_dir") or "").strip().casefold()
-    right_material = str(right.get("material_dir") or "").strip().casefold()
-    return bool(left_title and right_title and left_title != right_title
-                and left_material and right_material
-                and left_material != right_material)
+_parallel_pair_safe = queue_contracts.parallel_pair_safe
 
 
 def _run_task(task: dict) -> None:
@@ -2231,25 +2084,9 @@ def _run_task(task: dict) -> None:
 def select_queue_for_single_run(queue: list[dict], *,
                                 record_id: str = "",
                                 force_rebuild: bool = False) -> list[dict]:
-    """Select exactly one task; a targeted run must never drain the queue."""
-    target = str(record_id or "").strip()
-    if force_rebuild and not target:
-        raise ValueError("force_rebuild requires an exact record_id")
-    if target:
-        matches = [task for task in queue
-                   if str(task.get("record_id") or "").strip() == target]
-        if len(matches) != 1:
-            raise ValueError("expected exactly one queued task for record_id=%s; found %d"
-                             % (target, len(matches)))
-        selected = dict(matches[0])
-        if force_rebuild:
-            selected["force_rebuild"] = True
-        if os.environ.get("JY_TASK_RESUME_PARTIAL", "").strip() == "1":
-            selected["force_rebuild"] = False
-            selected["retry_deferred"] = True
-            selected["retry_error"] = False
-        return [selected]
-    return [dict(queue[0])] if queue else []
+    return queue_contracts.select_queue_for_single_run(
+        queue, record_id=record_id, force_rebuild=force_rebuild,
+        resume_partial=os.environ.get("JY_TASK_RESUME_PARTIAL", "").strip() == "1")
 
 
 def _queue_preflight(task: dict) -> dict:
