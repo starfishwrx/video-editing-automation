@@ -44,6 +44,7 @@ uv run --frozen python -X utf8 doubao-jianying-orchestrator/run.py --help
 - 初次使用：[快速开始](docs/quickstart.md)、[环境配置](packages/video-v1.5.3/ENVIRONMENT.md)、[模型与视觉流程](docs/model-and-vision.md)。
 - 了解实现：[文档索引](docs/README.md)、[架构](docs/architecture.md)、[产品目标](docs/prd.md)。
 - 修改项目：[贡献与分支约定](CONTRIBUTING.md)、[`AGENTS.md`](AGENTS.md)、[测试策略](docs/test.md)。
+- 按功能开发：[模块化开发与架构审计](docs/modular-development.md)，查找功能包并运行依赖边界检查。
 - 打包交接：[发布流程](docs/release-process.md)、[版本记录](docs/RELEASES.md)。
 
 日常使用 `main + 短期功能分支 + PR`；发布版本用 tag/Release 标记。仓库内的离线 CI 验证代码合同，真实模型效果、剪映打开与人工成片验收分别留证。
@@ -59,5 +60,7 @@ uv run --frozen python -X utf8 doubao-jianying-orchestrator/run.py --help
 - `.github/`：离线 CI 与 PR 模板。
 
 ## 使用边界与隐私
+
+This repository is designed to be publishable with only fake examples.
 
 模型会接收任务抽帧和相关脚本文字；运行前确认这些素材适合发送到所配置的服务。源码示例不包含真实账号、生产日志或业务素材，私有配置和输出保留在本机。预览稿和模型调用失败保留未认证状态；正式交付仍需要真实视觉证据与人工审阅。

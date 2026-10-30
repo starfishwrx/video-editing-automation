@@ -28,6 +28,7 @@
 | 文件 | 内容 |
 |---|---|
 | [`architecture.md`](architecture.md) | 端到端数据流 |
+| [`modular-development.md`](modular-development.md) | 架构审计、功能包边界、旧入口与新增功能开发规则 |
 | [`code-standards.md`](code-standards.md) | 微秒口径、闸门形态、凭据、依赖 |
 | [`agent-loops.md`](agent-loops.md) | Issue/反馈/夜间审计三类循环提示词 |
 | [`release-process.md`](release-process.md) | 合包发版流程 |

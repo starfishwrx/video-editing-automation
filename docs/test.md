@@ -30,6 +30,8 @@ uv run --frozen python -X utf8 -m unittest discover -s doubao-jianying-orchestra
 
 ## 2. 局部迭代（可缩小）
 
+模块边界检查：活包根运行 `uv run --frozen python -X utf8 -m tools.check_architecture`。`tests/test_modular_architecture.py` 验证旧/新导入共享状态、纯合同不加载引擎、中文空格路径副本资源、独立文件加载规则与反向依赖拒绝。`test_closed_loop_entrypoints.py` 覆盖两个旧入口、任意 cwd、importlib 独立命名空间、非 PASS/Eval/人工审批拦截；`test_queue_contracts.py` 与编排器 `test_media_boundary.py` 覆盖抽出的任务合同和媒体操作。新模块必须进入全新解压包后仍能运行。
+
 | 改动面 | 可先跑 |
 |---|---|
 | 草稿交付 / 媒体路径 | `test_draft_delivery.py` |

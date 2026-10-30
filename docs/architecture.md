@@ -2,6 +2,8 @@
 
 当前维护入口为 `packages/video-v1.5.3/`，真实版本读包内 `VERSION`。默认选镜为 `ai_editor`，视觉后端为火山方舟直连 **GLM-5.3-Flash**（`glm-5.3-flash`）。配置和覆盖优先级见[模型与视觉流程](model-and-vision.md)。
 
+实现已按功能包组织，见[模块化开发](modular-development.md)。本文模块名表示职责；旧平铺导入路径继续兼容，实际源码归属以 `orchestrator/module_map.json` 为准。CLI/引擎位于 application，数据模型位于 domain，底层抽帧位于 media；闭环由 tools/workflow 唯一维护。
+
 ## 默认数据流
 
 ```mermaid

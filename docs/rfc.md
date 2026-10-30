@@ -73,6 +73,9 @@
 
 ## 8. 迁移与兼容
 
+- 2026-10-30：采用技能内部功能包布局，保留双技能安装组件。50 个模块迁入 9 个功能包，Clip 数据模型独立为 domain；旧路径仅兼容导入，使用同一模块对象保持缓存/锁/patch 身份。按文件加载的证据合同、规则包和独立分发器保留位置。约束和已知留存耦合见 `docs/modular-development.md`。
+- 闭环以 `tools/workflow/closed_loop.py` 为单一实现，两条旧脚本统一执行现行 Eval/Mac/身份合同；worker 的纯任务合同进入 `tools/queueing/contracts.py`。不创建新的部署组件或恢复历史队列。
+
 - 外部调度与现有 pipeline 联接保留；升级先备份再换 ACTIVE 指针。
 - 分析缓存键变更（如 `product-visual-v2`）会触发素材重分析，属预期成本。
 - Mac 审阅路径与 Windows 分发路径指向同一共享文件的不同 OS 视图；暂存成功仍是 `AWAITING_MAC_REVIEW`，不是验收通过。

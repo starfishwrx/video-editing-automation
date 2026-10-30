@@ -7,6 +7,15 @@
 
 ## 新增条目
 
+### L-20261030-01 功能拆分必须同时验证导入身份与发布库存
+- status: OPEN
+- hits: 1
+- 模块: module-layout / release-inventory / compatibility
+- 现象: 直接复制导出会使旧 patch 与实现状态分离；通用 media 目录排除会把新媒体代码包也漏掉。开发树回归通过仍可能无法在全新包中启动。
+- 根因: Python 模块对象和目录名称同时承担了运行时合同，单纯搬文件没有覆盖这些隐含依赖。
+- 以后怎么做: 旧导入指向同一实现对象；数据与媒体操作围绕明确输入输出抽取；资源根独立于实现深度。每次引入功能子目录在包外副本做 full 合包/解压回归，并验证私有媒体排除仍生效。按文件加载的证据合同必须读取同一包副本。
+- 证据: `tests/test_modular_architecture.py`、`tests/test_closed_loop_entrypoints.py`、`doubao-jianying-orchestrator/tests/test_media_boundary.py`、`docs/modular-development.md`。
+
 ### L-20261028-09 混合选镜与缓存抽帧的证据身份
 - status: OPEN
 - hits: 1

@@ -12,6 +12,8 @@
 
 ## 1. 按任务找文档
 
+模块化维护先读 [`docs/modular-development.md`](docs/modular-development.md)。实际实现位于 `orchestrator/{application,audio,media,runtime,policy,selection,vision,quality,delivery,domain}/`；下表中的旧平铺 Python 路径为兼容导入，禁止在其中新增业务逻辑。具体归属见 `orchestrator/module_map.json`。闭环唯一实现为 `tools/workflow/closed_loop.py`，worker 纯合同为 `tools/queueing/contracts.py`。
+
 | 你要改的东西 | 先读 | 代码位置 |
 |---|---|---|
 | 新用户入口 / 模型和环境配置 | `docs/quickstart.md`, `docs/model-and-vision.md`, `ENVIRONMENT.md`（活包内） | `examples/`（活包内）、`vision_analyzer.py` |
@@ -40,6 +42,7 @@
 cd packages/video-v1.5.3
 uv run --frozen python -X utf8 -m unittest discover -s tests -q
 uv run --frozen python -X utf8 -m unittest discover -s doubao-jianying-orchestrator/tests -q
+uv run --frozen python -X utf8 -m tools.check_architecture
 ```
 
 - 完整策略见 `docs/test.md`。局部交付迭代可只跑 `test_draft_delivery.py`、`test_nas_portable.py`；发版 PR 用 `tools.release_package build --output <包外新目录> --checks full`。
