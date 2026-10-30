@@ -6,6 +6,7 @@
 
 ### 2026-10-30
 
+- 按用户要求统一分支命名为 feat/fix/docs；当前分支改名 feat/modular-vision-cleanup，保留全部已有提交。同步 AGENTS 与 CONTRIBUTING，文档差异检查通过。
 - 后续按用户要求移除 Codex 运行时调用，同时清理同类 Anthropic/CCSwitch 回退；GLM/Qwen 直连、ai_editor/rule_then_ai/legacy 选镜及独立 QC 保留。描述选镜通用入口改名 match_sentences。
 - 统一 runtime/vision_config 解析支持的通道及真实模型身份；删除旧 profile/provider/output-schema/Anthropic env loader、Agent 进程管理和非 HTTP 重试/槽位分支。旧 aijws profile 不再隐式覆盖模型；无效配置可诊断并在建稿/生成恢复的 TTS 前阻断，只读 UI 诊断继续可用。
 - 审计发现 JyPoll/JyRun 模板仍启动整条 Codex Agent，已将两个历史源码入口退役为控制台提示与 exit 2。真实 PowerShell 执行和 AST 验证无凭据读取、目录/锁修改、调度、外发或自动转交 worker。

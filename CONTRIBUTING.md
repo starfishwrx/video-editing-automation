@@ -7,7 +7,8 @@
 采用 `main + 短期功能分支 + PR`，目前不要求长期 `dev`。
 
 - `main`：通过既定代码检查的集成基线；是否已经发布或部署需看独立收据。
-- `codex/<简短主题>` 等功能分支：一次解决一个相关问题，改完通过 PR 合入 `main`；使用不同 Agent 时保留独立分支/工作树。
+- 分支按用途命名：`feat/<简短主题>` 用于新功能或功能重构，`fix/<简短主题>` 用于缺陷修复，`docs/<简短主题>` 用于纯文档。主题使用小写英文和连字符，不使用 Agent 名作为前缀。
+- 每个分支解决一个相关问题，改完通过 PR 合入 `main`；使用不同 Agent 时保留独立分支/工作树。
 - tag：某次确定的代码快照。Release：该 tag 对应的说明、ZIP 和校验附件。部署机器实际运行身份单独回读。
 
 从干净工作区开始，例如补快速开始文档：
@@ -15,12 +16,12 @@
 ```powershell
 git switch main
 git pull --ff-only
-git switch -c codex/docs-quickstart
+git switch -c docs/quickstart
 # 编辑、核对命令并验证；只暂存本次文件。
 git add README.md docs/quickstart.md
 git diff --cached
 git commit -m "docs: add runnable quickstart"
-git push -u origin codex/docs-quickstart
+git push -u origin docs/quickstart
 ```
 
 创建以 `main` 为目标的 PR，检查 Files changed、Checks 和审阅意见后再合并。合并后删除已完成的功能分支。不直接 push `main`，不将无关修改、临时数据或其他人的未提交工作带入 PR。
