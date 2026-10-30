@@ -6,7 +6,7 @@
     "machine-specific paths",
     "knowledge-base bodies"
   ],
-  "file_count": 347,
+  "file_count": 352,
   "files": [
     {
       "path": ".gitignore"
@@ -201,6 +201,9 @@
       "path": "doubao-jianying-orchestrator/orchestrator/media/__init__.py"
     },
     {
+      "path": "doubao-jianying-orchestrator/orchestrator/media/action_frames.py"
+    },
+    {
       "path": "doubao-jianying-orchestrator/orchestrator/media/ffmpeg_bootstrap.py"
     },
     {
@@ -349,6 +352,12 @@
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/selection/ai_editor.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/selection/paper_action_events.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/selection/paper_action_windows.py"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/selection/paper_retiming.py"
@@ -520,6 +529,12 @@
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_meeting_voice.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/tests/test_paper_action_events.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/tests/test_paper_action_windows.py"
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_paper_production.py"

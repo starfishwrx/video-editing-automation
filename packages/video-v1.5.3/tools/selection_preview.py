@@ -11,6 +11,8 @@ import json
 import math
 from pathlib import Path
 import subprocess
+import sys
+import tempfile
 
 US = 1_000_000
 
@@ -110,6 +112,65 @@ def video_rows(draft: dict, draft_root: Path, overrides: dict | None = None) -> 
     if abs(cursor - int(draft.get("duration", cursor))) > 40_000:
         raise ValueError("VIDEO_TIMELINE_DURATION_MISMATCH")
     return result
+
+
+def _action_modules():
+    skill = str(Path(__file__).resolve().parents[1] / "doubao-jianying-orchestrator")
+    if skill not in sys.path:
+        sys.path.insert(0, skill)
+    from orchestrator.media import action_frames
+    from orchestrator.selection import paper_action_windows
+    return action_frames, paper_action_windows
+
+
+def _validated_frame_map(spec: dict | None, rows: list[dict], fps: int,
+                         *, ffprobe="ffprobe") -> dict | None:
+    """Recompute the source-time proof from real PTS before consuming a map."""
+    if spec is None:
+        return None
+    if not isinstance(spec, dict):
+        raise ValueError("ACTION_FRAME_MAP_CONTRACT_REQUIRED")
+    key = _integer(spec.get("index"), "ACTION_INDEX", positive=True)
+    selected = [r for r in rows if r["index"] == key]
+    if not selected or not all(r["changed"] for r in selected):
+        raise ValueError("ACTION_FRAME_MAP_REQUIRES_OVERRIDE")
+    plan, phases = spec.get("plan"), spec.get("phases")
+    if not isinstance(plan, dict) or not isinstance(plan.get("parts"), list):
+        raise ValueError("ACTION_FRAME_MAP_PLAN_REQUIRED")
+    if len(plan["parts"]) != len(selected) or len({r["source"] for r in selected}) != 1:
+        raise ValueError("ACTION_FRAME_MAP_PARTS_MISMATCH")
+    for part, row in zip(plan["parts"], selected):
+        if (not isinstance(part, dict)
+                or any(part.get(k) != row[k] for k in ("source", "source_start_us", "source_end_us",
+                                                      "segment_us", "speed", "target_start_us", "target_end_us"))):
+            raise ValueError("ACTION_FRAME_MAP_PARTS_MISMATCH")
+    frames, windows = _action_modules()
+    source = selected[0]["source"]
+    source_identity = frames.identity(source)
+    if spec.get("source_identity") != source_identity:
+        raise ValueError("ACTION_FRAME_MAP_SOURCE_IDENTITY_MISMATCH")
+    with tempfile.TemporaryDirectory(prefix="selection-source-pts-") as temporary:
+        metadata = frames.probe(source, Path(temporary), ffprobe=ffprobe)
+    from fractions import Fraction
+    checked = windows.validate_action_plan(plan, [f["pts_us"] for f in metadata["frames"]], phases,
+        source_end_us=metadata["source_end_us"], source_fps=Fraction(metadata["stream"]["avg_frame_rate"]),
+        min_result_frames=spec.get("min_result_frames"), preferred_cap=spec.get("preferred_cap"),
+        hard_cap=spec.get("hard_cap"), output_fps=fps,
+        target_start_us=selected[0]["target_start_us"],
+        target_duration_us=selected[-1]["target_end_us"] - selected[0]["target_start_us"])
+    if not checked.get("ok"):
+        raise ValueError("ACTION_FRAME_MAP_INVALID:" + str(checked.get("reason")))
+    if (plan.get("protocol") != windows.PROTOCOL or plan.get("target") != checked["target"]
+            or plan.get("proof") != checked["proof"]):
+        raise ValueError("ACTION_FRAME_MAP_PROOF_MISMATCH")
+    samples = checked["proof"]["samples"]
+    indices = [s["source_frame_index"] for s in samples]
+    expected = list(range(checked["target"]["output_start_frame"], checked["target"]["output_end_frame"]))
+    if ([s["output_frame"] for s in samples] != expected
+            or any(a >= b for a, b in zip(indices, indices[1:]))):
+        raise ValueError("ACTION_FRAME_MAP_REPEATED_OR_MISSING_FRAME")
+    return {"index": key, "source": source, "source_identity": source_identity,
+            "metadata": metadata, "target": checked["target"], "proof": checked["proof"], "samples": samples}
 
 
 def ass_stamp(microseconds: int) -> str:
@@ -213,7 +274,8 @@ def contact_sheets(video: Path, output: Path, *, ffmpeg="ffmpeg", fps=4) -> list
 
 def render(draft_path: Path, output: Path, *, overrides: dict | None = None,
            draft_root: Path | None = None, name="review", width=540, height=960,
-           fps=30, ffmpeg="ffmpeg", ffprobe="ffprobe", sheets=True) -> dict:
+           fps=30, ffmpeg="ffmpeg", ffprobe="ffprobe", sheets=True,
+           source_frame_map: dict | None = None) -> dict:
     draft_path = Path(draft_path).resolve()
     draft_root = Path(draft_root).resolve() if draft_root else draft_path.parent
     output = Path(output).resolve()
@@ -229,7 +291,18 @@ def render(draft_path: Path, output: Path, *, overrides: dict | None = None,
     # before rendering rather than silently dropping or extending that action.
     if any(row["segment_us"] * fps < US for row in rows):
         raise ValueError("PART_SHORTER_THAN_OUTPUT_FRAME")
+    mapped = _validated_frame_map(source_frame_map, rows, fps, ffprobe=ffprobe)
     output.mkdir(parents=True)
+    extracted = {}
+    if mapped:
+        decoder, _ = _action_modules()
+        decoded = decoder.extract(mapped["source"], mapped["metadata"],
+            [s["source_frame_index"] for s in mapped["samples"]], output / "source_frame_map", ffmpeg=ffmpeg,
+            width=max(540, width))
+        extracted = {r["index"]: r for r in decoded}
+        if any(extracted[s["source_frame_index"]]["pts_us"] != mapped["metadata"]["frames"][s["source_frame_index"]]["pts_us"]
+               for s in mapped["samples"]):
+            raise ValueError("ACTION_FRAME_MAP_DECODED_PTS_MISMATCH")
     (output / "subtitles.ass").write_text(subtitle_text(draft, width, height), encoding="utf-8-sig")
     concat, row_receipts = [], []
     for n, row in enumerate(rows, 1):
@@ -237,21 +310,43 @@ def render(draft_path: Path, output: Path, *, overrides: dict | None = None,
         if frames <= 0:
             raise ValueError("PART_SHORTER_THAN_OUTPUT_FRAME")
         target = output / f"part_{n:03d}.mp4"
-        filters = [f"setpts=(PTS-STARTPTS)/{row['speed']:.12g}",
-            f"scale={width}:{height}:force_original_aspect_ratio=decrease",
-            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2", "setsar=1", f"fps={fps}",
-            "format=yuv420p"]
+        exact = bool(mapped and row["index"] == mapped["index"])
+        filters = [f"scale={width}:{height}:force_original_aspect_ratio=decrease",
+            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2", "setsar=1", "format=yuv420p"]
+        if not exact:
+            filters.insert(0, f"setpts=(PTS-STARTPTS)/{row['speed']:.12g}")
+            filters.insert(-1, f"fps={fps}")
         for curve in row["segment"].get("common_keyframes") or []:
             if curve.get("property_type") == "KFTypeBrightness" and curve.get("keyframe_list"):
                 value = curve["keyframe_list"][0].get("values", [0])[0]
                 filters.append(f"eq=brightness={float(value):.6f}")
-        filters.append(f"tpad=stop_mode=clone:stop_duration={2/fps:.9f}")
-        _run([ffmpeg, "-hide_banner", "-v", "error", "-ss", f"{row['source_start_us']/US:.6f}",
-            "-t", f"{(row['source_end_us']-row['source_start_us'])/US:.6f}", "-i", row["source"],
+        samples = []
+        if exact:
+            first = round(row["target_start_us"] * fps / US)
+            last = round(row["target_end_us"] * fps / US)
+            samples = [s for s in mapped["samples"] if first <= s["output_frame"] < last]
+            if len(samples) != frames:
+                raise ValueError("ACTION_FRAME_MAP_PART_FRAME_BUDGET_MISMATCH")
+            sequence = output / f"mapped_part_{n:03d}"
+            sequence.mkdir()
+            for i, sample in enumerate(samples, 1):
+                source_jpeg = Path(extracted[sample["source_frame_index"]]["path"])
+                (sequence / f"{i:06d}.jpg").write_bytes(source_jpeg.read_bytes())
+            inputs = ["-framerate", str(fps), "-start_number", "1", "-i", str(sequence / "%06d.jpg")]
+        else:
+            filters.append(f"tpad=stop_mode=clone:stop_duration={2/fps:.9f}")
+            inputs = ["-ss", f"{row['source_start_us']/US:.6f}",
+                "-t", f"{(row['source_end_us']-row['source_start_us'])/US:.6f}", "-i", row["source"]]
+        _run([ffmpeg, "-hide_banner", "-v", "error", *inputs,
             "-an", "-vf", ",".join(filters), "-frames:v", str(frames), "-c:v", "libx264",
             "-preset", "veryfast", "-crf", "23", "-threads", "2", "-y", str(target)], output)
         concat.append(f"file '{target.name}'")
-        row_receipts.append({k: v for k, v in row.items() if k not in {"segment", "material"}} | {"frames": frames})
+        record = {k: v for k, v in row.items() if k not in {"segment", "material"}} | {"frames": frames}
+        if exact:
+            record.update(render_mode="validated-source-frame-map", mapped_source_frames=[
+                {"output_frame": s["output_frame"], "source_frame_index": s["source_frame_index"],
+                 "source_pts_us": extracted[s["source_frame_index"]]["pts_us"]} for s in samples])
+        row_receipts.append(record)
     (output / "concat.txt").write_text("\n".join(concat) + "\n", encoding="utf-8")
     _run([ffmpeg, "-hide_banner", "-v", "error", "-f", "concat", "-safe", "0", "-i", "concat.txt",
           "-c", "copy", "-y", "picture.mp4"], output)
@@ -284,6 +379,8 @@ def render(draft_path: Path, output: Path, *, overrides: dict | None = None,
     probe = json.loads(_run([ffprobe, "-v", "error", "-show_streams", "-show_format", "-of", "json", str(target)], output).stdout)
     if draft_path.read_bytes() != before:
         raise ValueError("BASELINE_CHANGED_DURING_PREVIEW")
+    if mapped and _action_modules()[0].identity(mapped["source"]) != mapped["source_identity"]:
+        raise ValueError("ACTION_SOURCE_CHANGED_DURING_PREVIEW")
     receipt = {"status": "DIAGNOSTIC_PROXY_RENDERED", "draft": str(draft_path), "media_root": str(draft_root),
         "output": str(target), "native_export": False, "full_decode": True, "source_unchanged": True,
         "target_duration_s": duration, "actual_duration_s": float(probe["format"]["duration"]),
@@ -293,6 +390,9 @@ def render(draft_path: Path, output: Path, *, overrides: dict | None = None,
                         "Subtitle font metrics approximate; original text, timing and position retained",
                         "Basic brightness is retained; other effects, masks, animated crops and transitions are not reproduced",
                         "Video cut positions quantized to nearest output frame; audio is not retimed by video overrides"]}
+    if mapped:
+        receipt["source_frame_map"] = {k: mapped[k] for k in ("index", "source", "source_identity", "target", "proof")}
+        receipt["limitations"].append("Mapped source frames use verified JPEG decoder extracts at least 540px wide; fine detail is a diagnostic proxy")
     (output / "render_receipt.json").write_text(json.dumps(receipt, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return receipt
 
@@ -305,9 +405,12 @@ def main(argv=None) -> int:
     parser.add_argument("--overrides", type=Path)
     parser.add_argument("--name", default="review")
     parser.add_argument("--no-contact-sheets", action="store_true")
+    parser.add_argument("--source-frame-map", type=Path,
+                        help="Optional reviewed action plan contract; real source PTS and proof are revalidated")
     args = parser.parse_args(argv)
     receipt = render(args.draft, args.output, overrides=read(args.overrides) if args.overrides else None,
-                     draft_root=args.draft_root, name=args.name, sheets=not args.no_contact_sheets)
+                     draft_root=args.draft_root, name=args.name, sheets=not args.no_contact_sheets,
+                     source_frame_map=read(args.source_frame_map) if args.source_frame_map else None)
     print(json.dumps({key: receipt[key] for key in ("status", "output", "full_decode", "actual_duration_s")}, ensure_ascii=False))
     return 0
 

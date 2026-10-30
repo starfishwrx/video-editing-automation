@@ -9,12 +9,13 @@
 
 ### L-20261030-04 句长可行性与动作完整性必须分别核验
 - status: OPEN
-- hits: 1
+- hits: 2
 - 模块: selection / retiming / preview
 - 现象: 全片平均倍速下降仍可能保留半截动作；模型也会把下一次入手说成结果静置，或把一个固定机位误称为两个角度。横向拉宽的拼图还会影响包装厚实判断。
 - 根因: 仅凭历史描述、分段名称或时长合计不能证明实际使用窗口完整，短口播又容易诱导裁掉必要动作。
 - 以后怎么做: 保持图片比例，按最终连续源窗口重新看图；保护关键接触、完成与结果，只压缩明确允许的中间过程。微秒精确求解后还要核对输出帧边界并播放 A/B。放不下就保留时长冲突，不把方案就绪当成质量 PASS。参考工程要标注当前版本与归档快照及缺失媒体。
 - 证据: `test_paper_retiming.py`、`test_paper_selection.py`、`test_paper_review_media.py`、`test_selection_preview.py`、`docs/paper-selection-replay.md`。
+- 再次遇到: 名义源窗到达结果，fps中心重采样后的实际尾帧却仍在展开。先以真实PTS和不带时长目标的观察记录动作，再搜索连续窗口与帧预算；实际输出重验源帧对应。新增 `test_paper_action_events.py`、`test_paper_action_windows.py` 与显式映射真实渲染测试，说明见 `docs/paper-action-windows.md`。
 
 ### L-20261030-03 定时流水线必须使用当前证据并隔离代码根与工作根
 - status: OPEN

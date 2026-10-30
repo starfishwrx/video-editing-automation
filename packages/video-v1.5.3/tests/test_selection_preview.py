@@ -116,6 +116,80 @@ class SelectionPreviewTests(unittest.TestCase):
             preview.render(path, output, overrides=plan, sheets=False)
         self.assertFalse(output.exists())
 
+    def action_frame_fixture(self):
+        subprocess.run(["ffmpeg", "-hide_banner", "-v", "error", "-f", "lavfi", "-i",
+            "nullsrc=s=90x160:r=60:d=3,format=gbrp,geq=r='mod(N*17,255)':g='mod(N*43,255)':b='mod(N*71,255)'",
+            "-pix_fmt", "yuv420p", "-c:v", "libx264", "-qp", "0", "-threads", "1", "-y", str(self.video)],
+            check=True, capture_output=True, timeout=20)
+        self.draft["tracks"] = self.draft["tracks"][:1]
+        frames, windows = preview._action_modules()
+        metadata = frames.probe(self.video, self.root / "pts")
+        phases = [{"start_us": 0, "end_us": 200_000, "kind": "key_action", "can_speed": False},
+                  {"start_us": 200_000, "end_us": 2_000_000, "kind": "process", "can_speed": True},
+                  {"start_us": 2_000_000, "end_us": 2_400_000, "kind": "result", "can_speed": False}]
+        plan = windows.plan_action_window([f["pts_us"] for f in metadata["frames"]], phases,
+            source_end_us=metadata["source_end_us"], source_fps=60, min_result_frames=6,
+            source=str(self.video.resolve()), window_start_us=0, window_end_us=2_400_000,
+            target_start_us=0, target_duration_us=2_000_000)
+        self.assertTrue(plan["ok"], plan)
+        override = {"overrides": [{"index": 1, "reason": "Frame-aware protected action", "parts": plan["parts"]}]}
+        spec = {"index": 1, "plan": plan, "phases": phases, "source_identity": frames.identity(self.video),
+                "min_result_frames": 6, "preferred_cap": 2, "hard_cap": 3}
+        return override, spec
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg unavailable")
+    def test_action_frame_map_rejects_forged_proof_identity_and_part_budget(self):
+        overrides, spec = self.action_frame_fixture()
+        rows = preview.video_rows(self.draft, self.root, overrides)
+        self.assertIsNotNone(preview._validated_frame_map(spec, rows, 30))
+        mutations = [
+            lambda x: x["plan"]["proof"]["samples"][1].update(source_frame_index=0),
+            lambda x: x["source_identity"].update(size=0),
+            lambda x: x["plan"]["parts"][0].update(segment_us=1),
+            lambda x: x["plan"]["target"].update(output_frames=999),
+            lambda x: x["plan"]["proof"].update(result_output_frames=999),
+            lambda x: x.update(phases=[]),
+            lambda x: x["plan"]["parts"][0].update(source="other.mp4")]
+        for mutate in mutations:
+            bad = copy.deepcopy(spec)
+            mutate(bad)
+            with self.subTest(contract=bad), self.assertRaises(ValueError):
+                preview._validated_frame_map(bad, rows, 30)
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg unavailable")
+    def test_real_action_frame_map_displays_exact_selected_frames_without_tail_freeze(self):
+        from PIL import Image, ImageStat
+        overrides, spec = self.action_frame_fixture()
+        path = self.root / "timeline.json"
+        path.write_text(json.dumps(self.draft), encoding="utf-8")
+        output = self.root.parent / (self.root.name + "-mapped")
+        self.addCleanup(shutil.rmtree, output, True)
+        result = preview.render(path, output, overrides=overrides, source_frame_map=spec,
+                                width=90, height=160, sheets=False)
+        actual = [s for row in result["video_parts"] for s in row["mapped_source_frames"]]
+        expected = spec["plan"]["proof"]["samples"]
+        self.assertEqual([s["source_frame_index"] for s in actual], [s["source_frame_index"] for s in expected])
+        self.assertEqual(len(actual), 60)
+        self.assertEqual(actual[-1]["source_pts_us"], 2_366_667)
+        self.assertTrue(all(a["source_frame_index"] < b["source_frame_index"] for a, b in zip(actual, actual[1:])))
+        raw = subprocess.run(["ffmpeg", "-v", "error", "-i", result["output"], "-an", "-f", "rawvideo",
+                              "-pix_fmt", "rgb24", "-"], capture_output=True, check=True, timeout=20).stdout
+        frame_size = 90 * 160 * 3
+        self.assertEqual(len(raw), 60 * frame_size)
+        # Each native source frame has a unique constant RGB signature. Check
+        # all displayed frames against extracted source JPEG signatures, which
+        # catches fps-center resampling, reordering and a cloned result tail.
+        extracted = next((output / "source_frame_map").glob("frames-*"))
+        colours = []
+        for sample in expected:
+            with Image.open(extracted / f"{sample['source_frame_index']:06d}.jpg") as im:
+                colours.append(ImageStat.Stat(im.convert("RGB")).mean)
+        for i in range(60):
+            image = Image.frombytes("RGB", (90, 160), raw[i * frame_size:(i + 1) * frame_size])
+            colour = ImageStat.Stat(image).mean
+            nearest = min(range(60), key=lambda j: sum(abs(a - b) for a, b in zip(colour, colours[j])))
+            self.assertEqual(nearest, i, f"Output frame {i} was resampled or repeated")
+
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg unavailable")
     def test_real_continuous_source_retiming_keeps_sentence_frames_and_final_result(self):
         # Source time is continuous across six parts; only the process is 2x.

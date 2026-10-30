@@ -50,6 +50,8 @@
 
 纸品单模块改镜与局部变速验证使用独立的 `selection/paper_selection.py` 和纯求解器 `selection/paper_retiming.py`，从已有分析重新复核源窗口，固定配音句长；没有接入默认建稿/交付。命令、2/3 倍上限、缓存变化和未解决状态见 [纸品选镜单模块验证](../paper-selection-replay.md)。
 
+后续动作定位用 `selection/paper_action_events.py` 记录不带目标句长的源帧事实，`selection/paper_action_windows.py` 进行帧域窗口搜索，`media/action_frames.py` 提供PTS账本和非语义运动线索。显式选帧预览及限制见 [动作窗口验证](../paper-action-windows.md)。
+
 - `test_shared_product_vision_cache.py`：跨任务及镜头编号复用视觉和文字、同产品冷启动防重复、不同产品仍并行、旧缓存导入、否定观察复用但不放行、源文件/SKU 变更与失败不误用缓存。
 - `test_vision_stage_concurrency.py`：媒体准备与 API 阶段分离、2 路准备后 20 路请求、慢请求期间持久化快结果、文字双读及 API 上限、失败拼图和跨批响应阻断（离线）。
 - `test_visual_qc_response_contract.py`：QC 独立并发、乱序返回仍按原句对应、失败批次不放行。
