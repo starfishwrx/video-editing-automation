@@ -27,6 +27,7 @@
 - 唯一维护实现为 `tools/workflow/closed_loop.py`；根 `closed_loop.py` 与 `tools/closed_loop.py` 是同一实现的兼容入口，使用一致的 QC、Windows 自动验收与分发收据闸门。普通导入共享模块状态；两条路径支持包外工作目录直接执行。
 
 ## 3. 评估与收据（`tools/*.py`）
+- `paper_selection_replay.py` / `selection_preview.py`：复用已分析镜头、固定原音轨和句长的纸品选镜 A/B 验证，只输出预览与未解决项；不执行生产建稿或交付。见 [纸品选镜验证](../paper-selection-replay.md)。
 - `tools/acceptance/{evaluation,task_review,delivery_gate,finalization}.py`：四项当前证据验收、正式交付前检查和交付协调；`production_eval.py` 只兼容旧导入，`eval_bootstrap.py` 可独立冻结输入。
 - `material_index.py/material_library.py`：素材索引/库工具（不在 v1.5.1 正常路径写入素材库）
 - `classify_feedback.py`：将业务反馈归类到可复用规则候选，产出可审计规则文本

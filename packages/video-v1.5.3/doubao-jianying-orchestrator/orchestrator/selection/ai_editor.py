@@ -184,7 +184,7 @@ def _inventory(manifest: dict, shots: list[dict], directory: Path) -> list[dict]
     return result
 
 
-def _review_media(shot: dict, directory: Path, *, dense: bool = False) -> dict:
+def _review_media(shot: dict, directory: Path, *, dense: bool = False, fit: bool = False) -> dict:
     from ..vision import vision_analyzer as vision
     from ..runtime import platform_env
     from . import shot_analyzer
@@ -219,14 +219,16 @@ def _review_media(shot: dict, directory: Path, *, dense: bool = False) -> dict:
     frames = material_cache.cached_frames(shot, directory, prepare_frames,
         protocol=f"candidate-even-window-{count}-v1")
     tiles = [{**frame, "label": f"t={frame['timestamp']:.3f}s"} for frame in frames]
+    sheet_parameters = ({"columns": 4, "tile_width": 270, "tile_height": 514, "fit": True}
+                        if fit else {"columns": 4, "tile_width": 420, "tile_height": 300})
     def prepare_sheet(target):
         with media_slot(timeout=600) as handle:
             if not handle.acquired:
                 raise ValueError("AI_EDITOR_MEDIA_SLOT_TIMEOUT")
-            return vision._write_sheet(tiles, target, columns=4, tile_width=420, tile_height=300,
+            return vision._write_sheet(tiles, target, **sheet_parameters,
                                        ffmpeg=platform_env.find_ffmpeg()[0])
     sheet = material_cache.cached_sheet(tiles, directory, prefix=f"candidate{count}",
-        parameters={"columns": 4, "tile_width": 420, "tile_height": 300}, prepare=prepare_sheet)
+        parameters=sheet_parameters, prepare=prepare_sheet)
     if sheet is None:
         raise ValueError("AI_EDITOR_CONTACT_SHEET_FAILED")
     if before != contract.source_identity(source):

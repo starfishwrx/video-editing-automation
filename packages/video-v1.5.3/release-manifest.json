@@ -6,7 +6,7 @@
     "machine-specific paths",
     "knowledge-base bodies"
   ],
-  "file_count": 339,
+  "file_count": 347,
   "files": [
     {
       "path": ".gitignore"
@@ -351,6 +351,12 @@
       "path": "doubao-jianying-orchestrator/orchestrator/selection/ai_editor.py"
     },
     {
+      "path": "doubao-jianying-orchestrator/orchestrator/selection/paper_retiming.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/selection/paper_selection.py"
+    },
+    {
       "path": "doubao-jianying-orchestrator/orchestrator/selection/sentence_planner.py"
     },
     {
@@ -519,7 +525,16 @@
       "path": "doubao-jianying-orchestrator/tests/test_paper_production.py"
     },
     {
+      "path": "doubao-jianying-orchestrator/tests/test_paper_retiming.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/tests/test_paper_review_media.py"
+    },
+    {
       "path": "doubao-jianying-orchestrator/tests/test_paper_rulepack.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/tests/test_paper_selection.py"
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_paper_visual_cases.py"
@@ -918,6 +933,9 @@
       "path": "tests/test_scheduled_pipeline.py"
     },
     {
+      "path": "tests/test_selection_preview.py"
+    },
+    {
       "path": "tests/test_sentence_review.py"
     },
     {
@@ -993,6 +1011,9 @@
       "path": "tools/nas_portable.py"
     },
     {
+      "path": "tools/paper_selection_replay.py"
+    },
+    {
       "path": "tools/process_liveness.py"
     },
     {
@@ -1006,6 +1027,9 @@
     },
     {
       "path": "tools/release_package.py"
+    },
+    {
+      "path": "tools/selection_preview.py"
     },
     {
       "path": "tools/sentence_review.py"
