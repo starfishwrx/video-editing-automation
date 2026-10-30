@@ -57,11 +57,13 @@ uv run --frozen python -X utf8 -m tools.release_package build --output $releaseO
 
 需要真实环境变量与素材，默认跳过：
 
-- 两条真实任务观察（不同脚本/素材），人工或 Mac 审阅。
-- `JY_EVAL_MODE=observe` → 收齐观察收据后再考虑 `enforce`。
+- Windows 上运行真实任务，分别检查独立视觉 QC、剪映可编辑性和共享交付结果。
+- 自动验收始终要求四项核心 PASS，无需观察收据或人工 prepare/collect。
 - 凭据缺失必须有界失败，禁止硬编码兜底。
 
-## 5. 手工验收看什么 artifact
+定时入口的离线回归覆盖防重入、重复触发、预览跳过、有限重试与任务间故障隔离；不会注册真实计划任务或调用真实视觉 API。
+
+## 5. 真机观察看什么 artifact
 
 - `report/` 下选镜、场景规则、视觉 QC JSON。
 - `last_result.json` / `task_log` 终态与未认证理由。

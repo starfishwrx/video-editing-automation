@@ -4,6 +4,7 @@
 
 ## 初次使用
 
+- [Windows 整体脚本与定时运行](windows-pipeline.md)：完整流水线、配置、状态和恢复。
 - [快速开始](quickstart.md)：安装、离线验证、合成抽帧示例与真实任务预览入口。
 - [模型与视觉流程](model-and-vision.md)：默认 GLM-5.3-Flash 的完整型号、图片输入与配置优先级。
 - [环境配置](../packages/video-v1.5.3/ENVIRONMENT.md)：本地依赖、模型/API、路径与生产集成变量。

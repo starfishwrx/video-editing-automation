@@ -43,8 +43,8 @@ uv run --frozen python -X utf8 -m tools.release_package build --output $releaseO
 - 源码包通过测试 ≠ 生产通过。部署到渲染机/Windows 工作器前：
   - 从 ZIP 全新解压；核对 SHA-256 与 `PACKAGE_CONTENTS.sha256`
   - 运行包级测试与编排器测试
-  - 执行两条“真实任务观察”（不同脚本/素材组合），并经人工审阅/Mac 审核通过
-- 成功交付的判据：`closed_loop.audit` 满足策略（`QC/PASS`、Mac 审阅绑定、打包完整）
+  - 在 Windows 执行真实任务，检查画面、声音、字幕与草稿可编辑性，分别记录自动验收和人工观察结果
+- 成功交付的判据：`closed_loop.audit` 满足策略（明确 formal、独立 `QC/PASS`、四项自动验收和共享包读回通过）
 
 注意
 - 不得修改历史版本目录（v1.5.2 及更早）；如需修文档，在仓库 docs/ 层新增说明

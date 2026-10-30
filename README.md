@@ -1,13 +1,13 @@
 # 剪映自动化工具包
 
-把商品视频素材与口播脚本整理成可编辑的剪映草稿，并保存选镜、音画时序、视觉复检和人工审阅所需的证据。适用于需要批量生产、审阅和交接视频的视频团队。
+这是一套纯 Windows 脚本流水线：定时读取任务队列，调用 GLM 或千问分析素材、选镜、生成配音与剪映草稿，执行独立视觉验收，再按配置交付。功能按模块维护，运行无需编码 Agent 或 Mac 交接。
 
 **当前默认视觉模型是 GLM-5.3-Flash，API ID 为 `glm-5.3-flash`。** 通过火山方舟直接发送抽帧图片；GLM-5.3、GLM-5.3-Flash 和 ChatGLM3 是不同型号，不能混写。模型输入、配置覆盖与源码位置见[模型与视觉流程](docs/model-and-vision.md)。
 
 ## 输入、流程与输出
 
 - 输入：同一商品的素材视频、逐句口播及任务 `manifest.json`；运行账号和机器路径由本机配置提供。
-- 流程：FFmpeg 分镜/抽帧 → GLM-5.3-Flash 理解画面 → AI 复审候选并编排 → 程序校验源窗口与音频时长 → 剪映写稿 → 最终切片独立视觉 QC → 人工审阅。
+- 流程：FFmpeg 分镜/抽帧 → GLM-5.3-Flash 理解画面 → AI 复审候选并编排 → 程序校验源窗口与音频时长 → 剪映写稿 → 最终切片独立视觉 QC → Windows 自动验收 → 按配置交付。
 - 输出：剪映草稿、选镜计划、时间范围及 QC/任务结果 JSON。生成草稿与正式交付分别验收。
 
 默认选镜模式为 `ai_editor`，最终视觉 QC 使用 v4 合同。旧选镜逻辑仅在显式选择 `legacy` 时使用；两条路线及报告不能混用。详见[架构](docs/architecture.md)和[选镜说明](packages/video-v1.5.3/docs/AI_EDITOR.md)。
@@ -22,7 +22,7 @@ uv sync --frozen
 uv run --frozen python -X utf8 doubao-jianying-orchestrator/run.py --help
 ```
 
-接着按[快速开始](docs/quickstart.md)操作：先运行离线测试和合成视频抽帧，再配置真实素材、模型与剪映环境进行预览建稿。示例位于包内 [`examples/`](packages/video-v1.5.3/examples/)，不需要把账号或业务素材提交到 GitHub。
+完整流水线与 Windows 定时入口见[Windows 脚本运行](docs/windows-pipeline.md)。接着按[快速开始](docs/quickstart.md)操作：先运行离线测试和合成视频抽帧，再配置真实素材、模型与剪映环境进行预览建稿。示例位于包内 [`examples/`](packages/video-v1.5.3/examples/)，不需要把账号或业务素材提交到 GitHub。
 
 完整配置见 [`ENVIRONMENT.md`](packages/video-v1.5.3/ENVIRONMENT.md)。运行时只调用 GLM 或 Qwen 的直连 HTTP 接口。默认 `JY_VISION_TRANSPORT=volc_glm`（别名 `glm` / `volc`），模型为 `JY_VISION_MODEL=glm-5.3-flash`，凭据读取 `ARK_API_KEY`，为空时读取 `JY_VOLC_API_KEY`；千问使用 `qwen`（别名 `qwen_compatible`）及 `JY_QWEN_*` 配置。已移除的旧通道和未知值均报错，不自动回落。通用配置从进程环境变量读取；复制 `.env` 文件不会自动加载。
 
@@ -63,4 +63,4 @@ uv run --frozen python -X utf8 doubao-jianying-orchestrator/run.py --help
 
 This repository is designed to be publishable with only fake examples.
 
-模型会接收任务抽帧和相关脚本文字；运行前确认这些素材适合发送到所配置的服务。源码示例不包含真实账号、生产日志或业务素材，私有配置和输出保留在本机。预览稿和模型调用失败保留未认证状态；正式交付仍需要真实视觉证据与人工审阅。
+模型会接收任务抽帧和相关脚本文字；运行前确认这些素材适合发送到所配置的服务。源码示例不包含真实账号、生产日志或业务素材，私有配置和输出保留在本机。预览稿和模型调用失败保留未认证状态；自动正式交付必须具备当前草稿的真实视觉证据；模型失败、超时和预览均不能标成正式通过。

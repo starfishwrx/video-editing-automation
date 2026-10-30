@@ -7,6 +7,15 @@
 
 ## 新增条目
 
+### L-20261030-03 定时流水线必须使用当前证据并隔离代码根与工作根
+- status: OPEN
+- hits: 1
+- 模块: windows-runner / acceptance / delivery
+- 现象: 旧流程信任 PASS 字符串或历史批准，可能先分发后验收；外置工作目录与旧宿主环境又会把子进程指向错误代码或 Python。
+- 根因: 输入模式、验收与交付分支各自裁决，路径从工作目录反推，重复触发没有稳定的重试预算。
+- 以后怎么做: 整体脚本只负责选任务和限制次数，正式放行共享四项当前证据检查且发生在所有交付动作之前。代码根、工作根和草稿根分开传递；子进程固定当前包和解释器。Windows 大小写同名记录不能重置预算，分发副本存在也不等于归档和回写完成。用真实本地夹具、跨进程锁和 PowerShell 参数往返验证这些边界。
+- 证据: `tests/test_scheduled_pipeline.py`、`tests/test_acceptance_delivery_gate.py`、`tests/test_production_eval.py`、`docs/windows-pipeline.md`。
+
 ### L-20261030-02 删除模型后端要覆盖整条执行链和提前拒绝配置
 - status: OPEN
 - hits: 1

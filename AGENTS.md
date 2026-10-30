@@ -6,14 +6,14 @@
 
 1. **版本身份**：可改的候选包目录是 `packages/video-v1.5.3/`（目录名是历史代号，不随小版本改名）。真实版本只读该目录下的 `VERSION`（当前主线 **1.5.6**）。生产以部署机器的 `ACTIVE_VIDEO_RUNTIME.json` 与实际安装文件为准。开发使用从 `main` 创建的干净功能分支/工作树。1.5.4/1.5.5 为隔离索引实验，不作默认入口。
 2. **文档入口**：先读 [`docs/README.md`](docs/README.md)。子系统文档与代码路径一律指向 `packages/video-v1.5.3/`。`packages/video-v1.5.2/` 及更早是历史归档，禁止修改。
-3. **凭据**：只能来自环境变量 `JY_SKILL_ROOT` `JY_DRAFT_ROOT` `JY_INSTALL_ROOT` `JY_NAS_SHARE` `JY_NAS_USER` `NAS_PASSWORD` `JY_MAC_DRAFT_ROOT` `LARK_BASE_TOKEN` 等（完整列表见包内 `ENVIRONMENT.md`）。不得写进代码、测试、日志或提交。
+3. **凭据**：只能来自环境变量 `JY_SKILL_ROOT` `JY_DRAFT_ROOT` `JY_INSTALL_ROOT` `JY_NAS_SHARE` `JY_NAS_USER` `NAS_PASSWORD` `LARK_BASE_TOKEN` 等（完整列表见包内 `ENVIRONMENT.md`）。不得写进代码、测试、日志或提交。
 4. **闸门**：`RULES.md` 的成片证据要求继续生效；formal 模式只认 `PASS`。素材缺失、窗口越界、字幕内容不符或独立 QC 失败必须拦住。哈希、签名或逐文件发布清单不是成片质量证据，禁止为普通修改新增这类门槛。
 5. **提交习惯**：小步 commit；改完更新 `docs/working.md`；可复用教训写入 `LESSONS.md`。不 push `main`，只开 PR。
 6. **分支命名**：功能或功能重构用 `feat/<topic>`，缺陷修复用 `fix/<topic>`，纯文档用 `docs/<topic>`；topic 使用小写英文和连字符，不以 Agent 名命名。
 
 ## 1. 按任务找文档
 
-模块化维护先读 [`docs/modular-development.md`](docs/modular-development.md)。实际实现位于 `orchestrator/{application,audio,media,runtime,policy,selection,vision,quality,delivery,domain}/`；下表中的旧平铺 Python 路径为兼容导入，禁止在其中新增业务逻辑。具体归属见 `orchestrator/module_map.json`。闭环唯一实现为 `tools/workflow/closed_loop.py`，worker 纯合同为 `tools/queueing/contracts.py`。
+整个项目是纯 Windows 定时脚本流水线，入口见 [`docs/windows-pipeline.md`](docs/windows-pipeline.md)。运行不依赖编码 Agent、人工 prepare/collect 或 Mac 交接。模块化维护先读 [`docs/modular-development.md`](docs/modular-development.md)。实际实现位于 `orchestrator/{application,audio,media,runtime,policy,selection,vision,quality,delivery,domain}/`；下表中的旧平铺 Python 路径为兼容导入，禁止在其中新增业务逻辑。具体归属见 `orchestrator/module_map.json`。闭环唯一实现为 `tools/workflow/closed_loop.py`，worker 纯合同为 `tools/queueing/contracts.py`。
 
 | 你要改的东西 | 先读 | 代码位置 |
 |---|---|---|
@@ -28,7 +28,7 @@
 | 编解码 / ffmpeg / GPU | `docs/subsystems/media-codec.md` | `.../orchestrator/video_encode.py`, `video_decode.py`, `ffmpeg_bootstrap.py`, `platform_env.py`, `gpu_runtime.py` |
 | 容量 / 资源 / 任务日志 / 恢复 | `docs/subsystems/runtime-and-recovery.md` | `.../orchestrator/capacity.py`, `resource_profile.py`, `task_log.py`, `diagnostics.py`, `migration.py`, `draft_safety.py` |
 | 剪映草稿底层操作 | `docs/subsystems/jianying-editor.md` | `packages/video-v1.5.3/jianying-editor/scripts/**`（`vendor/pyJianYingDraft` 原则上不改） |
-| 队列 / 闭环 / 评估 | `docs/subsystems/package-tools.md` | `packages/video-v1.5.3/batch_worker.py`, `tools/batch_dispatch.py`, `tools/workflow/closed_loop.py`, `tools/*.py` |
+| 定时脚本 / 队列 / 闭环 / 评估 | `docs/windows-pipeline.md`, `docs/subsystems/package-tools.md` | `packages/video-v1.5.3/batch_worker.py`, `tools/batch_dispatch.py`, `tools/workflow/closed_loop.py`, `tools/*.py` |
 | 草稿交付 / 生成版恢复 | `.../references/draft_delivery_and_recovery.md` | `packages/video-v1.5.3/tools/draft_delivery.py`, `ship_distribute.py` |
 | 视觉业务规则 | `packages/video-v1.5.3/RULES.md`（规则版本 1.4.1） | `WINDOWS_VIDEO_CLOSED_LOOP_RULES_*.json` |
 | 环境依赖 | `packages/video-v1.5.3/ENVIRONMENT.md` | — |
@@ -64,7 +64,7 @@ uv run --frozen python -X utf8 -m orchestrator.cli review-script --input /abs/ma
 
 - 不将默认 GLM-5.3-Flash（`glm-5.3-flash`）简称为 GLM-5.3 或 ChatGLM3；transport、模型 ID、选镜模式与 QC 版本分开说明，改默认值时同步入口文档。
 - 运行时视觉与文字请求只走 GLM（`volc_glm` / `glm` / `volc`）或 Qwen（`qwen` / `qwen_compatible`）直连。不得恢复 Codex CLI、Anthropic 或 CCSwitch 调用；旧通道和未知值必须明确拒绝。`legacy` / `rule_then_ai` 是保留的选镜策略，不是旧调用后端。
-- 历史 JyPoll/JyRun 执行链已退役；`jy_poll.ps1` 与 `run_task.template.ps1` 仅保留立即失败的入口，不恢复 Agent 调度。新任务使用 manifest CLI 或经授权显式调用 dispatcher；不自动启用队列或修改宿主计划任务。
+- 历史 JyPoll/JyRun 执行链已退役；`jy_poll.ps1` 与 `run_task.template.ps1` 仅保留立即失败的入口，不恢复 Agent 调度。整体运行从 `scripts/run_pipeline.ps1` 或 `python -m tools.workflow.scheduled` 进入；内部复用 dispatcher。注册计划任务须显式运行安装脚本，开发验证不启用真实队列或改宿主计划任务。
 - 不 push 到 main；只开 PR。不改历史版本目录。不改 `vendor/` 除非 PR 说明原因。
 - 不放宽 `DIRECT → ACCEPTABLE_DEGRADED → MATERIAL_GAP` 顺序，不让 preview 稿进入正式交付。
 - 不在提示词或代码里手写版本号；版本从 `VERSION` 文件回读。

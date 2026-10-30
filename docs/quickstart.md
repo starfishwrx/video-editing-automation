@@ -92,4 +92,4 @@ uv run --frozen python -X utf8 doubao-jianying-orchestrator/run.py build `
 
 ## 5. 接入生产前
 
-生产队列、NAS、飞书和 Mac 审阅需要额外部署变量及授权，见 `ENVIRONMENT.md` 的生产集成部分。历史 JyPoll/JyRun 入口（`jy_poll.ps1` / `run_task.template.ps1`）已退役，调用会立即失败；单条任务继续使用上述 manifest CLI，已有批队列需经授权显式使用 `python -m tools.batch_dispatch run --queue <queue.json>`。源码更新不会自动启用队列、修改计划任务或替换已有生产生成脚本。按照[发布流程](release-process.md)和既定真实任务观察完成验收后再部署，保留当前队列和回滚依据。
+整个项目的手动与定时运行入口见 [Windows 脚本流水线](windows-pipeline.md)。生产队列、NAS 和飞书使用本机配置；Mac 交接已删除。历史 JyPoll/JyRun 入口（`jy_poll.ps1` / `run_task.template.ps1`）已退役，调用会立即失败；单条任务继续使用上述 manifest CLI，已有批队列使用 `scripts/run_pipeline.ps1` 运行一轮，内部直接调用 dispatcher。源码更新不会自动启用队列、修改计划任务或替换已有生产生成脚本。按照[发布流程](release-process.md)和既定真实任务观察完成验收后再部署，保留当前队列和回滚依据。
