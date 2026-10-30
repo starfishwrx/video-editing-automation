@@ -48,7 +48,7 @@ class Release140ContractTests(unittest.TestCase):
             ROOT / "RULES.md",
             ROOT / "jy_poll.ps1",
             ROOT / "WINDOWS_VIDEO_CLOSED_LOOP_RULES_20260930.json",
-            ROOT / "tools" / "closed_loop.py",
+            ROOT / "tools" / "workflow" / "closed_loop.py",
             ROOT / "run_task.template.ps1",
         ]
         text = "\n".join(path.read_text(encoding="utf-8", errors="replace") for path in paths)
@@ -57,11 +57,11 @@ class Release140ContractTests(unittest.TestCase):
         self.assertIn("LARK_BASE_TOKEN", text)
         self.assertIn("NAS_PASSWORD", text)
 
-    def test_standalone_runner_reports_failures(self):
+    def test_standalone_runner_is_retired(self):
         text = (ROOT / "run_task.template.ps1").read_text(encoding="utf-8-sig")
-        self.assertIn("failure-update", text)
-        self.assertIn("FAILURE_NOTIFICATION", text)
-        self.assertNotIn("飞书不回写", text)
+        self.assertIn("LEGACY_RUNNER_RETIRED", text)
+        self.assertNotIn("Start-Process", text)
+        self.assertNotIn("failure-update", text)
 
     def test_subtitles_use_the_release_canvas_position(self):
         source = (ROOT / "jianying-editor/scripts/vendor/pyJianYingDraft/script_file.py").read_text(encoding="utf-8")

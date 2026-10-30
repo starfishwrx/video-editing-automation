@@ -40,6 +40,17 @@ def _emit(obj: dict, code: int = 0) -> int:
     return code
 
 
+def _vision_configuration_gate(runtime: dict) -> dict | None:
+    error = runtime.get("vision_configuration_error")
+    if not error:
+        return None
+    return {"status": "ENV_ERROR", "terminal_state": "BLOCKED",
+            "failure_class": "environment",
+            "retryable": False, "safe_to_continue": False, "next_action": "fix_environment",
+            "message": "视觉通道配置不受支持，未开始配音、视觉分析或写稿。",
+            "error": error}
+
+
 def _compact_build_result(result: dict) -> dict:
     """Keep chat output minimal; full evidence remains in task logs."""
     status = result.get("status")
@@ -629,7 +640,7 @@ def _temporary_match(manifest: dict, input_path: Path, report_dir: Path,
         if matched.get("segments"):
             manifest["segments"] = matched["segments"]
     elif not analysis.get("semantic_matches") and vision_meta.get("errors") == []:
-        analysis = vision_analyzer.match_with_codex(manifest, analysis, report_dir)
+        analysis = vision_analyzer.match_sentences(manifest, analysis, report_dir)
         if analysis.get("semantic_match_error"):
             # Rule-only matching cannot judge whether a shot shows what the
             # sentence says; it fills with packaging/product-display shots.
@@ -736,6 +747,9 @@ def cmd_build(args) -> int:
     # Do the cheap, deterministic checks before TTS or vision work.  A missing
     # source or unusable runtime must stop this run and never become a generic
     # retryable model failure.
+    configuration_blocker = _vision_configuration_gate(logger.runtime)
+    if configuration_blocker:
+        return _emit(_compact_build_result(finalize(configuration_blocker)), 1)
     missing_sources = [str(path) for path in _manifest_sources(manifest, input_path.parent)
                        if not path.is_file()]
     if missing_sources:
@@ -948,6 +962,11 @@ def cmd_recover(args) -> int:
         result["recovery"] = True
         result["recovery_stage"] = stage
         return logger.finalize(result)
+
+    if stage in {"preflight", "semantic_match", "draft_write"}:
+        configuration_blocker = _vision_configuration_gate(logger.runtime)
+        if configuration_blocker:
+            return _emit(_compact_control_result(finalize(configuration_blocker)), 1)
 
     if stage == "preflight":
         missing = [str(path) for path in _manifest_sources(manifest, input_path.parent)

@@ -87,7 +87,7 @@ class ResumeIntegrityTest(unittest.TestCase):
         with mock.patch.object(vision_analyzer, "_sample_frames", return_value=self.frames), \
                 mock.patch.object(vision_analyzer, "_run_vision_with_retry", side_effect=fake):
             result = vision_analyzer.enrich_with_vision(
-                manifest or self.manifest, analysis, self.report, profile="volc")
+                manifest or self.manifest, analysis, self.report)
         return result, prompts
 
     def _killed_during_text(self) -> dict:
@@ -227,7 +227,7 @@ class ResumeIntegrityTest(unittest.TestCase):
                 mock.patch.object(vision_analyzer, "_sample_frames", return_value=self.frames), \
                 mock.patch.object(vision_analyzer, "_run_vision_with_retry", side_effect=fake):
             result = vision_analyzer.enrich_with_vision(self.manifest, {"shots": shots},
-                                                        self.report, profile="volc")
+                                                        self.report)
         self.assertGreater(peak[0], 1)
         self.assertLessEqual(peak[0], 3)
         self.assertTrue(all(row["text_pass"] == "hires" for row in result["shots"]))

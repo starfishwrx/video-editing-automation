@@ -10,7 +10,7 @@ from ..runtime.file_safety import locked_json_update
 
 def import_productless_observations(prior_task: dict[str, Any], prior_manifest: dict[str, Any],
                                     current_manifest: dict[str, Any], analysis: dict[str, Any],
-                                    cache_path: Path, *, profile: str = "volc",
+                                    cache_path: Path, *,
                                     prior_base_dir: Path | None = None,
                                     current_base_dir: Path | None = None) -> dict[str, int]:
     """Import only exact-source/protocol observations with proven task identity.
@@ -47,12 +47,12 @@ def import_productless_observations(prior_task: dict[str, Any], prior_manifest: 
         # Both identities must reproduce the original cache key. That proves
         # source stat, window, rules, sampling protocol, backend and model agree.
         if (source not in sources or source not in prior_sources or not old_key
-                or vision._vision_cache_key(prior_manifest, row, profile) != old_key
-                or vision._vision_cache_key(without_product, row, profile) != old_key):
+                or vision._vision_cache_key(prior_manifest, row) != old_key
+                or vision._vision_cache_key(without_product, row) != old_key):
             rejected += 1
             continue
         projection = vision._cache_projection(row)
-        new_key = vision._vision_cache_key(current_manifest, row, profile)
+        new_key = vision._vision_cache_key(current_manifest, row)
         if projection is None or not new_key:
             rejected += 1
             continue
@@ -82,7 +82,6 @@ def main() -> int:
     parser.add_argument("--current-manifest", required=True, type=Path)
     parser.add_argument("--prior-analysis", required=True, type=Path)
     parser.add_argument("--cache", required=True, type=Path)
-    parser.add_argument("--profile", default="volc")
     args = parser.parse_args()
     def read(path: Path) -> dict[str, Any]:
         value = json.loads(path.read_text(encoding="utf-8-sig"))
@@ -90,7 +89,7 @@ def main() -> int:
             raise ValueError("JSON_OBJECT_REQUIRED")
         return value
     result = import_productless_observations(read(args.prior_task), read(args.prior_manifest),
-        read(args.current_manifest), read(args.prior_analysis), args.cache, profile=args.profile,
+        read(args.current_manifest), read(args.prior_analysis), args.cache,
         prior_base_dir=args.prior_manifest.resolve().parent,
         current_base_dir=args.current_manifest.resolve().parent)
     print(json.dumps(result, ensure_ascii=False))

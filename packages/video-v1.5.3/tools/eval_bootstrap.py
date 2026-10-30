@@ -1,4 +1,4 @@
-"""Freeze a production Eval contract before the standalone JyRun creates a draft.
+"""Freeze a production Eval contract before an explicitly requested draft build.
 
 The operator-owned identity file is intentionally outside the release package.
 Its ``sources`` map can bind a confirmed single-SKU directory once for reuse;

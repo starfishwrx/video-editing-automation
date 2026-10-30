@@ -13,6 +13,7 @@ from contextlib import contextmanager
 from ..paths import SKILL_ROOT
 from pathlib import Path
 from typing import Any, Iterator
+from . import vision_config
 
 
 _SENSITIVE = re.compile(r"(token|secret|password|api[_-]?key|authorization|cookie)", re.I)
@@ -79,12 +80,7 @@ def runtime_facts() -> dict[str, Any]:
         "orchestrator_path": str(Path(__file__).resolve()),
         "ffmpeg": ffmpeg,
         "ffprobe": ffprobe,
-        "vision_profile": os.environ.get("JY_VISION_PROFILE", "").strip() or None,
-        "vision_model": ((os.environ.get("JY_QWEN_MODEL", "").strip()
-                         or os.environ.get("JY_VISION_TEXT_MODEL", "").strip())
-                         if os.environ.get("JY_VISION_TRANSPORT", "").strip().lower() in {"qwen", "qwen_compatible"}
-                         else os.environ.get("JY_VISION_MODEL", "").strip()) or None,
-        "vision_transport": os.environ.get("JY_VISION_TRANSPORT", "").strip() or None,
+        **vision_config.facts(),
     }
 
 

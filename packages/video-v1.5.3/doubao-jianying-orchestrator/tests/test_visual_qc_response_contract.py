@@ -103,7 +103,7 @@ class VisualQcResponseContractTests(unittest.TestCase):
             return True, json.dumps(response())
         vision._run_vision_with_retry.side_effect = call
         ok, _ = qc._call_qc_model(vision, Path("sheet"), "prompt", Path("out"),
-                                  timeout=360, workdir=Path("."), expected_count=1)
+                                  timeout=360, expected_count=1)
         self.assertTrue(ok)
         self.assertEqual(vision._run_vision_with_retry.call_count, 1)
 

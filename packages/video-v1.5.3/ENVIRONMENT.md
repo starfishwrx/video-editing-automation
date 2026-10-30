@@ -27,7 +27,7 @@ See [model and image-call details](https://github.com/starfishwrx/video-editing-
 | --- | --- | --- |
 | `JY_SELECTION_MODE` | `ai_editor`; manifest `selection_mode` wins | `ai_editor`, `rule_then_ai` (rule recall plus pixel-reviewed gaps), or explicit `legacy` |
 | `JY_CONCURRENCY_POLICY_FILE` | Explicit JSON is authoritative | One host/account policy for every entry; see `examples/concurrency-policy.json` |
-| `JY_VISION_TRANSPORT` | `volc_glm` | Direct Ark chat completions; `glm`/`volc` are aliases; `qwen` selects the Qwen-compatible route |
+| `JY_VISION_TRANSPORT` | `volc_glm` | GLM direct HTTP: `volc_glm` / `glm` / `volc`; Qwen direct HTTP: `qwen` / `qwen_compatible`. Removed and unknown values are rejected |
 | `JY_VISION_MODEL` | `glm-5.3-flash` | Exact Ark model ID; the Qwen transport uses `JY_QWEN_MODEL` instead |
 | `ARK_API_KEY` | Required for direct calls | First credential source; process environment only |
 | `JY_VOLC_API_KEY` | Used only if `ARK_API_KEY` is empty | Alternative Ark credential; process environment only |
@@ -46,12 +46,15 @@ See [model and image-call details](https://github.com/starfishwrx/video-editing-
 | `JY_AI_EDITOR_TIMEOUT_S` | `JY_VISION_TIMEOUT`, otherwise `360` | Can tighten the policy's request deadline |
 | `JY_POST_QC_STAGE_TIMEOUT_S` | `900` seconds | Separate QC stage budget; parent reserves another 30 seconds for cleanup |
 | `JY_STAGE_DEADLINE_TS`, `JY_TASK_DEADLINE_TS` | Inherited epoch deadlines | Requests can use only the remaining stage/task budget |
-| `JY_VISION_THINKING` | Depends on selected transport | Direct Ark uses `reasoning_effort=low`; the Qwen-compatible transport explicitly sends `enable_thinking=false` |
 | `JY_VISION_MAX_TOKENS` | `16384` | Initial completion cap; token semantics depend on the actual endpoint |
 | `JY_VISION_LENGTH_RETRY_VERIFIED` | off | Set `1` only after this endpoint is verified to support a 16384→32768 length retry |
 | `JY_VISION_CACHE_DIR` | Queue `work/.cache`; otherwise persistent user cache | Shared visual observations and completed text verification across tasks |
 | `JY_VISION_CACHE_WAIT_TIMEOUT` | `7200` seconds | Wait for another task recognizing the same product; timeout never starts duplicate calls |
 | `JY_VISION_RECHECK` | `reuse` | `reuse`, `vision` or `off`; explicit recheck policy |
+
+Thinking request fields are fixed by the direct adapters: GLM sends
+`reasoning_effort=low`, and Qwen sends `enable_thinking=false`. There is no
+separate environment switch for thinking mode.
 
 For `rule_then_ai`, the optional manifest field `ai_refill_max_sentences` limits
 automatic gap review (`0` or omitted means unlimited); explicit refill indices
@@ -125,13 +128,17 @@ generic `.env` auto-loader. Copy `examples/config.example.ps1` to the ignored
 already supplied to the process. Keep real media, prompts, responses and caches
 private. A local `env` report does not authenticate an Ark credential.
 
-The AI editor requires `volc_glm`. `codex` and `anthropic` are explicit legacy
-rollback transports, so also select `legacy` when using them. Codex uses
-`JY_VISION_PROFILE`, optional `JY_VISION_PROVIDER` and `JY_VISION_MODEL`.
-Anthropic uses `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN` and
-`JY_VISION_MODEL` (or `ANTHROPIC_MODEL`), with an optional dedicated
-`JY_VISION_ANTHROPIC_ENV` file loader. That backend-specific loader is not a
-general `.env` loader. Verify the chosen backend's image capability separately.
+All selection modes (`ai_editor`, `rule_then_ai`, and `legacy`) use only the
+GLM or Qwen direct HTTP routes above. Codex CLI, Anthropic, and CCSwitch runtime
+calls have been removed. Removed transport names and unknown values fail
+explicitly; no service is selected as a silent fallback. High-resolution text
+verification and `JY_AI_EDITOR_QWEN` remain supported.
+
+Observation and phase-cache keys keep the fixed historical compatibility field
+`profile="volc"`; it is not configurable and is not read from environment or CLI
+options. Existing identity-matching observations remain reusable without a
+whole-library refresh. Model, endpoint, source and protocol identity checks
+still apply. The explicit observation-import command has no profile option.
 
 ## Local media and draft paths
 
@@ -147,6 +154,14 @@ general `.env` loader. Verify the chosen backend's image capability separately.
   isolated draft library when preparing a local preview or production launcher.
 
 ## Production integrations
+
+The historical JyPoll/JyRun chain is retired. `jy_poll.ps1` and
+`run_task.template.ps1` are fail-fast compatibility stubs; they do not read
+credentials, create work directories, mount NAS, invoke a worker or send
+notifications. Use the manifest CLI or explicitly invoke the current
+`tools.batch_dispatch` entrypoint after preparing an authorized task/queue.
+This source change does not alter host scheduled tasks or existing generated
+production scripts, and does not enable any queue automatically.
 
 Captions use the original TTS sentence text and measured final audio durations.
 Tempo, edge trimming and loudness processing finish before caption timing is

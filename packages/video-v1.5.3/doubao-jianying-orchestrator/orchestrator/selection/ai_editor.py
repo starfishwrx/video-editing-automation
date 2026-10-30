@@ -43,8 +43,6 @@ def _call(prompt: str, path: Path, sheet: Path | None = None) -> dict:
     from ..vision import material_cache
     from ..runtime.file_safety import file_lock
     transport = vision._vision_transport()
-    if transport not in {"volc_glm", "qwen"}:
-        raise ValueError("AI_EDITOR_REQUIRES_DIRECT_GLM")
     path.parent.mkdir(parents=True, exist_ok=True)
     # Pixel reviews (a sheet) use the text-read Qwen route. Text-only edit
     # planning stays on the visual GLM route. Completed reviews stay valid

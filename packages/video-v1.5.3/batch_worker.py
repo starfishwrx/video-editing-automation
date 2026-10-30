@@ -11,8 +11,7 @@ Mac 侧负责最终人工检查和成功交付回写；失败/部分失败可由
 原则：
 - 任务之间互不影响：单条失败记 `error` + 证据（stderr 尾部/退出码），继续下一条。
 - 幂等：任何阶段重跑不产生半成品（report dir 按 task 复用，TTS/素材缓存命中）。
-- 凭据不出渲染机：NAS 挂载复用 `jy_pipeline/probe_mount2.ps1`（内部从 jy_poll.ps1
-  内存解析），不在本文件出现。
+- 凭据不出渲染机：NAS 挂载委托部署环境配置的外部脚本，源码不保存凭据。
 """
 from __future__ import annotations
 
@@ -77,8 +76,9 @@ def _pipeline_version() -> str:
 
 def _runtime_facts() -> dict:
     """Capture the execution surface that produced a batch receipt."""
-    vision_profile = os.environ.get("JY_VISION_PROFILE", "volc").strip()
-    vision_model = os.environ.get("JY_VISION_MODEL", "").strip()
+    if str(SKILL) not in sys.path:
+        sys.path.insert(0, str(SKILL))
+    from orchestrator.runtime import vision_config
     return {
         "python": str(PY),
         "skill_root": str(SKILL),
@@ -86,8 +86,7 @@ def _runtime_facts() -> dict:
         "pipeline_version": _pipeline_version(),
         "ffmpeg": shutil.which("ffmpeg") or "",
         "ffprobe": shutil.which("ffprobe") or "",
-        "vision_profile": vision_profile,
-        "vision_model": vision_model,
+        **vision_config.facts(),
     }
 
 
@@ -617,17 +616,11 @@ def run_build(manifest: dict, report_dir: pathlib.Path, draft_name: str, *,
            "--input", str(mpath), "--report-dir", str(report_dir),
            "--delivery-mode", "preview"]
     env = dict(os.environ, PYTHONUTF8="1")
-    # 视觉分析画像可通过 JY_VISION_PROFILE 切换。默认使用火山
-    # CodingPlan 的 OpenAI-compatible profile，避免旧的 CC Switch
-    # Anthropic Messages 路由返回空响应；需要回滚时显式传入其他 profile。
-    vp = os.environ.get("JY_VISION_PROFILE", "volc").strip().strip('"').strip("'").strip()
-    vm = os.environ.get("JY_VISION_MODEL", "").strip().strip('"').strip("'").strip()
-    if vp:
-        env["JY_VISION_PROFILE"] = vp
-    if not vm and vp == "aijws":
-        vm = "qwen3.8-flash"
-    if vm:
-        env["JY_VISION_MODEL"] = vm
+    if str(SKILL) not in sys.path:
+        sys.path.insert(0, str(SKILL))
+    from orchestrator.runtime import vision_config
+    env["JY_VISION_TRANSPORT"] = vision_config.transport()
+    vision_model = vision_config.model()
     timeout = timeout or BUILD_TIMEOUT_SECONDS
     deadline = time.time() + timeout
     inherited = env.get("JY_TASK_DEADLINE_TS") or env.get("JY_TASK_DEADLINE_EPOCH")
@@ -636,8 +629,8 @@ def run_build(manifest: dict, report_dir: pathlib.Path, draft_name: str, *,
     timeout = max(0.001, deadline - time.time())
     env["JY_STAGE_DEADLINE_EPOCH"] = str(deadline)
     env["JY_STAGE_DEADLINE_TS"] = str(deadline)
-    log("build draft=%s vision_profile=%s vision_model=%s timeout=%ss reuse=%s attempt=%s" % (
-        draft_name, vp or "volc(default)", vm or "profile-default", timeout,
+    log("build draft=%s vision_transport=%s vision_model=%s timeout=%ss reuse=%s attempt=%s" % (
+        draft_name, env["JY_VISION_TRANSPORT"], vision_model or "unconfigured", timeout,
         "yes" if reuse_analysis else "no", attempt))
     p = subprocess.run(cmd, cwd=str(SKILL), env=env, capture_output=True,
                        text=True, encoding="utf-8", errors="replace",
@@ -2092,6 +2085,9 @@ def select_queue_for_single_run(queue: list[dict], *,
 def _queue_preflight(task: dict) -> dict:
     """Check static queue inputs before starting the selected task."""
     issues = []
+    configuration_error = _runtime_facts().get("vision_configuration_error")
+    if configuration_error:
+        issues.append(configuration_error)
     rid = str(task.get("record_id") or "").strip()
     if not rid:
         issues.append("record_id missing")

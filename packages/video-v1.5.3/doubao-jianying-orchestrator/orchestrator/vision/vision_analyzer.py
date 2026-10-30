@@ -1,29 +1,17 @@
-"""Task-local image understanding and legacy description-to-shot matching.
+"""Task-local GLM/Qwen image understanding and description-to-shot matching.
 
 Build labelled contact sheets and send actual image bytes to the configured
 vision backend. The default is Volcengine Ark GLM-5.3-Flash
 (``glm-5.3-flash``), not GLM-5.3 or ChatGLM3. Validate observations before
 downstream selection and evidence checks. The default ``ai_editor`` selector
-re-extracts candidate frames for its own pixel review; ``match_with_codex``
-retains its historical name for compatibility, regardless of transport.
+re-extracts candidate frames for its own pixel review; ``match_sentences``
+ranks descriptions for the rule-first and legacy selection routes.
 
 Only the current task's frames are sent.  Nothing is written to the reusable
 material library.  A failed vision call remains a hard blocker; it is never
 replaced by guessed tags.
 
-v1.3.20: ``codex exec`` is an agent session, not a one-shot completion, and
-that is what actually stalled the pipeline.  Given the shell and app tools,
-the model answers a batch by cropping the contact sheet and re-viewing the
-crops ("Let me crop to check details" -> powershell + PIL -> "Let me view
-tiles 1-3"), a loop with no terminating condition.  Batches ran one to four
-minutes and periodically crossed the 300 s timeout; before v1.3.17 the pipe
-drain turned that into a permanent hang.  This version removes the tool
-surface that feeds the loop and routes *every* codex call through one
-file-backed runner so a timeout is always expressible as a process-tree kill.
-
-Default transport is ``JY_VISION_TRANSPORT=volc_glm``: contact sheets post
-straight to Volcengine Ark chat completions (``glm-5.3-flash``) with no Codex
-agent process. Set ``codex`` / ``anthropic`` only as explicit rollback paths.
+Only direct GLM and Qwen HTTP services are supported.
 Batch and slot concurrency default to 20 (``JY_VISION_BATCH_WORKERS`` /
 ``JY_VISION_SLOTS``).
 """
@@ -35,26 +23,20 @@ import hashlib
 import math
 import mimetypes
 import os
-import random
 import re
 import shutil
 import subprocess
-import sys
 import threading
 import time
-import urllib.error
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import urllib.request
 from pathlib import Path
 from typing import Any, Iterable
 
 from ..runtime.file_safety import file_lock, locked_json_update, private_temp_dir
 from ..runtime.json_extract import extract_json, is_blank
-from ..runtime.proc_slots import env_float, env_int, slot
+from ..runtime.proc_slots import env_float, env_int
+from ..runtime.vision_config import transport as _vision_transport
 from ..runtime import runtime_policy
-
-
-# Capture the imported source, rather than the file a later deployment may overwrite.
 
 
 def _number(value: Any, default: float = 0.0) -> float:
@@ -196,7 +178,7 @@ def _evidence_intervals(raw: Any, shot: dict[str, Any], frame: dict[str, Any] | 
 
 
 def _json_from_text(text: str) -> Any:
-    """Parse a JSON array/object from a Codex final message.
+    """Parse a JSON array/object from the provider final response.
 
     Tolerates ```json fences, bare arrays/objects and trailing prose; the
     first complete structured value wins.  Empty text raises
@@ -366,107 +348,7 @@ def _write_sheet(items: list[dict[str, Any]], output: Path, *, columns: int = 4,
         return False
 
 
-# The loop needs a shell to manufacture new images to look at, so removing
-# the shell removes the loop.  The sheet still reaches the model through
-# --image, and view_image stays available for inspecting that one image.
-_DISABLED_FEATURES = (
-    "shell_tool",
-    "unified_exec",
-    "code_mode_host",
-    "browser_use",
-    "computer_use",
-    "apps",
-)
-
-# The prompt already demands JSON-only output, but a prompt is a request and
-# the model ignored it whenever it decided to investigate first.
-# --output-schema would turn the shape into a constraint, but it is not
-# universally available: the aijws relay answered 400 "<InvalidParameter:
-# This response_format type is unavailable now>" and the batch never reached
-# the model (measured 2026-09-16 against deepseek-v4.1-flash).  Not re-tested
-# on official deepseek-flash, so the schema stays opt-in rather than default.  The
-# parser in enrich_with_vision still accepts either the object or a bare
-# array, so enabling it later is a one-variable change.
-_VISION_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "shots": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "shot_id": {"type": "string"},
-                    "description": {"type": "string"},
-                    "visual_tags": {"type": "array", "items": {"type": "string"}},
-                    "evidence_tags": {"type": "array", "items": {"type": "string"}},
-                    "action_complete": {"type": "boolean"},
-                    "head_waste": {"type": "number"},
-                    "tail_waste": {"type": "number"},
-                    "evidence_time": {"type": "number"},
-                    "evidence_intervals": {"type": "array", "items": {
-                        "type": "object",
-                        "properties": {"start": {"type": "number"}, "end": {"type": "number"}},
-                        "required": ["start", "end"], "additionalProperties": False}},
-                    "action_segments": {"type": "array", "items": {
-                        "type": "object",
-                        "properties": {"start": {"type": "number"}, "end": {"type": "number"},
-                                       "action": {"type": "string"},
-                                       "result": {"type": ["string", "null"]}},
-                        "required": ["start", "end", "action", "result"],
-                        "additionalProperties": False}},
-                    "text_tiles": {"type": "array", "items": {"type": "integer"}},
-                    "readable_claims": {"type": "array", "items": {"type": "string"}},
-                    "pointing_to_text": {"type": "boolean"},
-                    "pointing_action": {"type": "string"},
-                    "gesture": {"type": "string"},
-                    "confidence": {"type": "number"},
-                    # DEMO_ACTIONS V0.2 素材侧字段（见 demo_actions.py）。
-                    # 前四项是匹配的判据，后四项是反重复与空镜判据。
-                    "action": {"type": "string"},
-                    "object": {"type": "string"},
-                    "result": {"type": ["string", "null"]},
-                    "role": {"type": "string", "enum": [
-                        "direct_evidence", "usage_demo", "visual_metaphor",
-                        "product_display", "context", "CTA"]},
-                    "evidence_strength": {"type": "string", "enum": ["A", "B", "C"]},
-                    "action_phase": {"type": "string",
-                                     "enum": ["prep", "perform", "result", "static"]},
-                    "setup_id": {"type": "string"},
-                    "has_subject": {"type": "boolean"},
-                },
-                # 新增的 8 项**不在 required 里**：旧模型/旧中转可能不产出它们，
-                # 写进 required 会让整批校验失败、所有镜头回落 pending_analysis。
-                # 缺失时 demo_actions.judge() 走 ungated 分支放行，覆盖率另写入
-                # claim_gate_coverage，不会静默假装闸门生效。
-                "required": ["shot_id", "description", "visual_tags", "evidence_tags",
-                             "action_complete", "head_waste", "tail_waste",
-                             "evidence_time", "confidence"],
-                "additionalProperties": False,
-            },
-        }
-    },
-    "required": ["shots"],
-    "additionalProperties": False,
-}
-
-
-def _schema_enabled() -> bool:
-    """Gate --output-schema; the relay rejects structured output by default."""
-    return os.environ.get("JY_VISION_OUTPUT_SCHEMA", "").strip().lower() in (
-        "1", "true", "yes", "on")
-
-
-def _write_schema(directory: Path) -> Path | None:
-    """Materialise the batch schema for --output-schema; never fatal."""
-    path = directory / "vision_schema.json"
-    try:
-        path.write_text(json.dumps(_VISION_SCHEMA, ensure_ascii=False), encoding="utf-8")
-    except OSError:
-        return None
-    return path
-
-
-def _vision_summary(profile: str, batches: list[Any], responses: list[dict[str, Any]],
+def _vision_summary(batches: list[Any], responses: list[dict[str, Any]],
                     errors: list[dict[str, Any]], *, partial: bool) -> dict[str, Any]:
     """Describe the batch run as it stands, including a partial one.
 
@@ -476,10 +358,8 @@ def _vision_summary(profile: str, batches: list[Any], responses: list[dict[str, 
     """
     transport = _vision_transport()
     summary = {
-        "provider": {"codex": "codex_exec_image", "anthropic": "anthropic_messages",
-                     "volc_glm": "volc_chat", "qwen": "qwen_compatible"}.get(transport, "unknown"),
+        "provider": {"volc_glm": "volc_chat", "qwen": "qwen_compatible"}[transport],
         "transport": transport,
-        "profile": profile,
         "batch_count": len(batches),
         "responses": list(responses),
         "errors": list(errors),
@@ -578,7 +458,7 @@ def _vision_cache_path(report_dir: Path) -> Path:
 
     A task report remains the source of truth for its own result.  This cache is
     only a reusable accelerator, so it lives beside the queue work root and is
-    invalidated by the source signature, shot window, profile, or analyzer
+    invalidated by the source signature, shot window, model, or analyzer
     version.  ``JY_VISION_CACHE_DIR`` lets the Windows worker place it on a
     persistent local/NAS cache without changing task manifests.
     """
@@ -614,10 +494,10 @@ def _product_cache_lock(manifest: dict[str, Any], analysis: dict[str, Any], cach
 
 
 def _seed_legacy_vision_cache(manifest: dict[str, Any], analysis: dict[str, Any],
-                              report_dir: Path, cache_path: Path, profile: str) -> None:
+                              report_dir: Path, cache_path: Path) -> None:
     """Import matching observations from the old per-task caches, never task match decisions."""
     shared = _load_vision_cache(cache_path)
-    wanted = {_vision_cache_key(manifest, row, profile) for row in analysis.get("shots", [])
+    wanted = {_vision_cache_key(manifest, row) for row in analysis.get("shots", [])
               if isinstance(row, dict)} - set(shared) - {""}
     if not wanted:
         return
@@ -722,7 +602,7 @@ def _resolve_recheck(row: dict[str, Any] | None, checks: dict[str, list[str]]
     return None, "redo"
 
 
-def _vision_cache_key(manifest: dict[str, Any], shot: dict[str, Any], profile: str,
+def _vision_cache_key(manifest: dict[str, Any], shot: dict[str, Any],
                       rules: list[str] | None = None, *, transport_override: str | None = None,
                       model_override: str | None = None) -> str:
     source = str(shot.get("video") or "").strip()
@@ -738,7 +618,7 @@ def _vision_cache_key(manifest: dict[str, Any], shot: dict[str, Any], profile: s
     from ..media import frame_quality
     identity = {
         "version": VISION_ANALYSIS_VERSION,
-        "profile": profile,
+        "profile": "volc",  # Fixed legacy disk-key namespace; not runtime configuration.
         "product": str(manifest.get("product_id") or manifest.get("product")
                         or manifest.get("brand") or "").strip(),
         "video": source,
@@ -758,16 +638,14 @@ def _vision_cache_key(manifest: dict[str, Any], shot: dict[str, Any], profile: s
     }
     if str(manifest.get("sku") or "").strip():
         identity["sku"] = str(manifest["sku"]).strip()
-    transport = transport_override or _vision_transport()
-    if transport != "codex":
-        # 非 Codex 缓存键带上传输与模型，避免不同后端观察互相复用。
-        identity["transport"] = transport
-        if transport == "qwen":
-            cfg = _qwen_settings()
-            identity["model"] = cfg["model"]
-            identity["endpoint"] = cfg["base_url"]
-        else:
-            identity["model"] = model_override or os.environ.get("JY_VISION_MODEL", "").strip() or "glm-5.3-flash"
+    transport = _vision_transport(transport_override)
+    identity["transport"] = transport
+    if transport == "qwen":
+        cfg = _qwen_settings()
+        identity["model"] = cfg["model"]
+        identity["endpoint"] = cfg["base_url"]
+    else:
+        identity["model"] = model_override or os.environ.get("JY_VISION_MODEL", "").strip() or "glm-5.3-flash"
     raw = json.dumps(identity, ensure_ascii=False, sort_keys=True,
                      separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
@@ -913,274 +791,25 @@ def _annotate_shot_labels(manifest: dict[str, Any], shots: list[dict[str, Any]])
         rulepack.annotate_shot_labels(shot, rules)
 
 
-def _kill_tree(proc: subprocess.Popen) -> None:
-    """Kill a codex process tree, descendants before the cmd.exe wrapper.
-
-    Killing the wrapper first reaps cmd.exe only; taskkill /T can then no
-    longer enumerate the tree and the codex.exe/node.exe grandchildren leak as
-    orphans.  Order matters.
-    """
-    if os.name == "nt":
-        try:
-            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                           timeout=60, check=False)
-        except Exception:
-            pass
-    try:
-        proc.kill()
-    except Exception:
-        pass
-    try:
-        proc.wait(timeout=30)
-    except Exception:
-        pass
-
-
-def _run_codex_file(args: list[str] | str, prompt_path: Path, stdout_path: Path,
-                    stderr_path: Path, timeout: int) -> tuple[bool, int, str]:
-    """Run codex with file-backed stdio and a tree-killing timeout.
-
-    Never pipe codex stdio.  On Windows codex runs through a cmd.exe wrapper;
-    killing the cmd on timeout leaves the orphaned codex.exe children holding
-    the inherited pipe write handles, and the post-kill drain then blocks
-    forever waiting for EOF that never comes.  A timeout has to be a real
-    process-tree kill, which only works when nothing is draining a pipe.
-
-    Every codex invocation in this module goes through here so that the rule
-    cannot be honoured in one call site and forgotten in another.
-    """
-    stdout_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(stdout_path, "w", encoding="utf-8", errors="replace") as fout, \
-         open(stderr_path, "w", encoding="utf-8", errors="replace") as ferr, \
-         open(prompt_path, "rb") as fin:
-        try:
-            proc = subprocess.Popen(args, stdin=fin, stdout=fout, stderr=ferr)
-        except OSError as exc:
-            return False, -1, str(exc)
-        try:
-            proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            _kill_tree(proc)
-            return False, -1, f"timed out after {timeout}s"
-    return proc.returncode == 0, proc.returncode, ""
-
-
-def _tail(path: Path, limit: int = 12000) -> str:
-    try:
-        return path.read_text(encoding="utf-8", errors="replace")[-limit:]
-    except OSError:
-        return ""
-
-
-def _clean_profile(value: Any) -> str:
-    """Normalize a Windows-inherited Codex profile before CLI assembly.
-
-    SSH/cmd wrappers can preserve one layer of surrounding quotes in an
-    environment value. Passing that through makes Codex parse ``"flash`` as
-    the profile name. Strip only whitespace and quote wrappers; never alter
-    the profile's actual name.
-    """
-    return str(value or "").strip().strip('"').strip("'").strip()
-
-
-def _codex_command(sheet: Path | None, response: Path, profile: str, *,
-                   workdir: Path | None = None,
-                   schema: Path | None = None) -> list[str] | str:
-    profile = _clean_profile(profile)
-    args = ["codex", "exec"]
-    if profile:
-        args.extend(["-p", profile])
-    provider_override = os.environ.get("JY_VISION_PROVIDER", "").strip()
-    if provider_override:
-        args.extend(["-c", f"model_provider={provider_override}"])
-    model_override = os.environ.get("JY_VISION_MODEL", "").strip()
-    if model_override:
-        args.extend(["-c", f"model={model_override}"])
-    for feature in _DISABLED_FEATURES:
-        args.extend(["--disable", feature])
-    args.extend([
-            "--dangerously-bypass-approvals-and-sandbox",
-            "--skip-git-repo-check", "--ephemeral"])
-    if sheet is not None:
-        args.extend(["--image", str(sheet)])
-    args.extend(["-o", str(response)])
-    if workdir is not None:
-        # Keep the agent's cwd inside the throwaway batch directory.  Without
-        # this it inherits the task workdir and drops crop artefacts
-        # (tmp_tile_*.png) into the production task folder.
-        args.extend(["-C", str(workdir)])
-    if schema is not None and _schema_enabled():
-        # Single choke point: no caller can put --output-schema on the command
-        # line while the relay still rejects structured output.
-        args.extend(["--output-schema", str(schema)])
-    args.append("-")
-    if os.name == "nt":
-        # npm installs Codex as a .cmd shim on Windows.  Going through cmd.exe
-        # is the same rule used by run_task.template.ps1.  The command must be
-        # a single string: a list makes Popen re-quote the inner command line
-        # with backslash escapes that cmd.exe does not understand, which splits
-        # every path containing a space into two broken arguments.  ``/s``
-        # strips exactly the outer pair of quotes added here.
-        import subprocess as _sp
-        return f'cmd.exe /d /s /c "{_sp.list2cmdline(args)}"'
-    return args
-
-
-def _ccswitch_env() -> dict[str, str]:
-    """Load the CC Switch CodingPlan transport without logging credentials."""
-    values = {
-        "base_url": os.environ.get("ANTHROPIC_BASE_URL", "").strip(),
-        "auth_token": os.environ.get("ANTHROPIC_AUTH_TOKEN", "").strip(),
-        "model": os.environ.get("JY_VISION_MODEL", "").strip()
-        or os.environ.get("ANTHROPIC_MODEL", "").strip(),
-    }
-    env_file = os.environ.get("JY_VISION_ANTHROPIC_ENV", "").strip()
-    if env_file and Path(env_file).is_file():
-        try:
-            raw = json.loads(Path(env_file).read_text(encoding="utf-8"))
-            for key in values:
-                if str(raw.get(key) or "").strip():
-                    values[key] = str(raw[key]).strip()
-        except (OSError, ValueError, TypeError):
-            pass
-    return values
-
-
-def _run_anthropic_messages(sheet: Path, prompt: str, output: Path,
-                            *, timeout: int) -> tuple[bool, str]:
-    """Run a one-shot image request against the CC Switch Anthropic provider.
-
-    CC Switch's Agent Plan endpoint speaks Anthropic Messages, while Codex's
-    native runner speaks OpenAI Responses.  Keeping this adapter here lets the
-    Windows worker use the selected CodingPlan quota without pretending the
-    endpoint is a Codex Responses provider.
-    """
-    cfg = _ccswitch_env()
-    if not cfg["base_url"] or not cfg["auth_token"] or not cfg["model"]:
-        return False, "CCSWITCH_ANTHROPIC_CONFIG_MISSING"
-    try:
-        image = base64.b64encode(sheet.read_bytes()).decode("ascii")
-    except OSError as exc:
-        return False, f"CCSWITCH_IMAGE_READ_FAILED:{exc}"
-    media_type = mimetypes.guess_type(sheet.name)[0] or "image/jpeg"
-    body = {
-        "model": cfg["model"],
-        "max_tokens": int(os.environ.get("JY_VISION_MAX_TOKENS", "4096")),
-        # Volcengine GLM accepts enabled thinking with a bounded budget. An
-        # unbounded/default budget can consume all output tokens and leave an
-        # empty text block, while `disabled` is rejected by this model.
-        "thinking": {"type": "enabled", "budget_tokens": int(
-            os.environ.get("JY_VISION_THINKING_BUDGET", "2048"))},
-        "messages": [{"role": "user", "content": [
-            {"type": "text", "text": prompt},
-            {"type": "image", "source": {
-                "type": "base64", "media_type": media_type, "data": image,
-            }},
-        ]}],
-    }
-    url = cfg["base_url"].rstrip("/") + "/v1/messages"
-    request = urllib.request.Request(
-        url, data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
-        headers={
-            "content-type": "application/json",
-            "anthropic-version": "2023-06-01",
-            "x-api-key": cfg["auth_token"],
-        }, method="POST")
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            payload = json.loads(response.read().decode("utf-8", "replace"))
-    except (OSError, urllib.error.HTTPError, ValueError) as exc:
-        if isinstance(exc, urllib.error.HTTPError):
-            detail = exc.read(800).decode("utf-8", "replace")
-            return False, f"CCSWITCH_HTTP_{exc.code}:{detail[-500:]}"
-        return False, f"CCSWITCH_REQUEST_FAILED:{exc}"
-    parts = [item.get("text", "") for item in payload.get("content", [])
-             if isinstance(item, dict) and item.get("type") == "text"]
-    text = "\n".join(part for part in parts if part).strip()
-    if not text:
-        return False, "CCSWITCH_EMPTY_RESPONSE"
-    output.write_text(text, encoding="utf-8")
-    return True, text
-
-
-def _run_vision(sheet: Path, prompt: str, output: Path, *, profile: str,
-                timeout: int, workdir: Path | None = None,
-                schema: Path | None = None, validator=None,
-                max_attempts: int = 2) -> tuple[bool, str]:
-    output.parent.mkdir(parents=True, exist_ok=True)
-    stdout_path = output.with_suffix(".stdout.log")
-    stderr_path = output.with_suffix(".stderr.log")
-    prompt_path = output.with_suffix(".prompt.txt")
-    prompt_path.write_text(prompt, encoding="utf-8")
-    transport = _vision_transport()
-    if transport == "anthropic":
-        return _run_anthropic_messages(sheet, prompt, output, timeout=timeout)
-    if transport == "volc_glm":
-        return _run_volc_chat(sheet, prompt, output, timeout=timeout,
-                              validator=validator, max_attempts=max_attempts)
-    if transport == "qwen":
-        return _run_qwen_chat(sheet, prompt, output, timeout=timeout,
-                              validator=validator, max_attempts=max_attempts)
-    ok, code, error = _run_codex_file(
-        _codex_command(sheet, output, profile, workdir=workdir, schema=schema),
-        prompt_path, stdout_path, stderr_path, timeout)
-    if error:
-        if error.startswith("timed out"):
-            return False, f"vision batch {error}"
-        return False, error
-    # --output-last-message is the canonical final response.  Some older CLI
-    # builds do not create it when the provider fails, so keep the log files
-    # as a diagnostic fallback without treating logs as model JSON.
-    if output.is_file() and output.stat().st_size:
-        return ok, output.read_text(encoding="utf-8", errors="replace")
-    detail = _tail(stderr_path) or _tail(stdout_path) or f"codex exit {code}"
-    if ok:
-        return False, f"{EMPTY_RESPONSE}\n{detail}"
-    return False, detail
+def _run_vision(sheet: Path | None, prompt: str, output: Path, *,
+                timeout: int, validator=None, max_attempts: int = 2) -> tuple[bool, str]:
+    """Dispatch a direct HTTP call; unsupported transports never fall back."""
+    caller = _run_qwen_chat if _vision_transport() == "qwen" else _run_volc_chat
+    return caller(sheet, prompt, output, timeout=timeout,
+                  validator=validator, max_attempts=max_attempts)
 
 
 EMPTY_RESPONSE = "vision model returned an empty response"
 
 
-_ANTHROPIC_TRANSPORTS = {"anthropic", "ccswitch", "ccswitch_anthropic"}
-_VOLC_TRANSPORTS = {"volc_glm", "glm", "volc"}
-_QWEN_TRANSPORTS = {"qwen", "qwen_compatible"}
-
-
-def _vision_transport() -> str:
-    """Resolve transport; unset env uses Ark GLM-5.3-Flash direct HTTP."""
-    raw = os.environ.get("JY_VISION_TRANSPORT", "").strip().lower()
-    if raw in _ANTHROPIC_TRANSPORTS:
-        return "anthropic"
-    if raw in {"codex", "volc_codex"}:
-        return "codex"
-    if raw in _VOLC_TRANSPORTS or raw == "":
-        return "volc_glm"
-    if raw in _QWEN_TRANSPORTS:
-        return "qwen"
-    return raw or "volc_glm"
-
-
-def _direct_http_transport() -> bool:
-    return _vision_transport() in {"volc_glm", "qwen"}
-
-
 def _contact_sheet_source() -> str:
-    return {
-        "codex": "codex_vision_contact_sheet_v3",
-        "anthropic": "anthropic_vision_contact_sheet_v3",
-        "volc_glm": "volc_glm_contact_sheet_v3",
-        "qwen": "qwen_contact_sheet_v3",
-    }.get(_vision_transport(), "volc_glm_contact_sheet_v3")
+    return {"volc_glm": "volc_glm_contact_sheet_v3",
+            "qwen": "qwen_contact_sheet_v3"}[_vision_transport()]
 
 
 def _requested_batch_workers() -> int:
-    """How many contact-sheet calls may be in flight.
-
-    Codex stays at one agent process. Direct GLM HTTP defaults to 20.
-    """
-    return runtime_policy.load_policy().api_workers if _direct_http_transport() else 1
+    _vision_transport()
+    return runtime_policy.load_policy().api_workers
 
 
 def _batch_workers(batch_count: int) -> int:
@@ -1364,58 +993,20 @@ def _run_compatible_chat(cfg: dict[str, str], sheet: Path | None, prompt: str, o
     return result.legacy_tuple()
 
 
-_TRANSIENT_MARKERS = (
-    "502", "503", "429", "too many requests", "temporarily unavailable",
-    "timed out", "timeout", "connection reset", "connection refused", "network",
-    "empty response", "empty_response",
-)
-
-
 def is_empty_failure(text: str) -> bool:
     lowered = str(text or "").casefold()
     return is_blank(text) or "empty response" in lowered or "empty_response" in lowered
 
 
-def _is_transient(text: str) -> bool:
-    lowered = str(text or "").casefold()
-    if (re.search(r"http_40[13]\b", lowered)
-            or "volc_api_key_missing" in lowered
-            or "user location is not supported" in lowered):
-        return False
-    return is_blank(text) or any(marker in lowered for marker in _TRANSIENT_MARKERS)
-
-
-def _backoff_seconds(attempt: int) -> float:
-    base = env_float("JY_VISION_BACKOFF", 3.0)
-    delay = base * (2 ** attempt) * random.uniform(0.75, 1.25)
-    return min(60.0, delay)
-
-
-def _vision_slot():
-    return runtime_policy.vision_slot(timeout=env_float("JY_VISION_SLOT_TIMEOUT", 600.0))
-
-
 def _run_vision_with_retry(sheet: Path, prompt: str, output: Path, *,
-                           profile: str, timeout: int,
-                           workdir: Path | None = None,
-                           schema: Path | None = None,
-                           max_retries: int | None = None,
-                           require_slot: bool = False,
+                           timeout: int, max_retries: int | None = None,
                            on_attempt: Any = None, validator=None) -> tuple[bool, str]:
-    """Compatibility entry point; HTTP attempts belong exclusively to the client."""
+    """Submit once; the shared HTTP client owns attempts, deadlines and slots."""
     attempts = 2 if max_retries is None else min(2, max(1, int(max_retries) + 1))
     if on_attempt is not None:
         on_attempt(1, attempts, "")
-    kwargs = {"profile": profile, "timeout": timeout, "workdir": workdir, "schema": schema}
-    if _direct_http_transport():
-        kwargs.update(validator=validator, max_attempts=attempts)
-        # post_chat acquires/releases the account slot around each real request.
-        ok, text = _run_vision(sheet, prompt, output, **kwargs)
-    else:
-        with _vision_slot() as handle:
-            if not handle.acquired:
-                return False, "VISION_SLOT_TIMEOUT"
-            ok, text = _run_vision(sheet, prompt, output, **kwargs)
+    ok, text = _run_vision(sheet, prompt, output, timeout=timeout,
+                           validator=validator, max_attempts=attempts)
     return (False, EMPTY_RESPONSE) if ok and is_blank(text) else (ok, text)
 
 
@@ -1706,15 +1297,14 @@ def _primary_interval(raw: dict[str, Any], row: dict[str, Any],
 
 
 def enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], report_dir: Path,
-                      *, profile: str | None = None, batch_size: int = 12,
+                      *, batch_size: int = 12,
                       timeout: int | None = None, ffmpeg: str | None = None) -> dict[str, Any]:
     """One cold producer per product; other tasks re-read its completed shared observations."""
+    _vision_transport()
     if not analysis.get("shots"):
         return analysis
     report_dir = Path(report_dir)
     cache_path = _vision_cache_path(report_dir)
-    profile = _clean_profile(
-        profile if profile is not None else os.environ.get("JY_VISION_PROFILE", "volc"))
     from ..runtime.file_safety import atomic_write_text
     atomic_write_text(report_dir / "vision_progress.json", json.dumps({
         "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
@@ -1726,8 +1316,8 @@ def enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repor
                    timeout=env_float("JY_VISION_CACHE_WAIT_TIMEOUT", 7200.0)):
         waited = round(time.monotonic() - waiting, 3)
         _progress(report_dir, cache_wait_s=waited)
-        _seed_legacy_vision_cache(manifest, analysis, report_dir, cache_path, profile)
-        result = _enrich_with_vision(manifest, analysis, report_dir, profile=profile,
+        _seed_legacy_vision_cache(manifest, analysis, report_dir, cache_path)
+        result = _enrich_with_vision(manifest, analysis, report_dir,
                                     batch_size=batch_size, timeout=timeout, ffmpeg=ffmpeg)
         result["vision_analysis"]["cache_wait_s"] = waited
         _persist(report_dir, result)
@@ -1735,13 +1325,11 @@ def enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repor
 
 
 def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], report_dir: Path,
-                       *, profile: str | None = None, batch_size: int = 12,
+                       *, batch_size: int = 12,
                        timeout: int | None = None, ffmpeg: str | None = None) -> dict[str, Any]:
     """Use the configured image backend to fill and validate temporary shots."""
     if timeout is None:
         timeout = runtime_policy.load_policy().request_timeout
-    profile = _clean_profile(
-        profile if profile is not None else os.environ.get("JY_VISION_PROFILE", "volc"))
     shots = [row for row in analysis.get("shots", []) if isinstance(row, dict)]
     if not shots:
         return analysis
@@ -1770,7 +1358,7 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
     every_rule = _analysis_rules(manifest)
     for shot in shots:
         shot_id = str(shot.get("shot_id") or "")
-        key = _vision_cache_key(manifest, shot, profile)
+        key = _vision_cache_key(manifest, shot)
         if key:
             cache_keys[shot_id] = key
         cached = cache.get(key) if key else None
@@ -1782,7 +1370,7 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
         prior_transport = os.environ.get("JY_REUSE_VISION_TRANSPORT", "").strip().lower()
         if (cached is None and _vision_transport() == "qwen" and prior_model
                 and prior_transport == "volc_glm" and shot.get("frame_exists") is not False):
-            prior_key = _vision_cache_key(manifest, shot, profile, transport_override=prior_transport,
+            prior_key = _vision_cache_key(manifest, shot, transport_override=prior_transport,
                                           model_override=prior_model)
             prior = cache.get(prior_key) if prior_key else None
             checked, prior_recheck = _resolve_recheck(prior, checks)
@@ -1793,7 +1381,7 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
                 prior_origin = {"transport": prior_transport, "model": prior_model}
         if not prior_origin and key and checks and set((cached or {}).get("rule_checks") or []) != set(checks):
             # 分析要求曾经整份进缓存键时，按全部要求看过的观察存在另一个键下。
-            full = _vision_cache_key(manifest, shot, profile, every_rule)
+            full = _vision_cache_key(manifest, shot, every_rule)
             if (full != key and isinstance(cache.get(full), dict)
                     and cache[full].get("status") == "ready_for_matching"):
                 cached = cache[key] = {**cache[full], "rule_checks": sorted(checks)}
@@ -1925,7 +1513,7 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
     if not shots_to_analyze and not text_resume:
         _annotate_shot_labels(manifest, shots)
         apply_cross_shot_text(shots)
-        _set_cache_summary(_vision_summary(profile, [], [], [], partial=False))
+        _set_cache_summary(_vision_summary([], [], [], partial=False))
         analysis["pending_items"] = list(analysis.get("pending_items", []))
         analysis["ok"] = not any(needs_vision(row) for row in shots)
         _persist(report_dir, analysis)
@@ -2019,7 +1607,7 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
         # A partial file must not claim the previous attempt's batch count,
         # and must never claim ok.
         _set_cache_summary(
-            _vision_summary(profile, batches, responses, vision_errors, partial=True),
+            _vision_summary(batches, responses, vision_errors, partial=True),
             partial=True)
         analysis["ok"] = False
         _persist(report_dir, analysis)
@@ -2030,7 +1618,6 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
               time.strftime("%Y-%m-%dT%H:%M:%S%z"), finished_at=None)
     with private_temp_dir(prefix="jy_vision_", dir=report_dir) as temp:
         temp_dir = Path(temp)
-        schema = _write_schema(temp_dir)
         sheets: dict[int, Path] = {}
         def _call_path(prompt: str, sheet: Path, prefix: str) -> Path:
             # This identity survives task/report-directory changes. The client
@@ -2056,10 +1643,7 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
                 sheets[batch_index],
                 _vision_prompt(batch, batch_index, len(batches), analysis_rules),
                 response_file,
-                profile=profile,
                 timeout=timeout,
-                workdir=temp_dir,
-                schema=schema,
                 validator=validate,
                 on_attempt=_attempts("vision", batch_index, len(batches),
                                      sorted({str(item["shot_id"]) for item in batch})),
@@ -2226,7 +1810,7 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
                                      "errors": [], "status": "DEFERRED_VISUAL_ERRORS"}
             analysis["pending_items"] = list(analysis.get("pending_items", [])) + vision_errors
             analysis["ok"] = False
-            _set_cache_summary(_vision_summary(profile, batches, responses,
+            _set_cache_summary(_vision_summary(batches, responses,
                                                vision_errors, partial=True), partial=True)
             _persist(report_dir, analysis)
             _progress(report_dir, phase="blocked_vision", vision_left=len(vision_errors),
@@ -2273,8 +1857,8 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
                             sheet, prompt, output, timeout=timeout, validator=validate_text)
                     else:
                         ok, text = _run_vision_with_retry(
-                            sheet, prompt, output, profile=profile, timeout=timeout,
-                            workdir=temp_dir, validator=validate_text, on_attempt=note)
+                            sheet, prompt, output, timeout=timeout,
+                            validator=validate_text, on_attempt=note)
                     payload: Any = None
                     if ok:
                         try:
@@ -2311,7 +1895,7 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
             row["status"] = "pending_analysis"
             row.setdefault("analysis_error", "no validated vision result")
     analysis["shots"] = shots
-    _set_cache_summary(_vision_summary(profile, batches, responses,
+    _set_cache_summary(_vision_summary(batches, responses,
                                        vision_errors, partial=False), partial=False)
     analysis["pending_items"] = list(analysis.get("pending_items", [])) + vision_errors
     analysis["ok"] = bool(shots) and not analysis["pending_items"] and not any(
@@ -2329,13 +1913,12 @@ def _segments_text(shot: dict[str, Any]) -> str:
         for seg in shot.get("action_segments") or [] if isinstance(seg, dict))
 
 
-def match_with_codex(manifest: dict[str, Any], analysis: dict[str, Any], report_dir: Path,
-                     *, profile: str | None = None, timeout: int | None = None) -> dict[str, Any]:
+def match_sentences(manifest: dict[str, Any], analysis: dict[str, Any], report_dir: Path,
+                     *, timeout: int | None = None) -> dict[str, Any]:
     """Use the same observed shot descriptions to rank each spoken sentence."""
+    _vision_transport()
     if timeout is None:
         timeout = env_int("JY_VISION_TIMEOUT", 600, minimum=60)
-    profile = _clean_profile(
-        profile if profile is not None else os.environ.get("JY_VISION_PROFILE", "volc"))
     from ..selection import timing_contract
     sentence_rows = timing_contract.split_sentences(manifest)
     claims = [{"index": i, "text": timing_contract.sentence_text(row)}
@@ -2400,78 +1983,35 @@ score 0-100；只有明确匹配并且证据足够才给 70 以上；`matched_cl
 {catalog}
 """
     report_dir.mkdir(parents=True, exist_ok=True)
-    attempts = 1  # HTTP transport owns the persistent two-attempt budget.
+    transport = _vision_transport()
+    response = report_dir / "vision_calls" / (
+        "match_" + hashlib.sha256(prompt.encode("utf-8")).hexdigest() + ".txt")
+    caller = _run_qwen_chat if transport == "qwen" else _run_volc_chat
+    ok, raw_text = caller(None, prompt, response, timeout=timeout,
+        validator=lambda data: isinstance(data, list) or
+        (isinstance(data, dict) and isinstance(data.get("matches"), list)))
     failure = ""
-    stderr_tail = ""
-    used = 0
-    for attempt in range(attempts):
-        used = attempt + 1
-        with private_temp_dir(prefix="jy_match_", dir=report_dir) as temp:
-            temp_dir = Path(temp)
-            response = report_dir / "vision_calls" / (
-                "match_" + hashlib.sha256(prompt.encode("utf-8")).hexdigest() + ".txt")
-            if not _direct_http_transport():
-                response = temp_dir / "response.txt"
-            response.parent.mkdir(parents=True, exist_ok=True)
-            prompt_path = temp_dir / "prompt.txt"
-            prompt_path.write_text(prompt, encoding="utf-8")
-            if _vision_transport() in {"volc_glm", "qwen"}:
-                caller = _run_qwen_chat if _vision_transport() == "qwen" else _run_volc_chat
-                ok, text = caller(None, prompt, response, timeout=timeout,
-                    validator=lambda data: isinstance(data, list) or
-                    (isinstance(data, dict) and isinstance(data.get("matches"), list)))
-                stderr_tail = ""
-                if ok:
-                    raw_text, error, code = text, "", 0
-                else:
-                    raw_text, error, code = "", text, 1
-            else:
-                # Text-only call: no image attachment.  v1.3.20 routes it through the
-                # same file-backed runner as the vision batches.  It previously kept
-                # the old stdout=PIPE pattern, which is the same deadlock v1.3.17
-                # fixed in _run_vision and left behind here.
-                with _vision_slot() as handle:
-                    if not handle.acquired:
-                        analysis["semantic_match_error"] = "VISION_SLOT_TIMEOUT"
-                        analysis["semantic_matches"] = []
-                        return analysis
-                    ok, code, error = _run_codex_file(
-                        _codex_command(None, response, profile, workdir=temp_dir),
-                        prompt_path, temp_dir / "stdout.log", temp_dir / "stderr.log", timeout)
-                stderr_tail = _tail(temp_dir / "stderr.log", 2000).strip()
-                if response.is_file() and response.stat().st_size:
-                    raw_text = response.read_text(encoding="utf-8", errors="replace")
-                elif ok:
-                    raw_text = _tail(temp_dir / "stdout.log")
-                else:
-                    raw_text = ""
-            if error:
-                failure = f"match call {error}"
-            elif not raw_text.strip():
-                failure = (f"match call codex exit {code}: {stderr_tail[-800:]}" if not ok
-                           else f"match call {EMPTY_RESPONSE}")
-            else:
-                try:
-                    payload = _json_from_text(raw_text)
-                    matches = payload if isinstance(payload, list) else payload.get("matches", [])
-                    failure = ""
-                    # 偶发的「每句都给空候选」不是判断结果，按空响应重试。
-                    if (len(claims) > 1 and isinstance(matches, list)
-                            and not any(isinstance(m, dict) and m.get("top3") for m in matches)):
-                        failure = f"match call {EMPTY_RESPONSE}: every sentence has no candidate"
-                except (ValueError, TypeError, AttributeError) as exc:
-                    failure = f"match response invalid: {exc}"
-        if not failure:
-            analysis["semantic_matches"] = matches
-            analysis.pop("semantic_match_error", None)
-            break
+    matches = []
+    if not ok:
+        failure = "match call " + str(raw_text)
+    elif is_blank(raw_text):
+        failure = f"match call {EMPTY_RESPONSE}"
+    else:
+        try:
+            payload = _json_from_text(raw_text)
+            matches = payload if isinstance(payload, list) else payload.get("matches", [])
+            if (len(claims) > 1 and isinstance(matches, list)
+                    and not any(isinstance(m, dict) and m.get("top3") for m in matches)):
+                failure = f"match call {EMPTY_RESPONSE}: every sentence has no candidate"
+        except (ValueError, TypeError, AttributeError) as exc:
+            failure = f"match response invalid: {exc}"
+    analysis["semantic_matches"] = [] if failure else matches
     if failure:
         analysis["semantic_match_error"] = failure
-        analysis["semantic_matches"] = []
+    else:
+        analysis.pop("semantic_match_error", None)
     (report_dir / "shot_match_ai.json").write_text(
-        json.dumps({"claims": claims, "matches": analysis.get("semantic_matches", []),
-                    "error": analysis.get("semantic_match_error"),
-                    "attempts": used,
-                    "stderr_tail": stderr_tail[-2000:] if failure else ""},
+        json.dumps({"claims": claims, "matches": analysis["semantic_matches"],
+                    "error": analysis.get("semantic_match_error"), "attempts": 1},
                    ensure_ascii=False, indent=2), encoding="utf-8")
     return analysis

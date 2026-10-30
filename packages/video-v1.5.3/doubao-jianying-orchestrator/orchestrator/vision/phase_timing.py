@@ -44,7 +44,7 @@ def _cache_path(report_dir: Path) -> Path:
     return root / "phase_timing.json"
 
 
-def _cache_key(shot: dict[str, Any], scene: dict[str, Any], profile: str) -> str:
+def _cache_key(shot: dict[str, Any], scene: dict[str, Any]) -> str:
     source = str(shot.get("video") or "").strip()
     try:
         path = Path(source).expanduser().resolve()
@@ -57,9 +57,9 @@ def _cache_key(shot: dict[str, Any], scene: dict[str, Any], profile: str) -> str
     from . import vision_analyzer
     transport = vision_analyzer._vision_transport()
     provider = (vision_analyzer._qwen_settings() if transport == "qwen" else
-                vision_analyzer._volc_settings() if transport == "volc_glm" else {})
+                vision_analyzer._volc_settings())
     identity = {
-        "version": PHASE_TIMING_VERSION, "profile": profile, "video": source,
+        "version": PHASE_TIMING_VERSION, "profile": "volc", "video": source,
         "signature": signature, "scene": scene.get("id"),
         "scene_label": scene.get("label"),
         "phases": [{k: p.get(k) for k in ("name", "label", "describe")}
@@ -132,19 +132,17 @@ def validate(payload: Any, scene: dict[str, Any], times: list[float],
 
 
 def locate(shot: dict[str, Any], scene: dict[str, Any], report_dir: Path, *,
-           ffmpeg: Optional[str] = None, profile: Optional[str] = None, timeout: int = 240,
+           ffmpeg: Optional[str] = None, timeout: int = 240,
            runner: Optional[Callable[[Path, str], tuple[bool, str]]] = None) -> dict[str, Any]:
     if str(os.environ.get(DISABLE_ENV, "1")).strip() == "0":
         return {"ok": False, "reason": "PHASE_TIMING_DISABLED"}
     from ..selection import shot_analyzer
     from . import vision_analyzer
-    profile = vision_analyzer._clean_profile(
-        profile if profile is not None else os.environ.get("JY_VISION_PROFILE", "volc"))
     start = _number(shot.get("source_start"))
     end = _number(shot.get("source_end"), start)
     times = sample_times(start, end)
     cache_path = _cache_path(report_dir)
-    key = _cache_key(shot, scene, profile)
+    key = _cache_key(shot, scene)
     if key:
         try:
             cached = json.loads(cache_path.read_text(encoding="utf-8")).get(key)
@@ -193,8 +191,8 @@ def locate(shot: dict[str, Any], scene: dict[str, Any], report_dir: Path, *,
             ok, text = runner(sheet, prompt)
         else:
             ok, text = vision_analyzer._run_vision_with_retry(
-                sheet, prompt, temp_dir / "phase_response.txt", profile=profile,
-                timeout=timeout, workdir=temp_dir, max_retries=2)
+                sheet, prompt, temp_dir / "phase_response.txt",
+                timeout=timeout, max_retries=2)
     if not ok:
         return {"ok": False, "reason": "PHASE_VISION_FAILED", "message": str(text)[-400:]}
     try:

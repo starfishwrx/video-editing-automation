@@ -22,7 +22,7 @@ class LegacyCacheImportTest(unittest.TestCase):
         self.row = {"shot_id": "shot", "video": str(self.video), "source_start": 0,
                     "source_end": 2, "status": "ready_for_matching", "action_complete": True,
                     "description": "observed", "text_pass": "disabled"}
-        self.row["analysis_cache_key"] = vision._vision_cache_key(self.prior, self.row, "volc")
+        self.row["analysis_cache_key"] = vision._vision_cache_key(self.prior, self.row)
 
     def run_import(self):
         return legacy_cache_import.import_productless_observations(
@@ -32,7 +32,7 @@ class LegacyCacheImportTest(unittest.TestCase):
         result = self.run_import()
         self.assertEqual(result["added"], 1)
         cache = json.loads(self.cache.read_text(encoding="utf-8"))
-        key = vision._vision_cache_key(self.current, self.row, "volc")
+        key = vision._vision_cache_key(self.current, self.row)
         self.assertEqual(cache[key]["text_pass"], "disabled")
         self.assertTrue(vision._needs_text_backfill(cache[key]))
         self.assertEqual(self.run_import()["existing"], 1)
@@ -50,7 +50,7 @@ class LegacyCacheImportTest(unittest.TestCase):
     def test_changed_source_window_or_protocol_never_imports(self):
         self.video.write_bytes(b"changed source bytes")
         self.assertEqual(self.run_import()["rejected"], 1)
-        self.row["analysis_cache_key"] = vision._vision_cache_key(self.prior, self.row, "volc")
+        self.row["analysis_cache_key"] = vision._vision_cache_key(self.prior, self.row)
         self.current["sku"] = "different-sku"
         self.assertEqual(self.run_import()["rejected"], 1)
 
@@ -80,7 +80,7 @@ class LegacyCacheImportTest(unittest.TestCase):
         self.assertEqual(result["rejected"], 1)
 
     def test_existing_current_result_wins(self):
-        key = vision._vision_cache_key(self.current, self.row, "volc")
+        key = vision._vision_cache_key(self.current, self.row)
         self.cache.write_text(json.dumps({key: {"text_pass": "hires"}}), encoding="utf-8")
         self.assertEqual(self.run_import()["existing"], 1)
         self.assertEqual(json.loads(self.cache.read_text(encoding="utf-8"))[key]["text_pass"], "hires")

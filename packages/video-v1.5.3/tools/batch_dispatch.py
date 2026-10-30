@@ -98,7 +98,7 @@ def _qc_pending(task: dict, work: Path) -> bool:
 def _child_env(policy_file: Path, policy: RuntimePolicy, task: dict | None = None) -> dict:
     env = dict(os.environ, PYTHONUTF8="1",
         JY_CONCURRENCY_POLICY_FILE=str(policy_file), JY_SLOT_DIR=policy.slot_dir,
-        JY_VISION_TEXT_PASS="1", JY_VISION_RETRIES="2",
+        JY_VISION_TEXT_PASS="1",
         JY_VISION_SLOTS=str(policy.vision_slots),
         JY_VISION_BATCH_WORKERS=str(policy.api_workers),
         JY_VISION_PREP_WORKERS=str(policy.prep_workers),

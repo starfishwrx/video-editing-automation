@@ -253,9 +253,8 @@ class MatchPromptFeedbackTests(unittest.TestCase):
                                      dict(index=2, top3=[])])
         m = dict(category="卫品", segments=[{}, dict(text="荧光检测"), dict(text="这样就放心了")])
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"JY_VISION_TRANSPORT": "volc_glm"}), \
-                mock.patch.object(vision_analyzer, "_run_volc_chat", side_effect=fake), \
-                mock.patch.object(vision_analyzer, "_vision_slot"):
-            vision_analyzer.match_with_codex(m, {"shots": [shot("s")]}, Path(tmp))
+                mock.patch.object(vision_analyzer, "_run_volc_chat", side_effect=fake):
+            vision_analyzer.match_sentences(m, {"shots": [shot("s")]}, Path(tmp))
         self.assertIn("1. 荧光检测", prompts[0])
         self.assertIn("2. 这样就放心了", prompts[0])
         self.assertNotIn("3. ", prompts[0])

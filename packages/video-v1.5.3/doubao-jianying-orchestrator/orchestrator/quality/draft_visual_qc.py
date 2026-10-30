@@ -325,7 +325,6 @@ def _parse_model(text: str) -> dict[str, Any]:
 
 def _call_qc_model(vision_analyzer: Any, sheet: pathlib.Path, prompt: str,
                    response: pathlib.Path, *, timeout: int,
-                   workdir: pathlib.Path, strict_slots: bool = False,
                    expected_count: int | None = None,
                    expected_version: str = RESPONSE_VERSION) -> tuple[bool, str]:
     """The transport owns the complete two-attempt logical request budget."""
@@ -339,9 +338,7 @@ def _call_qc_model(vision_analyzer: Any, sheet: pathlib.Path, prompt: str,
 
     return vision_analyzer._run_vision_with_retry(
         sheet, prompt, response,
-        profile=os.environ.get("JY_VISION_PROFILE", "volc").strip() or "volc",
-        timeout=timeout, workdir=workdir, schema=None, max_retries=2,
-        require_slot=True, validator=validate,
+        timeout=timeout, max_retries=2, validator=validate,
     )
 
 
@@ -688,8 +685,7 @@ def main() -> int:
                         request_errors[batch_no] = {"error_code": "DEADLINE_EXCEEDED"}
                         return batch_no, (False, "QC_STAGE_DEADLINE_EXCEEDED")
                     answer = _call_qc_model(vision_analyzer, chunk_sheet,
-                        prompt, response, timeout=timeout, workdir=report_dir,
-                        strict_slots=ai_mode, expected_count=len(claims),
+                        prompt, response, timeout=timeout, expected_count=len(claims),
                         expected_version=response_version)
                     if answer[0]:
                         _save_batch_checkpoint(checkpoints[batch_no], bindings[batch_no],

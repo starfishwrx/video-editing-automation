@@ -457,7 +457,7 @@ class VisionRetryTests(unittest.TestCase):
                 mock.patch.object(vision_analyzer.time, "sleep"):
             ok, text = vision_analyzer._run_vision_with_retry(
                 Path("sheet.jpg"), "prompt", Path("response.txt"),
-                profile="flash", timeout=1, max_retries=1)
+                timeout=1, max_retries=1)
         self.assertFalse(ok)
         self.assertEqual(text, "502")
         self.assertEqual(call.call_count, 1)

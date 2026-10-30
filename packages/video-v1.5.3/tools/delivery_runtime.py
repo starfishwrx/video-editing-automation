@@ -23,6 +23,7 @@ PIPELINE_FILES = (
     "tools/eval_stage.py",
     "tools/mac_review_handoff.py",
     "doubao-jianying-orchestrator/orchestrator/visual_qc_contract.py",
+    "doubao-jianying-orchestrator/orchestrator/runtime/vision_config.py",
 )
 
 SHIP_FILES = (

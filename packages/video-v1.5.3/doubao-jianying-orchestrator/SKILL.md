@@ -81,8 +81,11 @@ legacy 的 QC v3 响应、旧场景重排复验及历史人工反馈回放见包
   分别从对应阶段恢复，不重新做视觉分析。
 - 视觉服务调用最多进行一次有限重试；凭据、路径、编码和余额错误直接停机。
 - 视觉默认直连火山 Ark `glm-5.3-flash`（`JY_VISION_TRANSPORT=volc_glm`），密钥放
-  `ARK_API_KEY`（或 `JY_VOLC_API_KEY`）。批次与槽位并发默认 20。`codex` /
-  `anthropic` 只作显式 legacy 回滚（需同时选择 legacy；AI editor 要求直连）；完整型号是 GLM-5.3-Flash，不是 GLM-5.3 或 ChatGLM3。媒体解码默认全部走 GPU（`JY_GPU_DECODE_CODECS=*`，
+  `ARK_API_KEY`（或 `JY_VOLC_API_KEY`）。批次与槽位并发默认 20。GLM 别名为 `glm` / `volc`；
+  千问使用 `qwen` / `qwen_compatible` 及 `JY_QWEN_*`。所有选镜策略只走这两类直连，
+  Codex CLI、Anthropic 与 CCSwitch 调用已移除；旧通道和未知值直接拒绝。
+  文字复核和 `JY_AI_EDITOR_QWEN` 保留，配置见包根 `ENVIRONMENT.md`。
+  完整默认型号是 GLM-5.3-Flash，不是 GLM-5.3 或 ChatGLM3。媒体解码默认全部走 GPU（`JY_GPU_DECODE_CODECS=*`，
   单帧默认开启），显存不足或槽位超时仍回退 CPU。
 - `draft_write` 只接受 `semantic_match` 产生的成功嵌套结果；原始 manifest 或损坏缓存
   不得作为恢复输入。桌面诊断失败保持 `DESKTOP_IMPORT_BLOCKED` / `PACKAGE_NOT_ACTIVE`。
@@ -93,6 +96,9 @@ legacy 的 QC v3 响应、旧场景重排复验及历史人工反馈回放见包
   `result.json`/`events.jsonl`，否则继续队列会停在当前任务。
 - 队列选择后的生成前预检会验证包版本、素材目录与视频池、草稿根目录父路径和脚本；
   预检失败直接写 `ENVIRONMENT_PRECHECK_FAILED`，不得触发 TTS、视觉分析或建稿。
+
+历史 JyPoll/JyRun 已退役；`jy_poll.ps1` 与 `run_task.template.ps1` 仅作立即失败的迁移提示。
+新任务使用 manifest CLI 或经授权显式调用 `tools.batch_dispatch`；不自动启用队列、修改计划任务或替换已有生产生成脚本。
 
 命令、运行路径和验收合同见 [references/runtime_contract.md](references/runtime_contract.md)。
 预览留空补镜和这次生产踩过的坑见 [references/preview_gap_and_pitfalls.md](references/preview_gap_and_pitfalls.md)。

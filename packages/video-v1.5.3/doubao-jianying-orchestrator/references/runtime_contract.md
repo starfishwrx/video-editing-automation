@@ -6,9 +6,16 @@ The full model name is **GLM-5.3-Flash**, distinct from GLM-5.3 and ChatGLM3.
 The default `ai_editor` rechecks candidate pixels, plans the full script and
 uses independent final-cut QC v4. Explicit `legacy` retains the old Top3,
 scene-swap and QC v3 contracts; its reports cannot certify an AI-editor draft.
-AI editor requires `volc_glm`; other transports require an explicit legacy
-rollback and separate image-backend validation. Local examples and process
-configuration are documented in the package `examples/` and `ENVIRONMENT.md`.
+All selection modes, including `rule_then_ai` and `legacy`, use GLM
+(`volc_glm` / `glm` / `volc`) or Qwen (`qwen` / `qwen_compatible`) direct HTTP.
+Codex CLI, Anthropic and CCSwitch runtime calls have been removed. Removed
+transport names and unknown values are rejected explicitly, without fallback.
+High-resolution text verification and `JY_AI_EDITOR_QWEN` remain available.
+The legacy description matcher is `vision_analyzer.match_sentences`.
+Observation and phase-cache identities retain a fixed `profile="volc"` field
+for compatible existing observations; it is not a runtime configuration option.
+Local examples and process configuration are documented in the package
+`examples/` and `ENVIRONMENT.md`.
 
 Use the installed sibling skills for standalone operations. The deployed pipeline is selected by `JY_PIPE_ROOT`. Do not select archived task runtimes or backup folders for new work. Read actual VERSION and release-manifest metadata before executing.
 
@@ -17,6 +24,13 @@ Use the installed sibling skills for standalone operations. The deployed pipelin
 - `python -X utf8 run.py recover --help` lists supported stage-specific recovery options. Recovery uses existing evidence rather than restarting all analysis.
 - Use the full pipeline's `tools/eval_bootstrap.py` before new production generation to freeze confirmed product identity, task inputs, material hashes and runtime identity.
 - `tools/eval_stage.py prepare` prepares hash-bound human review inputs; `collect` validates review evidence; `finalize` without `--deliver` evaluates without authorizing NAS or Feishu delivery.
+
+The historical JyPoll/JyRun execution chain is retired: `jy_poll.ps1` and
+`run_task.template.ps1` fail immediately without loading credentials or starting
+a task. Use the manifest CLI for a single task, or explicitly invoke
+`python -m tools.batch_dispatch run --queue <queue.json>` for an authorized
+existing queue. Updating source does not enable queues, change host scheduled
+tasks or replace already generated production scripts.
 
 The standard pipeline requires process-level deployment configuration. `JY_PIPE_ROOT` selects the pipeline; the worker's `JY_SKILL_ROOT` selects its orchestrator. The engine finds the adjacent jianying-editor. Set `JY_DRAFT_ROOT`, `JY_DRAFTS_ROOT` and `JY_PROJECTS_ROOT` to the same draft library when launching from the pipeline. Product-identity, material-index and credentials stay outside source-package manifests.
 
