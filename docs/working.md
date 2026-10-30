@@ -6,6 +6,13 @@
 
 ### 2026-10-30
 
+- 后续按用户要求移除 Codex 运行时调用，同时清理同类 Anthropic/CCSwitch 回退；GLM/Qwen 直连、ai_editor/rule_then_ai/legacy 选镜及独立 QC 保留。描述选镜通用入口改名 match_sentences。
+- 统一 runtime/vision_config 解析支持的通道及真实模型身份；删除旧 profile/provider/output-schema/Anthropic env loader、Agent 进程管理和非 HTTP 重试/槽位分支。旧 aijws profile 不再隐式覆盖模型；无效配置可诊断并在建稿/生成恢复的 TTS 前阻断，只读 UI 诊断继续可用。
+- 审计发现 JyPoll/JyRun 模板仍启动整条 Codex Agent，已将两个历史源码入口退役为控制台提示与 exit 2。真实 PowerShell 执行和 AST 验证无凭据读取、目录/锁修改、调度、外发或自动转交 worker。
+- 删除仅服务旧进程/调度实现的测试；通用选镜失败、空响应、提示词与禁止规则兜底合同迁移到 GLM/Qwen HTTP 测试。新增本机 HTTP 重试/恢复预算、运行事实、配音前阻断和退役无副作用回归。
+- 保留已有默认观察缓存的磁盘命名空间，独立对照 GLM/Qwen 视觉与相位的 4 组旧新键全部一致；未清空缓存或重识别真实素材。
+- 清理后包外副本 full 合包/全新解压通过：包级 169 项，编排器 862 项（1 个与基线同样的 FFmpeg 合成夹具类跳过），328 个文件；10 种包外 CLI 入口、编译、示例 JSON、模块边界和隐私形态扫描通过。独立审查发现的配置预检遗漏已修复并复验，无未解决阻断；源码、打包和生产验收分别记录。
+
 - 架构审计以 main `7775331` 为基线，确认平铺功能、引擎/CLI职责集中、部分延迟双向依赖、两份闭环实现漂移及包外直接执行路径故障；边界与保留耦合见 `docs/modular-development.md`。
 - 将 50 个实现模块迁入 application/audio/media/runtime/policy/selection/vision/quality/delivery；旧导入绑定同一个实现模块，保留共享缓存、锁、统计和测试 patch。Clip 独立为纯 domain 模型，包初始化延迟加载引擎并回读 VERSION。
 - FFmpeg 探测、切镜和抽帧抽为 media/frames；旧选镜 API 显式传入 decoder/单帧回退/开关。worker 的输入、终态、失败分类、任务选择和并行互斥合同抽为 tools/queueing。

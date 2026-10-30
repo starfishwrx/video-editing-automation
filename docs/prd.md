@@ -52,7 +52,7 @@
 
 ### 3.2 明确不做或需单独授权
 
-- 恢复历史禁用的 JyPoll/JyRun 队列。
+- 恢复已退役的 JyPoll/JyRun Agent 执行链。
 - 修改 `vendor/pyJianYingDraft`（除非 PR 写明来源与风险）。
 - 改写 `packages/video-v1.5.2/` 及更早归档包。
 

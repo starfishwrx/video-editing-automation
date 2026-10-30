@@ -1,6 +1,6 @@
 # 子系统：队列与闭环工具（package-tools）
 
-- 代码：`packages/video-v1.5.3/{batch_worker.py, closed_loop.py, tools/*.py, run_task.template.ps1, jy_poll.ps1, gold-reference.json}`
+- 活跃代码：`packages/video-v1.5.3/{batch_worker.py, closed_loop.py, tools/*.py, tools/workflow/, tools/queueing/, gold-reference.json}`；两份历史 PowerShell 入口仅为退役提示。
 
 ## 1. 队列与执行（`batch_worker.py`）
 - 正式批次统一入口：`python -m tools.batch_dispatch run --queue <queue.json>`；其他启动器向 `submit` 提交，制作进程须经账户级准入。同产品先完成公共准备，等待缓存不占制作池；已有草稿 QC 优先，其次就绪制作，再准备新产品。同级 FIFO。
@@ -22,10 +22,7 @@
 - `archive-parent`：把多版本草稿归档到一个父目录（`版本1/版本2/...`），核验后回写收据
 - `table-update`：将“草稿目录/成片状态”等回写业务表（飞书 Base），使用 `LARK_BASE_TOKEN`
 - `failure-update`：失败/部分失败回执，写“任务状态=生成失败”与“问题反馈”摘要；不写“草稿文件/成功状态/NAS 路径”
-- v1.5.1 同时存在：
-  - 根目录 `closed_loop.py`：精简依赖，仅按 QC/审核/打包做交付 gate
-  - `tools/closed_loop.py`：集成评估/分发收据/目录哈希（`tools/production_eval.py`、`delivery_identity.py`）
-  - 二者服务不同部署场景（Windows 工具链 vs. 更完整的评估闭环），脚本名相同但实现与依赖不同
+- 唯一维护实现为 `tools/workflow/closed_loop.py`；根 `closed_loop.py` 与 `tools/closed_loop.py` 是同一实现的兼容入口，使用一致的 QC、Mac 审阅、Eval 与分发收据闸门。普通导入共享模块状态；两条路径支持包外工作目录直接执行。
 
 ## 3. 评估与收据（`tools/*.py`）
 - `eval_bootstrap.py/eval_stage.py/production_eval.py`：生产评估流程与证据（contract 与 receipt 校验）
@@ -35,17 +32,18 @@
 - `sentence_review.py`：从 `eval_stage.collect` 收集哈希绑定的句级人工审稿，并冻结输入、调用实际 matcher 离线回放和比较；命令见当前包 `docs/sentence-review.md`，人工标签不授予正式交付许可
 - `mac_review_handoff.py`：Mac 端人工审核交接脚本
 
-## 4. Windows 脚本
-- `run_task.template.ps1`：按模板运行一条任务（含日志/证据路径与环境变量）
-- `jy_poll.ps1`：Windows 轮询与队列调度脚本
+## 4. 已退役的 Windows 入口
+
+`run_task.template.ps1`（JyRun）与 `jy_poll.ps1`（JyPoll）不再执行任务，调用即非零退出并提示迁移。它们不读取凭据、创建任务目录、挂载 NAS、调用 worker 或发送通知。
+
+单条任务按[快速开始](../quickstart.md)使用 manifest CLI；现有批队列仅在明确授权后显式调用 `python -m tools.batch_dispatch run --queue <queue.json>`。此改动不自动开启队列，不修改宿主计划任务，也不替换已经生成并使用中的生产脚本。
 
 ## 5. 测试
 - `packages/video-v1.5.3/tests/`：包级测试（评估/队列/守卫/索引）
 - `doubao-jianying-orchestrator/tests/test_task_control.py`：done.json 合同/阶段路由/skip/hold 行为
 
-## 6. 已知差异：两个 closed_loop.py 的关系
-- v1.5.1 下同时存在 `packages/video-v1.5.3/closed_loop.py` 与 `packages/video-v1.5.3/tools/closed_loop.py`
-  - 前者为“精简版闭环 gate”，仅依赖 QC + Mac 审阅结果与包完整性；不引入生产评估/目录身份哈希
-  - 后者为“评估闭环版”，在成功 gate 之外还核对 `production_eval` 合同、分发收据的哈希绑定等
-  - 这两个脚本服务于不同的落地形态（Windows 本地工具链 vs. 带评估收据的产线），并不会在同一流程中同时调用
+## 6. 运行时服务边界
 
+- 视觉、描述匹配和文字复核只调用 GLM 或 Qwen 直连 HTTP 接口，具体 transport 别名与配置见 [模型与视觉流程](../model-and-vision.md)。
+- `legacy` 与 `rule_then_ai` 保留选镜策略；它们不会启动已移除的 Codex CLI、Anthropic 或 CCSwitch 通道。旧 transport 和未知值明确拒绝。
+- worker 的纯输入、失败分类、任务选择与并行互斥合同位于 `tools/queueing/contracts.py`，调度和执行继续从正式 dispatcher 进入。

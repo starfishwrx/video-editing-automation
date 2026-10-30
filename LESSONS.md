@@ -7,6 +7,15 @@
 
 ## 新增条目
 
+### L-20261030-02 删除模型后端要覆盖整条执行链和提前拒绝配置
+- status: OPEN
+- hits: 1
+- 模块: vision / task-preflight / retired-runners
+- 现象: 视觉旧通道删除后，历史调度模板仍能启动整条 Agent；直接建稿也可能先生成配音再发现通道不支持。
+- 根因: 后端选择散落在模型调用、调度、运行事实和缓存中，失败诊断又依赖相同配置。
+- 以后怎么做: 通道统一解析，诊断保存无效配置但不自行失败，建稿和生成恢复在任何收费准备前阻断。退役执行器在读配置/写任务/外发之前退出。保留通用证据、QC 和 HTTP 重试合同，用真实旧新缓存键对照验证清理没有引起整库重分析。
+- 证据: `tests/test_vision_runtime_config.py`、`tests/test_retired_runners.py`、`doubao-jianying-orchestrator/tests/test_sentence_matching.py`、`docs/modular-development.md`。
+
 ### L-20261030-01 功能拆分必须同时验证导入身份与发布库存
 - status: OPEN
 - hits: 1

@@ -39,7 +39,7 @@ if (-not (Test-Path work/config.local.ps1)) {
 Copy-Item examples/manifest.preview.json work/quickstart/manifest.json
 ```
 
-配置模板明确使用 **GLM-5.3-Flash** / `glm-5.3-flash`，不写入或覆盖密钥。当前通用配置读取进程环境变量，`.env` 文件不会自动加载；完整变量说明见[环境合同](../packages/video-v1.5.3/ENVIRONMENT.md)。
+配置模板明确使用 **GLM-5.3-Flash** / `glm-5.3-flash`，不写入或覆盖密钥。运行时只支持 GLM（`volc_glm` / `glm` / `volc`）与 Qwen（`qwen` / `qwen_compatible`）直连，不需要启动额外的编码 Agent。使用 Qwen 时显式提供 `JY_QWEN_BASE_URL`、`JY_QWEN_MODEL` 和 `JY_QWEN_API_KEY`；旧通道及未知值直接报错。当前通用配置读取进程环境变量，`.env` 文件不会自动加载；文字复核、`JY_AI_EDITOR_QWEN` 与完整变量说明见[环境合同](../packages/video-v1.5.3/ENVIRONMENT.md)。
 
 准备 FFmpeg。若已配置 `FFMPEG_BIN` / `FFPROBE_BIN`，会直接复用；否则 Windows 引导器下载便携工具到技能的 `bin/`（需要网络，不运行安装器）。
 
@@ -92,4 +92,4 @@ uv run --frozen python -X utf8 doubao-jianying-orchestrator/run.py build `
 
 ## 5. 接入生产前
 
-生产队列、NAS、飞书和 Mac 审阅需要额外部署变量及授权，见 `ENVIRONMENT.md` 的生产集成部分。按照[发布流程](release-process.md)和既定真实任务观察完成验收后再部署，保留当前队列和回滚依据。
+生产队列、NAS、飞书和 Mac 审阅需要额外部署变量及授权，见 `ENVIRONMENT.md` 的生产集成部分。历史 JyPoll/JyRun 入口（`jy_poll.ps1` / `run_task.template.ps1`）已退役，调用会立即失败；单条任务继续使用上述 manifest CLI，已有批队列需经授权显式使用 `python -m tools.batch_dispatch run --queue <queue.json>`。源码更新不会自动启用队列、修改计划任务或替换已有生产生成脚本。按照[发布流程](release-process.md)和既定真实任务观察完成验收后再部署，保留当前队列和回滚依据。

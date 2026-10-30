@@ -27,7 +27,7 @@
 | 编解码 / ffmpeg / GPU | `docs/subsystems/media-codec.md` | `.../orchestrator/video_encode.py`, `video_decode.py`, `ffmpeg_bootstrap.py`, `platform_env.py`, `gpu_runtime.py` |
 | 容量 / 资源 / 任务日志 / 恢复 | `docs/subsystems/runtime-and-recovery.md` | `.../orchestrator/capacity.py`, `resource_profile.py`, `task_log.py`, `diagnostics.py`, `migration.py`, `draft_safety.py` |
 | 剪映草稿底层操作 | `docs/subsystems/jianying-editor.md` | `packages/video-v1.5.3/jianying-editor/scripts/**`（`vendor/pyJianYingDraft` 原则上不改） |
-| 队列 / 闭环 / 评估 | `docs/subsystems/package-tools.md` | `packages/video-v1.5.3/batch_worker.py`, `closed_loop.py`, `tools/*.py`, `run_task.template.ps1` |
+| 队列 / 闭环 / 评估 | `docs/subsystems/package-tools.md` | `packages/video-v1.5.3/batch_worker.py`, `tools/batch_dispatch.py`, `tools/workflow/closed_loop.py`, `tools/*.py` |
 | 草稿交付 / 生成版恢复 | `.../references/draft_delivery_and_recovery.md` | `packages/video-v1.5.3/tools/draft_delivery.py`, `ship_distribute.py` |
 | 视觉业务规则 | `packages/video-v1.5.3/RULES.md`（规则版本 1.4.1） | `WINDOWS_VIDEO_CLOSED_LOOP_RULES_*.json` |
 | 环境依赖 | `packages/video-v1.5.3/ENVIRONMENT.md` | — |
@@ -62,6 +62,8 @@ uv run --frozen python -X utf8 -m orchestrator.cli review-script --input /abs/ma
 ## 3. 不许做
 
 - 不将默认 GLM-5.3-Flash（`glm-5.3-flash`）简称为 GLM-5.3 或 ChatGLM3；transport、模型 ID、选镜模式与 QC 版本分开说明，改默认值时同步入口文档。
+- 运行时视觉与文字请求只走 GLM（`volc_glm` / `glm` / `volc`）或 Qwen（`qwen` / `qwen_compatible`）直连。不得恢复 Codex CLI、Anthropic 或 CCSwitch 调用；旧通道和未知值必须明确拒绝。`legacy` / `rule_then_ai` 是保留的选镜策略，不是旧调用后端。
+- 历史 JyPoll/JyRun 执行链已退役；`jy_poll.ps1` 与 `run_task.template.ps1` 仅保留立即失败的入口，不恢复 Agent 调度。新任务使用 manifest CLI 或经授权显式调用 dispatcher；不自动启用队列或修改宿主计划任务。
 - 不 push 到 main；只开 PR。不改历史版本目录。不改 `vendor/` 除非 PR 说明原因。
 - 不放宽 `DIRECT → ACCEPTABLE_DEGRADED → MATERIAL_GAP` 顺序，不让 preview 稿进入正式交付。
 - 不在提示词或代码里手写版本号；版本从 `VERSION` 文件回读。

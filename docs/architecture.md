@@ -30,9 +30,9 @@ flowchart TD
 
 `manifest.selection_mode=legacy` 可覆盖环境选择；其次读 `JY_SELECTION_MODE`，未设置时默认 `ai_editor`。
 
-legacy 沿用 `match_with_codex` 的描述语义匹配、Top3/Top1、复用/机位策略、`scene_rules` / `phase_timing` 和视觉 QC v3。历史函数名不代表当前一定启动 Codex；实际调用由视觉 transport 决定。新模式不使用旧词表和旧场景换镜器裁决语义，两个模式的收据不能互相认证。
+legacy 通过 `vision_analyzer.match_sentences` 执行描述语义匹配，保留 Top3/Top1、复用/机位策略、`scene_rules` / `phase_timing` 和视觉 QC v3。新模式不使用旧词表和旧场景换镜器裁决语义，两个模式的收据不能互相认证。`rule_then_ai` 同样保留规则召回与有界 AI 补选。
 
-新模式要求 `volc_glm` 直连。`codex` / `anthropic` 是旧路线的显式回滚通道；只改 transport 而保留 `ai_editor` 会被 `AI_EDITOR_REQUIRES_DIRECT_GLM` 阻断。回滚需同时明确选镜模式与 transport，并单独验证所选模型的图像能力。
+所有选镜策略统一使用 GLM 或 Qwen 的直连 HTTP 接口：GLM 为 `volc_glm`（别名 `glm` / `volc`），Qwen 为 `qwen`（别名 `qwen_compatible`）。Codex CLI、Anthropic 与 CCSwitch 调用已经移除；旧通道及未知值直接报错，不触发静默回落。选镜算法与调用通道分别配置；文字复核和 `JY_AI_EDITOR_QWEN` 路由继续保留。
 
 ## 共用不变量与边界
 

@@ -9,7 +9,7 @@
 - 调用失败、无可读图片或观察缺失保持待分析/未认证，不使用猜测标签。
 - 素材理解缓存可跨任务复用；缓存身份包含素材/源窗/分析规则和所选后端等，复用不等于写入持久素材库。
 
-旧任务清单未写商品时，可由操作者使用 `python -m orchestrator.legacy_cache_import` 显式导入：必填 `--prior-task`、`--prior-manifest`、`--current-manifest`、`--prior-analysis` 和 `--cache`（路径均为 JSON）；运行环境必须使用拟复用的 transport、模型和抽帧设置。工具要求旧任务与当前商品一致、旧任务和清单的 record 一致、素材在两份清单中，且旧键能由原清单及去掉商品字段的当前清单分别重算。源文件 stat、窗口、规则、模型和采样协议任何不一致都不会导入；已有当前键不覆盖。此操作只恢复视觉观察，未复核的文字仍需补验，选镜像素复核与独立 QC 不省略。导入影响新启动的分析，不会刷新已运行进程的内存快照。
+旧任务清单未写商品时，可由操作者使用 `python -m orchestrator.legacy_cache_import` 显式导入：必填 `--prior-task`、`--prior-manifest`、`--current-manifest`、`--prior-analysis` 和 `--cache`（路径均为 JSON）；运行环境必须使用拟复用的 transport、模型和抽帧设置。工具要求旧任务与当前商品一致、旧任务和清单的 record 一致、素材在两份清单中，且旧键能由原清单及去掉商品字段的当前清单分别重算。源文件 stat、窗口、规则、模型和采样协议任何不一致都不会导入；已有当前键不覆盖。此操作只恢复视觉观察，未复核的文字仍需补验，选镜像素复核与独立 QC 不省略。导入影响新启动的分析，不会刷新已运行进程的内存快照。导入命令不再提供可配置的 profile；观察和相位键中的历史兼容字段固定为 `profile="volc"`，身份相符的缓存可继续复用。
 
 ## 2. 默认 AI 选镜与整稿编排
 
@@ -38,13 +38,13 @@
 
 以下内容用于显式回滚，不能当成默认 AI 模式的执行说明：
 
-- `vision_analyzer.match_with_codex` 在已观察描述上补充句镜语义匹配；函数名保留历史兼容，实际 transport 决定调用方式。
+- `vision_analyzer.match_sentences` 在已观察描述上补充句镜语义匹配，通过已配置的 GLM 或 Qwen 直连接口执行。
 - Top3/Top1、`DIRECT → ACCEPTABLE_DEGRADED → MATERIAL_GAP`、窗口求解、多镜组合、复用/相邻同源/机位限制、`scene_rules` / `phase_timing`。
 - 包装直证需可读标称与明确指向，不能把包装印字当功能已验证；CTA 囤货量感与包内规格分别判断。
 - 单镜/多镜共用 `timing_contract` 求解；角色速度约束与证据覆盖同步传递。多样性只在同等质量候选间打散。
 - 旧 preview 的黑屏/补镜与未解窗口始终未认证；旧 `demo_actions` 的 `ungated` 覆盖率不能当作已通过。
 
-`ai_editor` 要求直连 `volc_glm`；使用旧 `codex` / `anthropic` transport 时同时显式选择 `legacy` 并验证相应后端。
+`ai_editor`、`rule_then_ai` 与 `legacy` 均支持 GLM（`volc_glm` / `glm` / `volc`）或 Qwen（`qwen` / `qwen_compatible`）直连。Codex CLI、Anthropic 和 CCSwitch 已从运行时移除；旧 transport 和未知值明确拒绝，选择 legacy 不会恢复旧服务调用。文字复核和 `JY_AI_EDITOR_QWEN` 保持可用。
 
 ## 5. 验证
 

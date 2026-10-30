@@ -24,7 +24,7 @@ uv run --frozen python -X utf8 doubao-jianying-orchestrator/run.py --help
 
 接着按[快速开始](docs/quickstart.md)操作：先运行离线测试和合成视频抽帧，再配置真实素材、模型与剪映环境进行预览建稿。示例位于包内 [`examples/`](packages/video-v1.5.3/examples/)，不需要把账号或业务素材提交到 GitHub。
 
-完整配置见 [`ENVIRONMENT.md`](packages/video-v1.5.3/ENVIRONMENT.md)。默认视觉通道为 `JY_VISION_TRANSPORT=volc_glm`，模型为 `JY_VISION_MODEL=glm-5.3-flash`，凭据读取 `ARK_API_KEY`，为空时读取 `JY_VOLC_API_KEY`。通用配置从进程环境变量读取；复制 `.env` 文件不会自动加载。
+完整配置见 [`ENVIRONMENT.md`](packages/video-v1.5.3/ENVIRONMENT.md)。运行时只调用 GLM 或 Qwen 的直连 HTTP 接口。默认 `JY_VISION_TRANSPORT=volc_glm`（别名 `glm` / `volc`），模型为 `JY_VISION_MODEL=glm-5.3-flash`，凭据读取 `ARK_API_KEY`，为空时读取 `JY_VOLC_API_KEY`；千问使用 `qwen`（别名 `qwen_compatible`）及 `JY_QWEN_*` 配置。已移除的旧通道和未知值均报错，不自动回落。通用配置从进程环境变量读取；复制 `.env` 文件不会自动加载。
 
 ## 版本与下载
 
