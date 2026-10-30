@@ -158,10 +158,33 @@ still apply. The explicit observation-import command has no profile option.
 The historical JyPoll/JyRun chain is retired. `jy_poll.ps1` and
 `run_task.template.ps1` are fail-fast compatibility stubs; they do not read
 credentials, create work directories, mount NAS, invoke a worker or send
-notifications. Use the manifest CLI or explicitly invoke the current
-`tools.batch_dispatch` entrypoint after preparing an authorized task/queue.
-This source change does not alter host scheduled tasks or existing generated
-production scripts, and does not enable any queue automatically.
+notifications. The Windows full-pipeline entrypoint is
+`scripts/run_pipeline.ps1`, backed by `tools/workflow/scheduled.py`. Each run
+processes the configured local `batch_queue.json` through the existing dispatcher:
+material understanding, selection, TTS, draft writing, independent visual QC,
+Windows checks and eligible delivery. It does not fetch business tasks through
+an Agent or revive the old polling chain. Unknown or preview build modes never
+become formal delivery automatically.
+
+Use the existing `examples/config.example.ps1` template and its private copy
+`work/config.local.ps1`; the default `-ConfigPath` is `config.local.ps1` under
+`-WorkRoot`. Configuration reads the existing `JY_WORK_ROOT`, `JY_DRAFT_ROOT` and
+other process environment variables. Explicit `-PythonPath`, `-WorkRoot`,
+`-DraftRoot` and `-QueuePath` parameters win over configuration. The default
+Python executable is the package `.venv/Scripts/python.exe`; deployments should
+set it explicitly. Keep credentials in process/local configuration.
+
+```powershell
+powershell -NoProfile -File scripts/run_pipeline.ps1 -WorkRoot work -ConfigPath work/config.local.ps1 -DryRun
+powershell -NoProfile -File scripts/run_pipeline.ps1 -WorkRoot work -ConfigPath work/config.local.ps1
+```
+
+The first command checks/plans the configured queue without running production
+stages. The normal run uses a cross-process lock and saves its run record under
+`<work-root>/pipeline_runs/` and current state in `<work-root>/pipeline_state.json`. Windows Task Scheduler can invoke this same complete
+pipeline; `scripts/install_pipeline_task.ps1` provides explicit registration with
+`-TaskName` and `-IntervalMinutes`. Source updates do not register, modify or
+start host scheduled tasks and do not replace existing generated scripts.
 
 Captions use the original TTS sentence text and measured final audio durations.
 Tempo, edge trimming and loudness processing finish before caption timing is
@@ -180,21 +203,17 @@ The release has no embedded credentials or host paths. A deployment may set:
 
 | Variable | Purpose |
 | --- | --- |
-| `JY_PIPE_ROOT` | pipeline working root |
+| `JY_PIPE_ROOT` | package code root; fixed by the pipeline launcher |
 | `JY_WORK_ROOT` | task work directory |
-| `JY_SKILL_ROOT` | deployed orchestrator/editor skill root |
+| `JY_SKILL_ROOT` | editor/package lookup root for standalone CLI |
+| `JY_ORCHESTRATOR_ROOT` | worker orchestrator source directory; fixed by the pipeline launcher |
 | `JY_DRAFT_ROOT` | local Jianying drafts root |
 | `JY_NAS_SHARE` | NAS share used by the distributor |
 | `JY_NAS_USER` | NAS account name |
 | `NAS_PASSWORD` | NAS password, process environment only |
-| `JY_NAS_TEST_ROOT` | NAS test-output root |
 | `JY_NAS_DISTRIBUTION_ROOT` | grouped distribution parent root |
-| `JY_MAC_DRAFT_ROOT` | Mac review draft root |
-| `JY_MAC_REVIEW_STAGE` | Windows-accessible review staging directory paired with the Mac mount; separate from final distribution |
 | `JY_PRODUCT_IDENTITY_FILE` | Operator-owned JSON map of confirmed single-SKU source directories, with optional record exceptions; not packaged |
 | `JY_MATERIAL_INDEX_FILE` | Optional reviewed material-index cache; when set, only approved same-SKU sources may enter the contract |
-| `JY_EVAL_MODE` | `observe` until two real observations qualify; then `enforce` for new tasks |
-| `JY_EVAL_OBSERVATIONS` | Hash-bound two-task observation receipt for enforcement |
 | `LARK_BASE_TOKEN` | Feishu base token, process environment only |
 | `LARK_TABLE_ID` | Feishu table id |
 
@@ -209,6 +228,8 @@ for all tasks using it; `records` may override an exception:
 ```
 
 The map stays on the production host. Missing or changed identity prevents
-dispatch without writing a business failure to Feishu. The review staging
-root and Mac root must refer to the same shared files through their respective
-OS paths; successful staging is still `AWAITING_MAC_REVIEW`, not acceptance.
+dispatch without writing a business failure to Feishu. Final acceptance uses the
+current Windows draft, explicit formal build provenance, independent visual PASS
+and complete package/input/runtime checks. A matching directory or file hash is
+not a substitute for visual QC. Failed or incomplete checks remain blocked and
+preserve their evidence for targeted recovery on the next full-pipeline run.

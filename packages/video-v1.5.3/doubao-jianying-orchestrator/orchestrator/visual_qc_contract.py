@@ -34,6 +34,44 @@ def _source_identity(path: str) -> dict:
     return {"path": str(source), "size": info.st_size, "mtime_ns": info.st_mtime_ns}
 
 
+def _source_bindings_valid(report: dict, draft: Path | None = None) -> bool:
+    bindings = report.get("source_bindings")
+    if (not isinstance(bindings, list) or not bindings
+            or any(not isinstance(row, dict) or not isinstance(row.get("path"), str)
+                   or not isinstance(row.get("identity"), dict) for row in bindings)):
+        return False
+    if any(not isinstance(row["identity"].get("path"), str)
+           or type(row["identity"].get("size")) is not int or row["identity"]["size"] < 0
+           or type(row["identity"].get("mtime_ns")) is not int for row in bindings):
+        return False
+    if draft is not None:
+        paths = [os.path.normcase(str(Path(row["path"]).resolve(strict=True))) for row in bindings]
+        if any(_source_identity(row["path"]) != row["identity"] for row in bindings):
+            return False
+        # Every source actually referenced by the video timeline needs a binding.
+        info_path = next((draft / name for name in ("draft_info.json", "draft_content.json")
+                          if (draft / name).is_file()), None)
+        if info_path is None:
+            return False
+        info = json.loads(info_path.read_text(encoding="utf-8-sig"))
+        used = {str(segment.get("material_id") or "") for track in info.get("tracks", [])
+                for segment in track.get("segments", [])}
+        for material in (info.get("materials") or {}).get("videos", []):
+            if str(material.get("id") or material.get("material_id") or "") not in used:
+                continue
+            raw = str(material.get("path") or material.get("media_path") or "")
+            source = Path(raw)
+            try:
+                readable = source.is_file()
+            except OSError:
+                readable = False
+            if not readable:
+                source = draft / "media" / Path(raw).name
+            if os.path.normcase(str(source.resolve(strict=True))) not in paths:
+                return False
+    return True
+
+
 def draft_metadata_fingerprint(draft: Path) -> str:
     """Hash JianYing timeline metadata only, never the referenced media tree."""
     root = Path(draft).resolve(strict=True)
@@ -123,7 +161,7 @@ def response_errors(model: dict[str, Any], expected_count: int, *, expected_vers
 def report_status(report: Any) -> str:
     try:
         return _report_status(report)
-    except (TypeError, ValueError, AttributeError, OverflowError):
+    except (OSError, RuntimeError, KeyError, TypeError, ValueError, AttributeError, OverflowError):
         return "FAIL" if isinstance(report, dict) and report.get("status") == "FAIL" else "UNCERTIFIED"
 
 
@@ -148,9 +186,8 @@ def report_matches_draft(report: Any, draft: Path) -> bool:
             if (not _current_editorial_rules(report) or identity.get("editorial_rules") != report.get("editorial_rules")
                     or identity.get("policy_version") != report.get("policy_version")):
                 return False
-            bindings = report.get("source_bindings")
-            if not isinstance(bindings, list) or not bindings or any(_source_identity(b["path"]) != b["identity"] for b in bindings):
-                return False
+        if not _source_bindings_valid(report, expected):
+            return False
         return (expected.is_dir() and recorded.is_dir()
                 and os.path.normcase(str(expected)) == os.path.normcase(str(recorded))
                 and report.get("draft_metadata_sha256") == draft_metadata_fingerprint(expected)
@@ -168,7 +205,11 @@ def _report_status(report: Any) -> str:
             isinstance(row, dict) and normalize_match_level(row) == "MISMATCH" for row in rows):
         return "FAIL"
     status = report.get("status")
-    if status not in {"PASS", "PASS_WITH_DEGRADED", "PASS_WITH_GAPS"}:
+    if (str(report.get("delivery_mode") or "").strip().lower() != "formal"
+            or report.get("release_eligibility") == "PREVIEW_ONLY" and status == "PASS"
+            or status not in {"PASS", "PASS_WITH_DEGRADED", "PASS_WITH_GAPS"}):
+        return "UNCERTIFIED"
+    if not _source_bindings_valid(report):
         return "UNCERTIFIED"
     contract = report.get("response_contract") or {}
     mode = report.get("selection_mode")

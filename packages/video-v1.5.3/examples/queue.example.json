@@ -1,0 +1,13 @@
+[
+  {
+    "record_id": "example-product-a",
+    "title": "演示预览",
+    "script": "看看这段演示画面。",
+    "product": "演示商品",
+    "category": "generic",
+    "sku": "example-product-a",
+    "material_dir": "C:/video-inputs/product-a",
+    "count": 1,
+    "delivery_mode": "preview"
+  }
+]

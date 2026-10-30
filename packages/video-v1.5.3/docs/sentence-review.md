@@ -1,6 +1,6 @@
 # 人工反馈候选与句级选镜评估
 
-本工具只收集私有审稿数据、复放确定性选镜，并报告指标。人工标签不参与生产选镜，也不能替代 formal、视觉 QC、Gold 或 Mac 验收。公开包仅含通用代码和合成测试；真实意见、源文件名、媒体、审稿人和截图均存入显式指定的私有执行目录。
+本工具是独立离线工具，只收集私有审稿数据、复放确定性选镜，并报告指标。人工标签不参与生产选镜，也不能替代Windows完整流水线中的明确formal来源、独立视觉QC或实际剪映观察。公开包仅含通用代码和合成测试；真实意见、源文件名、媒体、审稿人和截图均存入显式指定的私有执行目录。
 
 ## 反馈候选账本
 
@@ -21,7 +21,7 @@
 }
 ```
 
-`run_task.template.ps1` 在生成步骤后实际调用 `tools/feedback_candidates.py`。默认追加至运行时 `state/feedback_candidates.jsonl`，可用 `JY_FEEDBACK_CANDIDATE_LEDGER` 指定私有账本路径。旧 run、原意见漂移、证据哈希错误会留下 `FEEDBACK_CANDIDATE_PENDING` 日志，不会假装完成收集；收集失败不会改变生产验收结果。
+反馈收集保留为显式离线工具：`python -m tools.feedback_candidates collect --task-dir <task-dir> --ledger <private-ledger>`。旧Agent任务模板已经退役，不再自动收集或触发生产；账本路径由命令显式提供。旧run、原意见漂移或证据不符保持待处理，不会授予生产验收通过。
 
 每行记录 task/run/合同、原意见及哈希、resolution 和 QC/完成收据哈希、修复说明、建议规则与 `review_status=needs_review`。代理写入的 approved/reviewed_by 不会自动变成人工认可。相同收集重试不重复追加，修改意见产生新的候选，旧行不改写。并发锁或损坏行会阻断追加；确认为崩溃残留后由操作员处理锁，工具不会猜测并强制解锁。
 
@@ -38,7 +38,7 @@ uv run --frozen python -X utf8 tools/feedback_candidates.py transition --ledger 
 
 ## 句级审稿输入
 
-`eval_stage.prepare` 生成的 Gold input 现在带可选 `sentence_reviews: []`。可以在该私有 JSON 内填写，或向 `eval_stage collect` 显式传 `--sentence-input`。两者同时非空会报歧义。外部输入必须绑定相同 `task_id/run_id/contract_hash/task_sha256/output_sha256`。
+在独立私有JSON中填写 `sentence_reviews`，由 `tools.sentence_review collect` 显式收集。输入必须绑定相同 `task_id/run_id/contract_hash/task_sha256/output_sha256`；该工具不进入定时生产链，也不建立额外验收流程。
 
 ```json
 {
@@ -65,17 +65,17 @@ uv run --frozen python -X utf8 tools/feedback_candidates.py transition --ledger 
 ```
 
 - 一个句子允许多个可接受候选/窗口，`accepted` 与 `rejected` 同源同候选的窗口不得重叠。窗口均为整数微秒，是审稿人允许的源区间；实际切片必须完整落在允许区间内才能计为接受。
-- `reason_code` 可取 `wrong_selection/false_block/true_material_gap/needs_observation/acceptable`。只有审核过的记录可以带候选集合，且必须有审核人及真实证据哈希；没有人工结论写 `label_status=unknown`、空集合，不得借 Gold PASS 自动造标签。
-- 素材哈希须属于当前合同。原脚本、上下文、原决策、理由、审核人和证据进入独立 JSONL，并同时保存在规范化 Gold 收据中。重复收集不重复追加。重复句号的多次不同意见不会自动投票或“最后一条覆盖”：评估前必须显式选出经仲裁的一套标签。
+- `reason_code` 可取 `wrong_selection/false_block/true_material_gap/needs_observation/acceptable`。只有审核过的记录可以带候选集合，且必须有审核人及真实证据哈希；没有人工结论写 `label_status=unknown`、空集合，不得借生产PASS自动造标签。
+- 素材哈希须属于当前合同。原脚本、上下文、原决策、理由、审核人和证据进入独立JSONL。重复收集不重复追加。重复句号的多次不同意见不会自动投票或“最后一条覆盖”：评估前必须显式选出经仲裁的一套标签。
 - `debug` 和 `holdout` 指标分别报告。留出案例应按任务或 SKU 隔离并在调参前冻结；字段名本身不能证明独立性，已被用于调参的历史集必须归为 debug。
 
 正常收集入口，路径变量由操作环境提供：
 
 ```powershell
-uv run --frozen python -X utf8 -m tools.eval_stage collect --task-dir $taskDir --draft-root $draftRoot --sentence-input $sentenceInput --sentence-ledger $sentenceLedger
+uv run --frozen python -X utf8 -m tools.sentence_review collect --input $sentenceInput --contract $contract --task $taskJson --draft $draftRoot --ledger $sentenceLedger
 ```
 
-如果仅收句级标签、不做 Gold/Mac 收集，可使用 `tools.sentence_review collect --input ... --contract ... --task ... --draft ... --ledger ...`。任务 JSON 必须与合同冻结摘要一致，标签文字须出现在该脚本中。多草稿重复 `--draft`；工具重算实际草稿集合哈希。两种入口均仅追加数据，不授予交付许可。
+任务JSON必须与合同冻结摘要一致，标签文字须出现在该脚本中。`--draft`指定实际草稿目录，多草稿重复该参数；工具重算实际草稿集合哈希。此入口只追加离线标签，不授予交付许可。生产使用 `scripts/run_pipeline.ps1` / `tools/workflow/scheduled.py` 执行完整Windows流水线。
 
 ## 冻结和真实 matcher 离线对比
 

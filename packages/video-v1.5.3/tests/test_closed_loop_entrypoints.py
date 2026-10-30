@@ -18,6 +18,7 @@ if str(ROOT) not in sys.path:
 import closed_loop
 from tools import closed_loop as tools_entrypoint
 from tools.workflow import closed_loop as workflow
+from acceptance_fixtures import make_acceptance, make_distribution
 
 
 class ClosedLoopEntrypointsTests(unittest.TestCase):
@@ -28,27 +29,31 @@ class ClosedLoopEntrypointsTests(unittest.TestCase):
         self.task = self.root / "task.json"
         self.done = self.root / "done.json"
         self.policy = self.root / "policy.json"
-        self.report = self.root / "qc.json"
         self.draft = self.root / "draft"
         (self.draft / "media").mkdir(parents=True)
         (self.draft / "media" / "fixture.bin").write_bytes(b"synthetic")
         for name in ("draft_info.json", "fix_local.bat", "fix_local.ps1"):
             (self.draft / name).write_text("{}", encoding="utf-8")
-        self.write(self.task, {"task_id": "fixture", "record_id": "rec-fixture"})
-        self.write(self.done, {"status": "OK", "drafts": [str(self.draft)],
+        task = {"task_id": "fixture", "record_id": "rec-fixture", "script": "Synthetic script",
+                "category": "paper", "sku": "fixture-sku", "title": "Fixture"}
+        acceptance = make_acceptance(self.root, self.root, [self.draft.name], task)
+        self.report = Path(acceptance["qc_reports"][0]["report"])
+        distributions = make_distribution(acceptance, self.root, [self.draft.name], self.root / "share")
+        self.write(self.done, {"status": "OK", "drafts": [self.draft.name],
                               "nas_parent_folder": str(self.root / "shared"),
-                              "qc_reports": [{"report": str(self.report)}]})
+                              "qc_reports": acceptance["qc_reports"], "delivery_mode": "formal",
+                              "eval_receipt": acceptance["receipt"], "distribution_receipts": distributions})
         self.write(self.policy, {"policy_id": "fixture", "policy_version": "fixture",
                                 "qc": {"formal_delivery_requires": ["PASS"]},
-                                "delivery": {"mac_review_gate": {
-                                    "required_before_nas_and_table_write": True}},
                                 "table_write": {"initial_success_status": "pending-review",
                                                 "revision_status": "revision-review"}})
-        self.write(self.report, {"status": "PASS"})
-        self.write(self.root / "mac_review_approved.json", {"approved": True})
-        self.environment = mock.patch.dict(os.environ, {}, clear=True)
+        self.environment = mock.patch.dict(os.environ, {
+            "JY_EVAL_RUNTIME_ROOT": str(acceptance["runtime_root"]), "JY_DRAFT_ROOT": str(self.root)}, clear=True)
         self.environment.start()
         self.addCleanup(self.environment.stop)
+        drafts_patch = mock.patch.object(workflow, "DRAFTS", self.root)
+        drafts_patch.start()
+        self.addCleanup(drafts_patch.stop)
 
     @staticmethod
     def write(path, data):
@@ -97,16 +102,19 @@ class ClosedLoopEntrypointsTests(unittest.TestCase):
         self.assertFalse((self.root / "table_update_receipt.json").exists())
 
     def test_enforced_eval_requires_contract_even_at_root_entrypoint(self):
+        (self.root / "eval" / "active_contract.json").unlink()
         with mock.patch.dict(os.environ, {"JY_EVAL_MODE": "enforce"}):
             result = closed_loop.audit(self.task, self.done, self.policy)
         self.assertFalse(result["eligible"])
         self.assertIn("EVAL_CONTRACT_MISSING", result["reasons"])
 
-    def test_missing_manual_approval_blocks_both_imports(self):
-        (self.root / "mac_review_approved.json").unlink()
+    def test_current_output_edit_invalidates_both_entrypoints(self):
+        info = json.loads((self.draft / "draft_info.json").read_text(encoding="utf-8"))
+        self.write(self.draft / "draft_info.json", {**info, "duration": 2000000})
         for module in (closed_loop, tools_entrypoint):
-            self.assertIn("MAC_REVIEW_PENDING",
-                          module.audit(self.task, self.done, self.policy)["reasons"])
+            result = module.audit(self.task, self.done, self.policy)
+            self.assertFalse(result["eligible"])
+            self.assertIn("QC_BLOCKED", result["reasons"])
 
     def test_script_entrypoints_work_from_unrelated_directory(self):
         for entrypoint in (ROOT / "closed_loop.py", ROOT / "tools/closed_loop.py"):

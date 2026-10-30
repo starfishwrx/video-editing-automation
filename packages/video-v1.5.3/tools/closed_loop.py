@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Compatibility entrypoint for tools.workflow.closed_loop.
 
-The maintained implementation owns Eval/Mac gates and environment-bound LARK_BASE_TOKEN.
+The maintained implementation owns Windows acceptance and environment-bound LARK_BASE_TOKEN.
 """
 from __future__ import annotations
 

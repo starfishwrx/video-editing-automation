@@ -2,6 +2,8 @@
 
 默认视觉模型为 **GLM-5.3-Flash**（`glm-5.3-flash`），通过火山 Ark 直接发送图片；请保留完整型号，不与 GLM-5.3 或 ChatGLM3 混写。运行时只支持 GLM（`volc_glm` / `glm` / `volc`）与 Qwen（`qwen` / `qwen_compatible`）直连；Codex CLI、Anthropic 和 CCSwitch 调用已移除，旧通道和未知值明确拒绝。默认 `ai_editor` 复审候选并整稿编排，最终 QC 为 v4；`rule_then_ai` 与显式 `legacy` 算法继续通过上述直连通道执行。文字复核与 `JY_AI_EDITOR_QWEN` 路由保留，详见 [ENVIRONMENT.md](ENVIRONMENT.md)。
 
+整个项目按纯 Windows 脚本运行：`scripts/run_pipeline.ps1` 手动执行一轮，`scripts/install_pipeline_task.ps1` 显式注册定时执行；内部直接调用模块和 GLM/Qwen API。Mac 交接和人工 prepare/collect 已删除。
+
 新用户从仓库[快速开始](https://github.com/starfishwrx/video-editing-automation/blob/main/docs/quickstart.md)、[模型说明](https://github.com/starfishwrx/video-editing-automation/blob/main/docs/model-and-vision.md)及本包 [ENVIRONMENT.md](ENVIRONMENT.md) 进入。包内 `examples/` 提供脱敏 manifest 和 PowerShell 配置模板。源码候选不代表 GitHub 已发布该版本，下载状态见仓库 README。
 
 2026-10-23 NAS 分发修订：正常出货与修复统一素材收集，复制核验后才发布目录，多版本归档使用独立媒体引用，新增双执行位置部署检查。见 [NAS 分发稳定性说明](docs/NAS_DELIVERY_STABILITY.md)。
@@ -14,16 +16,13 @@
 
 草稿交付修复已合入候选源码：默认 UNC 分发新增实际媒体路径验收；历史加密稿可在用户确认后恢复原始生成版。
 用法与验收边界见 [草稿分发与生成版恢复](doubao-jianying-orchestrator/references/draft_delivery_and_recovery.md)。
-源码合包不等于安装：部署前回读实际运行版本，保留正在运行的队列。历史 JyPoll/JyRun 执行链已退役，`jy_poll.ps1` 与 `run_task.template.ps1` 调用即失败；新任务使用 manifest CLI 或经授权显式调用 `tools.batch_dispatch`。源码更新不修改本机计划任务和既有生产生成脚本，也不自动启用队列。
+源码合包不等于安装：部署前回读实际运行版本，保留正在运行的队列。历史 JyPoll/JyRun 执行链已退役，`jy_poll.ps1` 与 `run_task.template.ps1` 调用即失败；整体任务使用 `scripts/run_pipeline.ps1`；单任务也可使用 manifest CLI。源码更新不修改本机计划任务和既有生产生成脚本，也不自动启用队列。
 
 [已验证修复合包技能](doubao-jianying-orchestrator/references/validated_fix_to_release.md) 与
 `tools.release_package` 一起随包提供。局部迭代用 `--checks delivery`，发版用 `--checks full`；
 生成清单、ZIP、全新解压检查和测试收据不再依赖本机临时脚本。
 
-Default Eval mode is observation. Visual policy remains independently versioned
-at 1.4.1. Do not deploy over a running queue or publish release tags before the
-two-real-task rollout gate passes. See the bundled orchestrator SKILL and
-`references/runtime_contract.md` for the evidence contract.
+Automatic acceptance always verifies input, runtime, draft package and independent visual QC. Preview and unknown evidence cannot pass formal delivery. Visual policy remains independently versioned at 1.4.1. Runtime identity records inventory/version metadata, not a proof that code bytes or finished pixels are unchanged.
 
 This is the reusable video-automation capability extracted from the latest
 local video package. It contains the matcher, timing contract, Jianying draft

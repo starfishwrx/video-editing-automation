@@ -195,11 +195,6 @@
       "subfolder_pattern": "版本1,版本2,...",
       "table_draft_file_value": "parent_folder_only"
     },
-    "mac_review_gate": {
-      "required_before_nas_and_table_write": true,
-      "approval_artifact": "mac_review_approved.json",
-      "uncertified_or_unreviewed_never_updates_table": true
-    },
     "replacement": {
       "new_package_must_pass_before_old_removed": true,
       "replace_old_after_verified_delivery": true,
@@ -211,6 +206,17 @@
       "ship_plaintext_draft_info_not_encrypted_content": true,
       "list_draft_id_must_match_body_id": true,
       "id_mismatch_symptom": "草稿已损坏"
+    },
+    "windows_acceptance_gate": {
+      "required_before_nas_and_table_write": true,
+      "criteria": [
+        "INPUT-IDENTITY",
+        "RUNTIME-IDENTITY",
+        "DRAFT-PACKAGE",
+        "VISUAL-QC"
+      ],
+      "formal_delivery_mode_required": true,
+      "uncertified_never_updates_table": true
     }
   },
   "table_write": {
@@ -232,7 +238,7 @@
       "UNCERTIFIED",
       "PASS_WITH_GAPS",
       "missing_qc",
-      "missing_mac_review",
+      "missing_windows_acceptance",
       "missing_bat_or_fix_local"
     ],
     "operator_accepted_preview_may_replace_previous_link": true,

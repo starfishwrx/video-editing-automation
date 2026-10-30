@@ -25,7 +25,7 @@ try:
     from ..media.video_decode import run_ffmpeg_decode
     from ..runtime.file_safety import atomic_write_text
     from ..runtime.runtime_policy import load_policy, media_slot
-    from ..visual_qc_contract import MATCH_LEVELS, REPORT_VERSION, RESPONSE_VERSION, draft_metadata_fingerprint, normalize_match_level, response_errors
+    from ..visual_qc_contract import MATCH_LEVELS, REPORT_VERSION, RESPONSE_VERSION, draft_metadata_fingerprint, normalize_match_level, response_errors, _source_identity
 except ImportError:
     # 这个文件会被 python draft_visual_qc.py 直接启动，没有包上下文。
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
@@ -35,7 +35,7 @@ except ImportError:
     from orchestrator.runtime.runtime_policy import load_policy, media_slot
     from orchestrator.visual_qc_contract import (MATCH_LEVELS, REPORT_VERSION, RESPONSE_VERSION,
                                                 draft_metadata_fingerprint, normalize_match_level,
-                                                response_errors)
+                                                response_errors, _source_identity)
 
 
 def _claim_gate_summary(claim: dict[str, Any]) -> str:
@@ -196,6 +196,27 @@ def _timeline_items(info: dict[str, Any], draft: pathlib.Path) -> tuple[list[dic
     return rows, issues
 
 
+def _match_delivery_mode(data: dict[str, Any]) -> str:
+    """Unknown historical provenance cannot become a formal build by default."""
+    manifest = data.get("manifest")
+    if manifest is not None and not isinstance(manifest, dict):
+        return "unknown"
+    values = [container["delivery_mode"] for container in (data, manifest or {})
+              if "delivery_mode" in container]
+    if not values:
+        return "unknown"
+    modes = set()
+    for value in values:
+        raw = value.strip().lower() if isinstance(value, str) else ""
+        if raw == "formal":
+            modes.add("formal")
+        elif raw in {"preview", "preview_only", "预览"}:
+            modes.add("preview")
+        else:
+            return "unknown"
+    return modes.pop() if len(modes) == 1 else "unknown"
+
+
 def _expected_claims(report_dir: pathlib.Path) -> list[dict[str, Any]]:
     path = report_dir / "shot_match_report.json"
     if not path.is_file():
@@ -214,6 +235,7 @@ def _expected_claims(report_dir: pathlib.Path) -> list[dict[str, Any]]:
             "claim": str(row.get("claim_text") or row.get("text") or ""),
             "shot_id": str(row.get("temporary_shot_id") or ""),
             "selection_mode": str(row.get("selection_mode") or ""),
+            "delivery_mode": _match_delivery_mode(data),
             "degraded": bool(row.get("degraded_no_match")
                              or row.get("cta_product_display_fallback")
                              or row.get("preview_unresolved")),
@@ -475,6 +497,8 @@ def main() -> int:
         result["draft_metadata_sha256"] = draft_metadata_fingerprint(draft)
         info = _load_json(draft)
         claims = _expected_claims(report_dir)
+        modes = {claim["delivery_mode"] for claim in claims}
+        result["delivery_mode"] = modes.pop() if len(modes) == 1 else "unknown"
         ai_mode = any(c.get("selection_mode") == "ai_editor" for c in claims)
         response_version = RESPONSE_VERSION
         if ai_mode:
@@ -541,8 +565,12 @@ def main() -> int:
             result["final_windows_verified"] = bool(ai_claim_rows) and not cut_errors and not mixed
             result["ai_final_windows_verified"] = bool(ai_claim_rows) and not cut_errors
             result["uncertified"] = result["uncertified"] or bool(cut_errors)
-            result["source_bindings"] = [{"path": row["source"], "identity": ai_editor_contract.source_identity(row["source"])}
-                                         for _, cut_rows in claim_rows for row in cut_rows]
+        materials = _material_map(draft, info)
+        used_materials = {str(segment.get("material_id") or "") for track in info.get("tracks", [])
+                          for segment in track.get("segments", []) if isinstance(segment, dict)}
+        result["source_bindings"] = [{"path": str(materials[key]["path"]),
+                                      "identity": _source_identity(str(materials[key]["path"]))}
+                                     for key in sorted(used_materials) if key in materials]
         result["segment_map"] = [
             {"claim_index": claim["index"], "draft_segments": [row["index"] for row in rows]}
             for claim, rows in claim_rows]
@@ -803,8 +831,8 @@ def main() -> int:
                     "batch_size_claims": batch_size,
                 })
         result["draft_metadata_sha256_final"] = draft_metadata_fingerprint(draft)
-        if ai_mode and any(ai_editor_contract.source_identity(b["path"]) != b["identity"] for b in result["source_bindings"]):
-            result["issues"].append("AI_QC_SOURCE_CHANGED_DURING_REVIEW")
+        if any(_source_identity(b["path"]) != b["identity"] for b in result["source_bindings"]):
+            result["issues"].append("AI_QC_SOURCE_CHANGED_DURING_REVIEW" if ai_mode else "QC_SOURCE_CHANGED_DURING_REVIEW")
             result["uncertified"] = True
         if result["draft_metadata_sha256_final"] != result["draft_metadata_sha256"]:
             result["issues"].append("DRAFT_METADATA_CHANGED_DURING_QC")
@@ -831,8 +859,22 @@ def main() -> int:
             result["status"] = "PASS_WITH_DEGRADED"
         else:
             result["status"] = "PASS"
+        result["visual_observation_status"] = result["status"]
+        preview_observed = (result["delivery_mode"] == "preview"
+                            and result["status"] in {"PASS", "PASS_WITH_DEGRADED", "PASS_WITH_GAPS"})
+        if preview_observed:
+            result["status"] = "UNCERTIFIED"
+            result["uncertified"] = True
+            result["preview_only_reasons"].append("UPSTREAM_DELIVERY_MODE_PREVIEW")
+        unknown_mode = result["delivery_mode"] not in {"formal", "preview"}
+        if unknown_mode and result["status"] != "FAIL":
+            result["status"] = "UNCERTIFIED"
+            result["uncertified"] = True
+            result["warnings"].append("DELIVERY_MODE_MISSING_OR_INVALID")
         result["release_eligibility"] = (
-            "SHIP_ALLOWED" if result["status"] == "PASS"
+            "BLOCKED" if unknown_mode
+            else "PREVIEW_ONLY" if preview_observed
+            else "SHIP_ALLOWED" if result["status"] == "PASS"
             else "PREVIEW_ONLY" if result["status"] in {"PASS_WITH_DEGRADED", "PASS_WITH_GAPS"}
             else "BLOCKED"
         )

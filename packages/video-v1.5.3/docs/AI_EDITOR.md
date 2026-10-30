@@ -52,7 +52,7 @@ AI 通读整稿，按内容区分具体卖点、产品介绍、无具体卖点�
 - 新QC合同为`chatcut-visual-qc-response-v4`，不接收选镜分数、理由和通过结论。
   DIRECT表示按本句用途正常匹配，不将体验展示声称为物理证明。旧v3只供legacy，
   不能认证新模式草稿。worker/Eval重验原QC、草稿及素材身份。
-- 失败、漏段、不确定、换镜后旧收据不能获得正式PASS。Gold/Mac审核继续独立执行。
+- 失败、漏段、不确定、换镜后旧收据不能获得正式PASS。完整Windows流水线由 `scripts/run_pipeline.ps1` / `tools/workflow/scheduled.py` 执行；独立QC绑定当前实际草稿和源素材，实际剪映观察单独记录，目录或哈希检查不能代替画面。
 
 ## 验证及发布
 

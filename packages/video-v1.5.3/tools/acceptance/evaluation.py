@@ -1,0 +1,323 @@
+"""Current-output acceptance for the Windows scheduled pipeline.
+
+Local paths are private execution data, not source-registry entries. Receipt
+verification always reads the evidence; URI-looking strings are not evidence.
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import importlib.util
+import json
+import re
+from pathlib import Path
+from typing import Any
+
+# Load the bundled pure contract without importing an installed runtime or
+# changing sys.path: QC and receipt verification must use the same definition.
+_qc_contract_path = Path(__file__).resolve().parents[2] / "doubao-jianying-orchestrator" / "orchestrator" / "visual_qc_contract.py"
+_qc_contract_spec = importlib.util.spec_from_file_location("_production_visual_qc_contract", _qc_contract_path)
+visual_qc_contract = importlib.util.module_from_spec(_qc_contract_spec)
+_qc_contract_spec.loader.exec_module(visual_qc_contract)
+_ai_contract_path = _qc_contract_path.with_name("ai_editor_contract.py")
+_ai_contract_spec = importlib.util.spec_from_file_location("_production_ai_editor_contract", _ai_contract_path)
+ai_editor_contract = importlib.util.module_from_spec(_ai_contract_spec)
+_ai_contract_spec.loader.exec_module(ai_editor_contract)
+
+CRITERIA = ('INPUT-IDENTITY', 'RUNTIME-IDENTITY', 'DRAFT-PACKAGE', 'VISUAL-QC')
+STATUSES = {'PASS', 'FAIL', 'UNCERTIFIED'}
+
+
+def digest(value: Any) -> str:
+    return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True,
+                                   separators=(',', ':'), allow_nan=False).encode()).hexdigest()
+
+
+def file_hash(path: Path) -> str:
+    if path.is_symlink() or not path.is_file():
+        raise ValueError('NOT_A_REGULAR_EVIDENCE_FILE')
+    h = hashlib.sha256()
+    with path.open('rb') as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def read(path: Path) -> dict:
+    value = json.loads(path.read_text(encoding='utf-8-sig'))
+    if not isinstance(value, dict):
+        raise ValueError('JSON_OBJECT_REQUIRED')
+    return value
+
+
+def write_once(path: Path, value: dict) -> None:
+    """Immutable receipts: an identical retry is a no-op, drift is rejected."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with path.open('x', encoding='utf-8') as stream:
+            json.dump(value, stream, ensure_ascii=False, indent=2, allow_nan=False)
+            stream.write('\n')
+    except FileExistsError:
+        if read(path) != value:
+            raise ValueError('IMMUTABLE_RECEIPT_CHANGED')
+
+
+def output_identity(paths: list[Path]) -> dict:
+    rows = []
+    for index, path in enumerate(paths):
+        if path.is_symlink():
+            raise ValueError('SYMLINK_OUTPUT_REJECTED')
+        files = sorted(path.rglob('*')) if path.is_dir() else [path]
+        for child in files:
+            if child.is_symlink():
+                raise ValueError('SYMLINK_OUTPUT_REJECTED')
+            if child.is_file():
+                relative = child.relative_to(path).as_posix() if path.is_dir() else path.name
+                rows.append({'output_index': index, 'path': relative, 'sha256': file_hash(child)})
+    if not rows:
+        raise ValueError('OUTPUT_MISSING')
+    return {'files': rows, 'sha256': digest(rows)}
+
+
+def runtime_identity(root: Path) -> dict:
+    manifest = read(root / 'release-manifest.json')
+    rows = manifest.get('files', [])
+    if not rows or len(rows) != manifest.get('file_count'):
+        raise ValueError('RUNTIME_MANIFEST_INCOMPLETE')
+    version_path = root / 'VERSION'
+    if not version_path.is_file():
+        raise ValueError('RUNTIME_VERSION_FILE_MISSING')
+    if version_path.read_text(encoding='utf-8-sig').strip() != manifest.get('version'):
+        raise ValueError('RUNTIME_VERSION_METADATA_DRIFT')
+    names = set()
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get('path'), str):
+            raise ValueError('RUNTIME_MANIFEST_ROW_INVALID')
+        rel = Path(row['path'])
+        if (rel.is_absolute() or '..' in rel.parts or '\\' in row['path']
+                or ':' in row['path'] or row['path'] in names):
+            raise ValueError('RUNTIME_MANIFEST_PATH_INVALID')
+        names.add(row['path'])
+        path = root / rel
+        if path.is_symlink() or not path.resolve().is_relative_to(root.resolve()) or not path.is_file():
+            raise ValueError('RUNTIME_FILE_MISSING_OR_UNSAFE:' + row['path'])
+    if ('VERSION' not in names
+            or 'WINDOWS_VIDEO_CLOSED_LOOP_RULES_20260930.json' not in names):
+        raise ValueError('RUNTIME_MANIFEST_REQUIRED_FILE_MISSING')
+    policy = root / 'WINDOWS_VIDEO_CLOSED_LOOP_RULES_20260930.json'
+    policy_payload = read(policy)
+    if policy_payload.get('video_tool_version') != manifest.get('version'):
+        raise ValueError('RUNTIME_POLICY_TOOL_VERSION_DRIFT')
+    if policy_payload.get('visual_policy_version') != manifest.get('visual_policy_version'):
+        raise ValueError('RUNTIME_POLICY_VERSION_METADATA_DRIFT')
+    return {'tool_version': manifest['version'], 'package_sha256': digest(rows),
+            'release_id': manifest.get('release_id') or 'video-v' + manifest['version'],
+            'visual_policy_version': policy_payload['visual_policy_version'],
+            'visual_policy_sha256': file_hash(policy), 'eval_pack_version': 'windows-core-v1',
+            'eval_schema_version': 2}
+
+
+def output_draft_ids(outputs: list[Path]) -> list[str]:
+    values = []
+    for output in outputs:
+        info = read(output / 'draft_info.json')
+        draft_id = str(info.get('id') or '').strip()
+        if not draft_id:
+            raise ValueError('DRAFT_ID_MISSING')
+        values.append(draft_id)
+    return values
+
+
+def freeze(task: dict, run_id: str, inputs: list[Path], runtime: dict,
+           gold: dict | None = None, mode: str = 'enforce') -> dict:
+    """Freeze current Windows inputs; the retired gold argument is ignored."""
+    if mode not in {'observe', 'enforce'}:
+        raise ValueError('EVAL_MODE_INVALID')
+    task_id = str(task.get('task_id') or task.get('record_id') or '').strip()
+    if not task_id or not run_id or not task.get('script') or not inputs:
+        raise ValueError('TASK_INPUT_INCOMPLETE')
+    for field in ('package_sha256', 'visual_policy_sha256'):
+        if not re.fullmatch(r'[0-9a-f]{64}', str(runtime.get(field, ''))):
+            raise ValueError('RUNTIME_IDENTITY_INCOMPLETE')
+    if not runtime.get('tool_version') or not runtime.get('visual_policy_version'):
+        raise ValueError('RUNTIME_VERSION_MISSING')
+    identity = [{'path': str(path.absolute()), 'sha256': file_hash(path)} for path in inputs]
+    contract = {'schema_version': 2, 'task_id': task_id, 'run_id': run_id,
+                'mode': mode, 'task_sha256': digest(task), 'inputs': identity,
+                'runtime': runtime, 'category': task.get('category', ''), 'sku': task.get('sku', ''),
+                'eval_contract': {
+                    'schema_version': 2, 'case_id': 'production:' + task_id,
+                    'objective': 'Validate current editable Windows drafts and independent visual QC.',
+                    'input_contract': ['task identity', 'media SHA-256', 'runtime and policy identity'],
+                    'expected_route': 'Windows scheduled task -> current-output validation -> delivery',
+                    'expected_artifacts': ['draft', 'independent QC', 'acceptance receipt'],
+                    'acceptance_criteria': [{'id': name, 'description': name,
+                        'observable_evidence': 'Current-run evidence for ' + name,
+                        'unacceptable_substitutes': ['filename match', 'status-only approval']}
+                        for name in CRITERIA],
+                    'evidence_requirements': ['run_id', 'contract_hash', 'file SHA-256', 'output SHA-256'],
+                    'failure_taxonomy': ['wrong_input', 'evidence_missing', 'version_drift', 'timeout'],
+                    'replay_method': 'Recheck frozen inputs, current output and independent QC.'}}
+    contract = json.loads(json.dumps(contract, ensure_ascii=False, allow_nan=False))
+    contract['contract_hash'] = 'sha256:' + digest(contract)
+    return contract
+
+
+def verify_contract(contract: dict) -> None:
+    value = dict(contract)
+    supplied = value.pop('contract_hash', None)
+    if supplied != 'sha256:' + digest(value):
+        raise ValueError('CONTRACT_HASH_MISMATCH')
+    detail = contract.get('eval_contract')
+    if (contract.get('schema_version') != 2 or not isinstance(detail, dict)
+            or detail.get('schema_version') != 2):
+        raise ValueError('ACCEPTANCE_SCHEMA_UNSUPPORTED')
+    ids = [row.get('id') for row in detail.get('acceptance_criteria', []) if isinstance(row, dict)]
+    if ids != list(CRITERIA):
+        raise ValueError('ACCEPTANCE_ID_DRIFT')
+    if contract.get('mode') not in {'observe', 'enforce'}:
+        raise ValueError('EVAL_MODE_INVALID')
+
+
+def evidence(path: Path, contract: dict, output_sha256: str) -> dict:
+    row = read(path)
+    if not re.fullmatch(r'[0-9a-f]{64}', output_sha256):
+        raise ValueError('OUTPUT_IDENTITY_MISSING')
+    for key, value in {'run_id': contract['run_id'], 'task_id': contract['task_id'],
+                       'contract_hash': contract['contract_hash'],
+                       'output_sha256': output_sha256}.items():
+        if row.get(key) != value:
+            raise ValueError('EVIDENCE_BINDING_MISMATCH:' + key)
+    reports = row.get('reports', [])
+    if not isinstance(reports, list):
+        raise ValueError('EVIDENCE_REPORTS_INVALID')
+    for proof in reports:
+        if (not isinstance(proof, dict) or not isinstance(proof.get('path'), str)
+                or not re.fullmatch(r'[0-9a-f]{64}', str(proof.get('sha256', '')))):
+            raise ValueError('EVIDENCE_REPORT_INVALID')
+        if file_hash(Path(proof['path'])) != proof['sha256']:
+            raise ValueError('TRANSITIVE_EVIDENCE_HASH_MISMATCH')
+    return row
+
+
+def evaluate(contract: dict, task: dict, runtime: dict, outputs: list[Path],
+             evidence_paths: dict[str, Path]) -> dict:
+    verify_contract(contract)
+    reasons = []
+    try:
+        output = output_identity(outputs)
+    except (OSError, ValueError):
+        output = {'files': [], 'sha256': ''}
+    input_ok = bool(contract['inputs']) and digest(task) == contract['task_sha256']
+    try:
+        input_ok = input_ok and all(file_hash(Path(row['path'])) == row['sha256']
+                                   for row in contract['inputs'])
+    except (OSError, ValueError):
+        input_ok = False
+    statuses = {'INPUT-IDENTITY': 'PASS' if input_ok else 'UNCERTIFIED',
+                'RUNTIME-IDENTITY': 'PASS' if runtime == contract['runtime'] else 'UNCERTIFIED'}
+    proofs = {name: [] for name in CRITERIA}
+    if input_ok:
+        proofs['INPUT-IDENTITY'] = list(contract['inputs'])
+    if statuses['RUNTIME-IDENTITY'] == 'PASS':
+        proofs['RUNTIME-IDENTITY'] = [runtime]
+    verified = {}
+    for name in CRITERIA[2:]:
+        path = evidence_paths.get(name)
+        try:
+            if path is None or not output['sha256']:
+                raise ValueError('EVIDENCE_MISSING')
+            row = evidence(path, contract, output['sha256'])
+            verdict = row.get('status', 'UNCERTIFIED')
+            if verdict not in STATUSES:
+                verdict = 'UNCERTIFIED'
+            if name == 'VISUAL-QC':
+                qc_status = row.get('qc_status')
+                if qc_status == 'FAIL':
+                    verdict = 'FAIL'
+                elif verdict != 'FAIL':
+                    reports = row.get('reports') or []
+                    report_statuses = [visual_qc_contract.report_status(read(Path(proof['path'])))
+                                       for proof in reports]
+                    report_payloads = [read(Path(proof['path'])) for proof in reports]
+                    matched_outputs = []
+                    for report in report_payloads:
+                        matches = [index for index, output_path in enumerate(outputs)
+                                   if visual_qc_contract.report_matches_draft(report, output_path)]
+                        if len(matches) == 1:
+                            matched_outputs.append(matches[0])
+                    report_identity_valid = (len(report_payloads) == len(outputs)
+                                             and len(matched_outputs) == len(outputs)
+                                             and sorted(matched_outputs) == list(range(len(outputs))))
+                    if 'FAIL' in report_statuses:
+                        verdict = 'FAIL'
+                    elif (qc_status != 'PASS'
+                            or row.get('contract_status') != 'VALIDATED'
+                            or row.get('response_version') not in {visual_qc_contract.RESPONSE_VERSION, 'chatcut-visual-qc-response-v4'}
+                            or any(r.get('response_contract', {}).get('version') != row.get('response_version') for r in report_payloads)
+                            or not report_statuses
+                            or not report_identity_valid
+                            or any(status != 'PASS' for status in report_statuses)):
+                        verdict = 'UNCERTIFIED'
+            if verdict != 'FAIL' and name == 'DRAFT-PACKAGE' and row.get('files_verified') is not True:
+                verdict = 'UNCERTIFIED'
+            statuses[name] = verdict
+            proofs[name] = [{'path': str(path.absolute()), 'sha256': file_hash(path)}]
+            verified[name] = row
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            statuses[name] = 'UNCERTIFIED'
+            reasons.append(name + ':' + str(exc))
+    status = ('FAIL' if 'FAIL' in statuses.values() else
+              'PASS' if all(v == 'PASS' for v in statuses.values()) else 'UNCERTIFIED')
+    acceptance = ('REJECTED' if status == 'FAIL' else
+                  'ACCEPTED' if status == 'PASS' else 'UNVERIFIED')
+    result = {'schema_version': 2, 'task_id': contract['task_id'], 'run_id': contract['run_id'],
+              'contract_hash': contract['contract_hash'], 'runtime': runtime,
+              'output_identity': output, 'status': status, 'mode': contract['mode'],
+              'finished_output_acceptance': acceptance,
+              'criteria': [{'id': name, 'status': statuses[name], 'evidence': proofs[name]} for name in CRITERIA],
+              'blocking_reasons': reasons}
+    result['receipt_sha256'] = digest(result)
+    return result
+
+
+def verify_receipt(receipt: dict, contract: dict, task: dict,
+                   runtime: dict, outputs: list[Path]) -> bool:
+    try:
+        verify_contract(contract)
+        if (receipt.get('schema_version') != 2
+                or [row.get('id') for row in receipt.get('criteria', [])] != list(CRITERIA)):
+            return False
+        value = dict(receipt)
+        supplied = value.pop('receipt_sha256', None)
+        if supplied != digest(value):
+            return False
+        paths = {row['id']: Path(row['evidence'][0]['path']) for row in receipt.get('criteria', [])
+                 if row.get('id') in CRITERIA[2:] and row.get('evidence')}
+        return evaluate(contract, task, runtime, outputs, paths) == receipt
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return False
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('command', choices=['evaluate', 'verify'])
+    parser.add_argument('--contract', type=Path, required=True)
+    parser.add_argument('--task', type=Path, required=True)
+    parser.add_argument('--runtime-root', type=Path, required=True)
+    parser.add_argument('--output', type=Path, action='append', required=True)
+    parser.add_argument('--evidence-map', type=Path, required=True)
+    parser.add_argument('--receipt', type=Path, required=True)
+    args = parser.parse_args()
+    contract, task, runtime = read(args.contract), read(args.task), runtime_identity(args.runtime_root)
+    if args.command == 'verify':
+        return 0 if verify_receipt(read(args.receipt), contract, task, runtime, args.output) else 2
+    paths = {k: Path(v) for k, v in read(args.evidence_map).items()}
+    result = evaluate(contract, task, runtime, args.output, paths)
+    write_once(args.receipt, result)
+    print(json.dumps(result, ensure_ascii=False))
+    return 0 if result['status'] == 'PASS' else 2
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

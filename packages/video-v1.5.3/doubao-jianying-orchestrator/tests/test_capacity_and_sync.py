@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import sys
 import tempfile
@@ -33,7 +35,7 @@ class CalibrationAudioTests(unittest.TestCase):
 
 class ShipMetadataGateTests(unittest.TestCase):
     def _draft(self, root):
-        draft = root / "Mac Preview"
+        draft = root / "Windows Local"
         (draft / "media").mkdir(parents=True)
         (draft / "media" / "clip.mov").write_bytes(b"video")
         info = {
@@ -42,26 +44,52 @@ class ShipMetadataGateTests(unittest.TestCase):
             "last_modified_platform": {"os": "windows"},
             "tracks": [],
             "materials": {"videos": [{"name": "clip.mov",
-                                      "path": "C:/old/drafts/Mac Preview/media/clip.mov"}],
+                                      "path": "C:/old/drafts/Windows Local/media/clip.mov"}],
                           "audios": [], "images": [], "gifs": []},
         }
         (draft / "draft_info.json").write_text(json.dumps(info), encoding="utf-8")
         (draft / "draft_meta_info.json").write_text("{}", encoding="utf-8")
         return draft
 
-    def test_mac_ship_aligns_sidecar_identity_and_platform(self):
+    def test_windows_local_ship_aligns_sidecar_identity_and_keeps_platform(self):
         with tempfile.TemporaryDirectory() as tmp:
             draft = self._draft(Path(tmp))
-            with mock.patch.dict("os.environ", {"JY_MAC_DRAFT_ROOT": "/mac/drafts"}):
-                self.assertEqual(ship_distribute.rewrite(str(draft), "mac"), 1)
+            self.assertEqual(ship_distribute.rewrite(str(draft), "local"), 1)
             info = json.loads((draft / "draft_info.json").read_text())
             meta = json.loads((draft / "draft_meta_info.json").read_text())
-            self.assertEqual(info["platform"]["os"], "mac")
-            self.assertEqual(info["last_modified_platform"]["os"], "mac")
+            self.assertEqual(info["platform"]["os"], "windows")
+            self.assertEqual(info["last_modified_platform"]["os"], "windows")
             self.assertEqual(meta["draft_id"], info["id"])
             self.assertEqual(meta["draft_name"], draft.name)
-            self.assertEqual(meta["draft_fold_path"], f"/mac/drafts/{draft.name}")
-            self.assertTrue(info["materials"]["videos"][0]["path"].endswith("/media/clip.mov"))
+            self.assertEqual(meta["draft_fold_path"], str(draft))
+            self.assertEqual(meta["draft_root_path"], str(draft.parent))
+            self.assertEqual(info["materials"]["videos"][0]["path"], str(draft / "media" / "clip.mov"))
+
+    def test_removed_or_unknown_style_is_rejected_before_draft_access(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            draft = self._draft(Path(tmp))
+            snapshot = {str(path.relative_to(draft)): path.read_bytes()
+                        for path in draft.rglob("*") if path.is_file()}
+            for style in ("mac", "invalid", "", None):
+                with self.subTest(style=style), mock.patch.object(nas_portable, "inspect") as inspect:
+                    with self.assertRaisesRegex(ValueError, "UNSUPPORTED_SHIP_STYLE"):
+                        ship_distribute.rewrite(str(draft), style)
+                    inspect.assert_not_called()
+                    self.assertEqual({str(path.relative_to(draft)): path.read_bytes()
+                                      for path in draft.rglob("*") if path.is_file()}, snapshot)
+
+    def test_removed_style_cli_exits_before_rewrite(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            draft = self._draft(Path(tmp))
+            original = (draft / "draft_info.json").read_bytes()
+            with mock.patch.object(sys, "argv", ["ship", "--draft", str(draft), "--style", "mac"]), \
+                    mock.patch.object(ship_distribute, "rewrite") as rewrite, \
+                    contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as stopped:
+                    ship_distribute.main()
+            self.assertEqual(stopped.exception.code, 2)
+            rewrite.assert_not_called()
+            self.assertEqual((draft / "draft_info.json").read_bytes(), original)
 
     def test_invalid_sidecar_blocks_before_material_paths_change(self):
         with tempfile.TemporaryDirectory() as tmp:

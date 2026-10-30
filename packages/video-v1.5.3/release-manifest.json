@@ -6,7 +6,7 @@
     "machine-specific paths",
     "knowledge-base bodies"
   ],
-  "file_count": 227,
+  "file_count": 339,
   "files": [
     {
       "path": ".gitignore"
@@ -78,6 +78,9 @@
       "path": "doubao-jianying-orchestrator/orchestrator/__init__.py"
     },
     {
+      "path": "doubao-jianying-orchestrator/orchestrator/_compat.py"
+    },
+    {
       "path": "doubao-jianying-orchestrator/orchestrator/ai_editor.py"
     },
     {
@@ -85,6 +88,45 @@
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/ai_editor_qc.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/application/__init__.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/application/cli.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/application/engine.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/application/task_inputs.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/audio/__init__.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/audio/audio_captions.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/audio/audio_loudness.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/audio/bgm_selector.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/audio/subtitle_units.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/audio/voice_catalog.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/audio/voice_library.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/audio/voice_request.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/audio/voice_tts.py"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/audio_captions.py"
@@ -102,10 +144,22 @@
       "path": "doubao-jianying-orchestrator/orchestrator/cli.py"
     },
     {
+      "path": "doubao-jianying-orchestrator/orchestrator/delivery/__init__.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/delivery/migration.py"
+    },
+    {
       "path": "doubao-jianying-orchestrator/orchestrator/demo_actions.py"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/diagnostics.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/domain/__init__.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/domain/clips.py"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/draft_safety.py"
@@ -135,10 +189,46 @@
       "path": "doubao-jianying-orchestrator/orchestrator/json_extract.py"
     },
     {
+      "path": "doubao-jianying-orchestrator/orchestrator/legacy_cache_import.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/material_cache.py"
+    },
+    {
       "path": "doubao-jianying-orchestrator/orchestrator/material_corrections.py"
     },
     {
+      "path": "doubao-jianying-orchestrator/orchestrator/media/__init__.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/media/ffmpeg_bootstrap.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/media/frame_quality.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/media/frames.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/media/gpu_runtime.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/media/stability.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/media/video_decode.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/media/video_encode.py"
+    },
+    {
       "path": "doubao-jianying-orchestrator/orchestrator/migration.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/module_map.json"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/paths.py"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/phase_timing.py"
@@ -147,10 +237,55 @@
       "path": "doubao-jianying-orchestrator/orchestrator/platform_env.py"
     },
     {
+      "path": "doubao-jianying-orchestrator/orchestrator/policy/__init__.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/policy/demo_actions.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/policy/feedback_policy.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/policy/production_parameters.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/policy/scene_rules.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/policy/script_polish.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/policy/semantic_gate.py"
+    },
+    {
       "path": "doubao-jianying-orchestrator/orchestrator/proc_slots.py"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/production_parameters.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/py.typed"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/quality/__init__.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/quality/ai_editor_qc.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/quality/diagnostics.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/quality/draft_safety.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/quality/draft_visual_qc.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/quality/visual_match.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/ready_work.py"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/resource_profile.py"
@@ -168,13 +303,73 @@
       "path": "doubao-jianying-orchestrator/orchestrator/rules/zhipin.json"
     },
     {
+      "path": "doubao-jianying-orchestrator/orchestrator/runtime/__init__.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/runtime/capacity.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/runtime/file_safety.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/runtime/json_extract.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/runtime/platform_env.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/runtime/proc_slots.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/runtime/ready_work.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/runtime/resource_profile.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/runtime/runtime_policy.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/runtime/task_log.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/runtime/vision_config.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/runtime_policy.py"
+    },
+    {
       "path": "doubao-jianying-orchestrator/orchestrator/scene_rules.py"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/script_polish.py"
     },
     {
+      "path": "doubao-jianying-orchestrator/orchestrator/selection/__init__.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/selection/ai_editor.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/selection/sentence_planner.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/selection/shot_analyzer.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/selection/shot_notes.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/selection/timing_contract.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/selection/usage_ledger.py"
+    },
+    {
       "path": "doubao-jianying-orchestrator/orchestrator/semantic_gate.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/sentence_planner.py"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/ship_distribute.py"
@@ -210,7 +405,31 @@
       "path": "doubao-jianying-orchestrator/orchestrator/video_encode.py"
     },
     {
+      "path": "doubao-jianying-orchestrator/orchestrator/vision/__init__.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/vision/legacy_cache_import.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/vision/material_cache.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/vision/material_corrections.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/vision/phase_timing.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/vision/vision_analyzer.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/vision/vision_client.py"
+    },
+    {
       "path": "doubao-jianying-orchestrator/orchestrator/vision_analyzer.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/vision_client.py"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/visual_match.py"
@@ -261,10 +480,10 @@
       "path": "doubao-jianying-orchestrator/tests/test_audio_captions.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/tests/test_capacity_and_sync.py"
+      "path": "doubao-jianying-orchestrator/tests/test_bounded_frame_batch.py"
     },
     {
-      "path": "doubao-jianying-orchestrator/tests/test_codex_invocation.py"
+      "path": "doubao-jianying-orchestrator/tests/test_capacity_and_sync.py"
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_file_safety.py"
@@ -277,6 +496,15 @@
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_gpu_runtime.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/tests/test_legacy_cache_import.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/tests/test_material_cache.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/tests/test_media_boundary.py"
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_meeting_bgm.py"
@@ -300,10 +528,31 @@
       "path": "doubao-jianying-orchestrator/tests/test_preferred_speed.py"
     },
     {
+      "path": "doubao-jianying-orchestrator/tests/test_ready_work.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/tests/test_reference_sentence_planning.py"
+    },
+    {
       "path": "doubao-jianying-orchestrator/tests/test_resource_profile.py"
     },
     {
+      "path": "doubao-jianying-orchestrator/tests/test_runtime_policy.py"
+    },
+    {
       "path": "doubao-jianying-orchestrator/tests/test_scene_evidence_contracts.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/tests/test_sentence_matching.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/tests/test_sentence_planning.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/tests/test_shared_product_vision_cache.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/tests/test_single_copy_staging.py"
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_stability_single_pass.py"
@@ -351,10 +600,16 @@
       "path": "doubao-jianying-orchestrator/tests/test_video_encode.py"
     },
     {
+      "path": "doubao-jianying-orchestrator/tests/test_vision_client.py"
+    },
+    {
       "path": "doubao-jianying-orchestrator/tests/test_vision_retry.py"
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_vision_stage_concurrency.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/tests/test_visual_match_recovery.py"
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_visual_matching_governance.py"
@@ -366,6 +621,9 @@
       "path": "doubao-jianying-orchestrator/tests/test_volc_glm_vision.py"
     },
     {
+      "path": "examples/concurrency-policy.json"
+    },
+    {
       "path": "examples/config.example.ps1"
     },
     {
@@ -373,6 +631,9 @@
     },
     {
       "path": "examples/meeting_optional_fields.example.json"
+    },
+    {
+      "path": "examples/queue.example.json"
     },
     {
       "path": "gold-reference.json"
@@ -591,7 +852,25 @@
       "path": "run_task.template.ps1"
     },
     {
+      "path": "scripts/install_pipeline_task.ps1"
+    },
+    {
+      "path": "scripts/run_pipeline.ps1"
+    },
+    {
       "path": "scripts/uv_sync.ps1"
+    },
+    {
+      "path": "tests/acceptance_fixtures.py"
+    },
+    {
+      "path": "tests/test_acceptance_delivery_gate.py"
+    },
+    {
+      "path": "tests/test_batch_dispatch.py"
+    },
+    {
+      "path": "tests/test_closed_loop_entrypoints.py"
     },
     {
       "path": "tests/test_delivery_runtime.py"
@@ -606,19 +885,25 @@
       "path": "tests/test_feedback_candidates.py"
     },
     {
-      "path": "tests/test_mac_review_handoff.py"
-    },
-    {
-      "path": "tests/test_meeting_poll_fields.py"
-    },
-    {
       "path": "tests/test_meeting_task_inputs.py"
+    },
+    {
+      "path": "tests/test_modular_architecture.py"
     },
     {
       "path": "tests/test_nas_portable.py"
     },
     {
-      "path": "tests/test_queue_guardrails.py"
+      "path": "tests/test_prior_draft_recheck.py"
+    },
+    {
+      "path": "tests/test_process_liveness.py"
+    },
+    {
+      "path": "tests/test_production_eval.py"
+    },
+    {
+      "path": "tests/test_queue_contracts.py"
     },
     {
       "path": "tests/test_release_1_4_0.py"
@@ -627,7 +912,22 @@
       "path": "tests/test_release_version.py"
     },
     {
+      "path": "tests/test_retired_runners.py"
+    },
+    {
+      "path": "tests/test_scheduled_pipeline.py"
+    },
+    {
       "path": "tests/test_sentence_review.py"
+    },
+    {
+      "path": "tests/test_task_review_boundary.py"
+    },
+    {
+      "path": "tests/test_throughput_calibration.py"
+    },
+    {
+      "path": "tests/test_vision_runtime_config.py"
     },
     {
       "path": "tests/test_visual_governance_rules.py"
@@ -639,7 +939,28 @@
       "path": "tools/ab_stability_single_pass.py"
     },
     {
+      "path": "tools/acceptance/__init__.py"
+    },
+    {
+      "path": "tools/acceptance/delivery_gate.py"
+    },
+    {
+      "path": "tools/acceptance/evaluation.py"
+    },
+    {
+      "path": "tools/acceptance/finalization.py"
+    },
+    {
+      "path": "tools/acceptance/task_review.py"
+    },
+    {
+      "path": "tools/batch_dispatch.py"
+    },
+    {
       "path": "tools/bench_gpu_decode.py"
+    },
+    {
+      "path": "tools/check_architecture.py"
     },
     {
       "path": "tools/classify_feedback.py"
@@ -660,13 +981,7 @@
       "path": "tools/eval_bootstrap.py"
     },
     {
-      "path": "tools/eval_stage.py"
-    },
-    {
       "path": "tools/feedback_candidates.py"
-    },
-    {
-      "path": "tools/mac_review_handoff.py"
     },
     {
       "path": "tools/material_index.py"
@@ -678,13 +993,34 @@
       "path": "tools/nas_portable.py"
     },
     {
+      "path": "tools/process_liveness.py"
+    },
+    {
       "path": "tools/production_eval.py"
+    },
+    {
+      "path": "tools/queueing/__init__.py"
+    },
+    {
+      "path": "tools/queueing/contracts.py"
     },
     {
       "path": "tools/release_package.py"
     },
     {
       "path": "tools/sentence_review.py"
+    },
+    {
+      "path": "tools/throughput_calibration.py"
+    },
+    {
+      "path": "tools/workflow/__init__.py"
+    },
+    {
+      "path": "tools/workflow/closed_loop.py"
+    },
+    {
+      "path": "tools/workflow/scheduled.py"
     },
     {
       "path": "uv.lock"

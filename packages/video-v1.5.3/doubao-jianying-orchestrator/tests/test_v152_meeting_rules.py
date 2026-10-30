@@ -1341,7 +1341,7 @@ class PostDraftQcMappingTests(unittest.TestCase):
                 "duration": cursor, "materials": {"videos": materials},
                 "tracks": [{"name": "video", "segments": segments}]}), encoding="utf-8")
             (report / "shot_match_report.json").write_text(
-                json.dumps({"segments": claims}, ensure_ascii=False), encoding="utf-8")
+                json.dumps({"delivery_mode": "formal", "segments": claims}, ensure_ascii=False), encoding="utf-8")
             prompts = []
 
             def model(*args, **_kw):

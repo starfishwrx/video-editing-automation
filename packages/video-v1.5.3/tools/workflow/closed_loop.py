@@ -19,6 +19,8 @@ import time
 from typing import Any
 from tools.delivery_identity import tree_identity
 from tools.draft_delivery import archive_shared_copy, verify_existing_shared
+from tools.acceptance import delivery_gate
+from tools.acceptance.task_review import validate_draft_package
 
 PIPE = pathlib.Path(__file__).resolve().parents[2]
 DEFAULT_POLICY = PIPE / "WINDOWS_VIDEO_CLOSED_LOOP_RULES_20260930.json"
@@ -81,17 +83,7 @@ def policy(path: pathlib.Path) -> dict[str, Any]:
 
 
 def qc_statuses(task_dir: pathlib.Path, done: dict[str, Any]) -> list[str]:
-    statuses: list[str] = []
-    refs = done.get("qc_reports") or []
-    drafts = [str(item) for item in (done.get("drafts") or [])]
-    for index, draft in enumerate(drafts, 1):
-        report = ""
-        if index <= len(refs) and isinstance(refs[index - 1], dict):
-            report = str(refs[index - 1].get("report") or "")
-        report_path = pathlib.Path(report) if report else task_dir / "report" / (draft if index == 1 else "report_%d" % index) / "draft_visual_qc.json"
-        payload = read_json(report_path)
-        statuses.append(str(payload.get("status") or "UNCERTIFIED").upper())
-    return statuses
+    return delivery_gate.qc_statuses(task_dir, done, DRAFTS)
 
 
 def package_check(draft: pathlib.Path) -> dict[str, Any]:
@@ -108,6 +100,8 @@ def package_check(draft: pathlib.Path) -> dict[str, Any]:
     media = [item for item in (draft / "media").rglob("*") if item.is_file()] if (draft / "media").is_dir() else []
     if not media:
         issues.append("MEDIA_EMPTY")
+    graph = validate_draft_package(draft, video_extensions=VIDEO_EXTS)
+    issues.extend(graph.get("issues") or [])
     return {"ok": not issues, "issues": issues, "media_count": len(media)}
 
 
@@ -119,36 +113,15 @@ def audit(task_path: pathlib.Path, done_path: pathlib.Path, policy_path: pathlib
     reasons: list[str] = []
     if str(done.get("status") or "").upper() != "OK":
         reasons.append("DONE_NOT_OK")
+    reasons.extend(delivery_gate.mode_issues(task, done))
     statuses = qc_statuses(task_dir, done)
-    required_qc = rules["qc"].get("formal_delivery_requires") or ["PASS"]
+    required_qc = ["PASS"]
     if not statuses:
         reasons.append("QC_REPORT_MISSING")
     if any(status not in required_qc for status in statuses):
         reasons.append("QC_NOT_FORMAL: " + ",".join(statuses or ["UNCERTIFIED"]))
     if any(status in {"FAIL", "UNCERTIFIED", "PASS_WITH_GAPS"} for status in statuses):
         reasons.append("QC_BLOCKED")
-    if rules.get("delivery", {}).get("mac_review_gate", {}).get("required_before_nas_and_table_write", True):
-        frozen_path = task_dir / 'eval' / 'active_contract.json'
-        if frozen_path.is_file():
-            try:
-                from tools import production_eval
-                contract = production_eval.read(frozen_path)
-                names = done.get('drafts') or []
-                outputs = [DRAFTS / str(name) for name in names]
-                output_hash = production_eval.output_identity(outputs)['sha256']
-                approval = task_dir / ('mac_review_approved-' + output_hash + '.json')
-                approval_data = production_eval.read(approval)
-                if (approval_data.get('approved') is not True
-                        or approval_data.get('task_id') != contract.get('task_id')
-                        or approval_data.get('run_id') != contract.get('run_id')
-                        or approval_data.get('contract_hash') != contract.get('contract_hash')
-                        or approval_data.get('output_sha256') != output_hash
-                        or approval_data.get('draft_ids') != production_eval.output_draft_ids(outputs)):
-                    reasons.append('MAC_REVIEW_BINDING_MISMATCH')
-            except (OSError, ValueError, KeyError, TypeError):
-                reasons.append('MAC_REVIEW_PENDING_OR_UNCERTIFIED')
-        elif not (task_dir / "mac_review_approved.json").is_file():
-            reasons.append("MAC_REVIEW_PENDING")
     package_rows = []
     for draft in (done.get("local_only_drafts") or done.get("drafts") or []):
         draft_path = pathlib.Path(str(draft))
@@ -158,51 +131,50 @@ def audit(task_path: pathlib.Path, done_path: pathlib.Path, policy_path: pathlib
     if any(not row.get("ok") for row in package_rows):
         reasons.append("PACKAGE_INCOMPLETE")
     frozen_path = task_dir / 'eval' / 'active_contract.json'
-    if os.environ.get('JY_EVAL_MODE') == 'enforce' and not frozen_path.is_file():
+    if not frozen_path.is_file():
         reasons.append('EVAL_CONTRACT_MISSING')
     if frozen_path.is_file():
         from tools import production_eval
         try:
             contract = production_eval.read(frozen_path)
-            if contract['mode'] == 'enforce':
-                wrapper = done.get('eval_receipt') or {}
-                receipt = production_eval.read(pathlib.Path(wrapper['receipt_path']))
-                outputs = [DRAFTS / str(name) for name in done.get('drafts', [])]
-                runtime_root = pathlib.Path(os.environ.get('JY_EVAL_RUNTIME_ROOT', str(PIPE)))
-                current = production_eval.runtime_identity(runtime_root)
-                if receipt.get('status') != 'PASS' or not production_eval.verify_receipt(receipt, contract, task, current, outputs):
-                    reasons.append('EVAL_RECEIPT_NOT_VERIFIED')
-                elif wrapper.get('receipt_sha256') != receipt.get('receipt_sha256'):
-                    reasons.append('EVAL_RECEIPT_WRAPPER_MISMATCH')
-                distribution = done.get('distribution_receipts') or []
-                by_name = {str(row.get('draft_name') or ''): row
-                           for row in distribution if isinstance(row, dict)}
-                if set(by_name) != set(str(name) for name in done.get('drafts', [])):
-                    reasons.append('DISTRIBUTION_RECEIPTS_MISSING')
-                else:
-                    for name, row in by_name.items():
-                        try:
-                            output_hash = production_eval.output_identity([DRAFTS / name])['sha256']
-                            target_identity = tree_identity(pathlib.Path(row['nas_target']))
-                            from tools.draft_delivery import verify_shared
-                            target = pathlib.Path(row['nas_target'])
-                            verify_shared(target, target.parent.parent / name)
-                            receipt_body = dict(row)
-                            receipt_body.pop('receipt_sha256', None)
-                            receipt_body.pop('receipt_path', None)
-                            if (row.get('status') != 'VERIFIED'
-                                    or row.get('task_id') != contract.get('task_id')
-                                    or row.get('run_id') != contract.get('run_id')
-                                    or row.get('contract_hash') != contract.get('contract_hash')
-                                    or row.get('source_output_sha256') != output_hash
-                                    or row.get('transformed_tree_sha256') != target_identity['sha256']
-                                    or row.get('eval_receipt_sha256') != receipt.get('receipt_sha256')
-                                    or row.get('eval_status') != 'PASS'
-                                    or row.get('shared_media_references_verified') is not True
-                                    or row.get('receipt_sha256') != production_eval.digest(receipt_body)):
-                                reasons.append('DISTRIBUTION_RECEIPT_INVALID:' + name)
-                        except (RuntimeError, OSError, ValueError, KeyError, TypeError):
-                            reasons.append('DISTRIBUTION_READBACK_INVALID:' + name)
+            wrapper = done.get('eval_receipt') or {}
+            receipt = production_eval.read(pathlib.Path(wrapper['receipt_path']))
+            outputs = [DRAFTS / str(name) for name in done.get('drafts', [])]
+            runtime_root = pathlib.Path(os.environ.get('JY_EVAL_RUNTIME_ROOT', str(PIPE)))
+            current = production_eval.runtime_identity(runtime_root)
+            if receipt.get('status') != 'PASS' or not production_eval.verify_receipt(receipt, contract, task, current, outputs):
+                reasons.append('EVAL_RECEIPT_NOT_VERIFIED')
+            elif wrapper.get('receipt_sha256') != receipt.get('receipt_sha256'):
+                reasons.append('EVAL_RECEIPT_WRAPPER_MISMATCH')
+            distribution = done.get('distribution_receipts') or []
+            by_name = {str(row.get('draft_name') or ''): row
+                       for row in distribution if isinstance(row, dict)}
+            if set(by_name) != set(str(name) for name in done.get('drafts', [])):
+                reasons.append('DISTRIBUTION_RECEIPTS_MISSING')
+            else:
+                for name, row in by_name.items():
+                    try:
+                        output_hash = production_eval.output_identity([DRAFTS / name])['sha256']
+                        target_identity = tree_identity(pathlib.Path(row['nas_target']))
+                        from tools.draft_delivery import verify_shared
+                        target = pathlib.Path(row['nas_target'])
+                        verify_shared(target, target.parent.parent / name)
+                        receipt_body = dict(row)
+                        receipt_body.pop('receipt_sha256', None)
+                        receipt_body.pop('receipt_path', None)
+                        if (row.get('status') != 'VERIFIED'
+                                or row.get('task_id') != contract.get('task_id')
+                                or row.get('run_id') != contract.get('run_id')
+                                or row.get('contract_hash') != contract.get('contract_hash')
+                                or row.get('source_output_sha256') != output_hash
+                                or row.get('transformed_tree_sha256') != target_identity['sha256']
+                                or row.get('eval_receipt_sha256') != receipt.get('receipt_sha256')
+                                or row.get('eval_status') != 'PASS'
+                                or row.get('shared_media_references_verified') is not True
+                                or row.get('receipt_sha256') != production_eval.digest(receipt_body)):
+                            reasons.append('DISTRIBUTION_RECEIPT_INVALID:' + name)
+                    except (RuntimeError, OSError, ValueError, KeyError, TypeError):
+                        reasons.append('DISTRIBUTION_READBACK_INVALID:' + name)
         except (OSError, ValueError, KeyError, TypeError):
             reasons.append('EVAL_RECEIPT_MISSING_OR_DRIFTED')
     return {
@@ -225,6 +197,9 @@ def archive_parent(task_path: pathlib.Path, done_path: pathlib.Path, policy_path
     touching any old directory.  Replacement/deletion is a separate, explicit
     post-verification step and is never inferred from a copy failure.
     """
+    audit_result = audit(task_path, done_path, policy_path)
+    if not audit_result.get("eligible"):
+        return {"ok": False, "status": "BLOCKED", "audit": audit_result}
     rules = policy(policy_path)
     task = read_json(task_path)
     done = read_json(done_path)

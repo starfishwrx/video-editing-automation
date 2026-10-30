@@ -6,6 +6,13 @@
 
 ### 2026-10-30
 
+- 按用户要求将整个项目改为纯 Windows 脚本流水线：run_pipeline.ps1 运行一轮，install_pipeline_task.ps1 显式注册定时触发，内部复用 dispatcher 完成素材分析、选镜、配音、建稿、独立 QC 与配置的交付；没有只为审核单独增加定时器。
+- 删除 Mac 交接、人工 prepare/collect、旧批准文件消费与 Gold 放行流程；移除旧入口、Mac 分发样式、配置和专用测试。四项自动验收集中到 tools/acceptance，worker 保留调用适配，交付上下文不再污染全局路径或环境。
+- 修复状态字符串冒充 QC、预览／缺失模式转正式、observe 旁路、归档前无审核、分发收据重签带路径等缺陷；任何正式交付均须当前输入、运行身份、草稿包及独立视觉 QC 全部 PASS。
+- 定时脚本增加系统锁、持久化重试预算、记录名大小写保护、任务异常隔离和保留草稿的定向恢复；已完成任务跳过。修正外置工作目录、配置模板的技能路径及继承旧 Python 导致执行身份错误，去掉私有 NAS 挂载辅助脚本依赖。
+- 同步路径型 release-manifest 库存至 339 个文件，确保删除旧入口后 runtime_identity 可正常读取；没有新增逐文件 hash 门槛，没有修改 VERSION。原策略 JSON 重排触发字幕文档合同测试失败后已还原该行格式，相关 28 项通过。
+- 最终包外 full 合包与全新解压通过：339 个文件，包级 215 项、编排器 871 项（与基线同样的 FFmpeg 合成夹具类跳过 1 项）；Windows 调度专项 16 项与独立门禁探针通过。未注册计划任务，未调用真实模型或修改生产/NAS/飞书；独立复核在所查范围无未解决阻断。
+
 - 按用户要求统一分支命名为 feat/fix/docs；当前分支改名 feat/modular-vision-cleanup，保留全部已有提交。同步 AGENTS 与 CONTRIBUTING，文档差异检查通过。
 - 后续按用户要求移除 Codex 运行时调用，同时清理同类 Anthropic/CCSwitch 回退；GLM/Qwen 直连、ai_editor/rule_then_ai/legacy 选镜及独立 QC 保留。描述选镜通用入口改名 match_sentences。
 - 统一 runtime/vision_config 解析支持的通道及真实模型身份；删除旧 profile/provider/output-schema/Anthropic env loader、Agent 进程管理和非 HTTP 重试/槽位分支。旧 aijws profile 不再隐式覆盖模型；无效配置可诊断并在建稿/生成恢复的 TTS 前阻断，只读 UI 诊断继续可用。

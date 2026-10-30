@@ -72,8 +72,7 @@ def source_files(task: dict, runtime_root: Path, index_path: Path | None) -> lis
 
 
 def prepare(task_path: Path, runtime_root: Path, identity_path: Path,
-            *, index_path: Path | None = None, mode: str = "observe",
-            observations_path: Path | None = None) -> dict:
+            *, index_path: Path | None = None, mode: str = "enforce") -> dict:
     task = pe.read(task_path)
     identity = resolve_identity(task, pe.read(identity_path))
     if task.get("category") != identity["category"] or task.get("sku") != identity["sku"]:
@@ -81,11 +80,7 @@ def prepare(task_path: Path, runtime_root: Path, identity_path: Path,
     if mode not in {"observe", "enforce"}:
         raise ValueError("EVAL_MODE_INVALID")
     runtime = pe.runtime_identity(runtime_root)
-    if mode == "enforce":
-        if observations_path is None or not pe.verify_observations(observations_path, runtime)["ready"]:
-            raise ValueError("EVAL_ROLLOUT_REQUIRES_TWO_VERIFIED_REAL_TASKS")
     inputs = source_files(task, runtime_root, index_path)
-    gold = pe.read(runtime_root / "gold-reference.json")
     eval_root = task_path.parent / "eval"
     active = eval_root / "active_contract.json"
     if active.exists():
@@ -101,7 +96,7 @@ def prepare(task_path: Path, runtime_root: Path, identity_path: Path,
         return {"status": "FROZEN_REUSED", "run_id": contract["run_id"],
                 "contract_hash": contract["contract_hash"]}
     run_id = str(task["record_id"]) + "-" + uuid.uuid4().hex
-    contract = pe.freeze(task, run_id, inputs, runtime, gold, mode)
+    contract = pe.freeze(task, run_id, inputs, runtime, mode=mode)
     pe.write_once(eval_root / run_id / "contract.json", contract)
     pe.write_once(active, contract)
     return {"status": "FROZEN", "run_id": run_id,
@@ -114,12 +109,10 @@ def main() -> int:
     parser.add_argument("--runtime-root", required=True, type=Path)
     parser.add_argument("--identity-file", required=True, type=Path)
     parser.add_argument("--material-index", type=Path)
-    parser.add_argument("--mode", default=os.environ.get("JY_EVAL_MODE", "observe"))
-    parser.add_argument("--observations", type=Path)
+    parser.add_argument("--mode", choices=("observe", "enforce"), default="enforce")
     args = parser.parse_args()
     result = prepare(args.task_json, args.runtime_root, args.identity_file,
-                     index_path=args.material_index, mode=args.mode,
-                     observations_path=args.observations)
+                     index_path=args.material_index, mode=args.mode)
     print(json.dumps(result, ensure_ascii=False))
     return 0
 
