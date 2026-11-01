@@ -134,7 +134,7 @@ class SentencePlanningTests(unittest.TestCase):
 
     def test_build_reuses_frozen_plan_in_fresh_report_directory(self):
         with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw)
+            root = Path(raw).resolve()
             report = root / 'new-report'
             segments = [{'text': '纸张厚实亲肤，湿水不破。'}, {'text': '立即下单'}]
             manifest = {'task_id': 'reuse-plan', 'segments': segments,
