@@ -7,6 +7,15 @@
 
 ## 新增条目
 
+### L-20261102-01 冻结计划复用必须自行建立输出目录
+- status: OPEN
+- hits: 1
+- 模块: application/cli / sentence-planning
+- 现象: 已冻结的 semantic-v1 清单换新 report 目录构建时，在选镜前因 sentence_planning 目录不存在而失败。
+- 根因: 首次规划器负责创建目录，复用计划会跳过该规划器；后续保存逻辑仍假定目录已经存在。
+- 以后怎么做: 保存冻结计划的阶段自行建立目标父目录。用真实临时目录复现“已有分句 + 新报告目录”，确认不重新分句、原句序与配音时长保持，并确实到达匹配阶段。
+- 证据: `test_sentence_planning.py::test_build_reuses_frozen_plan_in_fresh_report_directory` 先失败后通过；修复位于 `application/cli.py`，不向兼容入口写业务逻辑。
+
 ### L-20261030-04 句长可行性与动作完整性必须分别核验
 - status: OPEN
 - hits: 2
