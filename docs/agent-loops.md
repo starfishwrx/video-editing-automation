@@ -1,4 +1,6 @@
-# 建议的 /loop 任务
+# 开发维护循环示例
+
+这些是按需执行的开发检查提示，不是运行时调度器。生产仍只从 [Windows 脚本](windows-pipeline.md) 进入，不恢复已退役的 JyPoll/JyRun 或 Agent 执行链。
 
 ## Loop A：Issue / PR 分诊（每 30 分钟）
 读 `AGENTS.md`。检查 starfishwrx/video-editing-automation 新的 issue 与 PR。
@@ -12,7 +14,7 @@
 ## Loop C：夜间质量巡检（每晚 23:00）
 读 `AGENTS.md`、`LESSONS.md`。对 `packages/video-v1.5.3`：
 1. 跑两套测试并记录数量（对照 `docs/RELEASES.md`，若数量下降要报告）。
-2. 扫描：硬编码路径/凭据、浮点秒跨模块、新闸门缺测试、`engine.py` 中超过 150 行的函数。
+2. 扫描：硬编码路径/凭据、浮点秒跨模块、新闸门缺测试、`application/engine.py` 中职责集中的函数。
 3. 检查 `docs/subsystems/*.md` 与代码是否漂移（子命令、状态码、文件列表）。
 4. 检查 `LESSONS.md` 中 `hits>=3` 且未 `PROMOTED` 的条目，起草升级 PR。
 输出一份简报；每晚最多开 1 个“清理”PR，不做行为变更。

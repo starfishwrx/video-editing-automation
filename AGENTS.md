@@ -2,7 +2,7 @@
 
 > 本文件只做指路。产品目标见 `docs/prd.md`，架构定案见 `docs/rfc.md`，按日记录见 `docs/working.md`，验证完成标准见 `docs/test.md`。新坑写进 `LESSONS.md`，并在当天 `docs/working.md` Changelog 留一条。
 
-## 0. 先读这五条
+## 0. 开始前先读
 
 1. **版本身份**：可改的候选包目录是 `packages/video-v1.5.3/`（目录名是历史代号，不随小版本改名）。真实版本只读该目录下的 `VERSION`（当前主线 **1.5.6**）。生产以部署机器的 `ACTIVE_VIDEO_RUNTIME.json` 与实际安装文件为准。开发使用从 `main` 创建的干净功能分支/工作树。1.5.4/1.5.5 为隔离索引实验，不作默认入口。
 2. **文档入口**：先读 [`docs/README.md`](docs/README.md)。子系统文档与代码路径一律指向 `packages/video-v1.5.3/`。`packages/video-v1.5.2/` 及更早是历史归档，禁止修改。
@@ -13,20 +13,22 @@
 
 ## 1. 按任务找文档
 
-整个项目是纯 Windows 定时脚本流水线，入口见 [`docs/windows-pipeline.md`](docs/windows-pipeline.md)。运行不依赖编码 Agent、人工 prepare/collect 或 Mac 交接。模块化维护先读 [`docs/modular-development.md`](docs/modular-development.md)。实际实现位于 `orchestrator/{application,audio,media,runtime,policy,selection,vision,quality,delivery,domain}/`；下表中的旧平铺 Python 路径为兼容导入，禁止在其中新增业务逻辑。具体归属见 `orchestrator/module_map.json`。闭环唯一实现为 `tools/workflow/closed_loop.py`，worker 纯合同为 `tools/queueing/contracts.py`。
+整个项目是纯 Windows 定时脚本流水线，入口见 [`docs/windows-pipeline.md`](docs/windows-pipeline.md)。运行不依赖编码 Agent、人工 prepare/collect 或 Mac 交接。模块化维护先读 [`docs/modular-development.md`](docs/modular-development.md)。下表中的 `orchestrator/` 均相对 `packages/video-v1.5.3/doubao-jianying-orchestrator/`，指向实际实现。旧平铺 Python 路径仅为兼容入口，禁止在其中新增业务逻辑。迁移映射见 `orchestrator/module_map.json`；公共证据合同与规则包保留原位置。闭环唯一实现为 `tools/workflow/closed_loop.py`，worker 纯合同为 `tools/queueing/contracts.py`。
 
 | 你要改的东西 | 先读 | 代码位置 |
 |---|---|---|
-| 新用户入口 / 模型和环境配置 | `docs/quickstart.md`, `docs/model-and-vision.md`, `ENVIRONMENT.md`（活包内） | `examples/`（活包内）、`vision_analyzer.py` |
+| 新用户入口 / 模型和环境配置 | `docs/quickstart.md`, `docs/model-and-vision.md`, `ENVIRONMENT.md`（活包内） | 活包 `examples/`、`orchestrator/runtime/vision_config.py`、`orchestrator/vision/vision_analyzer.py` |
 | GitHub 协作 / 离线 CI | `CONTRIBUTING.md`, `docs/test.md` | `.github/workflows/ci.yml`, `.github/PULL_REQUEST_TEMPLATE.md` |
-| 编排主流程 / 闸门顺序 / 草稿写入 | `docs/subsystems/orchestrator-engine.md` | `packages/video-v1.5.3/doubao-jianying-orchestrator/orchestrator/engine.py` |
-| CLI 子命令（env/build/recover/…） | `docs/subsystems/orchestrator-cli.md` | `packages/video-v1.5.3/doubao-jianying-orchestrator/orchestrator/cli.py` |
-| 选镜、视觉证据、语义闸门 | `docs/subsystems/visual-matching.md` | `.../orchestrator/ai_editor.py`, `ai_editor_contract.py`, `ai_editor_qc.py`, `shot_analyzer.py`, `vision_analyzer.py`, `semantic_gate.py`, `draft_visual_qc.py`；旧 matcher 仅 legacy |
-| 品类规则包 / 场景规则 / 相位 | `packages/video-v1.5.3/doubao-jianying-orchestrator/references/production_quality_and_lessons.md` | `.../orchestrator/rulepack.py`, `scene_rules.py`, `phase_timing.py`, `rules/*.json` |
-| 口播/TTS/音色/BGM/响度 | `docs/subsystems/audio-voice.md` | `.../orchestrator/voice_tts.py`, `voice_catalog.py`, `voice_library.py`, `bgm_selector.py`, `audio_loudness.py`, `script_polish.py` |
-| 时序契约 / 音画对齐 | `docs/subsystems/timing.md` | `.../orchestrator/timing_contract.py`, `stability.py` |
-| 编解码 / ffmpeg / GPU | `docs/subsystems/media-codec.md` | `.../orchestrator/video_encode.py`, `video_decode.py`, `ffmpeg_bootstrap.py`, `platform_env.py`, `gpu_runtime.py` |
-| 容量 / 资源 / 任务日志 / 恢复 | `docs/subsystems/runtime-and-recovery.md` | `.../orchestrator/capacity.py`, `resource_profile.py`, `task_log.py`, `diagnostics.py`, `migration.py`, `draft_safety.py` |
+| 编排主流程 / 闸门顺序 / 草稿写入 | `docs/subsystems/orchestrator-engine.md` | `orchestrator/application/engine.py`、`orchestrator/domain/clips.py` |
+| CLI 子命令（env/build/recover/…） | `docs/subsystems/orchestrator-cli.md` | `orchestrator/application/cli.py` |
+| 选镜、视觉证据、语义闸门 | `docs/subsystems/visual-matching.md` | `orchestrator/{selection,vision,quality}/`、`policy/semantic_gate.py`；原位公共合同 `ai_editor_contract.py`、`visual_qc_contract.py` |
+| 品类规则包 / 场景规则 / 相位 | `packages/video-v1.5.3/doubao-jianying-orchestrator/references/production_quality_and_lessons.md` | `orchestrator/rulepack.py`、`policy/scene_rules.py`、`vision/phase_timing.py`、`rules/*.json` |
+| 口播/TTS/音色/BGM/响度 | `docs/subsystems/audio-voice.md` | `orchestrator/audio/`、`orchestrator/policy/script_polish.py` |
+| 时序契约 / 音画对齐 | `docs/subsystems/timing.md` | `orchestrator/selection/timing_contract.py`、`orchestrator/media/stability.py` |
+| 编解码 / ffmpeg / GPU | `docs/subsystems/media-codec.md` | `orchestrator/media/`、`orchestrator/runtime/platform_env.py` |
+| 容量 / 资源 / 任务日志 / 恢复 | `docs/subsystems/runtime-and-recovery.md` | `orchestrator/runtime/`、`quality/{diagnostics,draft_safety}.py`、`delivery/migration.py` |
+| 纸品动作 / 帧域求解 / 诊断预览 | `docs/paper-action-windows.md`, `docs/paper-selection-replay.md` | `orchestrator/selection/paper_*.py`、`media/action_frames.py`；活包 `tools/{paper_selection_replay,selection_preview}.py`；尚未接入默认生产 |
+| 独立时间线与末端导出规划 | `docs/plans/20261101-programmatic-production.md` | 待实施方案；不得把计划模块或状态写成当前已完成能力 |
 | 剪映草稿底层操作 | `docs/subsystems/jianying-editor.md` | `packages/video-v1.5.3/jianying-editor/scripts/**`（`vendor/pyJianYingDraft` 原则上不改） |
 | 定时脚本 / 队列 / 闭环 / 评估 | `docs/windows-pipeline.md`, `docs/subsystems/package-tools.md` | `packages/video-v1.5.3/batch_worker.py`, `tools/batch_dispatch.py`, `tools/workflow/closed_loop.py`, `tools/*.py` |
 | 草稿交付 / 生成版恢复 | `.../references/draft_delivery_and_recovery.md` | `packages/video-v1.5.3/tools/draft_delivery.py`, `ship_distribute.py` |

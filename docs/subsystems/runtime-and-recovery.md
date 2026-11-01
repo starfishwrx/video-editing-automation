@@ -1,6 +1,6 @@
 # 子系统：运行时与恢复（runtime-and-recovery）
 
-- 代码：`packages/video-v1.5.3/doubao-jianying-orchestrator/orchestrator/{capacity.py, resource_profile.py, task_log.py, diagnostics.py, migration.py, draft_safety.py}`
+- 代码：`packages/video-v1.5.3/doubao-jianying-orchestrator/orchestrator/runtime/{capacity,resource_profile,task_log,platform_env}.py`；诊断/安全检查位于 `orchestrator/quality/{diagnostics,draft_safety}.py`，官方迁移位于 `orchestrator/delivery/migration.py`
 
 ## 1. 职责
 - 资源画像/容量标定/进程权重：避免与交互式剪映抢资源
@@ -22,7 +22,7 @@
   - `retryable`: 仅 “视觉/服务商” 且具“瞬时”特征（超时/502/网络）才为 True
   - `safe_to_continue`: 只有 `terminal_state=SUCCESS` 且非中间态时为 True
   - `next_action`: complete / retry_stage / fix_environment / manual_review / skip_task
-  - 附带：`pipeline_version`（读包内 VERSION）、`manifest_sha256`、`runtime`（Python/FFmpeg/vision profile）
+  - 附带：`pipeline_version`（读包内 VERSION）、`manifest_sha256`、`runtime`（Python/FFmpeg、实际视觉 transport/model 或配置错误；不再读取旧视觉 profile）
 
 ## 4. 安全写稿（`draft_safety.py`）
 - 写前：若剪映运行且目标草稿已存在 → `BLOCKED`；加密草稿一律不覆盖（`DRAFT_ENCRYPTED_UNSUPPORTED`）
@@ -30,7 +30,9 @@
 
 ## 5. 只读诊断与分阶段恢复（`diagnostics.py`, `cli.recover`）
 - 诊断：不驱动 UI，只读草稿/媒资/磁盘状态/包签名/依赖，报告 `DESKTOP_IMPORT_BLOCKED` 等
-- 恢复：`preflight`（素材/环境就绪）→ `semantic_match`（消费已有 `shot_candidates.json` 与匹配报告）→ `draft_write`（严格只消费匹配缓存）→ `ui_acceptance`（只读诊断，人工验收保留 UNCERTIFIED）
+- 恢复：`preflight`（素材/环境就绪）→ `semantic_match`（消费已有 `shot_candidates.json` 与匹配报告）→ `draft_write`（严格只消费匹配缓存）→ `ui_acceptance`（只读桌面可见性诊断，保留 UNCERTIFIED，不授予正式交付）
+
+整体脚本另有任务级恢复与有限重试，见 [Windows 流水线](../windows-pipeline.md)。正式交付依据 `tools/acceptance` 的四项当前证据，不消费 Mac/Gold 人工批准文件；`ui_acceptance` 兼容诊断与这条自动验收链分开。
 
 ## 6. 加密草稿迁移（`migration.py`）
 - 不解密/不复制密文；仅打开剪映官方客户端，由人执行“副本/导入”；工具轮询新草稿出现后做结构校验与来源快照一致性校验

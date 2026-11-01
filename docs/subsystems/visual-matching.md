@@ -1,6 +1,6 @@
 # 子系统：视觉匹配
 
-代码位于 `packages/video-v1.5.3/doubao-jianying-orchestrator/orchestrator/`。默认为 `ai_editor`；`manifest.selection_mode` 优先于 `JY_SELECTION_MODE`，显式 `legacy` 才运行旧路线。模型与调用配置见[模型说明](../model-and-vision.md)。
+实际选镜位于 `packages/video-v1.5.3/doubao-jianying-orchestrator/orchestrator/selection/`，观察在 `vision/`，独立 QC 在 `quality/`，公共合同保留原位置。默认为 `ai_editor`；`manifest.selection_mode` 优先于 `JY_SELECTION_MODE`，`rule_then_ai` 为规则初排/AI 复核，显式 `legacy` 保留旧算法。模型与调用配置见[模型说明](../model-and-vision.md)。
 
 ## 1. 两条路线的共同入口
 
