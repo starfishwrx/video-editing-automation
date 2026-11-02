@@ -59,7 +59,11 @@ uv run --frozen python -X utf8 -m tools.production_demo --output $newDemo
 
 ## 显式无头剪映待审交接
 
-`tools.production headless-plan --timeline $timeline --render-dir $render --name $newName --font $localStaticFont --report-dir $newPlan --review-only` 将固定结果转换成 `jy14-headless-plan/v1`，保留整微秒源窗、恒速、独立旁白与字幕。一次视频可承接多句，重复字幕仍各自保留。当前限 1080×1920/30fps、同画幅居中硬切、1–8倍恒速、基础音轨及默认字幕；不支持的布局、音频淡入淡出、同角色重叠或字幕样式明确拒绝。
+`tools.production headless-plan --timeline $timeline --render-dir $render --task-json $task --bgm-state-dir $selectionState --name $newName --font $localStaticFont --report-dir $newPlan --review-only` 先补齐业务音频，再将固定结果转换成 `jy14-headless-plan/v1`。任务和选曲状态目录为必填项，空 BGM 沿用 worker 的自动选曲合同；已有标题/ID/路径优先，不能把空字段当成关闭音乐。纯数据层 `headless_plan` 保留给明确准备好的技术输入。
+
+业务阶段使用现有曲库、任务选择记录、批次去重及 BGM 响度处理。任务身份和文案必须对应原时间线，不重新选镜或合成旁白；只替换独立 BGM 事件并增加修订。歌曲按所用窗口准备到默认 -28 LUFS、0.4秒淡入/0.2秒淡出，淡变一次烘焙到最终48k PCM，物理样本数向上取整而事件保持原微秒长度。实际音频源必须足够覆盖去静音/指定起点后的全片长度，禁止用长静音补成成功；不支持带视频的 BGM 源。任务选择记录可跨重试复用，批次身份兼容 worker 的三个字段。
+
+输出为 `$newPlan/timeline.json`、`bgm/bgm_receipt.json`、`render/preview.mp4` 及 `export/plan.json`。保留原视频、旁白、字幕与内容疑点，重新渲染同一画面和新增音乐，之后从当前修订导出。一次视频可承接多句，重复字幕仍各自保留。当前限1080×1920/30fps、同画幅居中硬切、1–8倍恒速、基础音轨及默认字幕；事件级淡变仍不直接映射到无头底座，预处理后的音乐不再次叠加淡变。未支持的布局、同角色重叠或字幕样式明确拒绝。
 
 外部 `jianying-headless-windows` 通过自己的固定版本、DLL 与签名检查，使用 `build --detached-root $approvedNasParent` 构建原生加密副本。这个待审交接扩展需要对应后端版本，不能只用旧版 build 冒充。媒体与静态字体由后端收集，活动时间轴与镜像由本机原生 codec 生成；不手改草稿 JSON、不登记本机首页、不控制界面。新建文字显式映射 bold；原生字号单位与选定本地字体不宣称和 libass 代理像素一致。
 

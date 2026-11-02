@@ -6,7 +6,7 @@
     "machine-specific paths",
     "knowledge-base bodies"
   ],
-  "file_count": 368,
+  "file_count": 370,
   "files": [
     {
       "path": ".gitignore"
@@ -118,6 +118,9 @@
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/audio/final_assets.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/audio/final_bgm.py"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/audio/subtitle_units.py"
@@ -532,6 +535,9 @@
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_file_safety.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/tests/test_final_bgm.py"
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_frame_batch.py"

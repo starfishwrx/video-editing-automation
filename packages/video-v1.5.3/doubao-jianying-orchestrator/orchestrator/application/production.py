@@ -6,6 +6,7 @@ not select shots, synthesize speech, write drafts or certify visual content.
 from collections import OrderedDict
 from dataclasses import replace
 from fractions import Fraction
+import hashlib
 import json
 from pathlib import Path
 import unicodedata
@@ -17,6 +18,53 @@ from ..domain.timeline import (Asset, AudioEvent, Canvas, EditTimeline, Sentence
 from ..media.probe import probe_media
 from ..policy.production_parameters import subtitle_transform
 from ..runtime.production_env import production_environment
+
+
+def prepare_headless_task(timeline, task, *, render_dir, report_dir, state_dir,
+                           ffmpeg="ffmpeg", ffprobe="ffprobe", width=540):
+    """Complete business BGM without reselecting shots or regenerating speech."""
+    from ..audio.final_bgm import prepare_task_bgm
+    from ..quality.production_qc import check_production
+    from ..media.timeline_render import render_timeline, timeline_identity
+    timeline.validate()
+    if timeline.task_id not in {str(task.get("record_id") or ""), str(task.get("task_id") or "")}:
+        raise TimelineError("HEADLESS_TASK_IDENTITY_MISMATCH")
+    def text(value):
+        return "".join(c for c in value if not c.isspace())
+    script = str(task.get("script") or task.get("full_script") or "")
+    if not script or text(script) != text("".join(s.text for s in timeline.sentences)):
+        raise TimelineError("HEADLESS_TASK_SCRIPT_MISMATCH")
+    root = Path(report_dir).resolve()
+    if root.exists():
+        raise TimelineError("HEADLESS_TASK_REPORT_EXISTS")
+    source_render = Path(render_dir).resolve()
+    if root.is_relative_to(source_render) or source_render.is_relative_to(root):
+        raise TimelineError("HEADLESS_TASK_REPORT_SOURCE_OVERLAP")
+    check = check_production(timeline, render_dir, ffmpeg=ffmpeg, ffprobe=ffprobe)
+    if check["structure_media"]["status"] != "PASS":
+        raise TimelineError("HEADLESS_TASK_SOURCE_RENDER_INVALID")
+    root.mkdir(parents=True, exist_ok=False)
+    bgm = prepare_task_bgm(task["bgm"], script=script, task_id=timeline.task_id,
+        batch_id=task.get("batch_id") or task.get("batch_identity") or task.get("worker_batch_identity"),
+        state_dir=state_dir, output_dir=root / "bgm",
+        duration_us=timeline.duration_us, ffmpeg=ffmpeg, ffprobe=ffprobe)
+    asset_id = "bgm-asset-" + hashlib.sha256(bgm["path"].encode()).hexdigest()[:16]
+    prepared = replace(timeline, revision=timeline.revision + 1,
+        assets=(*timeline.assets, Asset(asset_id, bgm["path"], "audio", bgm["asset_duration_us"])),
+        audios=(*(e for e in timeline.audios if e.role != "bgm"),
+                AudioEvent("bgm-prepared", asset_id, "bgm", 0, timeline.duration_us)))
+    prepared.validate()
+    prepared.save(root / "timeline.json")
+    render = root / "render"
+    render_timeline(prepared, render, ffmpeg=ffmpeg, ffprobe=ffprobe, width=width)
+    qc = check_production(prepared, render, ffmpeg=ffmpeg, ffprobe=ffprobe)
+    if qc["structure_media"]["status"] != "PASS":
+        raise TimelineError("HEADLESS_TASK_PREPARED_RENDER_INVALID")
+    (root / "audio_completion.json").write_text(json.dumps({"task_id": timeline.task_id,
+        "parent_timeline_identity": timeline_identity(timeline), "bgm": bgm,
+        "selection_and_narration_preserved": True, "formal_delivery_allowed": False},
+        ensure_ascii=False, indent=2), encoding="utf-8")
+    return prepared, render
 
 
 def _us(value):

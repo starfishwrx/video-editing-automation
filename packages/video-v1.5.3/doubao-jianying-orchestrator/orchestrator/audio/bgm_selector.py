@@ -469,7 +469,8 @@ def _integrated_lufs(ffmpeg: str, src: Path, *, start: float = 0.0,
 def prepare_bgm_track(src: Path, out_path: Path, total_duration: float, *,
                       ffmpeg: str = "ffmpeg", target_lufs: float = -28.0,
                       fade_in: float = 0.4, fade_out: float = 0.2,
-                      start: float = 0.0, tolerance_lu: float = 1.5) -> Path:
+                      start: float = 0.0, tolerance_lu: float = 1.5,
+                      source_duration: float | None = None) -> Path:
     """裁剪/增益/淡变，产出与成片等长的铺底成品，并闭环校正响度。
 
     target_lufs：铺底整体响度（EBU R128），默认 -28 LUFS。旁白统一归一到
@@ -503,6 +504,10 @@ def prepare_bgm_track(src: Path, out_path: Path, total_duration: float, *,
     source_start = max(0.0, float(start))
     if leading_silence_end is not None:
         source_start = max(source_start, leading_silence_end)
+    # New task preparation supplies a measured duration. APAD must not disguise
+    # missing music after a short source or a trimmed silent introduction.
+    if source_duration is not None and source_start + total_duration > source_duration + 1 / 48000:
+        raise ValueError("BGM_SOURCE_WINDOW_TOO_SHORT")
     source_mean = _mean_volume(ffmpeg, src, start=source_start, duration=total_duration)
     if source_mean is None or source_mean <= -65.0:
         raise ValueError("BGM source has no audible music in the requested window")

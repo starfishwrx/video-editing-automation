@@ -23,7 +23,7 @@
 | CLI 子命令（env/build/recover/…） | `docs/subsystems/orchestrator-cli.md` | `orchestrator/application/cli.py` |
 | 选镜、视觉证据、语义闸门 | `docs/subsystems/visual-matching.md` | `orchestrator/{selection,vision,quality}/`、`policy/semantic_gate.py`；原位公共合同 `ai_editor_contract.py`、`visual_qc_contract.py` |
 | 品类规则包 / 场景规则 / 相位 | `packages/video-v1.5.3/doubao-jianying-orchestrator/references/production_quality_and_lessons.md` | `orchestrator/rulepack.py`、`policy/scene_rules.py`、`vision/phase_timing.py`、`rules/*.json` |
-| 口播/TTS/音色/BGM/响度 | `docs/subsystems/audio-voice.md` | `orchestrator/audio/`、`orchestrator/policy/script_polish.py` |
+| 口播/TTS/音色/BGM/响度 | `docs/subsystems/audio-voice.md`, `docs/programmatic-production.md` | `orchestrator/audio/`（含`final_bgm.py`业务音乐准备）、`orchestrator/policy/script_polish.py` |
 | 时序契约 / 音画对齐 | `docs/subsystems/timing.md` | `orchestrator/selection/timing_contract.py`、`orchestrator/media/stability.py` |
 | 编解码 / ffmpeg / GPU | `docs/subsystems/media-codec.md` | `orchestrator/media/`、`orchestrator/runtime/platform_env.py` |
 | 容量 / 资源 / 任务日志 / 恢复 | `docs/subsystems/runtime-and-recovery.md` | `orchestrator/runtime/`、`quality/{diagnostics,draft_safety}.py`、`delivery/migration.py` |

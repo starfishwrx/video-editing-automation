@@ -34,6 +34,8 @@ def main(argv=None):
     e.add_argument("--name", required=True)
     e.add_argument("--report-dir", type=Path, required=True)
     e.add_argument("--font", type=Path, required=True)
+    e.add_argument("--task-json", type=Path, required=True, help="业务任务：先按worker空BGM自动选曲规则补齐音乐")
+    e.add_argument("--bgm-state-dir", type=Path, required=True, help="任务选曲复用/批次去重目录")
     e.add_argument("--review-only", action="store_true", required=True)
     for child in sub.choices.values():
         child.add_argument("--ffmpeg")
@@ -65,10 +67,25 @@ def main(argv=None):
         elif args.command == "check":
             result = check_production(timeline, args.render_dir, **tools)
         elif args.command == "headless-plan":
-            from orchestrator.delivery.jianying_export import prepare_headless_export
-            result = prepare_headless_export(timeline, render_dir=args.render_dir,
-                name=args.name, report_dir=args.report_dir, font_path=args.font,
+            from orchestrator.delivery.jianying_export import prepare_headless_export, headless_plan
+            headless_plan(timeline, args.name, args.font, review_only=args.review_only)
+            export_report, render_dir = args.report_dir, args.render_dir
+            if args.task_json:
+                if not args.bgm_state_dir:
+                    raise ValueError("BUSINESS_BGM_STATE_DIRECTORY_REQUIRED")
+                from tools.queueing.contracts import meeting_bgm_spec
+                from orchestrator.application.production import prepare_headless_task
+                task = json.loads(args.task_json.read_text(encoding="utf-8-sig"))
+                task["bgm"] = meeting_bgm_spec(task.get("bgm"))
+                timeline, render_dir = prepare_headless_task(timeline, task,
+                    render_dir=args.render_dir, report_dir=args.report_dir,
+                    state_dir=args.bgm_state_dir, **tools)
+                export_report = args.report_dir / "export"
+            result = prepare_headless_export(timeline, render_dir=render_dir,
+                name=args.name, report_dir=export_report, font_path=args.font,
                 review_only=args.review_only, **tools)
+            result["prepared_timeline"] = str(render_dir.parent / "timeline.json") if args.task_json else str(args.timeline)
+            result["bgm_completion"] = "TASK_BGM_PREPARED" if args.task_json else "PREPARED_TIMELINE_ONLY"
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 2 if result.get("status") == "BLOCKED" or result.get("qc", {}).get("status") == "BLOCKED" else 0
     except (OSError, ValueError, TypeError, KeyError, ZeroDivisionError, RuntimeError, subprocess.SubprocessError) as exc:
