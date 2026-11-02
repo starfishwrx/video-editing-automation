@@ -39,18 +39,14 @@
 | 发版 | `docs/release-process.md`, `docs/RELEASES.md`, `.../references/validated_fix_to_release.md` | `packages/video-v1.5.3/tools/release_package.py`, `release-manifest.json`, `VERSION`, `releases/` |
 | 代码风格 | `docs/code-standards.md` | — |
 
-## 2. 改完必须做（本地验证）
+## 2. 改完必须做（按范围验证）
 
-```powershell
-cd packages/video-v1.5.3
-uv run --frozen python -X utf8 -m unittest discover -s tests -q
-uv run --frozen python -X utf8 -m unittest discover -s doubao-jianying-orchestrator/tests -q
-uv run --frozen python -X utf8 -m tools.check_architecture
-```
-
-- 完整策略见 `docs/test.md`。局部交付迭代可只跑 `test_draft_delivery.py`、`test_nas_portable.py`；发版 PR 用 `tools.release_package build --output <包外新目录> --checks full`。
-- 改了闸门/状态：补一个「该拦住的输入确实被拦住」的测试。
-- 测试通过 ≠ 生产通过。不要在 PR/回复里声称「已上线/已验收」。
+- 单模块小改动默认只跑对应模块及直接调用方，映射见 `docs/test.md`；不要每次修改都运行两套全量。
+- 例如 BGM：活包根执行 `uv run --frozen python -X utf8 -m unittest discover -s doubao-jianying-orchestrator/tests -p "test_*bgm.py" -q` 和 `-p test_default_headless.py`（同一 discover 目录），当前35项；再执行 `uv run --frozen python -X utf8 -m tools.check_architecture`。
+- 跨模块、共享合同或正式质量／交付门禁变更才本地全量；范围不确定也用全量。PR 的 CI 保持两套 discover。
+- 发版 PR 用 `tools.release_package build --output <包外新目录> --checks full`，在最终解压目录跑一次全量即可。最终代码未变时，不再分别在开发树、解压目录和安装面重跑全套；安装只验证入口、依赖和必要案例。
+- 改了闸门/状态：必须保留「该拦住的输入确实被拦住」的行为覆盖。低价值源码字符串、文档数字及重复存在性检查可以精简；音频、动作证据、formal和NAS恢复保护不能删。
+- 测试通过 ≠ 生产通过。不要将离线结果说成真实成片验收。
 
 常用 CLI：
 

@@ -1,12 +1,11 @@
 import json
 import os
 import sys
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
-from contextlib import redirect_stdout
-from io import StringIO
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -19,29 +18,23 @@ from tools import closed_loop  # noqa: E402
 
 
 class Release140ContractTests(unittest.TestCase):
-    def test_published_entrypoint_exists(self):
-        package = json.loads((ROOT / "SKILL_PACKAGE.json").read_text(encoding="utf-8"))
-        entrypoint = ROOT / package["entrypoint"]
-        self.assertTrue(entrypoint.is_file(), entrypoint)
-
     def test_published_entrypoint_help_returns_success(self):
-        from orchestrator.cli import main
+        package = json.loads((ROOT / "SKILL_PACKAGE.json").read_text(encoding="utf-8"))
+        result = subprocess.run([sys.executable, "-X", "utf8", str(ROOT / package["entrypoint"]), "--help"],
+                                cwd=ROOT, capture_output=True, text=True, encoding="utf-8", timeout=20)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("build", result.stdout)
 
-        with redirect_stdout(StringIO()):
-            self.assertEqual(main(["--help"]), 0)
-
-    def test_runtime_160_and_independent_policy_141(self):
+    def test_package_and_components_share_current_version(self):
         package = json.loads((ROOT / "SKILL_PACKAGE.json").read_text(encoding="utf-8"))
         policy = json.loads((ROOT / "WINDOWS_VIDEO_CLOSED_LOOP_RULES_20260930.json").read_text(encoding="utf-8"))
-
-        self.assertEqual((ROOT / "VERSION").read_text(encoding="utf-8").strip(), "1.6.0")
-        self.assertEqual(package["version"], "v1.6.0")
-        self.assertIn("version: 1.4.1", (ROOT / "RULES.md").read_text(encoding="utf-8"))
-        self.assertEqual((ROOT / "jianying-editor" / "VERSION").read_text(encoding="utf-8").strip(), "1.6.0")
-        self.assertEqual((ROOT / "doubao-jianying-orchestrator" / "VERSION").read_text(encoding="utf-8").strip(), "1.6.0")
-        self.assertEqual(__version__, "1.6.0")
-        self.assertEqual(policy["video_tool_version"], "1.6.0")
-        self.assertEqual(policy["visual_policy_version"], "1.4.1")
+        current = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+        self.assertEqual(package["version"], "v" + current)
+        for component in ("jianying-editor", "doubao-jianying-orchestrator"):
+            self.assertEqual((ROOT / component / "VERSION").read_text(encoding="utf-8").strip(), current)
+        self.assertEqual(__version__, current)
+        self.assertEqual(policy["video_tool_version"], current)
+        self.assertIn("version: " + policy["visual_policy_version"], (ROOT / "RULES.md").read_text(encoding="utf-8"))
 
     def test_credentials_are_environment_bound(self):
         paths = [
@@ -56,18 +49,6 @@ class Release140ContractTests(unittest.TestCase):
         self.assertNotRegex(text, r"NAS_PASSWORD\s*=\s*['\"][^$'\"]+['\"]")
         self.assertIn("LARK_BASE_TOKEN", text)
         self.assertIn("NAS_PASSWORD", text)
-
-    def test_standalone_runner_is_retired(self):
-        text = (ROOT / "run_task.template.ps1").read_text(encoding="utf-8-sig")
-        self.assertIn("LEGACY_RUNNER_RETIRED", text)
-        self.assertNotIn("Start-Process", text)
-        self.assertNotIn("failure-update", text)
-
-    def test_subtitles_use_the_release_canvas_position(self):
-        source = (ROOT / "jianying-editor/scripts/vendor/pyJianYingDraft/script_file.py").read_text(encoding="utf-8")
-        self.assertIn("TextStyle(size=8, bold=True", source)
-        self.assertIn("ClipSettings(transform_x=0.0, transform_y=-0.55)", source)
-        self.assertNotIn("ClipSettings(transform_x=0.0, transform_y=-1000.0)", source)
 
     def test_table_update_blocks_without_token(self):
         with tempfile.TemporaryDirectory(prefix="video_release_140_") as raw:
