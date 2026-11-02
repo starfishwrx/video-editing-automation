@@ -7,6 +7,104 @@
 
 ## 新增条目
 
+### L-20261102-07 按改动范围测试，避免重复全量
+- status: OPEN
+- hits: 1
+- 模块: 测试策略、AGENTS、包级与字幕回归
+- 现象: 把每次小修改都当发版，在开发树、解压包、安装面反复跑全量，拖长迭代；源码字符串和文档数字断言还会因无关格式变更失败。
+- 以后怎么做: 小改动先跑对应模块与直接调用方；共享合同／正式门禁变化和范围不确定时全量，发版保留最终解压验收，安装只补入口与案例。删除已有行为覆盖的重复检查，取消无业务价值的静态文字约束；不同的音频、证据、formal和恢复失败边界不能为减少数量而删。
+- 证据: 35项BGM／默认无头定向验证约7秒，完整历史源码回归约136秒；5项静态／重复检查移除后，保留的入口及字幕测试读取实际执行结果，独立审阅通过。
+
+### L-20261102-06 默认后端切换要贯穿读稿与交付
+- status: OPEN
+- hits: 1
+- 模块: application/headless_production、runtime/draft_documents、tools/native_delivery
+- 现象: 原生稿已建出，但旧QC、交付和版本归档只读明文；新副本codec也可能因目标文件已存在而拒绝操作。
+- 以后怎么做: 默认入口、付费前预检、当前镜像读取、字体资源、独立QC、分发及恢复一起回归。编码写入新临时密文，再替换唯一新副本；六镜像和活动指针逐一核验。音频时长使用最终音频探针，不能套视频首帧修正。用真实复制、已存在目标、单侧中断、版本重命名以及内容漂移反例验证，保留正式质量门禁和源稿。
+- 证据: 默认入口测试、卫品固定缓存回归、原生NAS传输／版本恢复收据与独立代码审阅；文件技术成功不替代商品内容验收。
+
+### L-20261102-05 业务空BGM必须进入准备阶段且核验有效源长
+- status: OPEN
+- hits: 1
+- 模块: audio/final_bgm、application/production、tools/production
+- 现象: 固定输入测试将空BGM当成不添加，无头导出继续保留无音乐时间线；短音乐也可被APAD补成长静音后仍通过整体LUFS检查。
+- 根因: 技术时间线入口绕过worker空值规范化，响度门槛没有证明全片都有有效音乐。
+- 以后怎么做: 业务命令必须有任务输入，统一空值自动选曲和重试/批次选择记录；显式ID/标题/路径保持优先。按实际选用音频源长检查去静音和起点后的完整窗口，拒绝短源与含视频的歧义源，不将静音补齐当成成功。淡变仅处理一次，BGM独立轨，旁白/字幕/视频时序和字节按本次修订回读；缺音乐明确阻断。
+- 证据: `test_final_bgm.py` 的空值合同、默认CLI必填、短源/前置静音、带视频短音频、批次别名、真实PCM/LUFS及原编辑决定保留；独立复验与真实交付收据分别留证。
+
+### L-20261102-04 无头草稿交接应验证当前格式和实际路径
+- status: OPEN
+- hits: 1
+- 模块: delivery/jianying_export、quality/timeline_export、tools/headless_review_delivery
+- 现象: 明文 writer 对最终音频按毫秒截短；切换原生加密后，旧 NAS 工具无法读取实际活动时间轴，字幕粗体也可能被静默丢掉。
+- 根因: 不同底座的媒体时长、文字参数和草稿格式有不同表达，结构成功不代表参数已经完整映射。
+- 以后怎么做: 固定最终时间线，用外部后端的正式计划与 codec API 构建；逐微秒回读时序，显式映射并核对粗体、源窗、附加速度材料和字面媒体路径。NAS 收集包括字体，复制到新目录后再读实际加密镜像；拒绝设备路径和报告/草稿目录重叠。不得用旧明文替代、放宽成片认证或把参数验证当成观看通过。
+- 证据: `test_timeline_export.py`、后端 detached handoff 单元测试及本次真实待审构建/共享路径回读；支持范围见 `docs/programmatic-production.md`。
+
+### L-20261102-03 精确选帧表达式必须覆盖真实连续动作长度
+- status: OPEN
+- hits: 1
+- 模块: media/timeline_render / quality/production_qc
+- 现象: 一秒合成片可渲染，真实多句连续动作的 188 项平铺选帧表达式却报 Cannot allocate memory，GPU/CPU 编码器均失败。
+- 根因: FFmpeg 表达式解析有递归深度限制，平铺求和在尚未触及命令长度预算时已超限；不是换编码器或加内存可以解决。
+- 以后怎么做: 对同一精确索引集合生成平衡表达式，不改成平均 FPS 或删帧规避。回归包含长连续事件、保护末帧和实际像素对应；按结构、内容分别记录失败，内容证据不足不能混记成媒体损坏，也不得借此放行。
+- 证据: `test_timeline_render.py::test_long_continuous_action_does_not_exceed_expression_parser_depth`、内容缺口及非法类型回归；独立复核 1–1000 项中的 12 种规模逐字节符合预期。
+
+### L-20261102-02 时间线末端与保护区必须核验真实输出帧
+- status: OPEN
+- hits: 1
+- 模块: domain/timeline / media/timeline_render
+- 现象: 非整帧配音若把整片帧数直接 floor，会有末尾旁白没有画面；名义源窗覆盖结果，也可能采不到所需结果帧。Matroska 的 60fps 还会因 1ms time_base 表现为 16/17ms 交替。
+- 根因: 业务微秒、容器时间基和输出帧预算混用，或仅凭 avg_frame_rate 判断源时间分布。
+- 以后怎么做: 内部切点共享累计 floor、整片末端 ceil，最后一帧必须有真实源画面；实际 PTS 在容器精度内核对 CFR，再核验选中源帧和保护区的输出帧数量。短源、缺帧、编码增删帧保持阻断，不靠尾帧克隆或截旁白补齐。
+- 证据: `test_edit_timeline.py`、`test_timeline_render.py` 的非整帧、非零 PTS、逐帧像素及保护结果反例；实现边界见 `docs/programmatic-production.md`。
+
+### L-20261102-01 冻结计划复用必须自行建立输出目录
+- status: OPEN
+- hits: 1
+- 模块: application/cli / sentence-planning
+- 现象: 已冻结的 semantic-v1 清单换新 report 目录构建时，在选镜前因 sentence_planning 目录不存在而失败。
+- 根因: 首次规划器负责创建目录，复用计划会跳过该规划器；后续保存逻辑仍假定目录已经存在。
+- 以后怎么做: 保存冻结计划的阶段自行建立目标父目录。用真实临时目录复现“已有分句 + 新报告目录”，确认不重新分句、原句序与配音时长保持，并确实到达匹配阶段。
+- 证据: `test_sentence_planning.py::test_build_reuses_frozen_plan_in_fresh_report_directory` 先失败后通过；修复位于 `application/cli.py`，不向兼容入口写业务逻辑。
+
+### L-20261030-04 句长可行性与动作完整性必须分别核验
+- status: OPEN
+- hits: 2
+- 模块: selection / retiming / preview
+- 现象: 全片平均倍速下降仍可能保留半截动作；模型也会把下一次入手说成结果静置，或把一个固定机位误称为两个角度。横向拉宽的拼图还会影响包装厚实判断。
+- 根因: 仅凭历史描述、分段名称或时长合计不能证明实际使用窗口完整，短口播又容易诱导裁掉必要动作。
+- 以后怎么做: 保持图片比例，按最终连续源窗口重新看图；保护关键接触、完成与结果，只压缩明确允许的中间过程。微秒精确求解后还要核对输出帧边界并播放 A/B。放不下就保留时长冲突，不把方案就绪当成质量 PASS。参考工程要标注当前版本与归档快照及缺失媒体。
+- 证据: `test_paper_retiming.py`、`test_paper_selection.py`、`test_paper_review_media.py`、`test_selection_preview.py`、`docs/paper-selection-replay.md`。
+- 再次遇到: 名义源窗到达结果，fps中心重采样后的实际尾帧却仍在展开。先以真实PTS和不带时长目标的观察记录动作，再搜索连续窗口与帧预算；实际输出重验源帧对应。新增 `test_paper_action_events.py`、`test_paper_action_windows.py` 与显式映射真实渲染测试，说明见 `docs/paper-action-windows.md`。
+
+### L-20261030-03 定时流水线必须使用当前证据并隔离代码根与工作根
+- status: OPEN
+- hits: 1
+- 模块: windows-runner / acceptance / delivery
+- 现象: 旧流程信任 PASS 字符串或历史批准，可能先分发后验收；外置工作目录与旧宿主环境又会把子进程指向错误代码或 Python。
+- 根因: 输入模式、验收与交付分支各自裁决，路径从工作目录反推，重复触发没有稳定的重试预算。
+- 以后怎么做: 整体脚本只负责选任务和限制次数，正式放行共享四项当前证据检查且发生在所有交付动作之前。代码根、工作根和草稿根分开传递；子进程固定当前包和解释器。Windows 大小写同名记录不能重置预算，分发副本存在也不等于归档和回写完成。用真实本地夹具、跨进程锁和 PowerShell 参数往返验证这些边界。
+- 证据: `tests/test_scheduled_pipeline.py`、`tests/test_acceptance_delivery_gate.py`、`tests/test_production_eval.py`、`docs/windows-pipeline.md`。
+
+### L-20261030-02 删除模型后端要覆盖整条执行链和提前拒绝配置
+- status: OPEN
+- hits: 1
+- 模块: vision / task-preflight / retired-runners
+- 现象: 视觉旧通道删除后，历史调度模板仍能启动整条 Agent；直接建稿也可能先生成配音再发现通道不支持。
+- 根因: 后端选择散落在模型调用、调度、运行事实和缓存中，失败诊断又依赖相同配置。
+- 以后怎么做: 通道统一解析，诊断保存无效配置但不自行失败，建稿和生成恢复在任何收费准备前阻断。退役执行器在读配置/写任务/外发之前退出。保留通用证据、QC 和 HTTP 重试合同，用真实旧新缓存键对照验证清理没有引起整库重分析。
+- 证据: `tests/test_vision_runtime_config.py`、`tests/test_retired_runners.py`、`doubao-jianying-orchestrator/tests/test_sentence_matching.py`、`docs/modular-development.md`。
+
+### L-20261030-01 功能拆分必须同时验证导入身份与发布库存
+- status: OPEN
+- hits: 1
+- 模块: module-layout / release-inventory / compatibility
+- 现象: 直接复制导出会使旧 patch 与实现状态分离；通用 media 目录排除会把新媒体代码包也漏掉。开发树回归通过仍可能无法在全新包中启动。
+- 根因: Python 模块对象和目录名称同时承担了运行时合同，单纯搬文件没有覆盖这些隐含依赖。
+- 以后怎么做: 旧导入指向同一实现对象；数据与媒体操作围绕明确输入输出抽取；资源根独立于实现深度。每次引入功能子目录在包外副本做 full 合包/解压回归，并验证私有媒体排除仍生效。按文件加载的证据合同必须读取同一包副本。
+- 证据: `tests/test_modular_architecture.py`、`tests/test_closed_loop_entrypoints.py`、`doubao-jianying-orchestrator/tests/test_media_boundary.py`、`docs/modular-development.md`。
+
 ### L-20261028-09 混合选镜与缓存抽帧的证据身份
 - status: OPEN
 - hits: 1

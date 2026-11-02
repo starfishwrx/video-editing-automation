@@ -1,6 +1,6 @@
 # 子系统：视觉匹配
 
-代码位于 `packages/video-v1.5.3/doubao-jianying-orchestrator/orchestrator/`。默认为 `ai_editor`；`manifest.selection_mode` 优先于 `JY_SELECTION_MODE`，显式 `legacy` 才运行旧路线。模型与调用配置见[模型说明](../model-and-vision.md)。
+实际选镜位于 `packages/video-v1.5.3/doubao-jianying-orchestrator/orchestrator/selection/`，观察在 `vision/`，独立 QC 在 `quality/`，公共合同保留原位置。默认为 `ai_editor`；`manifest.selection_mode` 优先于 `JY_SELECTION_MODE`，`rule_then_ai` 为规则初排/AI 复核，显式 `legacy` 保留旧算法。模型与调用配置见[模型说明](../model-and-vision.md)。
 
 ## 1. 两条路线的共同入口
 
@@ -9,7 +9,7 @@
 - 调用失败、无可读图片或观察缺失保持待分析/未认证，不使用猜测标签。
 - 素材理解缓存可跨任务复用；缓存身份包含素材/源窗/分析规则和所选后端等，复用不等于写入持久素材库。
 
-旧任务清单未写商品时，可由操作者使用 `python -m orchestrator.legacy_cache_import` 显式导入：必填 `--prior-task`、`--prior-manifest`、`--current-manifest`、`--prior-analysis` 和 `--cache`（路径均为 JSON）；运行环境必须使用拟复用的 transport、模型和抽帧设置。工具要求旧任务与当前商品一致、旧任务和清单的 record 一致、素材在两份清单中，且旧键能由原清单及去掉商品字段的当前清单分别重算。源文件 stat、窗口、规则、模型和采样协议任何不一致都不会导入；已有当前键不覆盖。此操作只恢复视觉观察，未复核的文字仍需补验，选镜像素复核与独立 QC 不省略。导入影响新启动的分析，不会刷新已运行进程的内存快照。
+旧任务清单未写商品时，可由操作者使用 `python -m orchestrator.legacy_cache_import` 显式导入：必填 `--prior-task`、`--prior-manifest`、`--current-manifest`、`--prior-analysis` 和 `--cache`（路径均为 JSON）；运行环境必须使用拟复用的 transport、模型和抽帧设置。工具要求旧任务与当前商品一致、旧任务和清单的 record 一致、素材在两份清单中，且旧键能由原清单及去掉商品字段的当前清单分别重算。源文件 stat、窗口、规则、模型和采样协议任何不一致都不会导入；已有当前键不覆盖。此操作只恢复视觉观察，未复核的文字仍需补验，选镜像素复核与独立 QC 不省略。导入影响新启动的分析，不会刷新已运行进程的内存快照。导入命令不再提供可配置的 profile；观察和相位键中的历史兼容字段固定为 `profile="volc"`，身份相符的缓存可继续复用。
 
 ## 2. 默认 AI 选镜与整稿编排
 
@@ -38,15 +38,19 @@
 
 以下内容用于显式回滚，不能当成默认 AI 模式的执行说明：
 
-- `vision_analyzer.match_with_codex` 在已观察描述上补充句镜语义匹配；函数名保留历史兼容，实际 transport 决定调用方式。
+- `vision_analyzer.match_sentences` 在已观察描述上补充句镜语义匹配，通过已配置的 GLM 或 Qwen 直连接口执行。
 - Top3/Top1、`DIRECT → ACCEPTABLE_DEGRADED → MATERIAL_GAP`、窗口求解、多镜组合、复用/相邻同源/机位限制、`scene_rules` / `phase_timing`。
 - 包装直证需可读标称与明确指向，不能把包装印字当功能已验证；CTA 囤货量感与包内规格分别判断。
 - 单镜/多镜共用 `timing_contract` 求解；角色速度约束与证据覆盖同步传递。多样性只在同等质量候选间打散。
 - 旧 preview 的黑屏/补镜与未解窗口始终未认证；旧 `demo_actions` 的 `ungated` 覆盖率不能当作已通过。
 
-`ai_editor` 要求直连 `volc_glm`；使用旧 `codex` / `anthropic` transport 时同时显式选择 `legacy` 并验证相应后端。
+`ai_editor`、`rule_then_ai` 与 `legacy` 均支持 GLM（`volc_glm` / `glm` / `volc`）或 Qwen（`qwen` / `qwen_compatible`）直连。Codex CLI、Anthropic 和 CCSwitch 已从运行时移除；旧 transport 和未知值明确拒绝，选择 legacy 不会恢复旧服务调用。文字复核和 `JY_AI_EDITOR_QWEN` 保持可用。
 
 ## 5. 验证
+
+纸品单模块改镜与局部变速验证使用独立的 `selection/paper_selection.py` 和纯求解器 `selection/paper_retiming.py`，从已有分析重新复核源窗口，固定配音句长；没有接入默认建稿/交付。命令、2/3 倍上限、缓存变化和未解决状态见 [纸品选镜单模块验证](../paper-selection-replay.md)。
+
+后续动作定位用 `selection/paper_action_events.py` 记录不带目标句长的源帧事实，`selection/paper_action_windows.py` 进行帧域窗口搜索，`media/action_frames.py` 提供PTS账本和非语义运动线索。显式选帧预览及限制见 [动作窗口验证](../paper-action-windows.md)。
 
 - `test_shared_product_vision_cache.py`：跨任务及镜头编号复用视觉和文字、同产品冷启动防重复、不同产品仍并行、旧缓存导入、否定观察复用但不放行、源文件/SKU 变更与失败不误用缓存。
 - `test_vision_stage_concurrency.py`：媒体准备与 API 阶段分离、2 路准备后 20 路请求、慢请求期间持久化快结果、文字双读及 API 上限、失败拼图和跨批响应阻断（离线）。

@@ -178,8 +178,7 @@ class EnrichV3Test(unittest.TestCase):
         with mock.patch.object(vision_analyzer, "_sample_frames", return_value=self.frames), \
                 mock.patch.object(vision_analyzer, "_run_vision_with_retry", side_effect=fake):
             result = vision_analyzer.enrich_with_vision(
-                self.manifest, {"shots": [self._shot()]}, self.root / "task" / "report",
-                profile="volc")
+                self.manifest, {"shots": [self._shot()]}, self.root / "task" / "report")
         return result, prompts
 
     def _cache(self) -> dict:

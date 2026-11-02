@@ -1,6 +1,6 @@
 # 子系统：命令行（orchestrator-cli）
 
-- 代码：`packages/video-v1.5.3/doubao-jianying-orchestrator/orchestrator/cli.py`
+- 代码：`packages/video-v1.5.3/doubao-jianying-orchestrator/orchestrator/application/cli.py`；旧 `orchestrator/cli.py` 仅兼容导入与命令入口
 - 运行：进入 `doubao-jianying-orchestrator` 后 `python -m orchestrator.cli <subcommand>`
 - 说明：stdout 仅输出机器可读 JSON；详细运行日志写入 `report/tasks/<run_id>/events.jsonl`
 
@@ -29,7 +29,7 @@
 - `recover` 的 stdout 是 `_compact_control_result(result)`：保留 `status/next_action/recovery_stage`、`matched_manifest(_sha256)`、`task_log`。
 
 ## 3. 关键约束与口径
-- 默认选镜模式为 `ai_editor`，优先级为 manifest 字段 → `JY_SELECTION_MODE` → 默认值；新模式要求 `volc_glm`。默认模型完整名称为 GLM-5.3-Flash（`glm-5.3-flash`），见[模型与视觉流程](../model-and-vision.md)。
+- 默认选镜模式为 `ai_editor`，优先级为 manifest 字段 → `JY_SELECTION_MODE` → 默认值；`rule_then_ai` 和 `legacy` 选镜策略保留。所有策略只使用 GLM（`volc_glm` / `glm` / `volc`）或 Qwen（`qwen` / `qwen_compatible`）直连。旧通道和未知值明确拒绝，不再配置视觉 profile/provider。默认模型完整名称为 GLM-5.3-Flash（`glm-5.3-flash`），见[模型与视觉流程](../model-and-vision.md)。
 - `delivery_mode` 必须在选镜之前就写入 manifest（`cmd_build` 会归一化并注入）—— `match_manifest` 要用它决定预览黑屏/补镜与“未解出窗口”的处置；引擎仅读取并在结果里报告。
 - 音色仅在 `cmd_build` 里唯一决议并回写 manifest（`voice_catalog.resolve_voice_once`）；引擎后续只读锁定结果。
 - 选镜前的 `pre_synthesize_narration` 只用于拿逐句真实音频时长真值（命中同一缓存，不额外花钱），并据此跑候选窗口求解。
@@ -37,7 +37,7 @@
 
 ## 4. 依赖与缓存
 - 通过 `platform_env.environment_report()` 解析剪映根、草稿目录、FFmpeg/ffprobe、包签名、依赖状态。
-- 视觉理解缓存：`vision_analyzer` 会将“帧描述/标签/动作确认”的稳定投影写入跨任务 `.cache/material_vision.json`（key 受素材/窗口/profile 约束）。
+- 视觉理解缓存：`vision_analyzer` 将帧描述、标签、动作确认的稳定投影写入跨任务 `.cache/material_vision.json`；键绑定素材、窗口、模型、端点与协议。历史兼容字段固定为 `profile="volc"`，不接受配置，不会仅因删除旧通道触发全库重识别。
 - 旁白/TTS 批量合成缓存：`voice_tts` 的缓存键仅包含“文本+音色+后端+后处理版本”，与视频速度/窗口无关，命中即复用字节。
 
 ## 5. 测试与示例

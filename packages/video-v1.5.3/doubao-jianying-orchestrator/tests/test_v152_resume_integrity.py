@@ -87,7 +87,7 @@ class ResumeIntegrityTest(unittest.TestCase):
         with mock.patch.object(vision_analyzer, "_sample_frames", return_value=self.frames), \
                 mock.patch.object(vision_analyzer, "_run_vision_with_retry", side_effect=fake):
             result = vision_analyzer.enrich_with_vision(
-                manifest or self.manifest, analysis, self.report, profile="volc")
+                manifest or self.manifest, analysis, self.report)
         return result, prompts
 
     def _killed_during_text(self) -> dict:
@@ -227,7 +227,7 @@ class ResumeIntegrityTest(unittest.TestCase):
                 mock.patch.object(vision_analyzer, "_sample_frames", return_value=self.frames), \
                 mock.patch.object(vision_analyzer, "_run_vision_with_retry", side_effect=fake):
             result = vision_analyzer.enrich_with_vision(self.manifest, {"shots": shots},
-                                                        self.report, profile="volc")
+                                                        self.report)
         self.assertGreater(peak[0], 1)
         self.assertLessEqual(peak[0], 3)
         self.assertTrue(all(row["text_pass"] == "hires" for row in result["shots"]))
@@ -328,8 +328,8 @@ class NarrationProbeTest(unittest.TestCase):
         engine_ruler = {"duration_us": 1_545_771, "source": "container_duration", "confidence": "LOW"}
         with mock.patch("orchestrator.platform_env.find_ffmpeg",
                         return_value=(Path("ffmpeg"), Path("ffprobe"))), \
-                mock.patch.object(cli.timing_contract, "probe_material_duration_us",
-                                  return_value=engine_ruler) as probe:
+                mock.patch("orchestrator.audio.narration_probe.probe_audio",
+                           return_value={"duration": 1.545771, "duration_us": 1_545_771}) as probe:
             measured = cli._audio_probe()("tts.ogg")
         probe.assert_called_once()
         self.assertEqual(round(measured["duration"] * 1_000_000), 1_545_771)

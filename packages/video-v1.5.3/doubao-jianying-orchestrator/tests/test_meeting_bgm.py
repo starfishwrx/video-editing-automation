@@ -134,29 +134,20 @@ class MeetingBgmSelectionTests(unittest.TestCase):
              mock.patch.object(bgm_selector, "recommend_bgm", side_effect=AssertionError("must not fallback")):
             self.assertEqual(bgm_selector.select_bgm(music_id="Shared title"), [])
 
-    def test_engine_passes_resolved_music_id_after_title_lookup(self):
-        candidates = [{"music_id": "catalog-id", "title": "Official Song",
-                       "url": "https://cdn.example/track"}]
+    def test_engine_delegates_explicit_title_to_final_bgm_service(self):
+        from orchestrator.audio import final_bgm
         with tempfile.TemporaryDirectory() as root:
-            source = Path(root) / "source.m4a"
-            source.write_bytes(b"fixture")
             engine = engine_module.OrchestrationEngine.__new__(engine_module.OrchestrationEngine)
-            engine.m = {"bgm": {"music_id": "Official Song"}, "task_id": "task-1",
-                        "full_script": "demo script"}
-            engine.total_us = 1_000_000
-            engine.report_dir = Path(root)
-            engine.ffmpeg = None
-            engine.warnings = []
-            with mock.patch.object(engine_module.bgm_selector, "select_bgm",
-                                   return_value=candidates), \
-                 mock.patch.object(engine_module.bgm_selector, "select_bgm_for_task",
-                                   return_value=dict(candidates[0])) as select_task, \
-                 mock.patch.object(engine_module.bgm_selector, "download_track",
-                                   return_value=source), \
-                 mock.patch.object(engine_module.bgm_selector, "prepare_bgm_track"):
-                engine.prepare_bgm()
-            self.assertEqual(select_task.call_args.kwargs["explicit_music_id"], "catalog-id")
-            self.assertEqual(engine._bgm_choice["requested_label"], "Official Song")
+            engine.m = {"bgm": {"music_id": "Official Song"}, "task_id": "task-1", "full_script": "demo script"}
+            engine.total_us, engine.report_dir = 1_000_000, Path(root)
+            engine.ffmpeg, engine.ffprobe, engine.logger = None, None, None
+            receipt = {"path": str(Path(root)/"final.wav"), "measured_lufs": -28,
+                       "selected": {"music_id": "catalog-id", "title": "Official Song"}}
+            with mock.patch.object(final_bgm, "prepare_task_bgm", return_value=receipt) as prepare:
+                self.assertEqual(engine.prepare_bgm(), receipt["path"])
+            self.assertEqual(prepare.call_args.args[0], {"music_id": "Official Song"})
+            self.assertEqual(engine._bgm_choice["music_id"], "catalog-id")
+            self.assertEqual(engine._bgm_receipt, receipt)
 
     def test_negative_scientific_near_zero_onset_is_leading_but_later_pause_is_not(self):
         initial = ("[silencedetect] silence_start: -2.26757e-05\n"

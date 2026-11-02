@@ -19,6 +19,7 @@ class AIEditorQCIntegrationTests(unittest.TestCase):
         self.addCleanup(self.fixture.doCleanups)
         self.root = self.fixture.root
         self.match = self.fixture.result()
+        self.match["manifest"]["delivery_mode"] = "formal"
         self.segment = self.match["segments"][0]
         self.report = self.root / "report"
         self.draft = self.root / "draft"
@@ -55,12 +56,51 @@ class AIEditorQCIntegrationTests(unittest.TestCase):
     def test_v4_saved_draft_qc_and_standalone_consumer_both_pass(self):
         code, result = self.run_qc()
         self.assertEqual((code, result["status"]), (0, "PASS"), result)
+        self.assertEqual(result["delivery_mode"], "formal")
+        self.assertEqual(result["release_eligibility"], "SHIP_ALLOWED")
         self.assertEqual(visual_qc_contract.report_status(result), "PASS")
         sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
         from tools import production_eval
         self.assertTrue(production_eval.visual_qc_contract.report_matches_draft(result, self.draft))
         self.fixture.video.write_bytes(b"source changed after QC")
         self.assertFalse(production_eval.visual_qc_contract.report_matches_draft(result, self.draft))
+
+    def test_preview_with_all_pixels_matching_never_becomes_formal_pass(self):
+        self.match["manifest"]["delivery_mode"] = "preview"
+        self.write_reports()
+        code, result = self.run_qc()
+        self.assertEqual((code, result["status"]), (2, "UNCERTIFIED"))
+        self.assertEqual(result["delivery_mode"], "preview")
+        self.assertEqual(result["visual_observation_status"], "PASS")
+        self.assertEqual(result["release_eligibility"], "PREVIEW_ONLY")
+        self.assertIn("UPSTREAM_DELIVERY_MODE_PREVIEW", result["preview_only_reasons"])
+        self.assertEqual(visual_qc_contract.report_status(result), "UNCERTIFIED")
+        result["status"] = "PASS"  # persisted status cannot erase preview provenance
+        self.assertEqual(visual_qc_contract.report_status(result), "UNCERTIFIED")
+
+    def test_v4_requires_explicit_build_mode_in_match_and_persisted_report(self):
+        for kind in ("missing", "invalid", "conflict"):
+            with self.subTest(kind=kind):
+                self.match.pop("delivery_mode", None)
+                self.match["manifest"].pop("delivery_mode", None)
+                if kind == "invalid":
+                    self.match["manifest"]["delivery_mode"] = "junk"
+                elif kind == "conflict":
+                    self.match["delivery_mode"] = "formal"
+                    self.match["manifest"]["delivery_mode"] = "preview"
+                self.write_reports()
+                code, result = self.run_qc()
+                self.assertEqual((code, result["status"]), (2, "UNCERTIFIED"))
+                self.assertEqual(result["delivery_mode"], "unknown")
+                self.assertEqual(result["visual_observation_status"], "PASS")
+                self.assertEqual(result["release_eligibility"], "BLOCKED")
+                self.assertEqual(visual_qc_contract.report_status(result), "UNCERTIFIED")
+        self.match.pop("delivery_mode", None)
+        self.match["manifest"]["delivery_mode"] = "formal"
+        self.write_reports()
+        _, result = self.run_qc()
+        result.pop("delivery_mode")
+        self.assertEqual(visual_qc_contract.report_status(result), "UNCERTIFIED")
 
     def test_legacy_response_cannot_certify_ai_draft(self):
         code, result = self.run_qc(visual_qc_contract.RESPONSE_VERSION)

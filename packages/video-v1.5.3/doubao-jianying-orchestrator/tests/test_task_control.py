@@ -17,13 +17,13 @@ import batch_worker  # noqa: E402
 
 class ResultContractTests(unittest.TestCase):
     def test_runtime_version_is_read_from_package(self):
-        self.assertEqual(runtime_version(), "1.5.6")
+        self.assertEqual(runtime_version(), "1.6.0")
 
     def test_logger_ignores_stale_caller_version(self):
         with tempfile.TemporaryDirectory() as raw:
             logger = TaskLogger(Path(raw), {}, version="v1.3.13")
             try:
-                self.assertEqual(logger.version, "1.5.6")
+                self.assertEqual(logger.version, "1.6.0")
             finally:
                 logger.finalize({"status": "ERROR", "error": "test cleanup"})
 
@@ -32,7 +32,7 @@ class ResultContractTests(unittest.TestCase):
             {"status": "ERROR", "message": "VISION_CALL_FAILED: network timeout"},
             task_id="task", run_id="run", task_log="/tmp/task",
         )
-        self.assertEqual(result["pipeline_version"], "1.5.6")
+        self.assertEqual(result["pipeline_version"], "1.6.0")
         self.assertEqual(result["failure_class"], "vision")
         self.assertEqual(result["failure_code"], "VISION_CALL_FAILED")
         self.assertTrue(result["retryable"])
@@ -102,13 +102,13 @@ class ResultContractTests(unittest.TestCase):
             logger = TaskLogger(root, {"task_id": "source-task"})
             result = logger.finalize({"status": "SUCCESS"})
             self.assertEqual(result["run_id"], logger.run_id)
-            self.assertEqual(result["pipeline_version"], "1.5.6")
+            self.assertEqual(result["pipeline_version"], "1.6.0")
             self.assertTrue(result["manifest_sha256"])
             self.assertEqual(result["runtime"]["skill_root"], str(
                 Path(__file__).resolve().parents[1]))
             task = json.loads((logger.task_dir / "task.json").read_text(encoding="utf-8"))
             saved = json.loads((root / "last_result.json").read_text(encoding="utf-8"))
-            self.assertEqual(task["pipeline_version"], "1.5.6")
+            self.assertEqual(task["pipeline_version"], "1.6.0")
             self.assertIn("runtime", task)
             self.assertTrue(saved["safe_to_continue"])
 
@@ -457,7 +457,7 @@ class VisionRetryTests(unittest.TestCase):
                 mock.patch.object(vision_analyzer.time, "sleep"):
             ok, text = vision_analyzer._run_vision_with_retry(
                 Path("sheet.jpg"), "prompt", Path("response.txt"),
-                profile="flash", timeout=1, max_retries=1)
+                timeout=1, max_retries=1)
         self.assertFalse(ok)
         self.assertEqual(text, "502")
         self.assertEqual(call.call_count, 1)

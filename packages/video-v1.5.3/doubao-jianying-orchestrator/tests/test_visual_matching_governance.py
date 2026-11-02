@@ -185,7 +185,7 @@ class RelatedProductCloseupTests(unittest.TestCase):
                 "source_end": 2.0, "frame_exists": True,
                 "status": "pending_analysis", "description": "",
             }
-            key = vision_analyzer._vision_cache_key(manifest, shot, "flash")
+            key = vision_analyzer._vision_cache_key(manifest, shot)
             cache_path = vision_analyzer._vision_cache_path(report_dir)
             cache_path.parent.mkdir(parents=True, exist_ok=True)
             cache_path.write_text(json.dumps({key: {
@@ -198,7 +198,7 @@ class RelatedProductCloseupTests(unittest.TestCase):
             with mock.patch.object(vision_analyzer, "_run_vision_with_retry",
                                   side_effect=AssertionError("cache miss unexpectedly")):
                 result = vision_analyzer.enrich_with_vision(
-                    manifest, {"shots": [shot]}, report_dir, profile="flash")
+                    manifest, {"shots": [shot]}, report_dir)
 
             self.assertEqual(result["vision_analysis"]["cache_hits"], 1)
             self.assertEqual(result["vision_analysis"]["cache_misses"], 0)

@@ -28,7 +28,8 @@ def response(rows=None, **changes):
 
 
 class VisualQcResponseContractTests(unittest.TestCase):
-    def run_main(self, responses, *, claims=1, batch_size=4, write_sheet=None, passes=1):
+    def run_main(self, responses, *, claims=1, batch_size=4, write_sheet=None, passes=1,
+                 after_review=None, match_metadata=None):
         with tempfile.TemporaryDirectory(prefix="visual-qc-contract-") as raw:
             root = Path(raw)
             draft, report = root / "draft", root / "report"
@@ -44,8 +45,10 @@ class VisualQcResponseContractTests(unittest.TestCase):
                                  "target_timerange": {"start": index * 4_000_000, "duration": 4_000_000}})
             (draft / "draft_info.json").write_text(json.dumps({"duration": claims * 4_000_000,
                 "materials": {"videos": materials}, "tracks": [{"name": "video", "segments": segments}]}), encoding="utf-8")
-            (report / "shot_match_report.json").write_text(json.dumps({"segments": [
-                {"text": "揉搓也不掉絮", "temporary_shot_id": str(index)} for index in range(claims)]}), encoding="utf-8")
+            match_data = {"delivery_mode": "formal"} if match_metadata is None else dict(match_metadata)
+            match_data["segments"] = [
+                {"text": "揉搓也不掉絮", "temporary_shot_id": str(index)} for index in range(claims)]
+            (report / "shot_match_report.json").write_text(json.dumps(match_data), encoding="utf-8")
             def output_for_batch(vision, sheet, prompt, output, **kwargs):
                 if callable(responses):
                     return responses(vision, sheet, prompt, output, **kwargs)
@@ -63,6 +66,8 @@ class VisualQcResponseContractTests(unittest.TestCase):
                 for _ in range(passes):
                     code = qc.main()
             result = json.loads((root / "qc.json").read_text(encoding="utf-8"))
+            if after_review is not None:
+                after_review(root, draft, result)
             return result, code, extract.call_count, model.call_args_list
 
     def assert_blocked(self, body, *, status="UNCERTIFIED"):
@@ -80,6 +85,55 @@ class VisualQcResponseContractTests(unittest.TestCase):
         self.assertEqual(result["response_contract"]["status"], "VALIDATED")
         self.assertIn(contract.RESPONSE_VERSION, calls[0].args[2])
         self.assertIn("不得重复", calls[0].args[2])
+
+    def test_legacy_source_change_invalidates_current_draft_binding(self):
+        observed = {}
+        def change_source(root, draft, result):
+            observed["before"] = contract.report_matches_draft(result, draft)
+            Path(result["source_bindings"][0]["path"]).write_bytes(b"different source after QC")
+            observed["after"] = contract.report_matches_draft(result, draft)
+        result, code, _, _ = self.run_main([response()], after_review=change_source)
+        self.assertEqual((code, result["status"]), (0, "PASS"))
+        self.assertTrue(result["source_bindings"])
+        self.assertEqual(observed, {"before": True, "after": False})
+
+    def test_old_report_without_source_bindings_stays_uncertified(self):
+        result, _, _, _ = self.run_main([response()])
+        result.pop("source_bindings")
+        self.assertEqual(contract.report_status(result), "UNCERTIFIED")
+
+    def test_unknown_or_conflicting_build_modes_never_default_to_formal(self):
+        for data in ({}, {"delivery_mode": "junk"}, {"delivery_mode": None},
+                     {"delivery_mode": "formal", "manifest": {"delivery_mode": "preview"}},
+                     {"delivery_mode": "preview", "manifest": {"delivery_mode": "formal"}},
+                     {"delivery_mode": "formal", "manifest": {"delivery_mode": ""}}):
+            with self.subTest(metadata=data):
+                result, code, _, _ = self.run_main([response()], match_metadata=data)
+                self.assertEqual((code, result["status"]), (2, "UNCERTIFIED"))
+                self.assertEqual(result["delivery_mode"], "unknown")
+                self.assertEqual(result["visual_observation_status"], "PASS")
+                self.assertEqual(result["release_eligibility"], "BLOCKED")
+                self.assertIn("DELIVERY_MODE_MISSING_OR_INVALID", result["warnings"])
+
+    def test_explicit_nested_formal_and_consistent_modes_still_pass(self):
+        for data in ({"manifest": {"delivery_mode": "formal"}},
+                     {"delivery_mode": "formal", "manifest": {"delivery_mode": "formal"}}):
+            with self.subTest(metadata=data):
+                result, code, _, _ = self.run_main([response()], match_metadata=data)
+                self.assertEqual((code, result["status"]), (0, "PASS"))
+                self.assertEqual(result["delivery_mode"], "formal")
+                self.assertEqual(result["release_eligibility"], "SHIP_ALLOWED")
+
+    def test_v3_persisted_report_requires_explicit_formal_mode(self):
+        result, _, _, _ = self.run_main([response()])
+        for mode in (None, "", "junk", "preview", "preview_only", "预览"):
+            with self.subTest(mode=mode):
+                changed = dict(result)
+                if mode is None:
+                    changed.pop("delivery_mode")
+                else:
+                    changed["delivery_mode"] = mode
+                self.assertEqual(contract.report_status(changed), "UNCERTIFIED")
 
     def test_partial_success_resumes_only_missing_qc_batch(self):
         attempts = {}
@@ -103,7 +157,7 @@ class VisualQcResponseContractTests(unittest.TestCase):
             return True, json.dumps(response())
         vision._run_vision_with_retry.side_effect = call
         ok, _ = qc._call_qc_model(vision, Path("sheet"), "prompt", Path("out"),
-                                  timeout=360, workdir=Path("."), expected_count=1)
+                                  timeout=360, expected_count=1)
         self.assertTrue(ok)
         self.assertEqual(vision._run_vision_with_retry.call_count, 1)
 

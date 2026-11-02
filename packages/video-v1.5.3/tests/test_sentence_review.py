@@ -10,7 +10,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / 'doubao-jianying-orchestrator'))
-from tools import eval_stage, feedback_candidates as fc, production_eval as pe, sentence_review as sr
+from tools import feedback_candidates as fc, production_eval as pe, sentence_review as sr
 import batch_worker
 from orchestrator.task_inputs import normalize_meeting_task
 
@@ -27,8 +27,7 @@ class SentenceReviewTests(unittest.TestCase):
         pe.write_once(self.task_dir / 'task.json', self.task)
         runtime = {'tool_version': '1.5.6', 'visual_policy_version': 'fixture',
                    'package_sha256': 'a' * 64, 'visual_policy_sha256': 'b' * 64}
-        self.contract = pe.freeze(self.task, 'run-fixture', [self.source], runtime,
-                                  pe.read(ROOT / 'gold-reference.json'))
+        self.contract = pe.freeze(self.task, 'run-fixture', [self.source], runtime)
         pe.write_once(self.task_dir / 'eval' / 'active_contract.json', self.contract)
         self.drafts = self.root / 'drafts'
         pe.write_once(self.drafts / 'draft-fixture' / 'draft_info.json', {'id': 'draft-fixture'})
@@ -52,47 +51,34 @@ class SentenceReviewTests(unittest.TestCase):
     def _raw(self, reviews=None):
         return {**self.binding, 'sentence_reviews': reviews if reviews is not None else [self.review]}
 
-    def test_normalized_frozen_task_snapshot_prepares_real_review_input(self):
+    def test_normalized_frozen_task_snapshot_preserves_exact_input(self):
         task = normalize_meeting_task({**self.task, 'retry_deferred': True, 'retry_error': True})
-        contract = pe.freeze(task, 'run-normalized', [self.source], self.contract['runtime'],
-                             pe.read(ROOT / 'gold-reference.json'))
+        contract = pe.freeze(task, 'run-normalized', [self.source], self.contract['runtime'])
         self.assertNotEqual(pe.digest(self.task), contract['task_sha256'])
         batch_worker._save_frozen_task(self.task_dir, task, contract)
         (self.task_dir / 'eval' / 'active_contract.json').write_text(json.dumps(contract), encoding='utf-8')
-        prepared = eval_stage.prepare(self.task_dir, self.drafts)
-        self.assertEqual(prepared['status'], 'REVIEW_INPUTS_READY')
-        self.assertFalse(pe.read(Path(prepared['mac_review_input']))['approved'])
         with self.assertRaisesRegex(ValueError, 'TASK_CONTRACT_CONTENT_MISMATCH'):
             batch_worker._save_frozen_task(self.task_dir, {**task, 'script': 'changed'}, contract)
         self.assertEqual(pe.digest(pe.read(self.task_dir / 'task.json')), contract['task_sha256'])
 
     def test_record_id_fallback_matches_frozen_identity(self):
         task = normalize_meeting_task({'record_id': 'fixture', 'script': '口播'})
-        contract = pe.freeze(task, 'run-fallback', [self.source], self.contract['runtime'],
-                             pe.read(ROOT / 'gold-reference.json'))
+        contract = pe.freeze(task, 'run-fallback', [self.source], self.contract['runtime'])
         batch_worker._save_frozen_task(self.task_dir, task, contract)
         (self.task_dir / 'eval' / 'active_contract.json').write_text(json.dumps(contract), encoding='utf-8')
-        self.assertEqual(eval_stage.prepare(self.task_dir, self.drafts)['status'], 'REVIEW_INPUTS_READY')
+        pe.verify_contract(contract)
+        self.assertEqual(pe.read(self.task_dir / 'task.json')['record_id'], 'fixture')
 
-    def test_eval_collect_preserves_labels_without_approving_gold_or_mac(self):
-        prepared = eval_stage.prepare(self.task_dir, self.drafts)
-        gold_path, mac_path = Path(prepared['gold_review_input']), Path(prepared['mac_review_input'])
-        gold, mac = pe.read(gold_path), pe.read(mac_path)
-        gold.update(reviewed_by='synthetic-reviewer', sentence_reviews=[self.review])
-        mac['reviewed_by'] = 'synthetic-reviewer'
-        gold_path.write_text(json.dumps(gold))
-        mac_path.write_text(json.dumps(mac))
+    def test_offline_collect_preserves_labels_without_production_side_effects(self):
         ledger = self.root / 'private-labels.jsonl'
-        result = eval_stage.collect(self.task_dir, self.drafts, sentence_ledger=ledger)
-        self.assertEqual(result['gold_status'], 'UNCERTIFIED')
-        self.assertEqual(result['mac_status'], 'UNCERTIFIED')
-        self.assertIsNone(result['approval_file'])
-        self.assertEqual(result['sentence_review_collection']['appended'], 1)
-        receipt = pe.read(Path(result['gold_receipt']))
-        self.assertEqual(receipt['sentence_reviews'][0]['accepted'], [self.candidate])
+        result = sr.collect(self._raw(), self.binding, ledger,
+                            source_hashes={self.source_sha}, script_text=self.task['script'])
+        self.assertEqual(result['appended'], 1)
+        self.assertEqual(result['reviews'][0]['accepted'], [self.candidate])
+        self.assertFalse(result['production_rules_modified'])
         self.assertEqual(fc.read_rows(ledger)[0]['run_id'], 'run-fixture')
-        self.assertEqual(eval_stage.collect(self.task_dir, self.drafts,
-                                           sentence_ledger=ledger)['sentence_review_collection']['appended'], 0)
+        self.assertEqual(sr.collect(self._raw(), self.binding, ledger,
+                                   source_hashes={self.source_sha})['appended'], 0)
 
     def test_opposite_windows_multiple_allowed_and_unknown_are_explicit(self):
         review = copy.deepcopy(self.review)

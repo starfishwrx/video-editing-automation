@@ -1,22 +1,27 @@
 import os
+import json
 import sys
 import tempfile
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from orchestrator import draft_visual_qc, vision_analyzer  # noqa: E402
+from orchestrator import draft_visual_qc, runtime_policy, vision_analyzer, vision_client  # noqa: E402
 from orchestrator.json_extract import (EmptyResponseError, extract_json,  # noqa: E402
                                        iter_json_values)
 
 
-class _SlotEnv(unittest.TestCase):
+class _RequestEnv(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory(prefix="vision_retry_")
         clean = {k: v for k, v in os.environ.items() if not k.startswith("JY_VISION_")}
         clean["JY_SLOT_DIR"] = self._tmp.name
+        clean.update(ARK_API_KEY="synthetic-key", JY_STAGE_DEADLINE_TS="",
+                     JY_TASK_DEADLINE_TS="", JY_CONCURRENCY_POLICY_FILE="")
         self._env = mock.patch.dict(os.environ, clean, clear=True)
         self._env.start()
         self._sleep = mock.patch.object(vision_analyzer.time, "sleep")
@@ -31,11 +36,11 @@ class _SlotEnv(unittest.TestCase):
         with mock.patch.object(vision_analyzer, "_run_vision", side_effect=side_effect) as call:
             result = vision_analyzer._run_vision_with_retry(
                 Path("sheet.jpg"), "prompt", Path("response.txt"),
-                profile="volc", timeout=1, **kwargs)
+                timeout=1, **kwargs)
         return result, call
 
 
-class VisionRetryTests(_SlotEnv):
+class VisionRetryTests(_RequestEnv):
     def test_http_wrapper_does_not_multiply_transport_attempts(self):
         (ok, text), call = self._call([(False, "HTTP 429 Too Many Requests"), (True, "[]")])
         self.assertFalse(ok)
@@ -60,19 +65,56 @@ class VisionRetryTests(_SlotEnv):
         self.assertTrue(vision_analyzer.is_empty_failure(text))
         self.assertEqual(call.call_count, 1)
 
-    def test_rollback_slot_timeout_fails_without_request(self):
-        os.environ["JY_VISION_TRANSPORT"] = "codex"
-        os.environ["JY_VISION_SLOTS"] = "1"
-        os.environ["JY_VISION_SLOT_TIMEOUT"] = "0"
-        with vision_analyzer._vision_slot() as held:
-            self.assertTrue(held.acquired)
-            (ok, text), call = self._call([(True, "[]")])
+    def test_validator_and_logical_attempt_callback_reach_single_transport_call(self):
+        validator = lambda data: isinstance(data, list)
+        callback = mock.Mock()
+        (ok, _), call = self._call([(True, "[]")], validator=validator, on_attempt=callback)
+        self.assertTrue(ok)
+        self.assertIs(call.call_args.kwargs["validator"], validator)
+        callback.assert_called_once_with(1, 2, "")
+        for obsolete in ("profile", "workdir", "schema", "require_slot"):
+            self.assertNotIn(obsolete, call.call_args.kwargs)
+
+    def test_shared_http_client_owns_retries_slots_and_recovery_budget(self):
+        from test_vision_client import LocalHTTP, answer
+        acquisitions = []
+
+        @contextmanager
+        def client_slot(timeout=None):
+            acquisitions.append(timeout)
+            yield SimpleNamespace(acquired=True, waited=0.0)
+
+        output = Path(self._tmp.name) / "response.json"
+        with LocalHTTP({"status": 503}, {"payload": answer("[]")}) as server, \
+             mock.patch.object(vision_client, "vision_slot", client_slot), \
+             mock.patch.object(vision_client.random, "uniform", return_value=0), \
+             mock.patch.object(runtime_policy, "vision_slot", side_effect=AssertionError("outer slot forbidden")):
+            os.environ["JY_VOLC_BASE_URL"] = server.url.rsplit("/chat/completions", 1)[0]
+            first = vision_analyzer._run_vision_with_retry(
+                None, "prompt", output, timeout=2, validator=lambda data: isinstance(data, list))
+            second = vision_analyzer._run_vision_with_retry(
+                None, "prompt", output, timeout=2, validator=lambda data: isinstance(data, list))
+        self.assertEqual(first, (True, "[]"))
+        self.assertEqual(second, first)
+        self.assertEqual(len(server.calls), 2)
+        self.assertEqual(len(acquisitions), 2)
+        ledger = json.loads(output.with_suffix(".call.json").read_text(encoding="utf-8"))
+        self.assertEqual(ledger["attempts"], 2)
+        self.assertEqual(ledger["attempt_limit"], 2)
+
+    def test_authentication_failure_has_one_http_attempt_and_no_outer_retry(self):
+        from test_vision_client import LocalHTTP, available_slot
+        output = Path(self._tmp.name) / "authentication.json"
+        with LocalHTTP({"status": 401}) as server, \
+             mock.patch.object(vision_client, "vision_slot", available_slot):
+            os.environ["JY_VOLC_BASE_URL"] = server.url.rsplit("/chat/completions", 1)[0]
+            ok, text = vision_analyzer._run_vision_with_retry(None, "prompt", output, timeout=2)
         self.assertFalse(ok)
-        self.assertIn("SLOT_TIMEOUT", text)
-        call.assert_not_called()
+        self.assertIn("AUTHENTICATION", text)
+        self.assertEqual(len(server.calls), 1)
 
 
-class QcEmptyResponseTests(_SlotEnv):
+class QcEmptyResponseTests(_RequestEnv):
     def test_empty_text_never_parses_as_pass(self):
         with self.assertRaises(ValueError):
             draft_visual_qc._parse_model("")

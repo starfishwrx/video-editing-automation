@@ -1,9 +1,9 @@
 ---
 name: doubao-jianying-orchestrator
-description: Build and recover editable Jianying video drafts from task manifests using evidence-based shot matching, narration timing, visual QC, and human review gates. Use with the sibling jianying-editor skill for video automation.
+description: Build and recover editable Jianying drafts from task manifests through the Windows video pipeline, with evidence-based shot matching, narration timing, independent visual QC and delivery checks. Use with the sibling jianying-editor skill for video automation.
 ---
 
-# Doubao/Jianying orchestrator v1.5.6
+# Doubao/Jianying orchestrator v1.6.0
 
 纸品生产规则见包根`docs/PAPER_PRODUCTION_RULES.md`：13类语义视觉合同共用于分析、AI选镜和独立QC；
 口播默认1.3倍、清洁画面优先1.3倍、硬切、实际气口不超过5帧、字幕像素X=0/Y=-528。
@@ -11,7 +11,7 @@ description: Build and recover editable Jianying video drafts from task manifest
 
 完成标准：产出可打开、媒体可读、旁白与画面时长匹配、字幕内容正确的剪映草稿，
 并记录独立视觉 QC 的结果。模型失败或证据不足保留待审状态，不虚报正式完成。
-任务级 Eval、Gold 对照和 Mac 审阅按已配置的生产流程启用；它们不是普通源码修复的前置仪式。
+整个项目使用 Windows 完整流水线入口 `scripts/run_pipeline.ps1`，由 `tools/workflow/scheduled.py` 调用现有 dispatcher，串起素材理解、选镜、TTS、建稿、独立视觉 QC、Windows 检查和合格交付。定时脚本运行这条完整流水线，不另建人工交接或审核子流程。
 源码合并以代码审查和离线回归为准，生产安装与真实成片验收分别记录。
 哈希只用于需要复用的缓存或运输完整性，不要求源码、模型快照、提示词、拼图和收据逐层签名。
 
@@ -57,7 +57,6 @@ legacy 的 QC v3 响应、旧场景重排复验及历史人工反馈回放见包
 
 - `JY_SKILL_ROOT`、`JY_DRAFT_ROOT`、`JY_INSTALL_ROOT`
 - `JY_NAS_SHARE`、`JY_NAS_USER`、`NAS_PASSWORD`
-- `JY_MAC_DRAFT_ROOT`
 - `LARK_BASE_TOKEN`
 
 引擎职责：素材理解、语义分段、证据匹配、稳定切片、字幕写入、草稿结构校验和可回放证据生成。它不负责把视觉业务规则升级为通用 Diaodu/RDM 规则。
@@ -67,7 +66,7 @@ legacy 的 QC v3 响应、旧场景重排复验及历史人工反馈回放见包
 1. 先生成素材理解和匹配证据，再写入草稿。
 2. 任何视觉模型失败或证据不足都必须阻断正式 `PASS`。
 3. 只重做失败语义段，保留已完成稿和 deferred indices。
-4. 分发和表格回写必须经过独立人工检查凭证。
+4. 分发和表格回写前先验证明确formal来源、当前草稿真实独立QC PASS及完整Windows检查；预览或来源未知不得转正。
 5. 版本号从运行时实际文件回读，禁止在提示词中手写版本。
 
 安全继续与恢复：
@@ -81,8 +80,11 @@ legacy 的 QC v3 响应、旧场景重排复验及历史人工反馈回放见包
   分别从对应阶段恢复，不重新做视觉分析。
 - 视觉服务调用最多进行一次有限重试；凭据、路径、编码和余额错误直接停机。
 - 视觉默认直连火山 Ark `glm-5.3-flash`（`JY_VISION_TRANSPORT=volc_glm`），密钥放
-  `ARK_API_KEY`（或 `JY_VOLC_API_KEY`）。批次与槽位并发默认 20。`codex` /
-  `anthropic` 只作显式 legacy 回滚（需同时选择 legacy；AI editor 要求直连）；完整型号是 GLM-5.3-Flash，不是 GLM-5.3 或 ChatGLM3。媒体解码默认全部走 GPU（`JY_GPU_DECODE_CODECS=*`，
+  `ARK_API_KEY`（或 `JY_VOLC_API_KEY`）。批次与槽位并发默认 20。GLM 别名为 `glm` / `volc`；
+  千问使用 `qwen` / `qwen_compatible` 及 `JY_QWEN_*`。所有选镜策略只走这两类直连，
+  Codex CLI、Anthropic 与 CCSwitch 调用已移除；旧通道和未知值直接拒绝。
+  文字复核和 `JY_AI_EDITOR_QWEN` 保留，配置见包根 `ENVIRONMENT.md`。
+  完整默认型号是 GLM-5.3-Flash，不是 GLM-5.3 或 ChatGLM3。媒体解码默认全部走 GPU（`JY_GPU_DECODE_CODECS=*`，
   单帧默认开启），显存不足或槽位超时仍回退 CPU。
 - `draft_write` 只接受 `semantic_match` 产生的成功嵌套结果；原始 manifest 或损坏缓存
   不得作为恢复输入。桌面诊断失败保持 `DESKTOP_IMPORT_BLOCKED` / `PACKAGE_NOT_ACTIVE`。
@@ -93,6 +95,11 @@ legacy 的 QC v3 响应、旧场景重排复验及历史人工反馈回放见包
   `result.json`/`events.jsonl`，否则继续队列会停在当前任务。
 - 队列选择后的生成前预检会验证包版本、素材目录与视频池、草稿根目录父路径和脚本；
   预检失败直接写 `ENVIRONMENT_PRECHECK_FAILED`，不得触发 TTS、视觉分析或建稿。
+
+历史 JyPoll/JyRun 已退役；`jy_poll.ps1` 与 `run_task.template.ps1` 仅作立即失败的迁移提示。
+整个项目通过 `scripts/run_pipeline.ps1` 执行本地队列；`-DryRun` 只检查/规划，不调用生产阶段。配置沿用 `examples/config.example.ps1` 和私有 `work/config.local.ps1`，读取已有 `JY_WORK_ROOT`、`JY_DRAFT_ROOT` 等环境变量；默认配置路径为 `-WorkRoot` 下的 `config.local.ps1`。显式 `-PythonPath`、`-WorkRoot`、`-DraftRoot`、`-QueuePath` 参数优先，可用 `-ConfigPath` 指定本地文件；默认Python为包内 `.venv/Scripts/python.exe`，部署建议显式提供。
+Windows 计划任务调用同一个完整流水线入口；`scripts/install_pipeline_task.ps1` 仅在明确执行注册时设置任务，源码更新不会自动注册、启用或替换已有生产脚本。并发运行通过文件锁互斥，运行状态和收据保留在所配置工作根的 `pipeline_state.json` 与 `pipeline_runs/`。
+单条隔离任务仍可使用 manifest CLI；素材或模型失败从相应阶段恢复，保留已有TTS和选镜证据，不把旧预览来源默认改成formal。
 
 命令、运行路径和验收合同见 [references/runtime_contract.md](references/runtime_contract.md)。
 预览留空补镜和这次生产踩过的坑见 [references/preview_gap_and_pitfalls.md](references/preview_gap_and_pitfalls.md)。

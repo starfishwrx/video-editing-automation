@@ -4,13 +4,24 @@
 
 ## 初次使用
 
+- [Windows 整体脚本与定时运行](windows-pipeline.md)：完整流水线、配置、状态和恢复。
 - [快速开始](quickstart.md)：安装、离线验证、合成抽帧示例与真实任务预览入口。
 - [模型与视觉流程](model-and-vision.md)：默认 GLM-5.3-Flash 的完整型号、图片输入与配置优先级。
 - [环境配置](../packages/video-v1.5.3/ENVIRONMENT.md)：本地依赖、模型/API、路径与生产集成变量。
 - [贡献与分支约定](../CONTRIBUTING.md)：功能分支、PR、CI、tag/Release 的职责。
 
-当前维护包是 `video-v1.5.3/`（VERSION 为 1.5.6）；1.5.4/1.5.5 是隔离索引实验。
+当前维护包是 `video-v1.5.3/`（本功能分支候选 VERSION 为 1.6.0）；1.5.4/1.5.5 是隔离索引实验。
 下载包与生产安装分别核对，见根 README 的[版本与下载](../README.md#版本与下载)。
+
+## 当前边界与接续位置
+
+1.6.0 默认建稿已接无头后端及空 BGM 自动选曲，并贯通当前原生稿 QC、NAS 与版本恢复；正式质量门禁继续生效。实际本机启用状态读取 ACTIVE_VIDEO_RUNTIME.json；独立时间线与完整原生导出验收的边界见程序化生产页面。
+
+- 默认生产：Windows 脚本 → 素材/选镜/配音 → 剪映写稿 → 独立视觉 QC → 四项自动验收。源码候选、GitHub 集成与生产安装分别确认。
+- 已有基础：功能包迁移、旧 Agent 调度退役、GLM/Qwen 直连及 Windows 验收。旧平铺模块仅为兼容导入，实际归属见[模块化开发](modular-development.md)。
+- 隔离验证：[纸品选镜回放](paper-selection-replay.md)和[动作事实/帧级窗口](paper-action-windows.md)只用于诊断，不代表默认生产或真实内容已通过。
+- 显式开发入口：[独立时间线与无草稿工作预览](programmatic-production.md)已实现固定选镜、音频/字幕准备、独立渲染与检查骨架；技术结果保持未认证。动作自动接入、内容/观看验收、末端导出与调度恢复仍按[实施方案](plans/20261101-programmatic-production.md)推进。
+- 验证入口：[测试策略](test.md)区分离线程序检查、真实视频效果和剪映可编辑性；本轮具体结果见[开发记录](working.md)。
 
 ## 维护与 Agent 入口
 
@@ -28,6 +39,7 @@
 | 文件 | 内容 |
 |---|---|
 | [`architecture.md`](architecture.md) | 端到端数据流 |
+| [`modular-development.md`](modular-development.md) | 架构审计、功能包边界、旧入口与新增功能开发规则 |
 | [`code-standards.md`](code-standards.md) | 微秒口径、闸门形态、凭据、依赖 |
 | [`agent-loops.md`](agent-loops.md) | Issue/反馈/夜间审计三类循环提示词 |
 | [`release-process.md`](release-process.md) | 合包发版流程 |
@@ -35,10 +47,17 @@
 
 ## 会议与功能计划
 
+- [独立时间线、生产验收与末端剪映导出](plans/20261101-programmatic-production.md)：基于 `feat/paper-shot-retiming` 的分期方案，保留可编辑草稿交付；当前实现和剩余边界见[开发入口](programmatic-production.md)，生产未切换。
+
 | 文件 | 内容与状态 |
 |---|---|
 | [2026-10-26 会议功能计划](plans/20261026_feature_plan.md) | 原计划与验收标准；功能源码候选已提交，部署和完整成片验收待完成 |
 | [会议功能实现记录](meeting-features-20261026.md) | F01–F08行为、配置、无头验证及未完成验收项 |
+
+## 隔离诊断
+
+- [纸品选镜单模块验证](paper-selection-replay.md)：固定原音轨与句长的 A/B 诊断入口，保留未解决项与失败结论。
+- [纸品动作事实与帧级窗口](paper-action-windows.md)：源帧事件观察、有限 CFR/FPS 支持及实际选帧复查。
 
 ## 子系统
 

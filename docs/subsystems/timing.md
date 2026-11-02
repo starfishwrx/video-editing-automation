@@ -1,6 +1,6 @@
 # 子系统：时序契约（timing）
 
-- 代码：`packages/video-v1.5.3/doubao-jianying-orchestrator/orchestrator/timing_contract.py`, `stability.py`
+- 代码：`packages/video-v1.5.3/doubao-jianying-orchestrator/orchestrator/selection/timing_contract.py`、`orchestrator/media/stability.py`
 
 ## 1. 职责
 统一“够不够长”的唯一真时钟：以 µs 为单位，在规划与引擎两侧用同一套求解器/不变量，解决“估长/占位探针/最终裁决不一致”导致的整支拦截。
@@ -41,6 +41,8 @@
 
 ## 7. 稳定/转场建议（`stability.py`）
 - 低帧率小尺寸灰度帧 + `tblend=difference` 估算帧间差，搜索 `±search_span` 内的稳定窗口；避开黑场/静帧；必要时微调入点；给出“是否需叠化”的建议
+
+纸品隔离求解另见[动作帧域窗口](../paper-action-windows.md)，其倍率与帧率限制不自动替换默认生产的求解合同。
 
 ## 8. 测试
 - `test_timing_contract.py` 覆盖窗口求解/多镜/不变量/速度吸附/证据覆盖/边界容差；`test_video_decode.py`/`test_video_encode.py` 覆盖 GPU/回退链

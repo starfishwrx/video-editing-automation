@@ -1,9 +1,9 @@
 import io
 import json
 import os
+import subprocess
 import tempfile
 import unittest
-import urllib.error
 from pathlib import Path
 from unittest import mock
 
@@ -32,12 +32,30 @@ class VolcDirectTests(unittest.TestCase):
     def test_unset_transport_defaults_to_volc_glm(self):
         self.assertEqual(vision_analyzer._vision_transport(), "volc_glm")
         self.assertEqual(vision_analyzer._requested_batch_workers(), 20)
-        self.assertTrue(vision_analyzer._direct_http_transport())
 
-    def test_codex_rollback_keeps_single_worker(self):
-        os.environ["JY_VISION_TRANSPORT"] = "codex"
-        self.assertEqual(vision_analyzer._vision_transport(), "codex")
-        self.assertEqual(vision_analyzer._requested_batch_workers(), 1)
+    def test_supported_transport_aliases_resolve_explicitly(self):
+        for value, expected in (("", "volc_glm"), ("volc_glm", "volc_glm"),
+                                ("glm", "volc_glm"), ("volc", "volc_glm"),
+                                ("qwen", "qwen"), ("qwen_compatible", "qwen")):
+            with self.subTest(value=value):
+                os.environ["JY_VISION_TRANSPORT"] = value
+                self.assertEqual(vision_analyzer._vision_transport(), expected)
+                self.assertEqual(vision_analyzer._requested_batch_workers(), 20)
+
+    def test_unsupported_transport_fails_before_http_or_process(self):
+        for value in ("codex", "anthropic", "ccswitch", "typo-provider"):
+            with self.subTest(value=value), \
+                 mock.patch.dict(os.environ, {"JY_VISION_TRANSPORT": value}), \
+                 mock.patch.object(vision_client, "post_chat") as post, \
+                 mock.patch.object(subprocess, "Popen") as process:
+                with self.assertRaisesRegex(ValueError, "UNSUPPORTED_VISION_TRANSPORT:" + value):
+                    vision_analyzer._vision_transport()
+                with self.assertRaisesRegex(ValueError, "UNSUPPORTED_VISION_TRANSPORT:" + value):
+                    vision_analyzer._run_vision(None, "prompt", self.root / "out.txt", timeout=1)
+                with self.assertRaisesRegex(ValueError, "UNSUPPORTED_VISION_TRANSPORT:" + value):
+                    vision_analyzer._requested_batch_workers()
+                post.assert_not_called()
+                process.assert_not_called()
 
     def test_direct_glm_posts_chat_completions_with_image(self):
         os.environ["ARK_API_KEY"] = "ark-test-key-value"
@@ -49,9 +67,10 @@ class VolcDirectTests(unittest.TestCase):
             captured.update(url=url, auth=f"Bearer {api_key}", body=body, **kwargs)
             return vision_client.VisionCallResult(True, text='{"shots":[]}')
 
-        with mock.patch.object(vision_client, "post_chat", side_effect=post):
+        with mock.patch.object(vision_client, "post_chat", side_effect=post), \
+             mock.patch.object(subprocess, "Popen", side_effect=AssertionError("provider process forbidden")):
             ok, text = vision_analyzer._run_vision(
-                sheet, "看图", self.root / "out.txt", profile="volc", timeout=30)
+                sheet, "看图", self.root / "out.txt", timeout=30)
         self.assertTrue(ok)
         self.assertEqual(text, "{\"shots\":[]}")
         self.assertTrue(captured["url"].endswith("/api/plan/v3/chat/completions"))
@@ -120,17 +139,17 @@ class VolcDirectTests(unittest.TestCase):
         sheet.write_bytes(b"\xff\xd8\xff\xd9")
         with mock.patch.object(vision_client, "post_chat", return_value=vision_client.VisionCallResult(True, text='{"shots":[]}')) as post, \
                 mock.patch.object(vision_analyzer, "_run_volc_chat") as glm:
-            ok, _ = vision_analyzer._run_vision(sheet, "prompt", self.root / "out.txt", profile="test", timeout=30)
+            ok, _ = vision_analyzer._run_vision(sheet, "prompt", self.root / "out.txt", timeout=30)
             self.assertTrue(ok)
             body = post.call_args.args[2]
             self.assertEqual(body["model"], "qwen-test")
             self.assertIs(body["enable_thinking"], False)
             self.assertTrue(body["messages"][0]["content"][1]["image_url"]["url"].startswith("data:image/jpeg;base64,"))
-            self.assertEqual(vision_analyzer._vision_summary("test", [], [], [], partial=False)["model"], "qwen-test")
+            self.assertEqual(vision_analyzer._vision_summary([], [], [], partial=False)["model"], "qwen-test")
             glm.assert_not_called()
         del os.environ["JY_QWEN_API_KEY"]
         with mock.patch.object(vision_client, "post_chat") as post:
-            ok, error = vision_analyzer._run_vision(sheet, "prompt", self.root / "missing.txt", profile="test", timeout=30)
+            ok, error = vision_analyzer._run_vision(sheet, "prompt", self.root / "missing.txt", timeout=30)
             self.assertFalse(ok)
             self.assertEqual(error, "QWEN_CONFIG_MISSING")
             post.assert_not_called()
@@ -141,9 +160,23 @@ class VolcDirectTests(unittest.TestCase):
         shot = {"video": str(video), "source_start": 0, "source_end": 1}
         os.environ.update(JY_VISION_TRANSPORT="qwen", JY_QWEN_BASE_URL="https://example.invalid/v1",
                           JY_QWEN_MODEL="qwen-a", JY_QWEN_API_KEY="sk-test-key")
-        a = vision_analyzer._vision_cache_key({"product": "test"}, shot, "test")
+        a = vision_analyzer._vision_cache_key({"product": "test"}, shot)
         os.environ["JY_QWEN_MODEL"] = "qwen-b"
-        b = vision_analyzer._vision_cache_key({"product": "test"}, shot, "test")
+        b = vision_analyzer._vision_cache_key({"product": "test"}, shot)
         os.environ["JY_QWEN_BASE_URL"] = "https://other.invalid/v1"
-        c = vision_analyzer._vision_cache_key({"product": "test"}, shot, "test")
+        c = vision_analyzer._vision_cache_key({"product": "test"}, shot)
         self.assertEqual(len({a, b, c}), 3)
+
+    def test_obsolete_profile_environment_does_not_invalidate_observation_keys(self):
+        from orchestrator import phase_timing
+        video = self.root / "video.mp4"
+        video.write_bytes(b"source")
+        shot = {"video": str(video), "source_start": 0, "source_end": 1}
+        scene = {"id": "action", "phases": [{"name": "result", "describe": "visible result"}]}
+        manifest = {"product": "test"}
+        first = (vision_analyzer._vision_cache_key(manifest, shot),
+                 phase_timing._cache_key(shot, scene))
+        with mock.patch.dict(os.environ, {"JY_VISION_PROFILE": "obsolete-local-profile"}):
+            second = (vision_analyzer._vision_cache_key(manifest, shot),
+                      phase_timing._cache_key(shot, scene))
+        self.assertEqual(second, first)

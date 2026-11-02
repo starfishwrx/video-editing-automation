@@ -51,7 +51,7 @@ class SharedProductVisionCacheTests(unittest.TestCase):
 
     def run_task(self, task, manifest=None, analysis=None):
         return vision.enrich_with_vision(manifest or self.manifest,
-            analysis or self.analysis(), self.report(task), profile="volc")
+            analysis or self.analysis(), self.report(task))
 
     def test_different_tasks_and_shot_ids_reuse_both_vision_and_verified_text(self):
         with mock.patch.object(vision, "_run_vision_with_retry", side_effect=self.response) as api:
@@ -106,7 +106,7 @@ class SharedProductVisionCacheTests(unittest.TestCase):
         row = json.loads(_first_pass())["shots"][0]
         row.update(status="ready_for_matching", action_complete=True, analysis_confidence=0.8,
                    text_pass="hires", text_agreed=["verified"], readable_claims=["verified"])
-        key = vision._vision_cache_key(self.manifest, self.analysis()["shots"][0], "volc")
+        key = vision._vision_cache_key(self.manifest, self.analysis()["shots"][0])
         legacy = self.work / "old_task" / ".cache" / "material_vision.json"
         legacy.parent.mkdir(parents=True)
         legacy.write_text(json.dumps({key: row}), encoding="utf-8")

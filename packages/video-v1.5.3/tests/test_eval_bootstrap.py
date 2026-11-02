@@ -71,10 +71,17 @@ class EvalBootstrapTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "ACTIVE_EVAL_INPUT_DRIFT"):
                 eval_bootstrap.prepare(self.task_path, ROOT, self.mapping_path)
 
-    def test_enforce_requires_real_observations(self):
-        with mock.patch.object(eval_bootstrap.pe, "runtime_identity", return_value={}):
-            with self.assertRaisesRegex(ValueError, "EVAL_ROLLOUT_REQUIRES_TWO_VERIFIED_REAL_TASKS"):
-                eval_bootstrap.prepare(self.task_path, ROOT, self.mapping_path, mode="enforce")
+    def test_enforce_freezes_confirmed_inputs_without_manual_rollout_history(self):
+        runtime = {"tool_version": "fixture", "visual_policy_version": "fixture",
+                   "package_sha256": "a" * 64, "visual_policy_sha256": "b" * 64}
+        with mock.patch.object(eval_bootstrap.pe, "runtime_identity", return_value=runtime):
+            result = eval_bootstrap.prepare(self.task_path, ROOT, self.mapping_path, mode="enforce")
+        self.assertEqual(result["status"], "FROZEN")
+        frozen = eval_bootstrap.pe.read(self.root / "eval" / "active_contract.json")
+        self.assertEqual(frozen["mode"], "enforce")
+        self.assertEqual([row["id"] for row in frozen["eval_contract"]["acceptance_criteria"]],
+                         list(eval_bootstrap.pe.CRITERIA))
+        self.assertNotIn("gold_reference", frozen)
 
 
 if __name__ == "__main__":

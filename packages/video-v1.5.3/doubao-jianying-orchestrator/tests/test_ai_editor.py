@@ -1,13 +1,11 @@
 """Selection behavior and stale/fabricated receipt blockers without API calls."""
 import copy
-import contextlib
 import json
 from pathlib import Path
 import sys
 import tempfile
 import unittest
 from unittest import mock
-from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -617,8 +615,7 @@ class AIEditorTests(unittest.TestCase):
         output = self.root / "response.json"
         sheet = self.root / "sheet.jpg"
         sheet.write_bytes(b"synthetic image")
-        with mock.patch.object(vision_analyzer, "_vision_slot", side_effect=lambda: contextlib.nullcontext(SimpleNamespace(acquired=True))), \
-                mock.patch.object(vision_analyzer, "_run_volc_chat", return_value=(True, '{"ok":true}')) as provider, \
+        with mock.patch.object(vision_analyzer, "_run_volc_chat", return_value=(True, '{"ok":true}')) as provider, \
                 mock.patch.dict("os.environ", {"JY_VISION_TRANSPORT": "volc_glm", "JY_VISION_MODEL": "synthetic"}):
             editor._call("prompt", output, sheet)
             editor._call("prompt", output, sheet)
@@ -722,7 +719,7 @@ class AIEditorTests(unittest.TestCase):
         with mock.patch.object(cli, "_run_shot_analysis", return_value=analysis), \
                 mock.patch("orchestrator.material_corrections.apply", side_effect=lambda _m, a, _r: a), \
                 mock.patch.object(editor, "prepare", return_value={**analysis, "ai_editor_plan": {"ok": False}}) as prepare, \
-                mock.patch.object(vision_analyzer, "match_with_codex") as legacy, \
+                mock.patch.object(vision_analyzer, "match_sentences") as legacy, \
                 mock.patch.dict("os.environ", {"JY_SELECTION_MODE": ""}):
             _, blocker = cli._temporary_match({"segments": [{"text": "看看这个"}]}, self.root / "input.json", self.root)
         self.assertEqual(prepare.call_args.args[0]["selection_mode"], "ai_editor")

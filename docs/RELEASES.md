@@ -1,5 +1,10 @@
 # Release archive notes
 
+## 1.6.0 feature-branch candidate
+
+Default native headless draft writer and empty-BGM auto selection are integrated with current-output QC, NAS distribution, retry and version recovery. The licensed backend remains a separate installation. Fresh-unpack full checks: 231 package and 1032 orchestrator tests pass without skips. GitHub release assets and host activation are separate from this source candidate.
+
+
 ## Source / download / deployment status (checked 2026-10-24)
 
 - Maintained default source: `packages/video-v1.5.3/`, with `VERSION` 1.5.6;

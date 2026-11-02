@@ -2,7 +2,23 @@
 
 目标：让后续 agent 知道「什么算验证完成」，而不是只复制一条命令。
 
-## 1. 默认离线回归（每次功能 PR）
+## 0. 日常按改动范围验证
+
+单模块小改动默认跑对应模块及直接调用方；跨模块、公共合同、正式质量／交付门禁变化才跑完整两套。PR 的 CI 保持全量，发版在最终解压目录跑一次全量。本地已完成对应验证且代码没有再改时，不为提交或安装重复运行同一套全量；发版仍须验证全新解压包。安装后只做入口与依赖回读、必要的实际案例检查。
+
+例如修改自动 BGM，执行以下定向回归（当前共35项）：
+
+```powershell
+uv run --frozen python -X utf8 -m unittest discover -s doubao-jianying-orchestrator/tests -p "test_*bgm.py" -q
+uv run --frozen python -X utf8 -m unittest discover -s doubao-jianying-orchestrator/tests -p test_default_headless.py -q
+uv run --frozen python -X utf8 -m tools.check_architecture
+```
+
+范围不确定或涉及共享接口时使用全量。失败后先定向验证修复；最终是否重跑全量由新增改动范围决定。
+
+只检查源码字符串、文档数字、重复文件存在性且已有行为覆盖的用例可删除。优先验证实际调用、生成结果与应拦住的输入。动作／结果证据、完整口播、正式交付、NAS路径与恢复等测试继续保留，不为减少统计数删掉不同失败边界。
+
+## 1. 完整离线回归（跨模块／门禁／发版）
 
 在活包根执行（必须用 uv）：
 
@@ -11,6 +27,7 @@ cd packages/video-v1.5.3
 uv sync --frozen
 uv run --frozen python -X utf8 -m unittest discover -s tests -q
 uv run --frozen python -X utf8 -m unittest discover -s doubao-jianying-orchestrator/tests -q
+uv run --frozen python -X utf8 -m tools.check_architecture
 ```
 
 | 套件 | 覆盖什么 |
@@ -28,15 +45,29 @@ uv run --frozen python -X utf8 -m unittest discover -s doubao-jianying-orchestra
 
 文档中的合成视频/`analyze-shots --no-vision` 示例见 `docs/quickstart.md`，可在准备 FFmpeg 后本地验证；它验证素材解析与抽帧，不作为视觉效果验收。模型、prompt 或选镜逻辑变更还需单独记录真实图片观察和人工审阅。
 
-## 2. 局部迭代（可缩小）
+## 2. 定向回归（小改动默认）
+
+模块边界检查：活包根运行 `uv run --frozen python -X utf8 -m tools.check_architecture`。`tests/test_modular_architecture.py` 验证旧/新导入共享状态、纯合同不加载引擎、中文空格路径副本资源、独立文件加载规则与反向依赖拒绝。`test_closed_loop_entrypoints.py` 覆盖两个旧入口、任意 cwd、importlib 独立命名空间、非 PASS、预览转正式和四项当前证据拦截；`test_queue_contracts.py` 与编排器 `test_media_boundary.py` 覆盖抽出的任务合同和媒体操作。新模块必须进入全新解压包后仍能运行。
 
 | 改动面 | 可先跑 |
 |---|---|
+| BGM选曲／准备 | `test_*bgm.py` + `test_default_headless.py` |
+| 无头建稿／字幕 | `test_default_headless.py`、`test_meeting_caption_integration.py`、`test_timeline_export.py` |
+| AI选镜 | `test_ai_editor*.py`；涉及卖点证据时加 `test_visual_qc_response_contract.py` |
+| 时间窗求解 | `test_timing_contract.py`；纸品动作另加 `test_paper_action_windows.py` |
 | 草稿交付 / 媒体路径 | `test_draft_delivery.py` |
 | NAS 往返 | `test_nas_portable.py` |
 | 单一闸门 | 对应 `test_*gate*` / 模块测试，且必须含「该拦的输入被拦住」 |
 
 普通源码 PR 依据适用离线回归、代码审查与目标 Windows CI 合并；真实成片、GUI 编辑及生产安装另行验收，不要求每次源码修复都先出两条成片。准备发版时才运行第 3 节。
+
+## 2.1 实际媒体与端到端验收
+
+独立时间线的固定输入开发入口见[程序化生产](programmatic-production.md)。`test_edit_timeline.py`、`test_production_timeline.py`、`test_timeline_render.py` 覆盖无草稿预检、重复句与多镜、实际音频和派生资产、CFR/非零 PTS、逐帧像素对应、保护末帧、原声偏移拒绝、字幕边界和失败修订。`tools.production_demo` 在新的包外目录生成三路音轨和可播放合成预览；检查总体保持 UNCERTIFIED，不取代真实商品内容与剪映可编辑性验收。
+
+合成 FFmpeg 测试验证源帧/PTS、变速、结果帧、音频和字幕执行；缺少 FFmpeg 时的 skip 不代表媒体行为通过。准备绿色工具后需把其目录加入当前进程 PATH，并设置 FFMPEG_BIN/FFPROBE_BIN，再运行两套回归。
+
+当前有 CLI、调度、草稿/交付夹具和合成媒体集成测试；真实商品从自动选镜到专业编辑接受的完整端到端质量，不由离线套件认证。纸品隔离验证保留已有失败，详情见[动作帧域窗口](paper-action-windows.md)和[回放说明](paper-selection-replay.md)。独立时间线方案的阶段验收见[实施方案](plans/20261101-programmatic-production.md)。
 
 ## 3. 发版验收（合包命令）
 
@@ -55,11 +86,13 @@ uv run --frozen python -X utf8 -m tools.release_package build --output $releaseO
 
 需要真实环境变量与素材，默认跳过：
 
-- 两条真实任务观察（不同脚本/素材），人工或 Mac 审阅。
-- `JY_EVAL_MODE=observe` → 收齐观察收据后再考虑 `enforce`。
+- Windows 上运行真实任务，分别检查独立视觉 QC、剪映可编辑性和共享交付结果。
+- 自动验收始终要求四项核心 PASS，无需观察收据或人工 prepare/collect。
 - 凭据缺失必须有界失败，禁止硬编码兜底。
 
-## 5. 手工验收看什么 artifact
+定时入口的离线回归覆盖防重入、重复触发、预览跳过、有限重试与任务间故障隔离；不会注册真实计划任务或调用真实视觉 API。
+
+## 5. 真机观察看什么 artifact
 
 - `report/` 下选镜、场景规则、视觉 QC JSON。
 - `last_result.json` / `task_log` 终态与未认证理由。

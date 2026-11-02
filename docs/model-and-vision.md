@@ -14,7 +14,7 @@
 - 图片入参：`messages[].content[]` 中的 `image_url`，其值为图片字节的 Base64 Data URL。
 - 出参：模型生成文字/JSON；程序继续验证字段、时间范围、覆盖与身份，返回 JSON 本身不等于通过。
 
-配置来自 [`vision_analyzer._vision_transport` 与 `_volc_settings`](../packages/video-v1.5.3/doubao-jianying-orchestrator/orchestrator/vision_analyzer.py)。源码默认值可以被进程环境覆盖；生产实际型号需结合该次配置及请求/响应收据核对。
+通道白名单来自 [`runtime/vision_config.py`](../packages/video-v1.5.3/doubao-jianying-orchestrator/orchestrator/runtime/vision_config.py)，服务参数来自 [`vision/vision_analyzer.py` 的 `_volc_settings` / `_qwen_settings`](../packages/video-v1.5.3/doubao-jianying-orchestrator/orchestrator/vision/vision_analyzer.py)。源码默认值可以被进程环境覆盖；生产实际型号需结合该次配置及请求/响应收据核对。
 
 ## 每一步看到什么
 
@@ -31,20 +31,22 @@
 ## 配置与优先级
 
 - 选镜模式：`manifest.selection_mode` → `JY_SELECTION_MODE` → `ai_editor`。
-- transport：`JY_VISION_TRANSPORT`，空值默认为 `volc_glm`（别名 `glm` / `volc`）；它是调用通道名称，不是模型 ID。
-- 模型：`JY_VISION_MODEL` → `glm-5.3-flash`。
+- transport：`JY_VISION_TRANSPORT`，空值默认为 `volc_glm`（别名 `glm` / `volc`）；Qwen 为 `qwen`（别名 `qwen_compatible`）。只接受这两类直连通道，旧值和未知值明确拒绝。
+- GLM 模型：`JY_VISION_MODEL` → `glm-5.3-flash`；Qwen 模型读取 `JY_QWEN_MODEL`。
 - 凭据：`ARK_API_KEY` → `JY_VOLC_API_KEY`；两者都缺失返回 `VOLC_API_KEY_MISSING`。
 - base URL：`JY_VOLC_BASE_URL` → 上面的 Ark 地址；填写 base URL 时不重复附加 `/chat/completions`。
 - 默认直连的批次工作线程和跨进程槽位均为 20，分别由 `JY_VISION_BATCH_WORKERS`、`JY_VISION_SLOTS` 覆盖。
 - 抽帧/拼图先以独立的媒体并发完成（`JY_VISION_PREP_WORKERS`、跨进程 `JY_VISION_PREP_SLOTS` 均默认 2），随后 API 按任务并发；文字复核也先拼图再请求，默认跟随批次并发，QC 使用同一批次并发配置。请求完成即校验保存，不等待最慢批次。
 - 账户预算统一读取 `JY_CONCURRENCY_POLICY_FILE`；起点为制作4、媒体2、每任务API20、账户API20。没有策略文件时，旧环境变量只能收紧默认值。额度未确认前保持账户20；媒体并发独立校准。
-- 默认思考模式启用；GLM-5.3-Flash 不支持关闭思考，不应设置 `JY_VISION_THINKING=disabled`。相关预算、超时和缓存变量见 [`ENVIRONMENT.md`](../packages/video-v1.5.3/ENVIRONMENT.md)。
+- 请求行为固定：GLM 发送 `reasoning_effort=low`，Qwen 兼容接口发送 `enable_thinking=false`；没有单独的思考模式环境开关。相关预算、超时和缓存变量见 [`ENVIRONMENT.md`](../packages/video-v1.5.3/ENVIRONMENT.md)。
 
 通用配置从进程环境变量读取，没有通用 `.env` 自动加载器。PowerShell 示例见[配置模板](../packages/video-v1.5.3/examples/config.example.ps1)，本机副本和任务数据放在忽略的 `work/`。
 
-`ai_editor` 支持 `volc_glm` 和显式 `qwen` transport；千问需配置 `JY_QWEN_BASE_URL`、`JY_QWEN_MODEL` 和 `JY_QWEN_API_KEY`，请求关闭思考。也可保留素材分析 transport，设置 `JY_AI_EDITOR_QWEN=1` 并提供 `JY_VISION_TEXT_BASE_URL`、`JY_VISION_TEXT_MODEL` 和 `JY_VISION_TEXT_API_KEY`，仅将 AI 编辑流程切到兼容接口。凭据只从进程环境读取。跨模型复用观察须显式指定原 transport 和模型，保留原始来源，最终片段仍独立复核。
+`ai_editor`、`rule_then_ai` 和 `legacy` 均使用上述 GLM / Qwen 直连通道；千问需配置 `JY_QWEN_BASE_URL`、`JY_QWEN_MODEL` 和 `JY_QWEN_API_KEY`，请求关闭思考。也可保留素材分析 transport，设置 `JY_AI_EDITOR_QWEN=1` 并提供 `JY_VISION_TEXT_BASE_URL`、`JY_VISION_TEXT_MODEL` 和 `JY_VISION_TEXT_API_KEY`，仅将 AI 编辑流程切到兼容接口。凭据只从进程环境读取。跨模型复用观察须显式指定原 transport 和模型，保留原始来源，最终片段仍独立复核。
 
-`codex` 和 `anthropic` 仅供显式 legacy 回滚。它们使用各自的模型/服务配置，不能套用 GLM-5.3-Flash 默认结论。旧函数 `match_with_codex` 的名称为兼容保留，实际 backend 仍取决于 transport。
+Codex CLI、Anthropic 和 CCSwitch 运行时调用已经移除。设置已移除的通道不会启动这些程序或自动换成其他服务；请显式配置 GLM 或 Qwen。旧算法的描述语义匹配入口为 `vision_analyzer.match_sentences`。
+
+观察与动作相位缓存保留历史 `profile="volc"` 兼容字段；该值固定，不再读取环境或 CLI 设置。保留键位可继续使用身份相符的已有观察，移除旧通道本身不会让整库重新识别；模型、端点、素材或协议变化仍按既有身份规则失效。
 
 ## 如何留下验证证据
 
