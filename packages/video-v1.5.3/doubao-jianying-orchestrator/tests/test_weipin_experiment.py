@@ -32,7 +32,7 @@ def frames():return [{'frame_id':i,'source_frame':i*6,'pts_us':i*100000}for i in
 class ExperimentContractTests(unittest.TestCase):
     def test_weipin_policy_loads_existing_business_rules(self):
         text=purpose_review.policy({'category':'weipin'})
-        self.assertIn('纸巾擦拭全过程的同一条素材',text)
+        self.assertIn('允许使用对应同一次实验的多个素材文件',text)
         self.assertIn('不闷热句不并入吸水实验组',text)
         self.assertIn('倒液不能替代透气',text)
         self.assertNotIn('absorb_rewet',purpose_review.policy({'category':'zhipin'}))
@@ -77,7 +77,7 @@ class ExperimentContractTests(unittest.TestCase):
         t=timeline();a=replace(t.assets[0],asset_id='other',path='other-original.mp4')
         first=clip();first.update(source_end_us=8_000_000,target_duration_us=2_000_000,protected_intervals=[])
         second=deepcopy(first);second['asset_id']='other'
-        with self.assertRaisesRegex(ValueError,'DIFFERENT_ORIGINALS'):
+        with self.assertRaisesRegex(ValueError,'PAIR_EVIDENCE_REQUIRED'):
             replace_group(t,('s1','s2'),[first,second],group_id='g',assets=(a,))
         second=deepcopy(first);second.update(source_start_us=9_000_000,source_end_us=11_000_000)
         with self.assertRaisesRegex(ValueError,'SOURCE_GAP'):
@@ -140,7 +140,7 @@ class BoundExperimentTests(unittest.TestCase):
     def test_partial_chain_never_reaches_media_probe(self):
         self.evidence['observation']['verdict']='incomplete';self.evidence['observation']['phases']=[]
         with patch.object(app,'probe_media')as probe:
-            with self.assertRaisesRegex(ValueError,'NOT_COMPLETE'):
+            with self.assertRaisesRegex(ValueError,'INCOMPLETE_NEEDS_MATCHING'):
                 app.apply(self.manifest,self.timeline,('s1','s2'),self.roles,self.evidence,
                           group_id='g',prior_origins=self.origins)
             probe.assert_not_called()
@@ -196,7 +196,7 @@ class LegacyPurposeGateTests(unittest.TestCase):
         compile_.assert_called_once()
         self.assertEqual(result['requests'][0]['topic'],'absorption')
         self.assertIsNone(result['rows'][0]['selected'])
-        self.assertEqual(result['rows'][0]['reason'],'SINGLE_ORIGINAL_EXPERIMENT_GROUP_REQUIRED')
+        self.assertEqual(result['rows'][0]['reason'],'SAME_EXPERIMENT_GROUP_REQUIRED')
 
     def test_old_weipin_selection_rule_identity_is_rejected(self):
         with patch.object(purpose_production,'_audio_binding',return_value=[]), \

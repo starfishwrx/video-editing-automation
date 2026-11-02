@@ -1,40 +1,47 @@
-# 卫品吸水实验：同源核验后再编排
+# 卫品吸水实验：同一次实验允许跨文件
 
-吸水组合句必须选同一条源素材内的同一次倒液、吸收、纸巾按压、提起及纸巾结果。相同商品、相邻文件名或相似背景不能替代这一条件。透气、不闷热、荧光、商品切换及促销主题不并入吸水组。
+倒液吸收与后续纸巾按压、提起及结果必须对应同一次实验，允许分别拍在多个源文件中。不能用另一轮实验的验证替换。此前将这一要求收窄为“必须同一个文件”是实现方误解，已按用户澄清更正。
 
-当前实现是显式预览入口，未部署或切换默认队列。源观察与最终成片验收分别记录，任何输出继续保持待复核。
+相邻序号如31/32、IMG_3431/IMG_3432只用于优先召回，不证明实验对应；不相邻的文件也可以通过真实画面配对。透气、不闷热、荧光、商品切换及促销主题不并入吸水组。
 
-## 规则与证据如何进入程序
+当前仍为显式预览入口，未切换默认生产。素材关系、固定句长可行性、最终观看质量分别验收。
 
-`weipin.json`保留原有文字要求，新增可消费的`experiment_contracts.absorb_rewet`。`ai_editor_contract.policy_prompt`同时加载纸品与卫品的有效规则，`purpose_review`明确卫品具体判据优先；观察协议与规则版本改变后，旧支持结论不能自动获得当前认证。
+## 召回与画面配对
 
-`purpose_production.select`复用旧索引描述作召回，但按当前规则重新编译原文。吸收与反渗交给单源实验组入口，不继续逐句塞完整实验。旧`render`拒绝过期规则身份、无效主题以及未经实验组装的功能句选择；没有合格实验时保留待处理，不用包装或另一条素材补成通过。
+`weipin.json`的`experiment_contracts.absorb_rewet`声明同次实验、可跨文件和结果最低帧数。有效规则同时进入新旧文案识别；旧描述只作召回，原文按当前规则重新编译，旧的支持结论不会自动获得当前认证。
 
-受控媒体准备从原件直接生成CFR60代理，再每6帧取一帧制成带编号的视频。保存原件、代理、视频、实际采样PTS和编号映射，并逐帧核对FFmpeg实际选择日志。该映射指向规范化代理的真实帧，不声称是原始VFR逐帧无损映射。旧的原件/代理关系缺少证明时，仅对选中的候选重建派生媒体，不能自动重识别全库。
+`purpose_production.select`分别召回吸收及反渗候选，输出`experiment_pair_candidates`。同目录相邻序号优先，其他候选仍保留；相邻标记的`acceptance_evidence`始终为false。
 
-千问读取实际视频并按可见编号返回动作证据。程序检查阶段齐全、顺序、同一实验连续性、素材身份和结果窗口。局部漏判可补查实际编号原帧；这类图片补查只记录部分事实，不把两个回答或两条素材拼成完整实验。
+媒体准备保存原件→CFR60代理→实际编号帧链路，每6帧取一帧。已有物理缓存在原件、代理、编号视频及映射均未改变时可复用，不复用旧的单文件完整性结论作配对证据，也不自动重识别全库。
 
-组装还会核对原文、商品、任务和规则身份；保留既有配音、句长、字幕及BGM。组外画面的原件/代理关系必须已知，来源未知就停止，避免另一份代理绕过同源重播检查。原件、代理、视频及元数据与输出路径发生碰撞时，在请求前拒绝。
+`pair`联合查看两份候选的实际编号画面，每份源窗口取8帧。观察不接收文件名、邻接标记、旧结论或目标句长；逐项核对商品、实验承载物与布置、巾体湿润状态、按压验证对应关系，并分别记录倒液/吸收和按压/提起/结果的可见帧。冲突为mismatch，不能确认则uncertain，只有阶段齐全且四项对应均支持才为matched。这是抽样画面支持，不是连续录像证明或最终成片认证。
 
-当前业务组装器保护整段1倍速，结果最低15个输出帧只是防退化下限，仍需查看真实可读性。通用求解器原有2/3倍能力保留，但本入口尚未新增对可压缩过程的自动规划；不能据此声称已验证局部变速提升。
+复核提交前落盘独立输入绑定，包括有序成员、完整采样映射摘要、源窗口、实际可见帧和图片SHA256，绑定摘要进入模型请求。组装重新校验绑定及媒体身份；交换成员、同步修改窗口和可见帧列表、替换图片均须重新复核，不能套用旧matched。输入输出碰撞在请求前拒绝。
+
+## 固定时间线组装
+
+同文件完整实验和已确认的跨文件配对均可进入组装。源切换需要已确认的有向实验配对；文件相邻不能获得切换许可。检查原文、商品、规则与任务身份、阶段顺序、结果可读帧、源边界及同源重播，保留配音、句长、字幕、BGM和组外画面。
+
+当前业务组装器保护必要源窗为1倍速。通用求解器原有2/3倍能力保留，本入口尚未增加可压缩过程的自动规划。配对通过仍可能报时长冲突；不能借其他主题的句长、删必要动作、补静帧或暗中加速获得通过。结果最低15个输出帧只是防退化下限，仍需真实观看复核。
 
 ## 显式脚本入口
 
-活包根目录运行，凭据与模型使用已有`JY_QWEN_*`进程配置。观察入口要求`JY_VISION_TRANSPORT=qwen`，服务不支持时明确失败，不静默换模型或回退拼图。
+在活包根目录运行，凭据沿用已有`JY_QWEN_*`进程配置。`observe`要求`JY_VISION_TRANSPORT=qwen`并使用编号视频；`pair`通过已有视觉客户端提交联合真实帧图片。
 
 ```powershell
 uv run --frozen python -m tools.weipin_experiment roles --manifest work/task.json --timeline work/fixed/timeline.json --output work/roles.json
-uv run --frozen python -m tools.weipin_experiment observe --manifest work/task.json --source work/material.mp4 --report-dir work/observation-new --font C:/Windows/Fonts/arial.ttf
-uv run --frozen python -m tools.weipin_experiment detail --manifest work/task.json --evidence work/observation-new/observation.evidence.json --output work/detail-new.json --font C:/Windows/Fonts/arial.ttf
-uv run --frozen python -m tools.weipin_experiment apply --manifest work/task.json --timeline work/fixed/timeline.json --roles work/roles.json --evidence work/observation-new/observation.evidence.json --prior-origins work/fixed/origin-bindings.json --output work/timeline-new.json --render-dir work/render-new
+uv run --frozen python -m tools.weipin_experiment observe --manifest work/task.json --source work/pour.mp4 --report-dir work/pour-new --font C:/Windows/Fonts/arial.ttf
+uv run --frozen python -m tools.weipin_experiment observe --manifest work/task.json --source work/press.mp4 --report-dir work/press-new --font C:/Windows/Fonts/arial.ttf
+uv run --frozen python -m tools.weipin_experiment pair --manifest work/task.json --first-evidence work/pour-new/observation.evidence.json --second-evidence work/press-new/observation.evidence.json --first-window 20 78 --second-window 5 38 --output work/pair-new.json --font C:/Windows/Fonts/arial.ttf
+uv run --frozen python -m tools.weipin_experiment apply --manifest work/task.json --timeline work/fixed/timeline.json --roles work/roles.json --evidence work/pair-new.pair.json --prior-origins work/fixed/origin-bindings.json --output work/timeline-new.json --render-dir work/render-new
 ```
 
-`prior-origins`由调用方从已有受控素材来源收据生成：每项含`asset_id`、原件与代理的真实`path/size/mtime_ns`，以及`clock: same_source_clock`。不能按文件名猜来源，不允许未建模的时钟偏移。输出目录必须是新的；该入口不写NAS、业务表或生产队列。
+窗口参数是对应采样缓存的本地frame编号，不是秒数。`prior-origins`由已有受控来源收据生成：每项含`asset_id`、原件/代理的实际`path/size/mtime_ns`及`clock: same_source_clock`，不能按文件名猜来源。新目录存输出，该入口不写NAS、业务表或生产队列。
 
-## 卫品42本轮结果
+## 卫品42定向验证
 
-固定原13句1.2倍配音与现有音频。按主题只允许第8–10句组成实验组，共4.163719秒，排除第7句不闷热主题。复用92条旧描述，从已有功能召回复核9条候选；未确认一条同源完整实验。两条倒液素材缺纸巾按压结果，另外的按压素材缺倒液前提，剩余包含包装和硅胶球等误召回。
+固定原13句、直率英子1.2倍配音及现有音频。吸水合法组为第8–10句，共4.163719秒；第7句不闷热仍不可借用。
 
-局部原帧补查找回两条候选中的按压、提起与纸巾结果，保留模型分歧与可见范围，未将其升级为完整实验。旧描述的补充召回没有提出新的合理候选，但这不能证明全库缺素材。
+联合画面复核支持3431/3432、3513/3514、3513/3515配对，最后一组序号距离为2；3431/3514因木桌平铺与软垫承载场景冲突被拒绝。这是三个候选组合、涉及两个倒液场景，不应计为三次独立实验。041本文件没有按压，不代表041/042这一组缺少验证。
 
-本轮没有产出更优的合格整片。已验证的改进是拒绝跨源拼实验、拒绝吞并透气主题、补查局部漏判和保留原输入；模型支持数不作为质量提升结论。先前041倒液加042按压及第6–10句借时的试验不满足原业务规则，相关提升结论已撤回。真实媒体、调用、拒绝原因与测试收据留包外。
+当前三个通过关系复核的候选组合在原速保护下均超出4.163719秒，分别记录时长冲突，没有输出新的合格整片。此前将跨文件本身判错的结论撤回；跨主题借时仍无效。真实媒体、模型请求、配对及拒绝收据留在包外隔离验证目录。

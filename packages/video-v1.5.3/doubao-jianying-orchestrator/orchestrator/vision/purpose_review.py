@@ -9,8 +9,8 @@ from .. import ai_editor_contract as contract
 from ..selection import ai_editor
 from ..selection.paper_selection import validate_observation
 
-PROTOCOL = "purpose-observation-v2-category-contracts"
-OUTPUT_PROTOCOL = "purpose-output-review-v4-category-contracts"
+PROTOCOL = "purpose-observation-v3-experiment-pairs"
+OUTPUT_PROTOCOL = "purpose-output-review-v5-experiment-pairs"
 
 
 def policy(manifest):
@@ -22,8 +22,9 @@ def policy(manifest):
 """
     if contract.editorial_context(manifest)["category"] == "weipin":
         text += """卫品具体判据优先：不闷热/透气按本品类规则用对光透过、孔洞或网面；
-倒液不能替代透气。吸水组合句必须在同一条源素材内完整展示倒液、吸收、纸巾按压与结果；
-仅吸收或仅按压分别记录部分事实，不能合并不同素材冒充完整实验。必要的结果停留不当作无意义空镜。
+倒液不能替代透气。吸水组合句完整展示倒液、吸收、纸巾按压与结果，可跨文件但须对应同一次实验；
+仅吸收或仅按压先记录部分事实，再对通常相邻的素材做实验配对复核。禁止换另一轮实验的按压结果，
+不能把跨文件本身判为不合格。必要的结果停留不当作无意义空镜。
 """
     return text
 

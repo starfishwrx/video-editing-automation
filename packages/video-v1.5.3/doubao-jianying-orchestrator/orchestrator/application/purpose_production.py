@@ -126,13 +126,24 @@ def select(manifest, analysis, narration, index, directory, *, workers=6, candid
     inventory=ai_editor._inventory(manifest,ranked_shots,root)
     rankings={r["index"]:r["candidate_ids"] for r in inventory}
     kinds={r["index"]:r["kind"] for r in inventory}
+    experiment_pairs=[]
+    if contract.editorial_context(manifest)["category"]=="weipin":
+        from ..selection.experiment_contract import rank_pairs,adjacency_hint
+        def pool(topic):
+            return sorted({shots[sid]["video"] for r in requests if r.get("topic")==topic
+                for sid in rankings[r["index"]][:candidate_limit] if sid in shots})
+        first=pool("absorption");verification=set(pool("rewet"))
+        # A tissue check can be missed by the old semantic index. Recall the
+        # next camera file anyway, inside the task whitelist, for pixel review.
+        verification.update(b for a in first for b in sources if adjacency_hint(a,b)["adjacent"])
+        experiment_pairs=rank_pairs(first,sorted(verification))[:8]
     jobs = []
     rows = {r["index"]:{"index":r["index"],"text":r["text"],"candidates":[]} for r in requests}
     retrieval_use=Counter()
     for request in sorted(requests,key=lambda r:(kinds[r["index"]] != "selling_point",r["index"])):
         if contract.editorial_context(manifest)["category"] == "weipin" and request.get("topic") in {"absorption","rewet"}:
             rows[request["index"]]["retrieved_candidates"] = 0
-            rows[request["index"]]["reason"] = "SINGLE_ORIGINAL_EXPERIMENT_GROUP_REQUIRED"
+            rows[request["index"]]["reason"] = "SAME_EXPERIMENT_GROUP_REQUIRED"
             continue
         hints = []
         for sid, row in index["scans"].items():
@@ -202,6 +213,7 @@ def select(manifest, analysis, narration, index, directory, *, workers=6, candid
     result={"schema":"purpose-selection-v1","task_id":manifest["task_id"],"requests":requests,
         "rules":contract.rules_identity(manifest),"protocol":vision.PROTOCOL,
         "old_index_use":"retrieval descriptions only; requirements recompiled under current rules",
+        "experiment_pair_candidates":experiment_pairs,
         "revision":1,
         "sources":sorted(sources),"narration":_audio_binding(narration),"context":_context(manifest),
         "rows":[rows[i] for i in sorted(rows)],"formal_delivery_allowed":False,

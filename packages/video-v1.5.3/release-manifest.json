@@ -6,7 +6,7 @@
     "machine-specific paths",
     "knowledge-base bodies"
   ],
-  "file_count": 387,
+  "file_count": 389,
   "files": [
     {
       "path": ".gitignore"
@@ -477,6 +477,9 @@
       "path": "doubao-jianying-orchestrator/orchestrator/vision/experiment_detail.py"
     },
     {
+      "path": "doubao-jianying-orchestrator/orchestrator/vision/experiment_pair_review.py"
+    },
+    {
       "path": "doubao-jianying-orchestrator/orchestrator/vision/experiment_review.py"
     },
     {
@@ -565,6 +568,9 @@
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_edit_timeline.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/tests/test_experiment_pairs.py"
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_file_safety.py"

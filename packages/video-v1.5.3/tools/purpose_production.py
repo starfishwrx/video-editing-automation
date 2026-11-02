@@ -36,7 +36,8 @@ def main(argv=None):
         result=app.select(manifest,analysis,narration,read(root / "inspect/index.json"),root / "selection",
             workers=a.workers,candidate_limit=a.candidate_limit)
         print(json.dumps({"status":"SELECTED_FOR_REVIEW","sentences":len(result["rows"]),
-            "selected":sum(r["selected"] is not None for r in result["rows"]),"formal_delivery_allowed":False}))
+            "selected":sum(r["selected"] is not None for r in result["rows"]),
+            "experiment_pair_candidates":len(result.get("experiment_pair_candidates",[])),"formal_delivery_allowed":False}))
     elif a.stage == "render":
         timeline=app.materialize(manifest,narration,read(root / "selection/selection.json"),root / "production",
             ffmpeg=a.ffmpeg,ffprobe=a.ffprobe,width=a.width,music=read(a.music_receipt) if a.music_receipt else None)

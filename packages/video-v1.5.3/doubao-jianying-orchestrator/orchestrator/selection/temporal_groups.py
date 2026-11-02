@@ -22,7 +22,7 @@ def _source_key(asset, by_id, original_paths=None):
     return os.path.normcase(str(Path(asset.path).resolve()))
 
 
-def replace_group(timeline, sentence_ids, clips, *, group_id, assets=(), group_kind="continuous_experiment", original_paths=None):
+def replace_group(timeline, sentence_ids, clips, *, group_id, assets=(), group_kind="continuous_experiment", original_paths=None, matched_pairs=()):
     """Fit already grounded source windows without moving any audio or caption.
 
     Clips supply explicit target budgets and protected source intervals. This is
@@ -57,12 +57,15 @@ def replace_group(timeline, sentence_ids, clips, *, group_id, assets=(), group_k
         raise ValueError("TEMPORAL_GROUP_DUPLICATE_ASSET")
     previous_source = None
     previous_end = None
+    authorized = {(os.path.normcase(str(Path(a).resolve())),os.path.normcase(str(Path(b).resolve())))
+                  for a,b in matched_pairs}
     for clip in clips:
         source = _source_key(by_id[clip["asset_id"]], by_id, original_paths)
         if group_kind == "continuous_experiment" and previous_source is not None:
             if source != previous_source:
-                raise ValueError("TEMPORAL_GROUP_EXPERIMENT_DIFFERENT_ORIGINALS")
-            if clip["source_start_us"] != previous_end:
+                if (previous_source,source) not in authorized:
+                    raise ValueError("TEMPORAL_GROUP_EXPERIMENT_PAIR_EVIDENCE_REQUIRED")
+            elif clip["source_start_us"] != previous_end and (source,source) not in authorized:
                 raise ValueError("TEMPORAL_GROUP_EXPERIMENT_SOURCE_GAP")
         previous_source, previous_end = source, clip["source_end_us"]
     replaced_placeholders = {sid for event in timeline.videos if lo <= event.target_start_us < hi

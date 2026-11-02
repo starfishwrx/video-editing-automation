@@ -1,4 +1,4 @@
-"""Explicit single-original experiment validation; no business writes."""
+"""Explicit same-experiment validation across source files; no business writes."""
 import argparse
 import json
 from pathlib import Path
@@ -9,14 +9,16 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1] / "doubao-jianying-orc
 
 def main(argv=None):
     p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument("stage",choices=("roles","observe","apply","detail"))
+    p.add_argument("stage",choices=("roles","observe","pair","apply","detail"))
     p.add_argument("--manifest",type=Path,required=True)
-    for name in ("timeline","source","report-dir","output","roles","evidence","prior-origins","render-dir","font"):
+    for name in ("timeline","source","report-dir","output","roles","evidence","first-evidence","second-evidence","prior-origins","render-dir","font"):
         p.add_argument("--"+name,type=Path)
+    p.add_argument("--first-window",type=int,nargs=2);p.add_argument("--second-window",type=int,nargs=2)
     p.add_argument("--ffmpeg",default="ffmpeg");p.add_argument("--ffprobe",default="ffprobe")
     a=p.parse_args(argv)
     required={"roles":("timeline","output"),"observe":("source","report_dir","font"),
               "apply":("timeline","roles","evidence","prior_origins","output"),
+              "pair":("first_evidence","second_evidence","first_window","second_window","output","font"),
               "detail":("evidence","output","font")}[a.stage]
     if any(getattr(a,k) is None for k in required):p.error("missing required stage arguments: "+", ".join(required))
     from orchestrator import ai_editor_contract as identity
@@ -27,9 +29,9 @@ def main(argv=None):
     from orchestrator.vision.purpose_review import save
     def read(path):return json.loads(path.read_text(encoding="utf-8-sig"))
     manifest=read(a.manifest)
-    inputs=[v for k,v in vars(a).items() if isinstance(v,Path)and k in {"manifest","timeline","source","roles","evidence","prior_origins","font"}]
+    inputs=[v for k,v in vars(a).items() if isinstance(v,Path)and k in {"manifest","timeline","source","roles","evidence","first_evidence","second_evidence","prior_origins","font"}]
     if a.output:
-        guard_paths(inputs,a.output,(".prompt.txt",".request.json",".evidence.json",".detail.json",".jpg"))
+        guard_paths(inputs,a.output,(".prompt.txt",".request.json",".evidence.json",".detail.json",".pair.json",".jpg",".binding.json"))
         if a.output.exists():raise ValueError("EXPERIMENT_OUTPUT_ALREADY_EXISTS")
     if a.stage=="roles":
         timeline=EditTimeline.load(a.timeline)
@@ -46,6 +48,15 @@ def main(argv=None):
         samples=prepare(a.source,a.report_dir/"samples",ffmpeg=a.ffmpeg,ffprobe=a.ffprobe,font_path=a.font)
         evidence=observe(manifest,a.source,samples,a.report_dir/"observation.json")
         result={"status":"OBSERVED_FOR_REVIEW","verdict":evidence["observation"]["verdict"],"missing_phases":evidence["missing_phases"]}
+    elif a.stage=="pair":
+        from orchestrator.vision.experiment_pair_review import review as review_pair
+        first,second=read(a.first_evidence),read(a.second_evidence)
+        if any(e["task_id"]!=manifest["task_id"]for e in(first,second)):
+            raise ValueError("EXPERIMENT_TASK_MISMATCH")
+        paired=review_pair(manifest,first["samples"],second["samples"],a.first_window,a.second_window,a.output,
+            ffmpeg=a.ffmpeg,ffprobe=a.ffprobe,font_path=a.font)
+        result={"status":"EXPERIMENT_PAIR_REVIEWED","verdict":paired["observation"]["verdict"],
+                "adjacency_is_acceptance":False}
     elif a.stage=="detail":
         from orchestrator.vision.experiment_detail import review
         evidence=read(a.evidence)
@@ -59,7 +70,7 @@ def main(argv=None):
             raise ValueError("EXPERIMENT_ROLE_RULE_IDENTITY_CHANGED")
         timeline=EditTimeline.load(a.timeline);groups=candidate_groups(timeline,roles["sentences"],contract_for(manifest))
         if len(groups)!=1:raise ValueError("EXPERIMENT_REQUIRES_ONE_UNAMBIGUOUS_GROUP")
-        updated=apply(manifest,timeline,groups[0],roles["sentences"],read(a.evidence),group_id="single-source-experiment",
+        updated=apply(manifest,timeline,groups[0],roles["sentences"],read(a.evidence),group_id="same-experiment",
                       prior_origins=read(a.prior_origins),ffprobe=a.ffprobe)
         updated.save(a.output)
         if a.render_dir:

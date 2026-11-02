@@ -20,7 +20,7 @@ AI 通读整稿，按内容区分具体卖点、产品介绍、无具体卖点�
 
 ## 执行流程
 
-卫品吸水组合句还须遵守同一条源素材内完整倒液、吸收、纸巾按压及结果的规则；透气/不闷热主题不并入吸水组。显式预览工具`python -m tools.weipin_experiment --help`提供`roles/observe/detail/apply`，由受控原件生成编号帧并验证同源实验；局部补查只恢复部分事实，不获得完整实验认证。旧`purpose_production`入口重新编译当前原文并拒绝旧规则身份，功能句未经单源组装不能直接渲染为已匹配；默认生产未切换该实验入口，正式验收仍需真实成片独立QC。
+卫品吸水组合句须覆盖同一次实验的倒液、吸收、纸巾按压与结果，允许跨素材文件，禁止换成另一轮实验的验证。31/32等相邻序号优先召回，再联合复核实际画面；相邻不是通过条件。透气/不闷热主题不并入吸水组。显式预览工具`python -m tools.weipin_experiment --help`提供`roles/observe/pair/detail/apply`；单文件阶段观察可部分缺失，配对通过后才允许跨文件组装。配对与时长适配分别检查，默认生产未切换该实验入口，正式验收仍需真实成片独立QC。
 
 `cli._temporary_match → ai_editor.prepare → shot_analyzer.match_manifest`：
 
