@@ -22,7 +22,9 @@
 
 同文件完整实验和已确认的跨文件配对均可进入组装。源切换需要已确认的有向实验配对；文件相邻不能获得切换许可。检查原文、商品、规则与任务身份、阶段顺序、结果可读帧、源边界及同源重播，保留配音、句长、字幕、BGM和组外画面。
 
-当前业务组装器保护必要源窗为1倍速。通用求解器原有2/3倍能力保留，本入口尚未增加可压缩过程的自动规划。配对通过仍可能报时长冲突；不能借其他主题的句长、删必要动作、补静帧或暗中加速获得通过。结果最低15个输出帧只是防退化下限，仍需真实观看复核。
+配对后可通过`motion`按实际编号视频观察有效窗口及动作阶段，再用`apply --motion`启用局部变速。开始接触、完成、提起和结果保护为1倍；明确可压缩的中间过程共享整组预算，先求解2倍以内，无解再尝试最多3倍。保留选定连续源窗的全部区间，不靠裁过程或补静帧凑时长。新结果窗口至少15个实际输出帧，仍需观看可读性检查。
+
+未提供有效motion证据的入口保留原速保护；提供motion后无解明确报3倍上限冲突，不静默回退或超速。单文件完整实验目前仍走旧原速封装，新的局部变速验证范围为跨文件实验配对。上一版把整个窗口锁原速只是未完成的实现，不能据此宣布用户允许的局部变速方案无解。
 
 ## 显式脚本入口
 
@@ -33,7 +35,8 @@ uv run --frozen python -m tools.weipin_experiment roles --manifest work/task.jso
 uv run --frozen python -m tools.weipin_experiment observe --manifest work/task.json --source work/pour.mp4 --report-dir work/pour-new --font C:/Windows/Fonts/arial.ttf
 uv run --frozen python -m tools.weipin_experiment observe --manifest work/task.json --source work/press.mp4 --report-dir work/press-new --font C:/Windows/Fonts/arial.ttf
 uv run --frozen python -m tools.weipin_experiment pair --manifest work/task.json --first-evidence work/pour-new/observation.evidence.json --second-evidence work/press-new/observation.evidence.json --first-window 20 78 --second-window 5 38 --output work/pair-new.json --font C:/Windows/Fonts/arial.ttf
-uv run --frozen python -m tools.weipin_experiment apply --manifest work/task.json --timeline work/fixed/timeline.json --roles work/roles.json --evidence work/pair-new.pair.json --prior-origins work/fixed/origin-bindings.json --output work/timeline-new.json --render-dir work/render-new
+uv run --frozen python -m tools.weipin_experiment motion --manifest work/task.json --evidence work/pair-new.pair.json --output work/motion-new.json
+uv run --frozen python -m tools.weipin_experiment apply --manifest work/task.json --timeline work/fixed/timeline.json --roles work/roles.json --evidence work/pair-new.pair.json --motion work/motion-new.motion.json --prior-origins work/fixed/origin-bindings.json --output work/timeline-new.json --render-dir work/render-new
 ```
 
 窗口参数是对应采样缓存的本地frame编号，不是秒数。`prior-origins`由已有受控来源收据生成：每项含`asset_id`、原件/代理的实际`path/size/mtime_ns`及`clock: same_source_clock`，不能按文件名猜来源。新目录存输出，该入口不写NAS、业务表或生产队列。
@@ -44,4 +47,10 @@ uv run --frozen python -m tools.weipin_experiment apply --manifest work/task.jso
 
 联合画面复核支持3431/3432、3513/3514、3513/3515配对，最后一组序号距离为2；3431/3514因木桌平铺与软垫承载场景冲突被拒绝。这是三个候选组合、涉及两个倒液场景，不应计为三次独立实验。041本文件没有按压，不代表041/042这一组缺少验证。
 
-当前三个通过关系复核的候选组合在原速保护下均超出4.163719秒，分别记录时长冲突，没有输出新的合格整片。此前将跨文件本身判错的结论撤回；跨主题借时仍无效。真实媒体、模型请求、配对及拒绝收据留在包外隔离验证目录。
+此前三个matched组合只按原速保护测试，时长冲突不能代表局部加速也无解。后续对041/042重新检查开始帧并扩大配对观察范围，用一次完整按压代替文件内重复按压；保留原13句、字幕、BGM，在4.163719秒内实际渲染局部加速候选。计划倍率约2.94，实际输出按整数帧预算为倒液过程3倍、移杯过程2.4倍，纸巾结果25个实际输出帧。原声/背景音乐/混音/字幕四份派生文件与上轮字节一致。
+
+过程片段显式携带`bounded_process_speed_cap`，渲染按真实分配的输出帧均匀覆盖源窗，防止压缩段尾接原速时形成过大的采样跳步；实际输出帧预算超过3倍就拒绝。最终同源相邻采样最大6个60fps源帧，对应30fps输出不超过3倍。该规则只对明确标记的可压缩过程生效，保护区原速和既有路径不变。
+
+本次边界经过主线程实际编号帧定向校正：保留模型意见分歧，不能称为全自动稳定选镜。自动视频观察曾返回整段按压可加速（校验拒绝），另一次又将整段倒液锁原速。最终候选明确标记`main_thread_actual_frame_editorial_candidate`，单独做输出复核；原模型答复不改写。
+
+独立实际对照视频抽样支持新片段动作完整、结果可读和节奏；对照A是上轮固定预览（前半有诊断黑场），不是人工示例或原生产稿。它证明目标片段相较该失败预览有改善，不证明全片优于原选择器。结构媒体PASS，内容仍保留待输出复核项，整片观看和正式交付未通过。真实媒体、请求与证据留包外，未部署、未回写。

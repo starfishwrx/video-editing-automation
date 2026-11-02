@@ -107,11 +107,21 @@ def _frame_plan(timeline, event, metadata, *, allow_real_tail=False):
     if first_index >= len(pts):
         raise TimelineError("SOURCE_WINDOW_HAS_NO_FRAME")
     first_pts = pts[first_index]
+    step=Fraction(US * timeline.canvas.fps_den * event.speed_num,timeline.canvas.fps_num * event.speed_den)
+    caps=[row['bounded_process_speed_cap']for row in event.evidence
+        if isinstance(row,dict)and 'bounded_process_speed_cap'in row]
+    if caps:
+        if caps!=[3]or event.protected_intervals or end<=start:
+            raise TimelineError('BOUNDED_PROCESS_FRAME_CONTRACT_INVALID')
+        # Fill the reviewed continuous process window using its actual integer
+        # output-frame allocation, including the final stride back to 1x.
+        # Nominal microsecond rates alone leave an oversized boundary skip.
+        step=Fraction(source_end-first_pts,end-start)
+        if step>Fraction(3*US*timeline.canvas.fps_den,timeline.canvas.fps_num)+quantum/2:
+            raise TimelineError('FRAME_QUANTIZATION_EXCEEDS_PROCESS_SPEED_CAP')
     result = []
     for relative, output_frame in enumerate(range(start, end)):
-        source_time = first_pts + Fraction(
-            relative * US * timeline.canvas.fps_den * event.speed_num,
-            timeline.canvas.fps_num * event.speed_den)
+        source_time = first_pts + relative*step
         index = bisect_right(pts, source_time + quantum / 2) - 1
         preview_tail = (allow_real_tail and timeline.delivery_mode == "preview"
             and event.target_start_us + event.duration_us == timeline.duration_us and relative > 0

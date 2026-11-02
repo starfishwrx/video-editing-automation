@@ -11,11 +11,12 @@ from ..vision.experiment_review import PROTOCOL
 from ..media.temporal_samples import validate as validate_samples
 
 
-def apply(manifest, timeline, sentence_ids, roles, evidence, *, group_id, prior_origins=(), ffprobe="ffprobe"):
+def apply(manifest, timeline, sentence_ids, roles, evidence, *, group_id, prior_origins=(), ffprobe="ffprobe", motion=None):
     from ..vision.experiment_pair_review import PROTOCOL as PAIR_PROTOCOL
     if evidence.get("protocol")==PAIR_PROTOCOL:
         return apply_pair(manifest,timeline,sentence_ids,roles,evidence,group_id=group_id,
-                          prior_origins=prior_origins,ffprobe=ffprobe)
+                          prior_origins=prior_origins,ffprobe=ffprobe,motion=motion)
+    if motion is not None:raise ValueError('EXPERIMENT_MOTION_REQUIRES_PAIR_EVIDENCE')
     from ..selection.timing_contract import split_sentences
     if [s.text for s in timeline.sentences] != [r["text"] for r in split_sentences(manifest)]:
         raise ValueError("EXPERIMENT_TIMELINE_SCRIPT_CHANGED")
@@ -89,7 +90,7 @@ def apply(manifest, timeline, sentence_ids, roles, evidence, *, group_id, prior_
     return replace_group(timeline, sentence_ids, [clip], group_id=group_id, assets=(asset,), original_paths=origins)
 
 
-def apply_pair(manifest,timeline,sentence_ids,roles,evidence,*,group_id,prior_origins=(),ffprobe="ffprobe"):
+def apply_pair(manifest,timeline,sentence_ids,roles,evidence,*,group_id,prior_origins=(),ffprobe="ffprobe",motion=None):
     from ..selection.timing_contract import split_sentences
     from ..selection.experiment_contract import validate_pair
     from ..vision.experiment_pair_review import PROTOCOL as PAIR_PROTOCOL
@@ -140,7 +141,7 @@ def apply_pair(manifest,timeline,sentence_ids,roles,evidence,*,group_id,prior_or
             "kind":"result"if p["kind"]=="result"else"action",
             "min_output_frames":rules["minimum_result_frames"]if p["kind"]=="result"else 1}for p in phases]
         for p in phases_us:
-            if p["kind"]=="result"and (p["end"]-p["start"])*timeline.canvas.fps_num<rules["minimum_result_frames"]*1_000_000*timeline.canvas.fps_den:
+            if motion is None and p["kind"]=="result"and (p["end"]-p["start"])*timeline.canvas.fps_num<rules["minimum_result_frames"]*1_000_000*timeline.canvas.fps_den:
                 raise ValueError("EXPERIMENT_RESULT_WINDOW_TOO_SHORT")
         shown=member["visible_frame_ids"]
         first=min(p["first_frame"]for p in phases);last=max(p["last_frame"]for p in phases)
@@ -150,9 +151,24 @@ def apply_pair(manifest,timeline,sentence_ids,roles,evidence,*,group_id,prior_or
             min(right,samples["frames"][after]["pts_us"]+16_667)])
         intervals.append(phases_us)
     required=sum(b-a for a,b in minimum);maximum=sum(b-a for a,b in bounds);duration=hi-lo
-    if duration<required:raise ValueError("EXPERIMENT_DURATION_CONFLICT_WITH_COMPATIBLE_SENTENCES")
-    if duration>maximum:raise ValueError("EXPERIMENT_SOURCE_TOO_SHORT_NO_FREEZE_ALLOWED")
-    extra=duration-required;clips=[];added=[];origins={};asset_map=timeline.asset_map()
+    planned=[]
+    if motion is not None:
+        from ..vision.experiment_motion_review import validate as validate_motion
+        from ..selection.experiment_retiming import windows,fit_group
+        observed=validate_motion(manifest,evidence,motion)
+        planned=fit_group(windows(members,observed,rules['minimum_result_frames'],fps=timeline.canvas.fps_num/timeline.canvas.fps_den),duration,
+            fps=timeline.canvas.fps_num/timeline.canvas.fps_den)
+    else:
+        if duration<required:raise ValueError("EXPERIMENT_DURATION_CONFLICT_WITH_COMPATIBLE_SENTENCES")
+        if duration>maximum:raise ValueError("EXPERIMENT_SOURCE_TOO_SHORT_NO_FREEZE_ALLOWED")
+        extra=duration-required
+        for i,((left,right),(a,b),protected)in enumerate(zip(bounds,minimum,intervals)):
+            take=min(extra,(a-left)+(right-b));extra-=take
+            extend_left=min(a-left,take//2);a-=extend_left;b+=min(right-b,take-extend_left)
+            a=max(left,b-((minimum[i][1]-minimum[i][0])+take))
+            planned.append({'source_start_us':a,'source_end_us':b,'target_duration_us':b-a,
+                'protected_intervals':[{'start':a,'end':b,'kind':'action','min_output_frames':1}]+protected})
+    clips=[];added=[];origins={};asset_map=timeline.asset_map()
     for p in prior_origins:
         asset=asset_map[p["asset_id"]]
         if (p.get("clock")!="same_source_clock"or identity.source_identity(asset.path)!=p["proxy"]
@@ -162,15 +178,20 @@ def apply_pair(manifest,timeline,sentence_ids,roles,evidence,*,group_id,prior_or
     for event in timeline.videos:
         if (event.target_start_us>=hi or event.target_start_us+event.duration_us<=lo)and event.asset_id not in origins:
             raise ValueError("EXPERIMENT_EXISTING_ORIGIN_UNKNOWN")
-    for i,(member,(left,right),(a,b),protected)in enumerate(zip(members,bounds,minimum,intervals)):
-        take=min(extra,(a-left)+(right-b));extra-=take
-        extend_left=min(a-left,take//2);a-=extend_left;b+=min(right-b,take-extend_left)
-        a=max(left,b-((minimum[i][1]-minimum[i][0])+take))
+    for i,(member,plan)in enumerate(zip(members,planned)):
         samples=member["samples"];facts=probe_media(samples["source"]["path"],ffprobe=ffprobe)
         asset=Asset(f"{group_id}-{i}",samples["source"]["path"],"video",facts["duration_us"],facts["width"],facts["height"],facts["fps_num"],facts["fps_den"])
         added.append(asset);origins[asset.asset_id]=samples["original"]["path"]
-        clips.append({"asset_id":asset.asset_id,"source_start_us":a,"source_end_us":b,"target_duration_us":b-a,
-            "protected_intervals":[{"start":a,"end":b,"kind":"action","min_output_frames":1}]+protected,
-            "evidence":[{"protocol":PAIR_PROTOCOL,"original":samples["original"],"pair_observation":row,"status":"OUTPUT_REVIEW_PENDING"}]})
+        parts=plan['retiming']['parts']if motion is not None else [plan]
+        for part in parts:
+            a,b=part['source_start_us'],part['source_end_us']
+            protected=[{**p,'start':max(a,p['start']),'end':min(b,p['end'])}
+                for p in plan['protected_intervals']if max(a,p['start'])<min(b,p['end'])]
+            clips.append({'asset_id':asset.asset_id,'source_start_us':a,'source_end_us':b,
+                'target_duration_us':part['segment_us']if motion is not None else part['target_duration_us'],
+                'protected_intervals':protected,
+                "evidence":[{"protocol":PAIR_PROTOCOL,"original":samples["original"],"pair_observation":row,
+                    "motion_observation":motion,"status":"OUTPUT_REVIEW_PENDING"}]
+                    +([{'bounded_process_speed_cap':3}]if motion is not None and not part['locked']else [])})
     transition=(members[0]["samples"]["original"]["path"],members[1]["samples"]["original"]["path"])
     return replace_group(timeline,sentence_ids,clips,group_id=group_id,assets=added,original_paths=origins,matched_pairs=(transition,))

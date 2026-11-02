@@ -6,7 +6,7 @@
     "machine-specific paths",
     "knowledge-base bodies"
   ],
-  "file_count": 389,
+  "file_count": 392,
   "files": [
     {
       "path": ".gitignore"
@@ -399,6 +399,9 @@
       "path": "doubao-jianying-orchestrator/orchestrator/selection/experiment_contract.py"
     },
     {
+      "path": "doubao-jianying-orchestrator/orchestrator/selection/experiment_retiming.py"
+    },
+    {
       "path": "doubao-jianying-orchestrator/orchestrator/selection/paper_action_events.py"
     },
     {
@@ -475,6 +478,9 @@
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/vision/experiment_detail.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/vision/experiment_motion_review.py"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/vision/experiment_pair_review.py"
@@ -571,6 +577,9 @@
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_experiment_pairs.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/tests/test_experiment_retiming.py"
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_file_safety.py"
