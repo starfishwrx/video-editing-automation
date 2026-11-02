@@ -6,7 +6,7 @@
     "machine-specific paths",
     "knowledge-base bodies"
   ],
-  "file_count": 352,
+  "file_count": 364,
   "files": [
     {
       "path": ".gitignore"
@@ -99,6 +99,9 @@
       "path": "doubao-jianying-orchestrator/orchestrator/application/engine.py"
     },
     {
+      "path": "doubao-jianying-orchestrator/orchestrator/application/production.py"
+    },
+    {
       "path": "doubao-jianying-orchestrator/orchestrator/application/task_inputs.py"
     },
     {
@@ -112,6 +115,9 @@
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/audio/bgm_selector.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/audio/final_assets.py"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/audio/subtitle_units.py"
@@ -160,6 +166,9 @@
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/domain/clips.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/domain/timeline.py"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/draft_safety.py"
@@ -216,7 +225,13 @@
       "path": "doubao-jianying-orchestrator/orchestrator/media/gpu_runtime.py"
     },
     {
+      "path": "doubao-jianying-orchestrator/orchestrator/media/probe.py"
+    },
+    {
       "path": "doubao-jianying-orchestrator/orchestrator/media/stability.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/media/timeline_render.py"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/media/video_decode.py"
@@ -285,6 +300,9 @@
       "path": "doubao-jianying-orchestrator/orchestrator/quality/draft_visual_qc.py"
     },
     {
+      "path": "doubao-jianying-orchestrator/orchestrator/quality/production_qc.py"
+    },
+    {
       "path": "doubao-jianying-orchestrator/orchestrator/quality/visual_match.py"
     },
     {
@@ -322,6 +340,9 @@
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/runtime/proc_slots.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/runtime/production_env.py"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/runtime/ready_work.py"
@@ -501,6 +522,9 @@
       "path": "doubao-jianying-orchestrator/tests/test_capacity_and_sync.py"
     },
     {
+      "path": "doubao-jianying-orchestrator/tests/test_edit_timeline.py"
+    },
+    {
       "path": "doubao-jianying-orchestrator/tests/test_file_safety.py"
     },
     {
@@ -558,6 +582,9 @@
       "path": "doubao-jianying-orchestrator/tests/test_preferred_speed.py"
     },
     {
+      "path": "doubao-jianying-orchestrator/tests/test_production_timeline.py"
+    },
+    {
       "path": "doubao-jianying-orchestrator/tests/test_ready_work.py"
     },
     {
@@ -592,6 +619,9 @@
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_task_control.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/tests/test_timeline_render.py"
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_timing_contract.py"
@@ -1030,6 +1060,12 @@
     },
     {
       "path": "tools/process_liveness.py"
+    },
+    {
+      "path": "tools/production.py"
+    },
+    {
+      "path": "tools/production_demo.py"
     },
     {
       "path": "tools/production_eval.py"

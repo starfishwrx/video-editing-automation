@@ -399,7 +399,9 @@ def render(draft_path: Path, output: Path, *, overrides: dict | None = None,
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--draft", type=Path, required=True)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--draft", type=Path)
+    source.add_argument("--timeline", type=Path, help="Render the independent timeline without a draft")
     parser.add_argument("--draft-root", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--overrides", type=Path)
@@ -408,6 +410,11 @@ def main(argv=None) -> int:
     parser.add_argument("--source-frame-map", type=Path,
                         help="Optional reviewed action plan contract; real source PTS and proof are revalidated")
     args = parser.parse_args(argv)
+    if args.timeline:
+        if args.overrides or args.source_frame_map or args.draft_root:
+            parser.error("Timeline input does not accept draft overrides or arbitrary frame maps")
+        from tools.production import main as production_main
+        return production_main(["render", "--timeline", str(args.timeline), "--output", str(args.output)])
     receipt = render(args.draft, args.output, overrides=read(args.overrides) if args.overrides else None,
                      draft_root=args.draft_root, name=args.name, sheets=not args.no_contact_sheets,
                      source_frame_map=read(args.source_frame_map) if args.source_frame_map else None)

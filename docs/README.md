@@ -18,7 +18,7 @@
 - 默认生产：Windows 脚本 → 素材/选镜/配音 → 剪映写稿 → 独立视觉 QC → 四项自动验收。源码候选、GitHub 集成与生产安装分别确认。
 - 已有基础：功能包迁移、旧 Agent 调度退役、GLM/Qwen 直连及 Windows 验收。旧平铺模块仅为兼容导入，实际归属见[模块化开发](modular-development.md)。
 - 隔离验证：[纸品选镜回放](paper-selection-replay.md)和[动作事实/帧级窗口](paper-action-windows.md)只用于诊断，不代表默认生产或真实内容已通过。
-- 下一阶段：[独立时间线与末端剪映导出方案](plans/20261101-programmatic-production.md)待实施；当前预览仍读取既有草稿。接续从方案 PR1 的音频/字幕、时间线和环境边界开始。
+- 显式开发入口：[独立时间线与无草稿工作预览](programmatic-production.md)已实现固定选镜、音频/字幕准备、独立渲染与检查骨架；技术结果保持未认证。动作自动接入、内容/观看验收、末端导出与调度恢复仍按[实施方案](plans/20261101-programmatic-production.md)推进。
 - 验证入口：[测试策略](test.md)区分离线程序检查、真实视频效果和剪映可编辑性；本轮具体结果见[开发记录](working.md)。
 
 ## 维护与 Agent 入口
@@ -45,7 +45,7 @@
 
 ## 会议与功能计划
 
-- [独立时间线、生产验收与末端剪映导出](plans/20261101-programmatic-production.md)：基于 `feat/paper-shot-retiming` 的待实施方案，保留可编辑草稿交付；含阶段拆分、状态恢复与验收标准，不表示业务代码已实现或生产已切换。
+- [独立时间线、生产验收与末端剪映导出](plans/20261101-programmatic-production.md)：基于 `feat/paper-shot-retiming` 的分期方案，保留可编辑草稿交付；当前实现和剩余边界见[开发入口](programmatic-production.md)，生产未切换。
 
 | 文件 | 内容与状态 |
 |---|---|

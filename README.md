@@ -12,7 +12,7 @@
 
 默认选镜模式为 `ai_editor`，最终视觉 QC 使用 v4 合同；`rule_then_ai` 为显式规则初排/AI 复核策略，`legacy` 保留旧算法。算法选择与 GLM/Qwen 调用通道分别配置，各自报告不能混用。详见[架构](docs/architecture.md)和[选镜说明](packages/video-v1.5.3/docs/AI_EDITOR.md)。
 
-当前分支的功能边界与接续任务见[文档入口](docs/README.md#当前边界与接续位置)。纸品动作/帧级窗口是隔离验证；[程序化生产与末端剪映导出](docs/plans/20261101-programmatic-production.md)仍为待实施方案，默认生产尚未改为独立时间线。
+当前分支的功能边界与接续任务见[文档入口](docs/README.md#当前边界与接续位置)。纸品动作/帧级窗口是隔离验证；[独立时间线与无草稿工作预览](docs/programmatic-production.md)已提供固定选镜的显式开发入口，内容验收、末端可编辑导出和调度接入仍按[实施方案](docs/plans/20261101-programmatic-production.md)推进，默认生产未切换。
 
 ## 快速开始
 

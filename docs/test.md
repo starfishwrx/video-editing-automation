@@ -43,6 +43,8 @@ uv run --frozen python -X utf8 -m tools.check_architecture
 
 ## 2.1 实际媒体与端到端验收
 
+独立时间线的固定输入开发入口见[程序化生产](programmatic-production.md)。`test_edit_timeline.py`、`test_production_timeline.py`、`test_timeline_render.py` 覆盖无草稿预检、重复句与多镜、实际音频和派生资产、CFR/非零 PTS、逐帧像素对应、保护末帧、原声偏移拒绝、字幕边界和失败修订。`tools.production_demo` 在新的包外目录生成三路音轨和可播放合成预览；检查总体保持 UNCERTIFIED，不取代真实商品内容与剪映可编辑性验收。
+
 合成 FFmpeg 测试验证源帧/PTS、变速、结果帧、音频和字幕执行；缺少 FFmpeg 时的 skip 不代表媒体行为通过。准备绿色工具后需把其目录加入当前进程 PATH，并设置 FFMPEG_BIN/FFPROBE_BIN，再运行两套回归。
 
 当前有 CLI、调度、草稿/交付夹具和合成媒体集成测试；真实商品从自动选镜到专业编辑接受的完整端到端质量，不由离线套件认证。纸品隔离验证保留已有失败，详情见[动作帧域窗口](paper-action-windows.md)和[回放说明](paper-selection-replay.md)。独立时间线方案的阶段验收见[实施方案](plans/20261101-programmatic-production.md)。

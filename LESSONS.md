@@ -7,6 +7,15 @@
 
 ## 新增条目
 
+### L-20261102-02 时间线末端与保护区必须核验真实输出帧
+- status: OPEN
+- hits: 1
+- 模块: domain/timeline / media/timeline_render
+- 现象: 非整帧配音若把整片帧数直接 floor，会有末尾旁白没有画面；名义源窗覆盖结果，也可能采不到所需结果帧。Matroska 的 60fps 还会因 1ms time_base 表现为 16/17ms 交替。
+- 根因: 业务微秒、容器时间基和输出帧预算混用，或仅凭 avg_frame_rate 判断源时间分布。
+- 以后怎么做: 内部切点共享累计 floor、整片末端 ceil，最后一帧必须有真实源画面；实际 PTS 在容器精度内核对 CFR，再核验选中源帧和保护区的输出帧数量。短源、缺帧、编码增删帧保持阻断，不靠尾帧克隆或截旁白补齐。
+- 证据: `test_edit_timeline.py`、`test_timeline_render.py` 的非整帧、非零 PTS、逐帧像素及保护结果反例；实现边界见 `docs/programmatic-production.md`。
+
 ### L-20261102-01 冻结计划复用必须自行建立输出目录
 - status: OPEN
 - hits: 1
