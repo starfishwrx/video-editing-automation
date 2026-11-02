@@ -20,7 +20,7 @@ def fit(observation, shot, request):
         hi = min(bound["end"], lo + duration)
         lo = max(bound["start"], hi - duration)
     protected = [{"start": p["start"], "end": p["end"]} for p in row["phases"]
-        if not p["can_speed"] or row["time_sensitive"]]
+        if not p["can_speed"] or (row["time_sensitive"] and p["kind"] != "setup")]
     return plan_retiming(lo, hi, protected, duration, preferred_cap=2, hard_cap=3)
 
 

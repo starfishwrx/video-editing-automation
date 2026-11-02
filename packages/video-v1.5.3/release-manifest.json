@@ -6,7 +6,7 @@
     "machine-specific paths",
     "knowledge-base bodies"
   ],
-  "file_count": 376,
+  "file_count": 379,
   "files": [
     {
       "path": ".gitignore"
@@ -414,6 +414,9 @@
       "path": "doubao-jianying-orchestrator/orchestrator/selection/shot_notes.py"
     },
     {
+      "path": "doubao-jianying-orchestrator/orchestrator/selection/temporal_groups.py"
+    },
+    {
       "path": "doubao-jianying-orchestrator/orchestrator/selection/timing_contract.py"
     },
     {
@@ -475,6 +478,9 @@
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/vision/purpose_review.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/vision/temporal_video.py"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/vision/vision_analyzer.py"
@@ -646,6 +652,9 @@
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_task_control.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/tests/test_temporal_video_groups.py"
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_timeline_export.py"
