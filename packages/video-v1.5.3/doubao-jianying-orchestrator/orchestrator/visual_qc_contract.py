@@ -16,6 +16,14 @@ MATCH_LEVELS = {"DIRECT", "ACCEPTABLE_DEGRADED", "MISMATCH", "INSUFFICIENT_EVIDE
 OVERALL_LEVELS = {"PASS", "PASS_WITH_DEGRADED", "PASS_WITH_GAPS", "FAIL", "UNCERTIFIED"}
 
 
+def _draft_documents():
+    path = Path(__file__).with_name('runtime') / 'draft_documents.py'
+    spec = importlib.util.spec_from_file_location('_qc_draft_documents', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _current_editorial_rules(report: dict) -> bool:
     if __package__:
         from . import ai_editor_contract as contract
@@ -49,11 +57,7 @@ def _source_bindings_valid(report: dict, draft: Path | None = None) -> bool:
         if any(_source_identity(row["path"]) != row["identity"] for row in bindings):
             return False
         # Every source actually referenced by the video timeline needs a binding.
-        info_path = next((draft / name for name in ("draft_info.json", "draft_content.json")
-                          if (draft / name).is_file()), None)
-        if info_path is None:
-            return False
-        info = json.loads(info_path.read_text(encoding="utf-8-sig"))
+        info = _draft_documents().timeline(draft)
         used = {str(segment.get("material_id") or "") for track in info.get("tracks", [])
                 for segment in track.get("segments", [])}
         for material in (info.get("materials") or {}).get("videos", []):
@@ -78,7 +82,15 @@ def draft_metadata_fingerprint(draft: Path) -> str:
     if not root.is_dir():
         raise ValueError("DRAFT_DIRECTORY_REQUIRED")
     rows = []
-    for name in ("draft_info.json", "draft_content.json", "ai_selection_identity.json"):
+    names = ['draft_info.json', 'draft_content.json', 'ai_selection_identity.json']
+    if _draft_documents().is_native(root):
+        names += ['headless-production.json', 'draft_meta_info.json', 'template-2.tmp',
+                  'draft_content.json.bak', 'timeline_layout.json', 'Timelines/project.json', 'Timelines/project.json.bak',
+                  'caption_identity.json', 'audio_identity.json']
+        names += [str(p.relative_to(root)) for p in (root / 'Timelines').glob('*/draft_content.json')]
+        names += [str(p.relative_to(root)) for p in (root / 'Timelines').glob('*/draft_content.json.bak')]
+        names += [str(p.relative_to(root)) for p in (root / 'Timelines').glob('*/template-2.tmp')]
+    for name in names:
         path = root / name
         if path.is_symlink():
             raise ValueError("DRAFT_METADATA_SYMLINK_REJECTED")

@@ -79,10 +79,8 @@ def _num(value: Any, default: float = 0.0) -> float:
 
 
 def _load_json(path: pathlib.Path) -> dict[str, Any]:
-    for candidate in (path / "draft_info.json", path / "draft_content.json"):
-        if candidate.is_file():
-            return json.loads(candidate.read_text(encoding="utf-8-sig"))
-    raise FileNotFoundError("draft_info.json/draft_content.json missing")
+    from ..runtime.draft_documents import timeline
+    return timeline(path)
 
 
 def _ffmpeg() -> str | None:

@@ -328,8 +328,8 @@ class NarrationProbeTest(unittest.TestCase):
         engine_ruler = {"duration_us": 1_545_771, "source": "container_duration", "confidence": "LOW"}
         with mock.patch("orchestrator.platform_env.find_ffmpeg",
                         return_value=(Path("ffmpeg"), Path("ffprobe"))), \
-                mock.patch.object(cli.timing_contract, "probe_material_duration_us",
-                                  return_value=engine_ruler) as probe:
+                mock.patch("orchestrator.audio.narration_probe.probe_audio",
+                           return_value={"duration": 1.545771, "duration_us": 1_545_771}) as probe:
             measured = cli._audio_probe()("tts.ogg")
         probe.assert_called_once()
         self.assertEqual(round(measured["duration"] * 1_000_000), 1_545_771)

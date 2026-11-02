@@ -1,6 +1,6 @@
 [project]
 name = "video-automation"
-version = "1.5.6"
+version = "1.6.0"
 description = "Jianying / Doubao video automation skill pack (orchestrator + editor + tools)"
 readme = "README.md"
 requires-python = ">=3.11,<3.13"
@@ -10,6 +10,7 @@ dependencies = [
   "pillow>=10.0.0",
   "uiautomation>=2.0.0; sys_platform == 'win32'",
   "aiohttp>=3.12,<4",
+  "fonttools==4.60.2",
 ]
 
 [dependency-groups]

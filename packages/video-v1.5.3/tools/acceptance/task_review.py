@@ -93,14 +93,12 @@ def validate_draft_package(draft_dir: pathlib.Path, *,
     audio-only/empty draft into a false delivery.
     """
     video_extensions = tuple(video_extensions)
-    info_path = next((p for p in (draft_dir / "draft_info.json",
-                                  draft_dir / "draft_content.json")
-                      if p.is_file()), None)
-    if info_path is None:
-        return {"ok": False, "issues": ["DRAFT_INFO_MISSING"]}
     try:
-        info = json.loads(info_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError) as exc:
+        from tools.native_drafts import timeline
+        info = timeline(draft_dir)
+    except FileNotFoundError:
+        return {"ok": False, "issues": ["DRAFT_INFO_MISSING"]}
+    except (OSError, ValueError, TypeError, RuntimeError) as exc:
         return {"ok": False, "issues": ["DRAFT_INFO_INVALID:%s" % exc]}
     tracks = [t for t in (info.get("tracks") or []) if isinstance(t, dict)]
     preferred = [t for t in tracks if str(t.get("name") or "").casefold() in {

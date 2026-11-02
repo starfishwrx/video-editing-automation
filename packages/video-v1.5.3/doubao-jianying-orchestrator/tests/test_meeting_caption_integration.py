@@ -52,7 +52,7 @@ class CaptionIntegrationTests(unittest.TestCase):
                  patch("orchestrator.audio_captions.build_captions", return_value=failed), \
                  patch.object(engine.OrchestrationEngine, "_background_pressure", return_value=None), \
                  patch.object(engine.OrchestrationEngine, "_event") as event:
-                result = instance.write_draft(clips, None)
+                result = instance._write_legacy_draft(clips, None)
 
             self.assertEqual(result["status"], "CAPTION_TIMING_UNCERTIFIED")
             self.assertFalse(result["formal_delivery_allowed"])
@@ -108,7 +108,7 @@ class CaptionIntegrationTests(unittest.TestCase):
                  patch.object(engine.draft_safety, "post_write_validate", return_value=[]), \
                  patch.object(engine.draft_safety, "sync_root_meta"), \
                  patch.object(engine.OrchestrationEngine, "_coverage_report", return_value={}):
-                result = instance.write_draft(clips, None)
+                result = instance._write_legacy_draft(clips, None)
 
             self.assertEqual(result["status"], "SUCCESS")
             project.add_caption_cues.assert_called_once_with(

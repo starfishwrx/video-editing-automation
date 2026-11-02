@@ -149,6 +149,10 @@ def result_contract(result: dict[str, Any], *, task_id: str, run_id: str,
         "PACKAGE_NOT_ACTIVE": ("ui", "PACKAGE_NOT_ACTIVE"),
         "CAPTION_CONFIG_INVALID": ("environment", "CAPTION_CONFIG_INVALID"),
         "CAPTION_TIMING_UNCERTIFIED": ("semantic", "CAPTION_TIMING_UNCERTIFIED"),
+        "HEADLESS_BUILD_BLOCKED": ("draft", "HEADLESS_BUILD_BLOCKED"),
+        "HEADLESS_TARGET_EXISTS": ("draft", "HEADLESS_TARGET_EXISTS"),
+        "DRAFT_BACKEND_INVALID": ("environment", "DRAFT_BACKEND_INVALID"),
+        "BGM_REQUIRED": ("environment", "BGM_REQUIRED"),
     }
     if status in status_codes and (not failure_class or failure_class == "unknown"):
         failure_class, failure_code = status_codes[status]

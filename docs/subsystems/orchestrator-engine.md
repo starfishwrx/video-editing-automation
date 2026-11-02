@@ -65,6 +65,12 @@
 - [ ] 两套测试全绿；必要时补“必拦样例”参数化测试
 
 ## 8. 已知坑
+
+默认 `write_draft` 走 `application/headless_production`；显式历史恢复才用
+`draft_backend=legacy`。`HEADLESS_BUILD_BLOCKED`、`HEADLESS_TARGET_EXISTS`、
+`DRAFT_BACKEND_INVALID` 与 `BGM_REQUIRED` 会进入阻断合同，不重写同名草稿。
+按句验证音频切片从0连续覆盖最终配音末端；一帧容差不能吞掉句尾。画面尾留白
+可保留，实际音频长于该句画面时返回时长冲突，不能默默用 `min` 截短。
 - 版本闸门必须“下限”判断（见 `LESSONS.md#L-SEED-01`）
 - 选镜前必须在 CLI 写入 `delivery_mode`（见 `LESSONS.md#L-SEED-03`）
 - 4K HEVC CUDA 解码需 `-threads 1`，否则 NVDEC 静默退回 CPU（见 `LESSONS.md#L-SEED-02`）

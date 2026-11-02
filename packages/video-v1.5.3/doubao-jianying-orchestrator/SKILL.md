@@ -3,7 +3,7 @@ name: doubao-jianying-orchestrator
 description: Build and recover editable Jianying drafts from task manifests through the Windows video pipeline, with evidence-based shot matching, narration timing, independent visual QC and delivery checks. Use with the sibling jianying-editor skill for video automation.
 ---
 
-# Doubao/Jianying orchestrator v1.5.6
+# Doubao/Jianying orchestrator v1.6.0
 
 纸品生产规则见包根`docs/PAPER_PRODUCTION_RULES.md`：13类语义视觉合同共用于分析、AI选镜和独立QC；
 口播默认1.3倍、清洁画面优先1.3倍、硬切、实际气口不超过5帧、字幕像素X=0/Y=-528。

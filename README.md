@@ -12,7 +12,7 @@
 
 默认选镜模式为 `ai_editor`，最终视觉 QC 使用 v4 合同；`rule_then_ai` 为显式规则初排/AI 复核策略，`legacy` 保留旧算法。算法选择与 GLM/Qwen 调用通道分别配置，各自报告不能混用。详见[架构](docs/architecture.md)和[选镜说明](packages/video-v1.5.3/docs/AI_EDITOR.md)。
 
-当前分支的功能边界与接续任务见[文档入口](docs/README.md#当前边界与接续位置)。纸品动作/帧级窗口是隔离验证；[独立时间线与无草稿工作预览](docs/programmatic-production.md)已提供固定选镜的显式开发入口，内容验收、末端可编辑导出和调度接入仍按[实施方案](docs/plans/20261101-programmatic-production.md)推进，默认生产未切换。
+1.6.0 默认生产沿用现有选镜、配音和时序，切到无头建稿，BGM 为空自动选曲；独立 QC、NAS 分发、失败恢复与版本归档共用当前原生草稿读取合同。后端作为单独授权依赖安装，见[Windows 生产入口](docs/windows-pipeline.md)。[独立时间线工作预览](docs/programmatic-production.md)仍是显式开发入口；完整内容／观看验收、原生 MP4 导出和纸品帧级动作默认接入仍按[实施方案](docs/plans/20261101-programmatic-production.md)推进。
 
 ## 快速开始
 
@@ -32,8 +32,8 @@ uv run --frozen python -X utf8 doubao-jianying-orchestrator/run.py --help
 
 版本状态按 **2026-11-02** 核对；后续以包内 `VERSION` 和 [GitHub Releases](https://github.com/starfishwrx/video-editing-automation/releases) 的实际附件为准。本文描述当前分支，功能分支的能力不等于已合入 `main`。
 
-- **当前维护主线**：[`packages/video-v1.5.3/`](packages/video-v1.5.3/)，`VERSION` 为 **1.5.6**。目录名是历史代号，升级时保留路径。
-- **已发布下载包**：本次核对只有 [video-v1.5.1 预发布版](https://github.com/starfishwrx/video-editing-automation/releases/tag/video-v1.5.1)。它与当前主线存在差异；仓库内的旧 ZIP 也不代表 1.5.6 已发布。
+- **当前维护源码**：[`packages/video-v1.5.3/`](packages/video-v1.5.3/)，本功能分支候选 `VERSION` 为 **1.6.0**。目录名是历史代号，升级时保留路径。
+- **发布与安装**：下载资产以 [GitHub Releases](https://github.com/starfishwrx/video-editing-automation/releases) 为准；功能分支候选、历史 ZIP 和本机安装是分别核实的状态。
 - **实验路线**：`packages/video-v1.5.4/`、`packages/video-v1.5.5/` 是独立的索引/检索候选，后者声明为 experimental；不作为默认运行入口。
 - **生产安装**：由部署机器的 `ACTIVE_VIDEO_RUNTIME.json` 与实际安装文件确认。源码、下载包与生产版本分别记录。
 

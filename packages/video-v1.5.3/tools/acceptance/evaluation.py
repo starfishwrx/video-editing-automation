@@ -9,6 +9,7 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -110,7 +111,15 @@ def runtime_identity(root: Path) -> dict:
         raise ValueError('RUNTIME_POLICY_TOOL_VERSION_DRIFT')
     if policy_payload.get('visual_policy_version') != manifest.get('visual_policy_version'):
         raise ValueError('RUNTIME_POLICY_VERSION_METADATA_DRIFT')
-    return {'tool_version': manifest['version'], 'package_sha256': digest(rows),
+    content = [{'path': row['path'], 'sha256': file_hash(root / row['path'])} for row in rows]
+    if os.environ.get('JIANYING_HEADLESS_ROOT'):
+        from tools.native_drafts import contract
+        backend = contract().native_backend()
+        backend_root = Path(backend.__file__).resolve().parent.parent
+        entry = backend_root / 'skills/yichen-jianying-edit/scripts/headless_draft.py'
+        # Bind external backend code and plan/runtime provenance to this run.
+        content.append({'path': '@headless/entrypoint', 'sha256': file_hash(entry)})
+    return {'tool_version': manifest['version'], 'package_sha256': digest(content),
             'release_id': manifest.get('release_id') or 'video-v' + manifest['version'],
             'visual_policy_version': policy_payload['visual_policy_version'],
             'visual_policy_sha256': file_hash(policy), 'eval_pack_version': 'windows-core-v1',
@@ -120,8 +129,8 @@ def runtime_identity(root: Path) -> dict:
 def output_draft_ids(outputs: list[Path]) -> list[str]:
     values = []
     for output in outputs:
-        info = read(output / 'draft_info.json')
-        draft_id = str(info.get('id') or '').strip()
+        from tools.native_drafts import draft_id as current_draft_id
+        draft_id = str(current_draft_id(output) or '').strip()
         if not draft_id:
             raise ValueError('DRAFT_ID_MISSING')
         values.append(draft_id)

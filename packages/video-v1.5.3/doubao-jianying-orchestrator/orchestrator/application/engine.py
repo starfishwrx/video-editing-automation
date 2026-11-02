@@ -272,20 +272,23 @@ class OrchestrationEngine:
     def probe(self, path: str | Path) -> dict:
         resolved = Path(path).resolve()
         key = str(resolved)
+        from ..audio.narration_probe import AUDIO_EXTENSIONS, PROBE_KIND as AUDIO_PROBE_KIND, probe_audio
+        audio_only = resolved.suffix.lower() in AUDIO_EXTENSIONS
+        probe_kind = AUDIO_PROBE_KIND if audio_only else PROBE_KIND
         try:
             # 缓存键 = absolute_path + file_size + mtime_ns + PROBE_KIND（1.3.27.1
             # 用户修正第 6 条）：文件被替换（大小/mtime 变化）即自动重探；
             # PROBE_KIND 世代戳让旧口径缓存（容器时长）整体失效。
-            signature = (key, *self._file_signature(resolved), PROBE_KIND)
+            signature = (key, *self._file_signature(resolved), probe_kind)
         except OSError:
-            signature = (key, 0, 0, PROBE_KIND)
+            signature = (key, 0, 0, probe_kind)
         # Reuse both in-memory and cross-task results when the source is unchanged.
         # `probe_kind` 是 1.3.27.1 加的缓存世代戳：老缓存（容器时长口径）签名里
         # 没有它/形态不同，直接重探，绝不把旧的「容器 4.99 / 视频轨 4.984」两把尺混用。
         with self._probe_cache_lock:
             cached = self._probe_cache.get(key)
             if cached and tuple(cached.get("signature", ())) == signature \
-                    and cached.get("probe_kind") == PROBE_KIND:
+                    and cached.get("probe_kind") == probe_kind:
                 return cached
             waiter = self._probe_inflight.get(key)
             if waiter is None:
@@ -299,12 +302,15 @@ class OrchestrationEngine:
             with self._probe_cache_lock:
                 cached = self._probe_cache.get(key)
                 if cached and tuple(cached.get("signature", ())) == signature \
-                        and cached.get("probe_kind") == PROBE_KIND:
+                        and cached.get("probe_kind") == probe_kind:
                     return cached
             raise RuntimeError(f"媒体探测失败：{key}")
         try:
             meta = None
-            if self.ffprobe:
+            if audio_only and self.ffprobe:
+                meta = probe_audio(key, ffprobe=str(self.ffprobe))
+                meta.update(path=key, signature=list(signature), probe_kind=probe_kind)
+            if meta is None and self.ffprobe:
                 try:
                     # 1.3.27.1：素材总长统一走 probe_material_duration_us ——
                     # 优先使用与写入层一致的视频素材时长（pymediainfo/ffprobe
@@ -316,7 +322,7 @@ class OrchestrationEngine:
                     if dur_us > 0:
                         meta = {"duration": dur_us / US, "path": key,
                                 "signature": list(signature),
-                                "probe_kind": PROBE_KIND,
+                                "probe_kind": probe_kind,
                                 "duration_source": str(
                                     probe_res.get("source") or "probe_failed"),
                                 "duration_confidence": str(
@@ -326,7 +332,7 @@ class OrchestrationEngine:
             if meta is None:
                 meta = self._probe_via_ffmpeg(key)
                 meta["signature"] = list(signature)
-                meta["probe_kind"] = PROBE_KIND
+                meta["probe_kind"] = probe_kind
                 meta.setdefault("duration_source", "ffmpeg_container")
                 meta.setdefault("duration_confidence", "LOW")
             with self._probe_cache_lock:
@@ -419,6 +425,11 @@ class OrchestrationEngine:
                 f"{MIN_SUPPORTED_PACKAGE_VERSION}；请先执行更新，不得回退到内置或旧版 Skill。")
         if problems:
             return {"status": "ENV_ERROR", "problems": problems, "report": rep}
+        from ..runtime.headless import preflight as draft_preflight
+        try:
+            rep['draft_backend'] = draft_preflight(self.m)
+        except (OSError, ValueError, RuntimeError, ImportError) as exc:
+            return {'status': 'ENV_ERROR', 'reason': str(exc), 'report': rep}
         self.env = rep
         return None
 
@@ -891,7 +902,7 @@ class OrchestrationEngine:
         }
 
     def audio_selection_gate(self, clips: list[Clip]) -> Optional[dict]:
-        """Pause normal-mode builds until missing voice/BGM choices are confirmed.
+        """Pause normal-mode builds for voice confirmation; BGM is automatic when empty.
 
         Intelligent mode is intentionally one-click. Normal mode must expose
         choices before doing TTS, media staging, or draft creation.
@@ -902,11 +913,11 @@ class OrchestrationEngine:
         voice_spec = os.environ.get("JY_OPERATOR_VOICE", "").strip() or self.m.get("voice")
         if voice_spec is None or (isinstance(voice_spec, str) and not voice_spec.strip()):
             missing.append("voice")
-        if not self.m.get("bgm"):
-            missing.append("bgm")
+        from ..audio.bgm_request import normalize
+        self.m["bgm"] = normalize(self.m.get("bgm"))
         confirmed = self.m.get("audio_selection_confirmed") is True
         if not confirmed and not missing:
-            missing = ["voice", "bgm"]
+            missing = ["voice"]
         if confirmed and not missing:
             return None
         full = str(self.m.get("full_script", "") or self.m.get("script", ""))
@@ -924,39 +935,9 @@ class OrchestrationEngine:
                 audition["order"] = idx
         except Exception as exc:  #试听失败不应绕过确认门禁
             self._warn("voice_audition_unavailable", str(exc))
-        # Normal-mode confirmation must be actionable: only expose tracks with
-        # a direct preview/download URL. Unplayable library entries are hidden.
-        bgms = [b for b in bgm_selector.recommend_bgm(text, topn=10)
-                if b.get("url")][:5]
-        # Prepare only the small candidate set, concurrently. This keeps the
-        # selection step responsive while avoiding a full-library download.
-        bgm_auditions = []
-        bgm_candidate_count = len(bgms)
-        if bgms:
-            try:
-                audition_dir = self.report_dir / "audio_selection" / "bgm_auditions"
-                prepared = bgm_selector.prepare_preview_tracks(
-                    bgms, audition_dir,
-                    ffmpeg=str(self.ffmpeg) if self.ffmpeg else "ffmpeg",
-                    seconds=8.0, workers=min(4, len(bgms)))
-                # Only return files that can be played immediately. A URL by
-                # itself is not enough: download/ffmpeg failures must stop the
-                # selection gate instead of exposing an unplayable candidate.
-                bgm_auditions = [a for a in prepared
-                                 if a.get("preview_ready") and a.get("preview_file")]
-                bgms = bgm_auditions
-                for idx, audition in enumerate(bgm_auditions, 1):
-                    audition["order"] = idx
-            except Exception as exc:  # 试听失败不应绕过确认门禁
-                self._warn("bgm_audition_unavailable", str(exc))
-                bgms = []
-        if "bgm" in missing and not bgm_auditions:
-            self._event("bgm_preview_unavailable", candidate_count=bgm_candidate_count)
-            return {
-                "status": "BGM_PREVIEW_UNAVAILABLE",
-                "message": "候选 BGM 无法生成可播放试听文件，未继续生成草稿。",
-                "task_log_hint": "请检查 BGM 直链/网络，或在 manifest 中指定可访问的本地 bgm.path。",
-            }
+        # BGM is fulfilled automatically after final voice timing. Voice
+        # confirmation never downloads music previews or blocks on an empty BGM.
+        bgms, bgm_auditions = [], []
         self._event("audio_selection_required", missing=missing,
                     confirmation_required=not confirmed,
                     voice_candidates=voices, bgm_candidates=bgms)
@@ -2177,58 +2158,30 @@ class OrchestrationEngine:
 
     # ---------- 需求3：BGM ----------
     def prepare_bgm(self) -> Optional[str]:
-        spec = self.m.get("bgm")
-        if not spec and self.intelligent_mode_authorized():
-            spec = {"auto": True, "script": str(self.m.get("full_script", ""))}
-            self._event("bgm_auto_enabled", mode="intelligent")
-        if not spec:
+        from ..audio.bgm_request import normalize
+        from ..audio.final_bgm import prepare_task_bgm
+        import uuid
+        spec = normalize(self.m.get("bgm"))
+        if spec.get("path"):
+            spec["path"] = str(self.resolve(spec["path"]))
+        script = str(self.m.get("full_script") or "".join(
+            str(row.get("text") or "") for row in self.m.get("segments", [])))
+        state = self.resolve(self.m["bgm_state_dir"]) if self.m.get("bgm_state_dir") else self.report_dir / "bgm_selection"
+        try:
+            result = prepare_task_bgm(spec, script=script,
+                task_id=str(self.m.get("task_id") or self.m.get("record_id") or self.m.get("draft_name") or "draft"),
+                batch_id=self.m.get("batch_id") or self.m.get("batch_identity"), state_dir=state,
+                output_dir=self.report_dir / "bgm" / ("attempt-" + uuid.uuid4().hex[:10]),
+                duration_us=self.total_us, ffmpeg=str(self.ffmpeg or "ffmpeg"), ffprobe=str(self.ffprobe or "ffprobe"))
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+            self._warn("bgm_prepare_failed", str(exc))
+            self._bgm_failure = str(exc)
             return None
-        bgm_dir = self.report_dir / "bgm"
-        total = self.total_us / US
-        src: Optional[Path] = None
-        if isinstance(spec, dict) and spec.get("path"):
-            src = self.resolve(spec["path"])
-            self._bgm_choice = {"path": str(src), "selection_mode": "explicit_path"}
-        elif isinstance(spec, dict) and (spec.get("music_id") or spec.get("mood") or
-                                         spec.get("auto", True) or self.m.get("full_script")):
-            # 默认基于脚本/剧情对曲库相关性排序；显式 mood/music_id 优先
-            cands = bgm_selector.select_bgm(
-                spec.get("mood", ""), music_id=spec.get("music_id", ""),
-                topk=5, min_duration=total,
-                script=spec.get("script", "") or str(self.m.get("full_script", "")))
-            if not cands:
-                self._warn("bgm_not_found", f"未找到匹配BGM: {spec}")
-                return None
-            task_identity = {"task_id": self.m.get("task_id") or self.m.get("record_id") or
-                             self.m.get("draft_name"),
-                             "script_sha256": hashlib.sha256(str(self.m.get("full_script") or
-                                 [c.get("text", "") for c in self.m.get("segments", [])]).encode()).hexdigest()}
-            state_dir = (self.resolve(self.m["bgm_state_dir"]) if self.m.get("bgm_state_dir") else
-                         self.report_dir / "bgm_selection")
-            requested_bgm = str(spec.get("music_id") or "")
-            resolved_music_id = (str(cands[0].get("music_id") or requested_bgm)
-                                 if requested_bgm else "")
-            chosen = bgm_selector.select_bgm_for_task(cands, task_identity=task_identity,
-                batch_identity=self.m.get("batch_id") or self.m.get("batch_identity") or task_identity,
-                state_dir=state_dir, explicit_music_id=resolved_music_id)
-            if requested_bgm and resolved_music_id and requested_bgm != resolved_music_id:
-                chosen["requested_label"] = requested_bgm
-            self._bgm_choice = chosen
-            if chosen.get("url"):
-                src = bgm_selector.download_track(chosen, bgm_dir)
-            if src is None:
-                self._warn("bgm_no_url", f"《{chosen['title']}》无直链，请在剪映同步音乐后指定 path")
-                return None
-        if src is None or not Path(src).exists():
-            return None
-        target_lufs = float(spec.get("target_lufs", -28.0)) if isinstance(spec, dict) else -28.0
-        out = bgm_dir / "bgm_final.m4a"
-        bgm_selector.prepare_bgm_track(
-            src, out, total, ffmpeg=str(self.ffmpeg) if self.ffmpeg else "ffmpeg",
-            target_lufs=target_lufs,
-            fade_in=float(spec.get("fade_in", 0.4)) if isinstance(spec, dict) else 0.4,
-            fade_out=float(spec.get("fade_out", 0.2)) if isinstance(spec, dict) else 0.2)
-        return str(out)
+        self._bgm_choice = result["selected"]
+        self._bgm_receipt = result
+        self._event("bgm_prepared", music_id=self._bgm_choice.get("music_id"),
+                    title=self._bgm_choice.get("title"), measured_lufs=result["measured_lufs"])
+        return result["path"]
 
     # ---------- 素材 stage（需求5：并行复制） ----------
     def _normalize_narrations(self, clips: list[Clip]) -> dict[str, str]:
@@ -2367,6 +2320,15 @@ class OrchestrationEngine:
 
     # ---------- 需求6/7：构建并安全写入草稿 ----------
     def write_draft(self, clips: list[Clip], bgm_path: Optional[str]) -> dict:
+        backend = str(self.m.get("draft_backend") or os.environ.get("JY_DRAFT_BACKEND") or "headless")
+        if backend == "headless":
+            from .headless_production import write_draft
+            return write_draft(self, clips, bgm_path)
+        if backend == "legacy":
+            return self._write_legacy_draft(clips, bgm_path)
+        return {"status": "DRAFT_BACKEND_INVALID", "formal_delivery_allowed": False}
+
+    def _write_legacy_draft(self, clips: list[Clip], bgm_path: Optional[str]) -> dict:
         import sys
         sys.path.insert(0, str(self.editor_root / "scripts"))
         from jy_wrapper import JyProject, draft  # type: ignore
@@ -2686,9 +2648,14 @@ class OrchestrationEngine:
             }, ensure_ascii=False, indent=2), encoding="utf-8")
         draft_safety.sync_root_meta(Path(drafts_root), name, duration_us=self.total_us)
         actual_total_us = project.get_track_duration("Video_BRoll") or self.total_us
+        return self._draft_result(clips, bgm_path, name, draft_dir, expected_root, built,
+                                  caption_source, caption_result, actual_total_us)
+
+    def _draft_result(self, clips, bgm_path, name, draft_dir, expected_root, built,
+                      caption_source, caption_result, actual_total_us):
         intelligent = self.intelligent_mode_authorized()
         voice_rec = getattr(self, "_voice_rec", None)
-        selected_voice = getattr(self, "_global_voice", self.DEFAULT_VOICE_KEY)
+        selected_voice = getattr(self, "_global_voice", self.m.get('voice') or self.DEFAULT_VOICE_KEY)
         try:
             selected_preset = resolve_voice(selected_voice)
             selected_data = selected_preset.to_dict()
@@ -2730,12 +2697,12 @@ class OrchestrationEngine:
             "bgm": (bgm_choice if bgm_choice else {
                 "mode": "none",
                 "selected": None,
-                "hint": "普通模式未指定 bgm，因此未添加背景音乐；可在 manifest 中指定 bgm.path、bgm.music_id 或 {auto:true}。"
+                "hint": "BGM 为空时自动选曲；显式曲目保持用户选择。"
             }),
         }
         return {"status": "SUCCESS", "draft_name": name, "draft_path": str(draft_dir),
                 "drafts_root": str(expected_root),
-                "drafts_root_source": self.env.get("drafts_root_source") if self.env else None,
+                "drafts_root_source": (getattr(self, 'env', None) or {}).get("drafts_root_source"),
                 "total_s": round(actual_total_us / US, 3), "segments": built,
                 # 交付模式必须出现在成功结果里（定案第 9 条）：预览稿能出图，
                 # 但下游（回写飞书、分发）要能一眼看出「这份不是正式交付」。

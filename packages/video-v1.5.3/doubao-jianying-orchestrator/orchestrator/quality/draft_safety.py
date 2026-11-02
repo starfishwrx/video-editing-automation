@@ -333,6 +333,19 @@ def post_write_validate(draft_dir: Path, *, expected_tracks: Optional[dict] = No
     was silently omitted.
     """
     issues: list[str] = []
+    from ..runtime.draft_documents import is_native, documents
+    if is_native(draft_dir):
+        try:
+            payload = documents(draft_dir)
+            draft = payload['timeline']
+            if Path(payload['reference_root']).resolve() != Path(draft_dir).resolve():
+                issues.append('HEADLESS_LOCAL_REFERENCE_ROOT_MISMATCH')
+            if expected_tracks:
+                issues.extend(_expected_track_issues(draft, expected_tracks))
+            issues.extend(_audio_video_bound_issues(draft))
+        except (OSError, ValueError, RuntimeError, KeyError) as exc:
+            issues.append('HEADLESS_NATIVE_INVALID:' + str(exc))
+        return issues
     info = draft_dir / "draft_info.json"
     if not info.exists():
         fmt = inspect_draft_format(draft_dir)
@@ -414,14 +427,15 @@ def post_write_validate(draft_dir: Path, *, expected_tracks: Optional[dict] = No
 
 def validate_audio_video_bounds(draft_dir: Path) -> list[str]:
     """Ensure narration/BGM tracks cannot extend beyond the video timeline."""
-    info = Path(draft_dir) / "draft_info.json"
     try:
-        raw = info.read_text(encoding="utf-8", errors="ignore")
-        if not raw.lstrip().startswith("{"):
-            return []
-        draft = json.loads(raw)
-    except (OSError, ValueError):
+        from ..runtime.draft_documents import timeline
+        draft = timeline(draft_dir)
+    except (OSError, ValueError, RuntimeError):
         return []
+    return _audio_video_bound_issues(draft)
+
+
+def _audio_video_bound_issues(draft):
     video_end = 0
     audio_ends: list[tuple[str, int]] = []
     for track in draft.get("tracks", []):

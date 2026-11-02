@@ -21,6 +21,7 @@ from tools.delivery_identity import tree_identity
 from tools.draft_delivery import archive_shared_copy, verify_existing_shared
 from tools.acceptance import delivery_gate
 from tools.acceptance.task_review import validate_draft_package
+from tools.lark_command import actor as lark_actor
 
 PIPE = pathlib.Path(__file__).resolve().parents[2]
 DEFAULT_POLICY = PIPE / "WINDOWS_VIDEO_CLOSED_LOOP_RULES_20260930.json"
@@ -90,6 +91,9 @@ def package_check(draft: pathlib.Path) -> dict[str, Any]:
     issues: list[str] = []
     if not draft.is_dir():
         return {"ok": False, "issues": ["DRAFT_DIR_MISSING"]}
+    from tools.native_drafts import is_native
+    if is_native(draft):
+        return validate_draft_package(draft, video_extensions=VIDEO_EXTS)
     for required in ("draft_info.json", "media"):
         if not (draft / required).exists():
             issues.append("MISSING_" + required.upper())
@@ -291,18 +295,32 @@ def table_update(task_path: pathlib.Path, done_path: pathlib.Path, policy_path: 
     task_id = str(task.get("task_id") or record_id).strip()
     film_status = rules["table_write"]["revision_status"] if task.get("rev") or task.get("issue") else rules["table_write"]["initial_success_status"]
     patch = {"草稿文件": parent, "任务状态": ["已完成"], "成片状态": [film_status]}
+    from tools.native_drafts import bgm_title
+    titles = []
+    for name in done.get('local_only_drafts') or done.get('drafts') or []:
+        source = pathlib.Path(name)
+        if not source.is_absolute():
+            source = DRAFTS / source
+        title = bgm_title(source)
+        if title and title not in titles:
+            titles.append(title)
+    if titles:
+        patch['BGM名称'] = '\n'.join(titles)
     payload = {"update_records": {record_id: patch}}
     token_env = str(rules["table_write"].get("base_token_env") or "LARK_BASE_TOKEN")
-    base_token = os.environ.get(token_env, "").strip()
+    base_token = str(task.get('lark_base_token') or os.environ.get(token_env, '')).strip()
     if not base_token:
         return {"ok": False, "status": "BLOCKED", "reason": "LARK_BASE_TOKEN_MISSING", "record_id": record_id, "task_id": task_id}
-    table_id = str(rules["table_write"].get("table_id") or os.environ.get(DEFAULT_TABLE_ENV, "")).strip()
+    table_id = str(task.get('lark_table_id') or rules["table_write"].get("table_id") or os.environ.get(DEFAULT_TABLE_ENV, "")).strip()
     if not table_id:
         return {"ok": False, "status": "BLOCKED", "reason": "LARK_TABLE_ID_MISSING", "record_id": record_id, "task_id": task_id}
-    command = [lark_cli_executable(), "base", "+record-batch-update", "--base-token", base_token, "--table-id", table_id, "--as", "bot", "--json", json.dumps(payload, ensure_ascii=False)]
+    arguments = ["base", "+record-batch-update", "--base-token", base_token, "--table-id", table_id, "--as", lark_actor(), "--json", json.dumps(payload, ensure_ascii=False)]
     profile = os.environ.get("LARK_PROFILE", "").strip()
-    if profile:
-        command[1:1] = ["--profile", profile]
+    from tools.lark_command import command as lark_command
+    try:
+        command = lark_command(arguments, executable=lark_cli_executable(), profile=profile)
+    except RuntimeError as exc:
+        return {'ok': False, 'status': 'BLOCKED', 'reason': str(exc), 'record_id': record_id, 'task_id': task_id}
     result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
     raw = (result.stdout or "")[-4000:]
     try:
@@ -367,8 +385,8 @@ def failure_update(task_path: pathlib.Path, done_path: pathlib.Path,
         "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
     token_env = str(rules["table_write"].get("base_token_env") or "LARK_BASE_TOKEN")
-    base_token = os.environ.get(token_env, "").strip()
-    table_id = str(rules["table_write"].get("table_id") or os.environ.get(DEFAULT_TABLE_ENV, "")).strip()
+    base_token = str(task.get('lark_base_token') or os.environ.get(token_env, '')).strip()
+    table_id = str(task.get("lark_table_id") or rules["table_write"].get("table_id") or os.environ.get(DEFAULT_TABLE_ENV, "")).strip()
     if not base_token:
         receipt["reason"] = "LARK_BASE_TOKEN_MISSING"
         write_json(done_path.parent / "failure_notification_receipt.json", receipt)
@@ -377,12 +395,17 @@ def failure_update(task_path: pathlib.Path, done_path: pathlib.Path,
         receipt["reason"] = "LARK_TABLE_ID_MISSING"
         write_json(done_path.parent / "failure_notification_receipt.json", receipt)
         return receipt
-    command = [lark_cli_executable(), "base", "+record-batch-update", "--base-token", base_token,
-               "--table-id", table_id, "--as", "bot", "--json",
+    arguments = ["base", "+record-batch-update", "--base-token", base_token,
+               "--table-id", table_id, "--as", lark_actor(), "--json",
                json.dumps({"update_records": {record_id: receipt["patch"]}}, ensure_ascii=False)]
     profile = os.environ.get("LARK_PROFILE", "").strip()
-    if profile:
-        command[1:1] = ["--profile", profile]
+    from tools.lark_command import command as lark_command
+    try:
+        command = lark_command(arguments, executable=lark_cli_executable(), profile=profile)
+    except RuntimeError as exc:
+        receipt['reason'] = str(exc)
+        write_json(done_path.parent / 'failure_notification_receipt.json', receipt)
+        return receipt
     try:
         result = subprocess.run(command, capture_output=True, text=True,
                                 encoding="utf-8", errors="replace", timeout=60)

@@ -301,9 +301,8 @@ _PROBE_CACHE: dict = {}
 def _audio_probe():
     """返回 ffprobe 时长探测函数；没有 ffprobe 时返回 None（调用方显式降级）。
 
-    和引擎 ``align_audio_video`` 用同一个探测口：音频文件只有容器时长，
-    引擎会减一帧。这里不对齐的话，场景规则按长一帧的配音切好的窗口
-    （定速、证据卡满整段）到引擎里会差一帧放不下，退回素材开头。
+    与引擎、字幕和最终草稿共享真实音频探测，保留微秒句长。
+    视频素材的末帧保护不能用于音频，避免每句少算一帧。
     """
     if "probe" in _PROBE_CACHE:
         return _PROBE_CACHE["probe"]
@@ -313,12 +312,9 @@ def _audio_probe():
         _PROBE_CACHE["probe"] = None
         return None
 
+    from ..audio.narration_probe import probe_audio
     def probe(path: str) -> dict:
-        res = timing_contract.probe_material_duration_us(str(path), ffprobe=str(ffprobe),
-                                                         ffmpeg=str(ffmpeg) if ffmpeg else None)
-        if int(res.get("duration_us") or 0) <= 0:
-            raise RuntimeError(f"ffprobe 读取失败：{res.get('source')}")
-        return {"duration": int(res["duration_us"]) / timing_contract.US}
+        return probe_audio(path, ffprobe=str(ffprobe))
 
     _PROBE_CACHE["probe"] = probe
     return probe
@@ -778,6 +774,13 @@ def cmd_build(args) -> int:
             "environment": env,
         })
         return _emit(_compact_build_result(result), 1)
+
+    from ..runtime.headless import preflight as draft_preflight
+    try:
+        draft_preflight(manifest)
+    except (OSError, ValueError, RuntimeError, ImportError) as exc:
+        return _emit(_compact_build_result(finalize({'status': 'ENV_ERROR', 'failure_class': 'environment',
+            'message': '无头建稿环境预检未通过，未开始配音或视觉分析。', 'reason': str(exc)})), 1)
 
     # Freeze one verified text plan before narration, matching and note binding.
     # Existing segment/audio mappings and explicit notes are never reindexed.

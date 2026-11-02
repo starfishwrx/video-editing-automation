@@ -20,19 +20,12 @@ TRANSIENT_BUILD_MARKERS = (
 
 def meeting_bgm_spec(value: object) -> dict:
     """Preserve an explicit worker BGM choice; strings never become random auto."""
-    if isinstance(value, dict):
-        return dict(value) if value else {"auto": True}
-    text = str(value or "").strip()
-    if not text:
-        return {"auto": True}
-    path_like = (pathlib.Path(text).is_absolute()
-                 or bool(re.match(r"^[A-Za-z]:[\\/]", text))
-                 or text.startswith("\\\\")
-                 or ("/" in text or "\\" in text)
-                 or pathlib.Path(text).suffix.lower() in {".mp3", ".m4a", ".wav", ".aac", ".flac"})
-    if path_like:
-        return {"path": text}
-    return {"music_id": text}
+    import importlib.util
+    path = pathlib.Path(__file__).resolve().parents[2] / "doubao-jianying-orchestrator/orchestrator/audio/bgm_request.py"
+    spec = importlib.util.spec_from_file_location("_queue_bgm_request", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.normalize(value)
 
 
 def safe_manifest_stem(name: str) -> str:

@@ -800,6 +800,25 @@ def ship_one(draft_dir: pathlib.Path, task_dir: pathlib.Path | None = None,
     source_identity = production_eval.output_identity([draft_dir])
     task_dir = task_dir or (work / '.manual-ship-stage')
     staging = task_dir / 'shipping-stage' / (uuid.uuid4().hex) / draft_dir.name
+    from tools.native_drafts import is_native
+    if is_native(draft_dir):
+        from tools.native_delivery import ship as ship_native
+        try:
+            payload = ship_native(draft_dir, staging)
+            if production_eval.output_identity([draft_dir]) != source_identity:
+                raise RuntimeError('SOURCE_CHANGED_DURING_DELIVERY')
+            receipt = {'schema_version': 1, 'status': 'VERIFIED', 'draft_name': draft_dir.name,
+                'task_id': (frozen or {}).get('task_id'), 'run_id': (frozen or {}).get('run_id'),
+                'contract_hash': (frozen or {}).get('contract_hash'),
+                'source_output_sha256': source_identity['sha256'], 'staging_path': str(staging),
+                'nas_target': payload['dist_target'], 'transformed_tree_sha256': payload['staged_tree_sha256'],
+                'transformed_file_count': payload['staged_file_count'], 'nas_root_verified': True,
+                'distribution_verified': True, 'shared_media_references_verified': True,
+                'shared_reference_root': payload['shared_reference_root'], 'draft_backend': 'headless'}
+            return {'rc': 0, 'out': 'HEADLESS_SHARED_COPY_VERIFIED', 'receipt': receipt, 'distribution': payload}
+        except (OSError, ValueError, RuntimeError) as exc:
+            return {'rc': 2, 'out': str(exc), 'staging_path': str(staging),
+                    'source_output_sha256': source_identity['sha256']}
     cmd = [python, str(skill / "orchestrator" / "ship_distribute.py"),
            "--draft", str(draft_dir), "--style", "unc", "--work", str(staging.parent)]
     env = dict(os.environ, PYTHONUTF8="1")
