@@ -28,7 +28,7 @@
 | 编解码 / ffmpeg / GPU | `docs/subsystems/media-codec.md` | `orchestrator/media/`、`orchestrator/runtime/platform_env.py` |
 | 容量 / 资源 / 任务日志 / 恢复 | `docs/subsystems/runtime-and-recovery.md` | `orchestrator/runtime/`、`quality/{diagnostics,draft_safety}.py`、`delivery/migration.py` |
 | 纸品动作 / 帧域求解 / 诊断预览 | `docs/paper-action-windows.md`, `docs/paper-selection-replay.md` | `orchestrator/selection/paper_*.py`、`media/action_frames.py`；活包 `tools/{paper_selection_replay,selection_preview}.py`；尚未接入默认生产 |
-| 独立时间线 / 无草稿工作预览 | `docs/programmatic-production.md`, `docs/plans/20261101-programmatic-production.md` | `orchestrator/domain/timeline.py`、`application/production.py`、`audio/final_assets.py`、`media/timeline_render.py`、`quality/production_qc.py`；活包 `tools/production.py`；固定选镜显式入口，正式内容与末端导出仍待实施 |
+| 独立时间线 / 无草稿工作预览 / 无头待审交接 | `docs/programmatic-production.md`, `docs/plans/20261101-programmatic-production.md` | `orchestrator/domain/timeline.py`、`application/production.py`、`audio/final_assets.py`、`media/timeline_render.py`、`quality/{production_qc,timeline_export}.py`、`delivery/jianying_export.py`；活包 `tools/{production,headless_review_delivery}.py`；固定选镜与待审交接显式入口，正式内容与导出验收仍待实施 |
 | 剪映草稿底层操作 | `docs/subsystems/jianying-editor.md` | `packages/video-v1.5.3/jianying-editor/scripts/**`（`vendor/pyJianYingDraft` 原则上不改） |
 | 定时脚本 / 队列 / 闭环 / 评估 | `docs/windows-pipeline.md`, `docs/subsystems/package-tools.md` | `packages/video-v1.5.3/batch_worker.py`, `tools/batch_dispatch.py`, `tools/workflow/closed_loop.py`, `tools/*.py` |
 | 草稿交付 / 生成版恢复 | `.../references/draft_delivery_and_recovery.md` | `packages/video-v1.5.3/tools/draft_delivery.py`, `ship_distribute.py` |

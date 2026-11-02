@@ -7,6 +7,15 @@
 
 ## 新增条目
 
+### L-20261102-04 无头草稿交接应验证当前格式和实际路径
+- status: OPEN
+- hits: 1
+- 模块: delivery/jianying_export、quality/timeline_export、tools/headless_review_delivery
+- 现象: 明文 writer 对最终音频按毫秒截短；切换原生加密后，旧 NAS 工具无法读取实际活动时间轴，字幕粗体也可能被静默丢掉。
+- 根因: 不同底座的媒体时长、文字参数和草稿格式有不同表达，结构成功不代表参数已经完整映射。
+- 以后怎么做: 固定最终时间线，用外部后端的正式计划与 codec API 构建；逐微秒回读时序，显式映射并核对粗体、源窗、附加速度材料和字面媒体路径。NAS 收集包括字体，复制到新目录后再读实际加密镜像；拒绝设备路径和报告/草稿目录重叠。不得用旧明文替代、放宽成片认证或把参数验证当成观看通过。
+- 证据: `test_timeline_export.py`、后端 detached handoff 单元测试及本次真实待审构建/共享路径回读；支持范围见 `docs/programmatic-production.md`。
+
 ### L-20261102-03 精确选帧表达式必须覆盖真实连续动作长度
 - status: OPEN
 - hits: 1

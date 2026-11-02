@@ -2,7 +2,7 @@
 
 本页记录[程序化生产方案](plans/20261101-programmatic-production.md)第一阶段的实际实现。输入为固定选镜和已经准备的配音，输出为独立 `timeline.json`、分轨音频、工作预览和三类检查结果。生产核心不导入 JyProject、不查草稿根、不调用选镜、TTS 或业务队列。
 
-默认 Windows 制作路径保持现状。新路径必须显式运行；技术渲染成功保持 `UNCERTIFIED`，不能进入正式交付。自动纸品动作接入、独立内容模型与观看验收、剪映末端导出、调度恢复尚未实施。纸品 34 揉搓的历史不合格结论不变。
+默认 Windows 制作路径保持现状。新路径必须显式运行；技术渲染成功保持 `UNCERTIFIED`，不能进入正式交付。现增加按用户明确要求调用 Jianying Headless 的待审草稿交接；正式末端导出验收、自动纸品动作接入、独立内容模型与观看验收、调度恢复仍待实施。纸品 34 揉搓的历史不合格结论不变。
 
 ## 命令
 
@@ -56,3 +56,13 @@ uv run --frozen python -X utf8 -m tools.production_demo --output $newDemo
 新增合同、准备和真实 FFmpeg 测试覆盖重复句、多镜共享旁白、新报告目录、实际音频与旧分配冲突、未支持效果、源窗和音频错误、非零 PTS、实际输出逐帧像素对应、结果帧缺失和修订失效。合成媒体可以证明执行合同，不证明商品识别、动作完整性、口播质量或专业编辑接受。
 
 方案 PR1 的固定输入数据与资产边界、PR2 的渲染与检查骨架已落地；一份人工确认的真实固定选镜集成、独立内容/观看验收仍待补。接续按原计划推进 PR3 动作/语义接入、PR4 可编辑导出和 PR5 调度恢复，默认切换与部署另行执行。
+
+## 显式无头剪映待审交接
+
+`tools.production headless-plan --timeline $timeline --render-dir $render --name $newName --font $localStaticFont --report-dir $newPlan --review-only` 将固定结果转换成 `jy14-headless-plan/v1`，保留整微秒源窗、恒速、独立旁白与字幕。一次视频可承接多句，重复字幕仍各自保留。当前限 1080×1920/30fps、同画幅居中硬切、1–8倍恒速、基础音轨及默认字幕；不支持的布局、音频淡入淡出、同角色重叠或字幕样式明确拒绝。
+
+外部 `jianying-headless-windows` 通过自己的固定版本、DLL 与签名检查，使用 `build --detached-root $approvedNasParent` 构建原生加密副本。这个待审交接扩展需要对应后端版本，不能只用旧版 build 冒充。媒体与静态字体由后端收集，活动时间轴与镜像由本机原生 codec 生成；不手改草稿 JSON、不登记本机首页、不控制界面。新建文字显式映射 bold；原生字号单位与选定本地字体不宣称和 libass 代理像素一致。
+
+已获用户授权复制待审稿时，`tools.headless_review_delivery --build $build --headless-root $backend --timeline $timeline --report-dir $newReceipt --publish` 使用现有原子复制工具发布独立 NAS 主目录与分发副本；不指定 `--publish` 只读验证。工具读取实际加密时间轴及5个镜像，比较文字、源窗、倍速、位置、音轨和微秒时序，并核对共享目录的字面媒体与字体引用。旧的明文 NAS 工具不支持这个原生加密格式，不用旧 sidecar 替代它。
+
+这是有明确授权的待审副本交接，不接入自动队列或正式 finalizer。收据始终 `formal_delivery_allowed=false`；三项内容/观看/原生显示验收未完成时保持待审。只有结构、包和参数通过，不能把业务表标成正式完成或已验收。业务回填只写请求范围内的草稿链接和真实问题，保留原内容疑点；不新增人工批准文件。收到最终草稿后仍需编辑侧开稿/播放/保存重开验收。

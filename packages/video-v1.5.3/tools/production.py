@@ -1,4 +1,4 @@
-"""Explicit fixed-selection production slice; never starts the business queue or writes drafts."""
+"""Explicit fixed-selection production and review export; never starts the business queue."""
 from __future__ import annotations
 
 import argparse
@@ -28,6 +28,13 @@ def main(argv=None):
     q = sub.add_parser("check", help="检查当前渲染；内容及观看效果保持待审")
     q.add_argument("--timeline", type=Path, required=True)
     q.add_argument("--render-dir", type=Path, required=True)
+    e = sub.add_parser("headless-plan", help="转换为无头剪映待审计划，不授予正式交付许可")
+    e.add_argument("--timeline", type=Path, required=True)
+    e.add_argument("--render-dir", type=Path, required=True)
+    e.add_argument("--name", required=True)
+    e.add_argument("--report-dir", type=Path, required=True)
+    e.add_argument("--font", type=Path, required=True)
+    e.add_argument("--review-only", action="store_true", required=True)
     for child in sub.choices.values():
         child.add_argument("--ffmpeg")
         child.add_argument("--ffprobe")
@@ -57,6 +64,11 @@ def main(argv=None):
             result["qc"] = check_production(timeline, output, **tools)
         elif args.command == "check":
             result = check_production(timeline, args.render_dir, **tools)
+        elif args.command == "headless-plan":
+            from orchestrator.delivery.jianying_export import prepare_headless_export
+            result = prepare_headless_export(timeline, render_dir=args.render_dir,
+                name=args.name, report_dir=args.report_dir, font_path=args.font,
+                review_only=args.review_only, **tools)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 2 if result.get("status") == "BLOCKED" or result.get("qc", {}).get("status") == "BLOCKED" else 0
     except (OSError, ValueError, TypeError, KeyError, ZeroDivisionError, RuntimeError, subprocess.SubprocessError) as exc:
