@@ -47,7 +47,7 @@ uv run --frozen python -X utf8 -m tools.production_demo --output $newDemo
 - `prepared_assets.json`：最终配音、实际时长、处理与媒体事实。
 - `render/preview.mp4`、三路 WAV、`mix.wav`、`subtitles.ass`：可播放和分别审查的媒体。
 - `render/render_receipt.json`：成功后最后落盘，含实际解码 PTS、输出帧映射、保护帧数量、量化差和当前资产身份。失败目录只有明确阻断记录，不能覆盖旧成功输出。
-- `render/production_qc.json`：结构媒体、内容语义、观看效果分别记账。当前只执行结构媒体检查，另外两项 `NOT_RUN`，总状态始终未认证或阻断；导出保真同样待做。
+- `render/production_qc.json`：结构媒体、内容语义、观看效果分别记账。当前执行结构媒体检查；时间线已有未解决内容需求时，内容项明确 `BLOCKED`，不混记为媒体损坏。其余内容与观看检查 `NOT_RUN`，总状态始终未认证或阻断；导出保真同样待做。
 
 这些输出尚不进入现有 `tools/acceptance` 的四项正式验收，也不会生成完成回写。保留现有实际草稿 QC 和正式交付边界，不能把该检查结果改名成旧草稿 QC 的 PASS。
 

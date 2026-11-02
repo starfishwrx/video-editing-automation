@@ -132,6 +132,18 @@ def _protected_counts(event, mapping):
     return result
 
 
+def _selection_expression(mapping):
+    # A flat a+b+c+... exceeds FFmpeg's expression recursion limit on real
+    # multi-sentence actions. Balance the same exact membership set, not its FPS.
+    parts = [f"eq(n\\,{row['source_frame']})" for row in mapping]
+    if not parts:
+        raise TimelineError("RENDER_SELECTION_EMPTY")
+    while len(parts) > 1:
+        parts = ["(" + parts[i] + "+" + parts[i + 1] + ")" if i + 1 < len(parts) else parts[i]
+                 for i in range(0, len(parts), 2)]
+    return parts[0]
+
+
 def verify_video(path, *, expected_frames, fps, ffmpeg, ffprobe):
     proc = _run([ffprobe, "-v", "error", "-select_streams", "v:0", "-count_frames",
                  "-show_entries", "stream=nb_read_frames,avg_frame_rate", "-of", "json", path])
@@ -230,7 +242,7 @@ def render_timeline(timeline: EditTimeline, output_dir, *, ffmpeg="ffmpeg", ffpr
             metadata = action_frames.probe(source["path"], root / "source_pts", ffprobe=str(ffprobe))
             mapping = _frame_plan(timeline, event, metadata)
             # The decoder's observed PTS, before any setpts, must match the source plan.
-            expression = "+".join(f"eq(n\\,{m['source_frame']})" for m in mapping)
+            expression = _selection_expression(mapping)
             if len(expression) > 24000:
                 raise TimelineError("RENDER_EVENT_FRAME_BUDGET_EXCEEDED")
             vf = (f"select='{expression}',showinfo," + _layout(event, source, width, height) +

@@ -7,6 +7,15 @@
 
 ## 新增条目
 
+### L-20261102-03 精确选帧表达式必须覆盖真实连续动作长度
+- status: OPEN
+- hits: 1
+- 模块: media/timeline_render / quality/production_qc
+- 现象: 一秒合成片可渲染，真实多句连续动作的 188 项平铺选帧表达式却报 Cannot allocate memory，GPU/CPU 编码器均失败。
+- 根因: FFmpeg 表达式解析有递归深度限制，平铺求和在尚未触及命令长度预算时已超限；不是换编码器或加内存可以解决。
+- 以后怎么做: 对同一精确索引集合生成平衡表达式，不改成平均 FPS 或删帧规避。回归包含长连续事件、保护末帧和实际像素对应；按结构、内容分别记录失败，内容证据不足不能混记成媒体损坏，也不得借此放行。
+- 证据: `test_timeline_render.py::test_long_continuous_action_does_not_exceed_expression_parser_depth`、内容缺口及非法类型回归；独立复核 1–1000 项中的 12 种规模逐字节符合预期。
+
 ### L-20261102-02 时间线末端与保护区必须核验真实输出帧
 - status: OPEN
 - hits: 1

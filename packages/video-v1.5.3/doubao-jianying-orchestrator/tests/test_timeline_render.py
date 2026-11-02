@@ -27,12 +27,12 @@ def run(cmd, **kw):
     return subprocess.run([str(x) for x in cmd], capture_output=True, check=True, timeout=90, **kw)
 
 
-def make_media(root, *, offset=0):
+def make_media(root, *, offset=0, frame_count=150):
     root = Path(root)
     video, voice = root / ("source-offset.mkv" if offset else "source.mkv"), root / "voice.wav"
     colors = np.array([[(i * 17 + 20) % 240, (i * 29 + 30) % 240, (i * 43 + 40) % 240]
-                       for i in range(150)], dtype=np.uint8)
-    frames = np.broadcast_to(colors[:, None, None, :], (150, 240, 160, 3)).copy()
+                       for i in range(frame_count)], dtype=np.uint8)
+    frames = np.broadcast_to(colors[:, None, None, :], (frame_count, 240, 160, 3)).copy()
     cmd = [FFMPEG, "-v", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", "160x240", "-r", "60", "-i", "-"]
     if offset:
         cmd += ["-vf", f"setpts=PTS+{offset}/TB"]
@@ -87,6 +87,21 @@ class TimelineRenderTests(unittest.TestCase):
         self.assertGreaterEqual(receipt["render_duration_us"], self.t.duration_us)
         self.assertLess(receipt["quantization_overhang_us"], 33334)
 
+    def test_long_continuous_action_does_not_exceed_expression_parser_depth(self):
+        source = self.root / "long-source"
+        source.mkdir()
+        video, _, colors = make_media(source, frame_count=420)
+        t = fixed_timeline(video, duration=6_216_959)
+        t = replace(t, videos=(replace(t.videos[0], protected_intervals=(
+            SourceInterval("long-result", 6_100_000, 6_216_959, "result", 3),)),))
+        receipt = render_timeline(t, self.root / "long-render", ffmpeg=FFMPEG, ffprobe=FFPROBE)
+        self.assertEqual(receipt["video_verification"]["frames"], 187)
+        self.assertEqual(receipt["frame_mapping"][0]["frames"][-1]["source_frame"], 372)
+        raw = run([FFMPEG, "-v", "error", "-i", receipt["video"], "-vf", "select='eq(n,186)'",
+                   "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]).stdout
+        frame = np.frombuffer(raw, np.uint8).reshape(240, 160, 3)
+        self.assertLess(np.abs(frame.astype(float).mean(axis=(0, 1)) - colors[372]).max(), 10)
+
     def test_independent_audio_tracks_and_full_sample_lengths(self):
         self.assertEqual(set(self.receipt["audio"]["tracks"]), {"narration", "bgm", "original"})
         for path in self.receipt["audio"]["tracks"].values():
@@ -104,6 +119,25 @@ class TimelineRenderTests(unittest.TestCase):
         qc = check_production(replace(self.t, revision=2), self.out, ffmpeg=FFMPEG, ffprobe=FFPROBE)
         self.assertEqual(qc["status"], "BLOCKED")
         self.assertIn("RENDER_REVISION", str(qc))
+
+    def test_content_gap_blocks_delivery_without_mislabeling_valid_media(self):
+        t = replace(self.t, unresolved=({"sentence_id": "s1", "reason": "quantity evidence unverified"},))
+        out = self.root / "unresolved-content"
+        render_timeline(t, out, ffmpeg=FFMPEG, ffprobe=FFPROBE)
+        qc = check_production(t, out, ffmpeg=FFMPEG, ffprobe=FFPROBE)
+        self.assertEqual(qc["structure_media"]["status"], "PASS")
+        self.assertEqual(qc["content_semantics"]["status"], "BLOCKED")
+        self.assertEqual(qc["status"], "BLOCKED")
+        self.assertFalse(qc["formal_delivery_allowed"])
+
+    def test_invalid_unresolved_type_still_returns_blocked_report(self):
+        for index, value in enumerate((None, 42, "fake")):
+            out = self.root / f"bad-unresolved-{index}"
+            with self.subTest(value=value):
+                qc = check_production(replace(self.t, unresolved=value), out, ffmpeg=FFMPEG, ffprobe=FFPROBE)
+                self.assertEqual(qc["status"], "BLOCKED")
+                self.assertEqual(qc["structure_media"]["status"], "FAIL")
+                self.assertTrue((out / "production_qc.json").is_file())
 
     def test_cannot_overwrite_existing_output(self):
         with self.assertRaisesRegex(TimelineError, "OUTPUT_EXISTS"):

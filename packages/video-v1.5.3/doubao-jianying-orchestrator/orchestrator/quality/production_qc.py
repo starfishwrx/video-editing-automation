@@ -45,14 +45,15 @@ def check_production(timeline, render_dir, *, ffmpeg="ffmpeg", ffprobe="ffprobe"
         for sid, parts in by_sentence.items():
             if _caption("".join(parts)) != _caption(timeline.sentence_map()[sid].text):
                 raise TimelineError("SUBTITLE_NARRATION_TEXT_MISMATCH:" + sid)
-        if timeline.unresolved:
-            issues.append("UNRESOLVED_TIMELINE_REQUIREMENTS")
     except (OSError, ValueError, KeyError, TypeError, IndexError, subprocess.SubprocessError) as exc:
         issues.append(str(exc))
+    content_issues = list(timeline.unresolved) if isinstance(timeline.unresolved, (list, tuple)) else []
     report = {"schema": "production-qc-v1", "task_id": timeline.task_id, "revision": timeline.revision,
-        "status": "BLOCKED" if issues else "UNCERTIFIED", "formal_delivery_allowed": False,
+        "status": "BLOCKED" if issues or content_issues else "UNCERTIFIED", "formal_delivery_allowed": False,
         "structure_media": {"status": "FAIL" if issues else "PASS", "issues": issues},
-        "content_semantics": {"status": "NOT_RUN", "reason": "INDEPENDENT_CONTENT_REVIEW_REQUIRED"},
+        "content_semantics": {"status": "BLOCKED" if content_issues else "NOT_RUN",
+            "reason": "UNRESOLVED_TIMELINE_REQUIREMENTS" if content_issues else "INDEPENDENT_CONTENT_REVIEW_REQUIRED",
+            "issues": content_issues},
         "viewing_quality": {"status": "NOT_RUN", "reason": "ACTION_RHYTHM_SUBTITLE_AND_MIX_REVIEW_REQUIRED"},
         "export_fidelity": {"status": "NOT_RUN", "reason": "JIAN_YING_EXPORT_NOT_IMPLEMENTED"}}
     root.mkdir(parents=True, exist_ok=True)
