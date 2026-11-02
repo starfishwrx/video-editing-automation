@@ -54,6 +54,8 @@
 
 ## 隔离诊断
 
+- [按口播目的识别与选镜](plans/20261102-purpose-driven-selection.md)：任务限定索引、连续源窗复核、固定配音求解和实际输出盲审；卫品42隔离验证，默认生产未切换。
+
 - [纸品选镜单模块验证](paper-selection-replay.md)：固定原音轨与句长的 A/B 诊断入口，保留未解决项与失败结论。
 - [纸品动作事实与帧级窗口](paper-action-windows.md)：源帧事件观察、有限 CFR/FPS 支持及实际选帧复查。
 

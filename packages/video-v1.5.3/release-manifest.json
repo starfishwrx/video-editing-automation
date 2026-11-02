@@ -6,7 +6,7 @@
     "machine-specific paths",
     "knowledge-base bodies"
   ],
-  "file_count": 370,
+  "file_count": 376,
   "files": [
     {
       "path": ".gitignore"
@@ -100,6 +100,9 @@
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/application/production.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/application/purpose_production.py"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/application/task_inputs.py"
@@ -220,6 +223,9 @@
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/media/ffmpeg_bootstrap.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/media/frame_boundaries.py"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/media/frame_quality.py"
@@ -396,6 +402,9 @@
       "path": "doubao-jianying-orchestrator/orchestrator/selection/paper_selection.py"
     },
     {
+      "path": "doubao-jianying-orchestrator/orchestrator/selection/purpose_selection.py"
+    },
+    {
       "path": "doubao-jianying-orchestrator/orchestrator/selection/sentence_planner.py"
     },
     {
@@ -463,6 +472,9 @@
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/vision/phase_timing.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/vision/purpose_review.py"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/vision/vision_analyzer.py"
@@ -595,6 +607,9 @@
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_production_timeline.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/tests/test_purpose_production.py"
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_ready_work.py"
@@ -1087,6 +1102,9 @@
     },
     {
       "path": "tools/production_eval.py"
+    },
+    {
+      "path": "tools/purpose_production.py"
     },
     {
       "path": "tools/queueing/__init__.py"
