@@ -9,17 +9,23 @@ from .. import ai_editor_contract as contract
 from ..selection import ai_editor
 from ..selection.paper_selection import validate_observation
 
-PROTOCOL = "purpose-observation-v1"
-OUTPUT_PROTOCOL = "purpose-output-review-v3-picture-frames"
+PROTOCOL = "purpose-observation-v2-category-contracts"
+OUTPUT_PROTOCOL = "purpose-output-review-v4-category-contracts"
 
 
 def policy(manifest):
-    return contract.policy_prompt(manifest) + """
+    text = contract.policy_prompt(manifest) + """
 用途边界：普通介绍、个人使用/回购经历、修辞衔接、泛促销和囤货号召，用贴切同商品展示即可；
 不要要求购买记录、多品牌对比、促销价格牌或证明一句修辞。薄软、舒适、不闷热不粘腻等体验表达
 允许贴切真实产品展示，不要求模拟高温穿戴、皮肤检测或人体实验。明确成分须可读标称，
 吸收/反渗等性能须真实演示和结果；明确持续时间、数值、比较不能由氛围、透光或短实验外推。
 """
+    if contract.editorial_context(manifest)["category"] == "weipin":
+        text += """卫品具体判据优先：不闷热/透气按本品类规则用对光透过、孔洞或网面；
+倒液不能替代透气。吸水组合句必须在同一条源素材内完整展示倒液、吸收、纸巾按压与结果；
+仅吸收或仅按压分别记录部分事实，不能合并不同素材冒充完整实验。必要的结果停留不当作无意义空镜。
+"""
+    return text
 
 
 def save(path, value):
@@ -30,7 +36,14 @@ def save(path, value):
 
 def requirements(manifest, narration, directory):
     rows = narration["rows"]
-    data = ai_editor._call(policy(manifest) + """把口播转成需要检查的画面事实。不要判断任何素材已经支持。
+    category = contract.editorial_context(manifest)["category"]
+    topics = ""
+    if category == "weipin":
+        topics = """卫品每行另带topic，枚举absorption|rewet|followup|bridge|breathability|fluorescence|sku_change|promotion|other|uncertain。
+吸收/锁水=absorption，反渗=rewet，同实验干爽总结=followup，不闷热/透气=breathability，
+纯承接=bridge；有独立卖点不能标bridge。先按原文主题分类，不因缺素材改变分类。
+"""
+    data = ai_editor._call(policy(manifest) + topics + """把口播转成需要检查的画面事实。不要判断任何素材已经支持。
 每句保留编号与原文，多个卖点分别列check。体验/介绍/促销允许贴切同商品展示；纯棉等成分须可读标称，
 吸收/反渗等需真实动作和可见结果，透气体验可用结构/薄软等贴切展示但不能声称已物理证明，
 一整天效果不能由短实验外推。修辞衔接/囤货号召/普通促销只需display，不能标为unverifiable。
@@ -48,6 +61,10 @@ def requirements(manifest, narration, directory):
             raise ValueError("PURPOSE_REQUIREMENT_IDENTITY")
         if any(type(row.get(k)) is not bool for k in ("require_action", "require_result")):
             raise ValueError("PURPOSE_REQUIREMENT_ACTION_POLICY")
+        if category == "weipin" and row.get("topic") not in {
+                "absorption","rewet","followup","bridge","breathability","fluorescence",
+                "sku_change","promotion","other","uncertain"}:
+            raise ValueError("PURPOSE_REQUIREMENT_TOPIC_REQUIRED")
         checks = row.get("checks")
         if (not isinstance(checks, list) or not checks or any(
                 not isinstance(c, dict) or not isinstance(c.get("id"), str) or not c["id"].strip()

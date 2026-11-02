@@ -37,7 +37,7 @@ def _request_coverage(requests, rows):
         raise ValueError("PURPOSE_REQUEST_COVERAGE")
 
 
-def _binding(manifest, narration, artifact):
+def _binding(manifest, narration, artifact, *, rules_required=False):
     from ..selection.timing_contract import split_sentences
     sources=sorted(str(Path(p).resolve()) for p in manifest["material_sources"])
     if (artifact.get("task_id") != manifest["task_id"] or artifact.get("sources") != sources
@@ -47,6 +47,9 @@ def _binding(manifest, narration, artifact):
             or [s["text"] for s in split_sentences(manifest)] != [r["text"] for r in narration["rows"]]):
         raise ValueError("PURPOSE_ARTIFACT_INPUT_CHANGED")
     _request_coverage(artifact.get("requests"),narration["rows"])
+    if rules_required and contract.editorial_context(manifest)["category"] == "weipin":
+        if artifact.get("rules") != contract.rules_identity(manifest) or artifact.get("protocol") != vision.PROTOCOL:
+            raise ValueError("PURPOSE_WEIPIN_RULE_IDENTITY_CHANGED")
 
 
 def _parallel(jobs, prepare, consume, *, workers=6):
@@ -111,7 +114,10 @@ def select(manifest, analysis, narration, index, directory, *, workers=6, candid
             or any(sid not in shots for sid in index["scans"])):
         raise ValueError("PURPOSE_SOURCE_SCOPE_MISMATCH")
     audio = {r["index"]:r for r in narration["rows"]}
-    requests = [{**r, "segment_us":audio[r["index"]]["audio_duration_us"]} for r in index["requests"]]
+    # The old corpus descriptions remain retrieval hints. Recompile only the
+    # fixed script under current category rules rather than rescanning media.
+    requests = [{**r, "segment_us":audio[r["index"]]["audio_duration_us"]}
+        for r in vision.requirements(manifest,narration,root / "requirements")]
     ranked_shots=[]
     for sid,shot in shots.items():
         scan=index["scans"].get(sid,{})
@@ -124,6 +130,10 @@ def select(manifest, analysis, narration, index, directory, *, workers=6, candid
     rows = {r["index"]:{"index":r["index"],"text":r["text"],"candidates":[]} for r in requests}
     retrieval_use=Counter()
     for request in sorted(requests,key=lambda r:(kinds[r["index"]] != "selling_point",r["index"])):
+        if contract.editorial_context(manifest)["category"] == "weipin" and request.get("topic") in {"absorption","rewet"}:
+            rows[request["index"]]["retrieved_candidates"] = 0
+            rows[request["index"]]["reason"] = "SINGLE_ORIGINAL_EXPERIMENT_GROUP_REQUIRED"
+            continue
         hints = []
         for sid, row in index["scans"].items():
             if row.get("error"):
@@ -190,6 +200,8 @@ def select(manifest, analysis, narration, index, directory, *, workers=6, candid
         if winner:
             used.append({"source":winner["source"],"start":winner["plan"]["source_start_us"],"end":winner["plan"]["source_end_us"]})
     result={"schema":"purpose-selection-v1","task_id":manifest["task_id"],"requests":requests,
+        "rules":contract.rules_identity(manifest),"protocol":vision.PROTOCOL,
+        "old_index_use":"retrieval descriptions only; requirements recompiled under current rules",
         "revision":1,
         "sources":sorted(sources),"narration":_audio_binding(narration),"context":_context(manifest),
         "rows":[rows[i] for i in sorted(rows)],"formal_delivery_allowed":False,
@@ -201,9 +213,19 @@ def select(manifest, analysis, narration, index, directory, *, workers=6, candid
 def materialize(manifest, narration, selection, directory, *, ffmpeg="ffmpeg", ffprobe="ffprobe", width=540, music=None):
     """Normalize selected media explicitly, preserving its source clock in provenance."""
     root=Path(directory)
-    _binding(manifest,narration,selection)
+    _binding(manifest,narration,selection,rules_required=True)
     _request_coverage(selection.get("rows"),narration["rows"])
     requests={r["index"]:r for r in selection["requests"]}
+    if contract.editorial_context(manifest)["category"] == "weipin":
+        from ..selection.experiment_contract import contract_for
+        experiment_rules = contract_for(manifest)
+        topics = set(experiment_rules["allowed_roles"]) | set(experiment_rules["forbidden_roles"])
+        for row in selection["rows"]:
+            topic = requests[row["index"]].get("topic")
+            if topic not in topics:
+                raise ValueError("PURPOSE_WEIPIN_TOPIC_REQUIRED")
+            if row["selected"] is not None and topic in {"absorption","rewet"}:
+                raise ValueError("PURPOSE_WEIPIN_EXPERIMENT_REQUIRES_GROUP_ASSEMBLY")
     sources={str(Path(p).resolve()) for p in manifest["material_sources"]}
     occupied=[]
     for row in selection["rows"]:
@@ -351,7 +373,7 @@ def repair_selection(manifest, narration, previous, review, timeline, directory)
         raise ValueError("PURPOSE_REPAIR_OUTPUT_EXISTS")
     if review.get("protocol") != vision.OUTPUT_PROTOCOL:
         raise ValueError("PURPOSE_REPAIR_REVIEW_PROTOCOL_CHANGED")
-    _binding(manifest,narration,previous)
+    _binding(manifest,narration,previous,rules_required=True)
     _request_coverage(review.get("rows"),[{"text":s.text} for s in timeline.sentences])
     if review.get("timeline_identity") != timeline_identity(timeline):
         raise ValueError("PURPOSE_REPAIR_REVIEW_STALE")

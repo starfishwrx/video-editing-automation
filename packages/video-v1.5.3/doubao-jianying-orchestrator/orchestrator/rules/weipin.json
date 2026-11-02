@@ -1,7 +1,18 @@
 {
   "rulepack": "weipin",
   "label": "卫品",
-  "version": "1.5.3-9",
+  "version": "1.5.3-10",
+  "experiment_contracts": {
+    "absorb_rewet": {
+      "single_original": true,
+      "continuous_specimen": true,
+      "phases": ["pour", "absorb", "press", "lift", "result"],
+      "minimum_result_frames": 15,
+      "allowed_roles": ["absorption", "rewet", "followup", "bridge"],
+      "forbidden_roles": ["breathability", "fluorescence", "sku_change", "promotion", "other", "uncertain"],
+      "evidence": "同一条源素材内同一次实验，实际倒液、吸收、纸巾接触按压、提起翻转、清楚展示纸巾结果；同商品、同背景或相邻文件名不能替代同源实验。透气或不闷热句不并入吸水实验组。"
+    }
+  },
   "source": "卫品AI智能混剪通行指令；人工反馈回流：开场展示、主题分离、完整检测与透光连续句组",
   "product_keywords": ["卫生巾", "护垫", "安睡裤", "裤型", "日用", "夜用", "姨妈巾", "经期裤", "萌睡裤", "萌动裤"],
   "voice": {

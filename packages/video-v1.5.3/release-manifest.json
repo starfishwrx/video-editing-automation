@@ -6,7 +6,7 @@
     "machine-specific paths",
     "knowledge-base bodies"
   ],
-  "file_count": 379,
+  "file_count": 387,
   "files": [
     {
       "path": ".gitignore"
@@ -97,6 +97,9 @@
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/application/engine.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/application/experiment_production.py"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/application/production.py"
@@ -241,6 +244,9 @@
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/media/stability.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/media/temporal_samples.py"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/media/timeline_render.py"
@@ -390,6 +396,9 @@
       "path": "doubao-jianying-orchestrator/orchestrator/selection/ai_editor.py"
     },
     {
+      "path": "doubao-jianying-orchestrator/orchestrator/selection/experiment_contract.py"
+    },
+    {
       "path": "doubao-jianying-orchestrator/orchestrator/selection/paper_action_events.py"
     },
     {
@@ -463,6 +472,12 @@
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/vision/__init__.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/vision/experiment_detail.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/vision/experiment_review.py"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/vision/legacy_cache_import.py"
@@ -654,6 +669,9 @@
       "path": "doubao-jianying-orchestrator/tests/test_task_control.py"
     },
     {
+      "path": "doubao-jianying-orchestrator/tests/test_temporal_samples.py"
+    },
+    {
       "path": "doubao-jianying-orchestrator/tests/test_temporal_video_groups.py"
     },
     {
@@ -718,6 +736,9 @@
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_volc_glm_vision.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/tests/test_weipin_experiment.py"
     },
     {
       "path": "examples/concurrency-policy.json"
@@ -1132,6 +1153,9 @@
     },
     {
       "path": "tools/throughput_calibration.py"
+    },
+    {
+      "path": "tools/weipin_experiment.py"
     },
     {
       "path": "tools/workflow/__init__.py"
