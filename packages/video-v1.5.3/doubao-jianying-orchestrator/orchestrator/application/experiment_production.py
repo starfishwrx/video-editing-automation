@@ -11,6 +11,43 @@ from ..vision.experiment_review import PROTOCOL
 from ..media.temporal_samples import validate as validate_samples
 
 
+def _prior_origins(timeline, prior_origins, allowed, lo, hi):
+    """Keep explicit unresolved preview placeholders separate from real footage."""
+    assets = timeline.asset_map()
+    unresolved = {u.get('sentence_id') for u in timeline.unresolved if u.get('reason') ==
+        'NO_CONFIRMED_FIT_WITHIN_SEARCH_BUDGET; black is diagnostic only'}
+    diagnostic = set()
+    if timeline.delivery_mode == 'preview':
+        for asset_id, asset in assets.items():
+            events = [v for v in timeline.videos if v.asset_id == asset_id]
+            if (events and str(Path(asset.path).resolve()) not in allowed
+                    and all(v.sentence_ids and set(v.sentence_ids) <= unresolved
+                        and any(isinstance(e, dict) and e.get('diagnostic_placeholder') is True
+                            for e in v.evidence) for v in events)):
+                diagnostic.add(asset_id)
+    origins = {}
+    for p in prior_origins:
+        asset = assets[p['asset_id']]
+        if (p.get('clock') != 'same_source_clock' or identity.source_identity(asset.path) != p['proxy']
+                or (p['original']['path'] not in allowed and asset.asset_id not in diagnostic)
+                or identity.source_identity(p['original']['path']) != p['original']):
+            raise ValueError('EXPERIMENT_PRIOR_ORIGIN_BINDING_INVALID')
+        if p['original']['path'] in allowed:
+            origins[asset.asset_id] = p['original']['path']
+        elif asset.asset_id in diagnostic:
+            # This is an existing diagnostic file, never a matched task source.
+            origins[asset.asset_id] = p['proxy']['path']
+        else:
+            raise ValueError('EXPERIMENT_PRIOR_ORIGIN_BINDING_INVALID')
+    for event in timeline.videos:
+        if event.target_start_us >= hi or event.target_start_us + event.duration_us <= lo:
+            if event.asset_id not in origins:
+                if event.asset_id not in diagnostic:
+                    raise ValueError('EXPERIMENT_EXISTING_ORIGIN_UNKNOWN')
+                origins[event.asset_id] = identity.source_identity(assets[event.asset_id].path)['path']
+    return origins
+
+
 def apply(manifest, timeline, sentence_ids, roles, evidence, *, group_id, prior_origins=(), ffprobe="ffprobe", motion=None):
     from ..vision.experiment_pair_review import PROTOCOL as PAIR_PROTOCOL
     if evidence.get("protocol")==PAIR_PROTOCOL:
@@ -41,19 +78,7 @@ def apply(manifest, timeline, sentence_ids, roles, evidence, *, group_id, prior_
         raise ValueError("EXPERIMENT_INCOMPLETE_NEEDS_MATCHING_VERIFICATION")
     selected = [s for s in timeline.sentences if s.sentence_id in sentence_ids]
     lo, hi = selected[0].start_us, selected[-1].start_us + selected[-1].duration_us
-    origins = {}
-    assets = timeline.asset_map()
-    for p in prior_origins:
-        a = assets[p["asset_id"]]
-        if (p.get("clock") != "same_source_clock" or identity.source_identity(a.path) != p["proxy"]
-                or p["original"]["path"] not in allowed
-                or identity.source_identity(p["original"]["path"]) != p["original"]):
-            raise ValueError("EXPERIMENT_PRIOR_ORIGIN_BINDING_INVALID")
-        origins[a.asset_id] = p["original"]["path"]
-    for event in timeline.videos:
-        if event.target_start_us >= hi or event.target_start_us+event.duration_us <= lo:
-            if event.asset_id not in origins:
-                raise ValueError("EXPERIMENT_EXISTING_ORIGIN_UNKNOWN")
+    origins = _prior_origins(timeline, prior_origins, allowed, lo, hi)
     duration = hi - lo
     intervals = [{"start": frames[p["first_frame"]]["pts_us"],
                   "end": min(samples["source_end_us"], frames[p["last_frame"]]["pts_us"]+16_667),
@@ -168,16 +193,7 @@ def apply_pair(manifest,timeline,sentence_ids,roles,evidence,*,group_id,prior_or
             a=max(left,b-((minimum[i][1]-minimum[i][0])+take))
             planned.append({'source_start_us':a,'source_end_us':b,'target_duration_us':b-a,
                 'protected_intervals':[{'start':a,'end':b,'kind':'action','min_output_frames':1}]+protected})
-    clips=[];added=[];origins={};asset_map=timeline.asset_map()
-    for p in prior_origins:
-        asset=asset_map[p["asset_id"]]
-        if (p.get("clock")!="same_source_clock"or identity.source_identity(asset.path)!=p["proxy"]
-            or p["original"]["path"]not in allowed or identity.source_identity(p["original"]["path"])!=p["original"]):
-            raise ValueError("EXPERIMENT_PRIOR_ORIGIN_BINDING_INVALID")
-        origins[asset.asset_id]=p["original"]["path"]
-    for event in timeline.videos:
-        if (event.target_start_us>=hi or event.target_start_us+event.duration_us<=lo)and event.asset_id not in origins:
-            raise ValueError("EXPERIMENT_EXISTING_ORIGIN_UNKNOWN")
+    clips=[];added=[];origins=_prior_origins(timeline,prior_origins,allowed,lo,hi)
     for i,(member,plan)in enumerate(zip(members,planned)):
         samples=member["samples"];facts=probe_media(samples["source"]["path"],ffprobe=ffprobe)
         asset=Asset(f"{group_id}-{i}",samples["source"]["path"],"video",facts["duration_us"],facts["width"],facts["height"],facts["fps_num"],facts["fps_den"])

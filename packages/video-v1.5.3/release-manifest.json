@@ -6,7 +6,7 @@
     "machine-specific paths",
     "knowledge-base bodies"
   ],
-  "file_count": 405,
+  "file_count": 406,
   "files": [
     {
       "path": ".gitignore"
@@ -601,6 +601,9 @@
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_experiment_pairs.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/tests/test_experiment_placeholders.py"
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_experiment_retiming.py"
