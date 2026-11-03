@@ -137,6 +137,7 @@ def editorial_context(manifest: dict[str, Any] | None) -> dict[str, Any]:
         "match_rules": merged.get("match_prompt_rules", []),
         "analysis_rules": merged.get("analysis_prompt_rules", []),
         "voice_acceptance": source_rules.get("voice", {}),
+        "experiment_contracts": source_rules.get("experiment_contracts", {}),
         "subtitle_position_px": source_rules.get("editorial_contract", {}).get(
             "subtitle_position_px"),
     }

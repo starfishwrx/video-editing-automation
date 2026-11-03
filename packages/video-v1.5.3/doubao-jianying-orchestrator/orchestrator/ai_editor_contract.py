@@ -71,7 +71,7 @@ def rules_identity(manifest: dict | None = None) -> dict:
 
 def policy_prompt(manifest: dict) -> str:
     policy = POLICY
-    if editorial_context(manifest)["category"] == "zhipin":
+    if editorial_context(manifest)["category"] in {"zhipin", "weipin"}:
         policy += "\n本任务生效的品类制作与选镜合同（按口播含义适用，不能据此虚构画面）：\n" + json.dumps(
             editorial_context(manifest), ensure_ascii=False, sort_keys=True)
     feedback = str(manifest.get("revision_feedback") or "").strip()

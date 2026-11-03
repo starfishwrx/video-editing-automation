@@ -89,7 +89,7 @@ def _layout(event, source, width, height):
     return f"scale={w}:{h},pad={pw}:{ph}:(ow-iw)/2:(oh-ih)/2:black,crop={width}:{height}:{x}:{y},setsar=1"
 
 
-def _frame_plan(timeline, event, metadata):
+def _frame_plan(timeline, event, metadata, *, allow_real_tail=False):
     stream, frames = metadata["stream"], metadata["frames"]
     fps = Fraction(stream["avg_frame_rate"])
     # Matroska commonly quantizes 60fps to a 1ms time base: 16/17ms is still CFR.
@@ -107,15 +107,33 @@ def _frame_plan(timeline, event, metadata):
     if first_index >= len(pts):
         raise TimelineError("SOURCE_WINDOW_HAS_NO_FRAME")
     first_pts = pts[first_index]
+    step=Fraction(US * timeline.canvas.fps_den * event.speed_num,timeline.canvas.fps_num * event.speed_den)
+    caps=[row['bounded_process_speed_cap']for row in event.evidence
+        if isinstance(row,dict)and 'bounded_process_speed_cap'in row]
+    if caps:
+        if caps!=[3]or event.protected_intervals or end<=start:
+            raise TimelineError('BOUNDED_PROCESS_FRAME_CONTRACT_INVALID')
+        # Fill the reviewed continuous process window using its actual integer
+        # output-frame allocation, including the final stride back to 1x.
+        # Nominal microsecond rates alone leave an oversized boundary skip.
+        step=Fraction(source_end-first_pts,end-start)
+        if step>Fraction(3*US*timeline.canvas.fps_den,timeline.canvas.fps_num)+quantum/2:
+            raise TimelineError('FRAME_QUANTIZATION_EXCEEDS_PROCESS_SPEED_CAP')
     result = []
     for relative, output_frame in enumerate(range(start, end)):
-        source_time = first_pts + Fraction(
-            relative * US * timeline.canvas.fps_den * event.speed_num,
-            timeline.canvas.fps_num * event.speed_den)
+        source_time = first_pts + relative*step
         index = bisect_right(pts, source_time + quantum / 2) - 1
-        if index < 0 or index >= len(pts) or not event.source_start_us <= pts[index] < source_end:
+        preview_tail = (allow_real_tail and timeline.delivery_mode == "preview"
+            and event.target_start_us + event.duration_us == timeline.duration_us and relative > 0
+            and output_frame == end - 1
+            and 0 <= index < len(pts) and source_end <= pts[index] < source_end +
+                math.ceil(Fraction(US * timeline.canvas.fps_den * event.speed_num,
+                    timeline.canvas.fps_num * event.speed_den) + US / fps))
+        if index < 0 or index >= len(pts) or not (event.source_start_us <= pts[index] < source_end or preview_tail):
             raise TimelineError("OUTPUT_FRAME_OUTSIDE_SOURCE_WINDOW")
         result.append({"output_frame": output_frame, "source_frame": index, "source_pts_us": pts[index]})
+        if preview_tail:
+            result[-1]["preview_real_tail_us"] = pts[index] - source_end
     if any(a["source_frame"] >= b["source_frame"] for a, b in zip(result, result[1:])):
         raise TimelineError("REPEATED_SOURCE_FRAME_UNSUPPORTED")
     return result
@@ -207,9 +225,12 @@ def _render_audio(timeline, directory, *, duration_us, ffmpeg, facts):
     return {"path": str(output), "tracks": tracks, "samples": total_samples, "sample_rate": SAMPLE_RATE}
 
 
-def render_timeline(timeline: EditTimeline, output_dir, *, ffmpeg="ffmpeg", ffprobe="ffprobe", width=None):
+def render_timeline(timeline: EditTimeline, output_dir, *, ffmpeg="ffmpeg", ffprobe="ffprobe", width=None,
+                    allow_real_tail=False):
     """Write only into a new directory; the success receipt is always written last."""
     timeline.validate()
+    if allow_real_tail and timeline.delivery_mode != "preview":
+        raise TimelineError("REAL_TAIL_REQUIRES_DIAGNOSTIC_PREVIEW")
     root = Path(output_dir).resolve()
     if root.exists():
         raise TimelineError("RENDER_OUTPUT_EXISTS")
@@ -240,7 +261,7 @@ def render_timeline(timeline: EditTimeline, output_dir, *, ffmpeg="ffmpeg", ffpr
         for i, event in enumerate(timeline.videos):
             source = facts[event.asset_id]
             metadata = action_frames.probe(source["path"], root / "source_pts", ffprobe=str(ffprobe))
-            mapping = _frame_plan(timeline, event, metadata)
+            mapping = _frame_plan(timeline, event, metadata, allow_real_tail=allow_real_tail)
             # The decoder's observed PTS, before any setpts, must match the source plan.
             expression = _selection_expression(mapping)
             if len(expression) > 24000:
@@ -300,6 +321,9 @@ def render_timeline(timeline: EditTimeline, output_dir, *, ffmpeg="ffmpeg", ffpr
             "audio_identities": {p: action_frames.identity(p) for p in
                                   [audio["path"], *audio["tracks"].values()]},
             "frame_mapping": mappings, "protected": protected,
+            "real_tail_preview": bool(allow_real_tail),
+            "real_tail_frames": [dict(event_id=group["event_id"], **row) for group in mappings
+                for row in group["frames"] if "preview_real_tail_us" in row],
             "subtitle_rendering": {"path": str(ass), "method": "libass", "time_quantum_us": 10000,
                 "font_selection": [line.strip() for line in (final_proc.stderr or "").splitlines() if "fontselect:" in line],
                 "fidelity": "basic layout proxy; font metrics and Jianying editing not verified"},

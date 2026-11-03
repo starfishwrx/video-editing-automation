@@ -20,6 +20,18 @@ AI 通读整稿，按内容区分具体卖点、产品介绍、无具体卖点�
 
 ## 执行流程
 
+卫品吸水组合句须覆盖同一次实验的倒液、吸收、纸巾按压与结果，允许跨素材文件，禁止换成另一轮实验的验证。31/32等相邻序号优先召回，再联合复核实际画面；相邻不是通过条件。透气/不闷热主题不并入吸水组。显式预览工具`python -m tools.weipin_experiment --help`提供`roles/observe/pair/motion/phase-template/optimize/detail/apply`；配对后按实际阶段证据局部变速，共享固定组预算，优先≤2倍、硬上限3倍，关键首尾/提起/结果原速。没有motion证据仍保守保护；不把该原速冲突当作允许局部变速也无解。自动边界观察仍不稳定，定向帧校正需如实标注，默认生产未切换，正式验收仍需真实成片独立QC。
+
+正常预览命令不依赖任务专属脚本：
+
+```powershell
+uv run --frozen python -X utf8 -m tools.weipin_experiment optimize --manifest work/task.json --timeline work/fixed/timeline.json --roles work/roles.json --evidence work/pair.pair.json --motion work/reviewed.motion.json --prior-origins work/origins.json --report-dir work/optimization-new
+```
+
+以`--phase-spec work/phase-spec.json`替换`--motion`可复现已定向复核的帧区间。用`phase-template --manifest work/task.json --evidence work/pair.pair.json --motion work/observed.motion.json --output work/phase-spec.json`生成带当前输入身份的模板，再依据实际编号帧修改`members[].observation`并填写`review_note`。不带`--motion`生成待填写模板。原件/采样映射或配对窗口变化后旧规格拒绝复用；模板本身不是视觉通过结论。
+
+`optimize`输出独立时间线、逐句旧新源窗口/计划倍速、实际执行帧预算及相位滞后、工作预览和未认证检查结果，已有输出目录不覆盖；`--no-render`仅准备。多句组用重复`--sentence-id`明确选择。该入口不重做配音/选曲/全库识别，不回写NAS或业务表。
+
 `cli._temporary_match → ai_editor.prepare → shot_analyzer.match_manifest`：
 
 1. 描述只用于分类和宽召回，不用旧关键词、A/B强度和降级白名单淘汰。
