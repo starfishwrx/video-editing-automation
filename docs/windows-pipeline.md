@@ -75,6 +75,8 @@ powershell -NoProfile -File scripts/install_pipeline_task.ps1 -TaskName VideoAut
 
 操作系统锁防止多进程重入。已完成、正在执行、普通预览和确定性失败会跳过；明确可重试的制作最多尝试两次，保留草稿的 QC／交付最多自动恢复两次，次数在开始前保存。恢复复用草稿，不重做 TTS 或选镜。同一记录的输入变化不能重置次数，必须使用新记录或显式定向恢复。不要删除整个状态文件来重放全部任务。
 
+选镜服务超时/限流的制作重试改为阶段恢复：复用冻结的配音、句长、素材分析及完成的候选观察，仅补失败调用。每次原始运行持久记录一次恢复预算，中断也不清零；缓存缺失、输入变化或预算耗尽直接停止，不回到完整build。选镜完成后的BGM/写稿超时保留匹配结果。恢复产物和原始运行身份见[运行时与恢复](subsystems/runtime-and-recovery.md)。
+
 有明确修复后，可使用现有入口定向恢复：`python -m tools.batch_dispatch resume --queue <queue.json> --work-root <work> --record-id <id> --stage qc`。制作缺失才使用 `--stage build`，不会因定时器重复触发而无限重建。
 
 ## 自动验收边界

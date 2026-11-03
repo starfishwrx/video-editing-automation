@@ -6,7 +6,7 @@
     "machine-specific paths",
     "knowledge-base bodies"
   ],
-  "file_count": 428,
+  "file_count": 433,
   "files": [
     {
       "path": ".gitignore"
@@ -115,6 +115,9 @@
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/application/purpose_production.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/application/recovery_audio.py"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/application/task_inputs.py"
@@ -418,6 +421,9 @@
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/selection/ai_editor.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/selection/ai_editor_recovery.py"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/selection/experiment_contract.py"
@@ -730,6 +736,9 @@
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_scene_evidence_contracts.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/tests/test_selection_recovery.py"
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_sentence_matching.py"
@@ -1149,6 +1158,9 @@
       "path": "tests/test_selection_preview.py"
     },
     {
+      "path": "tests/test_selection_stage_resume.py"
+    },
+    {
       "path": "tests/test_sentence_review.py"
     },
     {
@@ -1288,6 +1300,9 @@
     },
     {
       "path": "tools/workflow/scheduled.py"
+    },
+    {
+      "path": "tools/workflow/selection_recovery.py"
     },
     {
       "path": "uv.lock"

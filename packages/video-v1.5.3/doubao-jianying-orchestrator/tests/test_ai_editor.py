@@ -94,7 +94,7 @@ class AIEditorTests(unittest.TestCase):
         with mock.patch("orchestrator.demo_actions.judge", side_effect=AssertionError("legacy gate")):
             self.assertTrue(semantic_gate.evaluate_segments(result["segments"], require_explicit=True, category="weipin")["ok"])
 
-    def test_partial_selling_points_are_preview_only_and_remain_unresolved(self):
+    def test_partial_preview_stays_uncertified_and_formal_retains_uncovered_notes(self):
         self.sentence["selling_points"].append({"id": "p2", "text": "具体香型"})
         self.manifest.update(delivery_mode="preview", allow_partial_selling_points=True)
         result = self.result()
@@ -107,13 +107,13 @@ class AIEditorTests(unittest.TestCase):
         self.assertEqual(len(segment["ai_selection"]["selling_points"]), 2)
         self.assertTrue(contract.validate_segment_receipt(segment, manifest=self.manifest)["ok"])
         formal = {**self.manifest, "delivery_mode": "formal"}
-        self.assertFalse(contract.validate_segment_receipt(segment, manifest=formal)["ok"])
-        self.assertFalse(semantic_gate.evaluate_segments([segment], require_explicit=True)["ok"])
+        self.assertTrue(contract.validate_segment_receipt(segment, manifest=formal)["ok"])
+        self.assertTrue(semantic_gate.evaluate_segments([segment], require_explicit=True)["ok"])
         legacy = copy.deepcopy(segment)
         legacy["ai_selection"]["selling_points"] = legacy["ai_selection"]["selling_points"][:1]
         self.assertFalse(contract.validate_segment_receipt(legacy, manifest=formal)["ok"])
         self.manifest["delivery_mode"] = "formal"
-        self.assertFalse(self.result()["ok"])
+        self.assertTrue(self.result()["ok"])
 
     def test_refinement_preparation_failure_retains_prior_observation(self):
         original = {**self.review, "dense_required": True}
@@ -351,9 +351,13 @@ class AIEditorTests(unittest.TestCase):
         row["target_duration"] = 1.0
         self.assertIn("AI_QC_FINAL_SPEED_CHANGED", ai_editor_qc.validate_cut(claim, [row]))
 
-    def test_every_selling_point_must_be_covered(self):
+    def test_one_specific_point_is_required_and_other_points_are_reported(self):
         plan = self.plan()
         plan["sentences"][0]["selling_points"].append({"id": "p2", "text": "按压不反渗"})
+        result = self.result(plan)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["segments"][0]["uncovered_selling_points"], [{"id": "p2", "text": "按压不反渗"}])
+        plan["reviews"]["1"][0]["supported_point_ids"] = []
         self.assertFalse(self.result(plan)["ok"])
 
     def test_source_change_invalidates_plan(self):

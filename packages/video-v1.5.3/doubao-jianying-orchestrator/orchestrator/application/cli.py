@@ -71,7 +71,7 @@ def _compact_build_result(result: dict) -> dict:
                 "pipeline_version", "message", "problems", "reason", "error", "missing",
                 "voice_input", "voice_candidates", "voice_auditions", "bgm_candidates", "bgm_auditions",
                 "pending_items", "coverage", "report", "confirmation", "task_id", "task_log",
-                "issues", "caption_report")
+                "issues", "caption_report", "failed_stage", "resume_stage")
         return {k: result[k] for k in keys if k in result}
     draft_path = result.get("draft_path")
     artifacts = []
@@ -120,7 +120,7 @@ def _compact_control_result(result: dict) -> dict:
         "safe_to_continue", "next_action", "task_id", "run_id", "pipeline_version",
         "parent_run_id", "recovery", "recovery_stage", "message", "error", "missing",
         "analysis", "match_report", "matched_manifest", "matched_manifest_sha256",
-        "draft_path", "task_log", "reason",
+        "draft_path", "task_log", "reason", "failed_stage", "resume_stage",
     )
     return {key: result[key] for key in keys if key in result}
 
@@ -758,6 +758,7 @@ def _match_temporary_input(manifest: dict, input_path: Path, report_dir: Path,
             }, ensure_ascii=False, indent=2), encoding="utf-8")
     if not matched.get("ok"):
         return manifest, {"status": "SHOT_MATCH_BLOCKED",
+                          **{k: matched[k] for k in ("status", "failure_class", "failure_code", "retryable", "reason", "failed_stage", "resume_stage") if k in matched},
                           "message": "当前商品素材已切成候选镜头，但逐句匹配仍缺少可审计的画面描述、卖点证据或动作完成确认。",
                           "pending_items": matched.get("pending_items", []),
                           "recommendations": matched.get("recommendations", []),
@@ -900,6 +901,18 @@ def cmd_build(args) -> int:
                 (report_dir / "sentence_planning").mkdir(parents=True, exist_ok=True)
                 (report_dir / "sentence_planning" / "planned_manifest.json").write_text(
                     json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+            audio_files = []
+            for row in narration_timing.get("rows", []):
+                path = Path(str(row.get("tts_path") or ""))
+                if path.is_file():
+                    stat = path.stat()
+                    audio_files.append({"path": str(path.resolve()), "size": stat.st_size, "mtime_ns": stat.st_mtime_ns})
+            manifest["_selection_attempt"] = logger.run_id
+            (report_dir / "selection_resume.json").write_text(json.dumps({
+                "input_manifest": _read(input_path), "manifest": manifest,
+                "audio_files": audio_files, "timing": narration_timing,
+                "run_id": logger.run_id,
+            }, ensure_ascii=False, indent=2), encoding="utf-8")
             manifest, blocker = _temporary_match(manifest, input_path, report_dir,
                                                  narration_timing=narration_timing)
             shot_match_report = report_dir / "shot_match_report.json"
@@ -1238,6 +1251,13 @@ def cmd_recover(args) -> int:
                          ("draft_name", "force_overwrite", "recovery_stage", "parent_run_id")}
     manifest.update(cached)
     manifest.update(recovery_controls)
+    from . import recovery_audio
+    try:
+        manifest = recovery_audio.bind_and_record(manifest, cached_result, report_dir)
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        return _emit(_compact_control_result(finalize({"status": "RECOVERY_SENTENCE_TIMING_REQUIRED",
+            "failure_class": "environment", "reason": str(exc),
+            "message": "原配音或句长无法复用，未重新合成、未写入草稿。"})), 1)
     matched_manifest_sha256 = hashlib.sha256(
         json.dumps(cached_result, ensure_ascii=False, sort_keys=True, default=str).encode()
     ).hexdigest()
