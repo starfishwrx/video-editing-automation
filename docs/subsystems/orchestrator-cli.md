@@ -5,7 +5,7 @@
 - 说明：stdout 仅输出机器可读 JSON；详细运行日志写入 `report/tasks/<run_id>/events.jsonl`
 
 ## 1. 子命令与退出码
-- `env`：环境自检（FFmpeg、剪映根、包签名、依赖、草稿根可写性等）。0=ready，非 0=未就绪。
+- `env [--profile production|base] [--input manifest.json]`：默认检查通用工具链与所选写稿后端；任务可覆盖后端与字体，base显式只查通用工具链。0=ready，非0=未就绪，输出含 `profile`、`base_ready` 和 `draft_backend_check`（后两项限production）。
 - `setup-ffmpeg [--force]`：Windows 绿色 FFmpeg 自动引导；成功返回 `READY/ALREADY_READY`。
 - `list-voices`：列出可选音色（供运营二选一）。
 - `recommend-voice [--text --style --persona --topk]`：按脚本/人设推荐音色。
@@ -26,7 +26,7 @@
 
 ## 2. 输出合同（精简版）
 - `build` 的 stdout 是 `_compact_build_result(result)`：在 `SUCCESS` 时仅列出草稿名称/路径/关键文件与 `task_log`；在阻断/未认证/待确认时，保留 `status`、`failure_class`、`retryable`、`next_action`、`report` 等关键字段，便于对话面板渲染。
-- `recover` 的 stdout 是 `_compact_control_result(result)`：保留 `status/next_action/recovery_stage`、`matched_manifest(_sha256)`、`task_log`。
+- `recover` 的 stdout 是 `_compact_control_result(result)`：保留 `status/next_action/recovery_stage/reason`、`match_report`、`matched_manifest(_sha256)`、`task_log`。
 
 ## 3. 关键约束与口径
 - 默认选镜模式为 `ai_editor`，优先级为 manifest 字段 → `JY_SELECTION_MODE` → 默认值；`rule_then_ai` 和 `legacy` 选镜策略保留。所有策略只使用 GLM（`volc_glm` / `glm` / `volc`）或 Qwen（`qwen` / `qwen_compatible`）直连。旧通道和未知值明确拒绝，不再配置视觉 profile/provider。默认模型完整名称为 GLM-5.3-Flash（`glm-5.3-flash`），见[模型与视觉流程](../model-and-vision.md)。
@@ -37,6 +37,8 @@
 
 ## 4. 依赖与缓存
 - 通过 `platform_env.environment_report()` 解析剪映根、草稿目录、FFmpeg/ffprobe、包签名、依赖状态。
+- `headless.production_environment_report(base_report, manifest)` 复用基础报告，并即时检查后端/原生运行时/字体/媒体工具；CLI env、build和recover preflight共用。基础报告缓存不缓存后端失败或成功。
+- `match-shots` 与 `semantic_match` 的完整结果均落 `shot_match_report.json`，含 `ok`、嵌套 `manifest` 和匹配开始前的原始 `input_manifest`。裸 `matched_manifest.json` 仍供后续build直接输入，不充当成功匹配凭证。`draft_write` 仅接受当前输入绑定相同的完整成功报告；匹配失败或异常会令当前恢复缓存失效，不能回退旧成功。无绑定旧报告须基于已有分析显式恢复semantic_match，不重合成配音或隐式扫描全库。
 - 视觉理解缓存：`vision_analyzer` 将帧描述、标签、动作确认的稳定投影写入跨任务 `.cache/material_vision.json`；键绑定素材、窗口、模型、端点与协议。历史兼容字段固定为 `profile="volc"`，不接受配置，不会仅因删除旧通道触发全库重识别。
 - 旁白/TTS 批量合成缓存：`voice_tts` 的缓存键仅包含“文本+音色+后端+后处理版本”，与视频速度/窗口无关，命中即复用字节。
 

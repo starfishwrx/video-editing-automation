@@ -53,6 +53,7 @@ uv run --frozen python -X utf8 -m tools.check_architecture
 |---|---|
 | BGM选曲／准备 | `test_*bgm.py` + `test_default_headless.py` |
 | 无头建稿／字幕 | `test_default_headless.py`、`test_meeting_caption_integration.py`、`test_timeline_export.py` |
+| 阶段恢复／环境检查 | `test_task_control.py`、`test_default_headless.py`；覆盖成功阶段串接、匹配提前失败、旧任务/文案/来源拒绝和env退出码 |
 | AI选镜 | `test_ai_editor*.py`；涉及卖点证据时加 `test_visual_qc_response_contract.py` |
 | 时间窗求解 | `test_timing_contract.py`；纸品动作另加 `test_paper_action_windows.py` |
 | 草稿交付 / 媒体路径 | `test_draft_delivery.py` |

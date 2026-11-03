@@ -61,6 +61,47 @@ class ArchitectureTests(unittest.TestCase):
             self.assertIn("LEGACY_ENTRYPOINT_HAS_LOGIC:engine", issues)
             self.assertIn("ROOT_IMPLEMENTATION_FORBIDDEN:new_business.py", issues)
 
+    def test_anchored_public_contracts_cannot_load_application_or_delivery(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "orchestrator"
+            shutil.copytree(architecture.ROOT, root, ignore=shutil.ignore_patterns("__pycache__"))
+            contract = root / "ai_editor_contract.py"
+            with contract.open("a", encoding="utf-8") as stream:
+                stream.write("\ndef forbidden():\n    from .application import engine\n    from tools import draft_delivery\n")
+            issues = architecture.check(root)
+            self.assertTrue(any(x.startswith("APPLICATION_DEPENDENCY:ai_editor_contract.py:") for x in issues), issues)
+            self.assertTrue(any(x.startswith("PUBLIC_CONTRACT_DEPENDENCY:ai_editor_contract.py:") for x in issues), issues)
+
+    def test_tools_layers_reject_worker_and_reverse_dependencies(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "orchestrator"
+            root.mkdir()
+            (root / "module_map.json").write_text(json.dumps({
+                "features": {"application": ["engine"]}, "anchored": []}), encoding="utf-8")
+            (root / "application").mkdir()
+            (root / "application/engine.py").write_text("", encoding="utf-8")
+            (root / "engine.py").write_text(architecture._wrapper("engine", "application.engine"), encoding="utf-8")
+            tools = Path(directory) / "tools"
+            for feature in ("queueing", "acceptance", "workflow"):
+                (tools / feature).mkdir(parents=True)
+            (tools / "queueing" / "contracts.py").write_text(
+                "def forbidden():\n    import batch_worker\n    from ..acceptance import finalization\n",
+                encoding="utf-8")
+            (tools / "acceptance" / "gate.py").write_text(
+                "from ..workflow import closed_loop\nfrom .. import batch_dispatch\n"
+                "from orchestrator import engine, OrchestrationEngine\n", encoding="utf-8")
+            (tools / "workflow" / "run.py").write_text(
+                "from ..queueing import contracts\nfrom ..acceptance import gate\nfrom ..batch_dispatch import dispatch\n",
+                encoding="utf-8")
+            issues = architecture.check(root, tools_root=tools)
+            self.assertIn("TOOLS_DEPENDENCY:queueing/contracts.py:batch_worker", issues)
+            self.assertIn("TOOLS_DEPENDENCY:queueing/contracts.py:tools.acceptance", issues)
+            self.assertIn("TOOLS_DEPENDENCY:acceptance/gate.py:tools.workflow", issues)
+            self.assertIn("TOOLS_DEPENDENCY:acceptance/gate.py:tools.batch_dispatch", issues)
+            self.assertIn("TOOLS_DEPENDENCY:acceptance/gate.py:orchestrator.engine", issues)
+            self.assertIn("TOOLS_DEPENDENCY:acceptance/gate.py:orchestrator.OrchestrationEngine", issues)
+            self.assertFalse(any(":workflow/" in x for x in issues), issues)
+
     def test_all_legacy_imports_share_state_and_patch_targets(self):
         layout = json.loads((architecture.ROOT / "module_map.json").read_text(encoding="utf-8"))
         for feature, names in layout["features"].items():
