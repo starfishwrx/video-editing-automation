@@ -1,6 +1,6 @@
 # 子系统：命令行（orchestrator-cli）
 
-- 代码：`packages/video-v1.5.3/doubao-jianying-orchestrator/orchestrator/cli.py`
+- 代码：`packages/video-v1.5.3/doubao-jianying-orchestrator/orchestrator/application/cli.py`；旧 `orchestrator/cli.py` 仅兼容导入与命令入口
 - 运行：进入 `doubao-jianying-orchestrator` 后 `python -m orchestrator.cli <subcommand>`
 - 说明：stdout 仅输出机器可读 JSON；详细运行日志写入 `report/tasks/<run_id>/events.jsonl`
 

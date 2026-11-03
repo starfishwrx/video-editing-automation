@@ -10,7 +10,9 @@
 - 流程：FFmpeg 分镜/抽帧 → GLM-5.3-Flash 理解画面 → AI 复审候选并编排 → 程序校验源窗口与音频时长 → 剪映写稿 → 最终切片独立视觉 QC → Windows 自动验收 → 按配置交付。
 - 输出：剪映草稿、选镜计划、时间范围及 QC/任务结果 JSON。生成草稿与正式交付分别验收。
 
-默认选镜模式为 `ai_editor`，最终视觉 QC 使用 v4 合同。旧选镜逻辑仅在显式选择 `legacy` 时使用；两条路线及报告不能混用。详见[架构](docs/architecture.md)和[选镜说明](packages/video-v1.5.3/docs/AI_EDITOR.md)。
+默认选镜模式为 `ai_editor`，最终视觉 QC 使用 v4 合同；`rule_then_ai` 为显式规则初排/AI 复核策略，`legacy` 保留旧算法。算法选择与 GLM/Qwen 调用通道分别配置，各自报告不能混用。详见[架构](docs/architecture.md)和[选镜说明](packages/video-v1.5.3/docs/AI_EDITOR.md)。
+
+当前分支的功能边界与接续任务见[文档入口](docs/README.md#当前边界与接续位置)。纸品动作/帧级窗口是隔离验证；[程序化生产与末端剪映导出](docs/plans/20261101-programmatic-production.md)仍为待实施方案，默认生产尚未改为独立时间线。
 
 ## 快速开始
 
@@ -28,12 +30,12 @@ uv run --frozen python -X utf8 doubao-jianying-orchestrator/run.py --help
 
 ## 版本与下载
 
-版本状态按 **2026-10-24** 核对；后续以包内 `VERSION` 和 [GitHub Releases](https://github.com/starfishwrx/video-editing-automation/releases) 的实际附件为准。
+版本状态按 **2026-11-02** 核对；后续以包内 `VERSION` 和 [GitHub Releases](https://github.com/starfishwrx/video-editing-automation/releases) 的实际附件为准。本文描述当前分支，功能分支的能力不等于已合入 `main`。
 
 - **当前维护主线**：[`packages/video-v1.5.3/`](packages/video-v1.5.3/)，`VERSION` 为 **1.5.6**。目录名是历史代号，升级时保留路径。
 - **已发布下载包**：本次核对只有 [video-v1.5.1 预发布版](https://github.com/starfishwrx/video-editing-automation/releases/tag/video-v1.5.1)。它与当前主线存在差异；仓库内的旧 ZIP 也不代表 1.5.6 已发布。
 - **实验路线**：`packages/video-v1.5.4/`、`packages/video-v1.5.5/` 是独立的索引/检索候选，后者声明为 experimental；不作为默认运行入口。
-- **生产安装**：由部署机器的 `ACTIVE_VIDEO_RUNTIME.json`、已安装技能和哈希确认。源码、下载包与生产版本分别记录。
+- **生产安装**：由部署机器的 `ACTIVE_VIDEO_RUNTIME.json` 与实际安装文件确认。源码、下载包与生产版本分别记录。
 
 需要当前源码候选时，从主线检出后按[合包流程](docs/release-process.md)生成新包。候选测试通过后，仍需完成既定的真实任务观察和人工验收，才能发布或部署。
 

@@ -11,6 +11,7 @@ cd packages/video-v1.5.3
 uv sync --frozen
 uv run --frozen python -X utf8 -m unittest discover -s tests -q
 uv run --frozen python -X utf8 -m unittest discover -s doubao-jianying-orchestrator/tests -q
+uv run --frozen python -X utf8 -m tools.check_architecture
 ```
 
 | 套件 | 覆盖什么 |
@@ -30,7 +31,7 @@ uv run --frozen python -X utf8 -m unittest discover -s doubao-jianying-orchestra
 
 ## 2. 局部迭代（可缩小）
 
-模块边界检查：活包根运行 `uv run --frozen python -X utf8 -m tools.check_architecture`。`tests/test_modular_architecture.py` 验证旧/新导入共享状态、纯合同不加载引擎、中文空格路径副本资源、独立文件加载规则与反向依赖拒绝。`test_closed_loop_entrypoints.py` 覆盖两个旧入口、任意 cwd、importlib 独立命名空间、非 PASS/Eval/人工审批拦截；`test_queue_contracts.py` 与编排器 `test_media_boundary.py` 覆盖抽出的任务合同和媒体操作。新模块必须进入全新解压包后仍能运行。
+模块边界检查：活包根运行 `uv run --frozen python -X utf8 -m tools.check_architecture`。`tests/test_modular_architecture.py` 验证旧/新导入共享状态、纯合同不加载引擎、中文空格路径副本资源、独立文件加载规则与反向依赖拒绝。`test_closed_loop_entrypoints.py` 覆盖两个旧入口、任意 cwd、importlib 独立命名空间、非 PASS、预览转正式和四项当前证据拦截；`test_queue_contracts.py` 与编排器 `test_media_boundary.py` 覆盖抽出的任务合同和媒体操作。新模块必须进入全新解压包后仍能运行。
 
 | 改动面 | 可先跑 |
 |---|---|
@@ -39,6 +40,12 @@ uv run --frozen python -X utf8 -m unittest discover -s doubao-jianying-orchestra
 | 单一闸门 | 对应 `test_*gate*` / 模块测试，且必须含「该拦的输入被拦住」 |
 
 普通源码 PR 依据适用离线回归、代码审查与目标 Windows CI 合并；真实成片、GUI 编辑及生产安装另行验收，不要求每次源码修复都先出两条成片。准备发版时才运行第 3 节。
+
+## 2.1 实际媒体与端到端验收
+
+合成 FFmpeg 测试验证源帧/PTS、变速、结果帧、音频和字幕执行；缺少 FFmpeg 时的 skip 不代表媒体行为通过。准备绿色工具后需把其目录加入当前进程 PATH，并设置 FFMPEG_BIN/FFPROBE_BIN，再运行两套回归。
+
+当前有 CLI、调度、草稿/交付夹具和合成媒体集成测试；真实商品从自动选镜到专业编辑接受的完整端到端质量，不由离线套件认证。纸品隔离验证保留已有失败，详情见[动作帧域窗口](paper-action-windows.md)和[回放说明](paper-selection-replay.md)。独立时间线方案的阶段验收见[实施方案](plans/20261101-programmatic-production.md)。
 
 ## 3. 发版验收（合包命令）
 

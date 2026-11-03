@@ -29,7 +29,7 @@
 ## 3. 评估与收据（`tools/*.py`）
 - `paper_selection_replay.py` / `selection_preview.py`：复用已分析镜头、固定原音轨和句长的纸品选镜 A/B 验证，只输出预览与未解决项；不执行生产建稿或交付。见 [纸品选镜验证](../paper-selection-replay.md)。
 - `tools/acceptance/{evaluation,task_review,delivery_gate,finalization}.py`：四项当前证据验收、正式交付前检查和交付协调；`production_eval.py` 只兼容旧导入，`eval_bootstrap.py` 可独立冻结输入。
-- `material_index.py/material_library.py`：素材索引/库工具（不在 v1.5.1 正常路径写入素材库）
+- `material_index.py/material_library.py`：素材索引/库工具（不在当前默认生产路径自动写入素材库）
 - `classify_feedback.py`：将业务反馈归类到可复用规则候选，产出可审计规则文本
 - `feedback_candidates.py`：只追加私有反馈候选与人工审核/回归/发布事件，不在运行中提升全局规则
 - `sentence_review.py`：通过自身 `collect` 命令收集私有句级审稿，并冻结输入、调用实际 matcher 离线回放和比较；命令见当前包 `docs/sentence-review.md`，人工标签不授予正式交付许可
