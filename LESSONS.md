@@ -7,6 +7,14 @@
 
 ## 新增条目
 
+### L-20261103-14 限速必须贯穿生产入口并区分观察与规划缓存
+- status: OPEN
+- hits: 1
+- 模块: policy/playback、selection/ai_editor、selection/timing_contract、application/engine
+- 现象: 实验有2/3倍规则，默认AI和旧成功计划仍可产生9–13倍；后台技术上限被误当成剪辑许可。
+- 以后怎么做: 共享版本化生产政策，实际源窗/输出时长在写稿前重新计算；关键/结果及未知相位原速。旧成功标志和旧速度覆盖不构成许可，保留像素事实，仅重解或重选失败句；完整证据装不下报告冲突，不裁短证据伪造可行。实验配对、阶段与跨句预算必须先适配证据合同再接默认入口。
+- 证据: test_production_playback.py；从冻结计划匿名提取的 production_speed_failures.json；docs/production-playback.md 中分别记录源码能力、未接入组件和部署状态。
+
 ### L-20261103-13 自动选曲回退必须区分坏素材和环境故障
 - status: OPEN
 - hits: 1

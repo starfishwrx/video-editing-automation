@@ -40,6 +40,7 @@ import re
 import subprocess
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Optional
+from ..policy import playback
 
 US = 1_000_000
 
@@ -485,6 +486,9 @@ def solve_window(req: WindowRequest) -> WindowSolution:
     speed_max = float(req.speed_max)
     if speed_max < speed_min:
         speed_min, speed_max = speed_max, speed_min
+    speed_max = min(speed_max, playback.PROCESS_MAX)
+    if not (math.isfinite(speed_min) and math.isfinite(speed_max) and 0 < speed_min <= speed_max):
+        return _fail(REASON_SPEED_OUT_OF_RANGE, policy_version=playback.VERSION)
 
     if usable_us < int(round(speed_min * timeline_us)):
         return _fail(REASON_SOURCE_TOO_SHORT, usable_us=usable_us,
@@ -516,6 +520,7 @@ def solve_window(req: WindowRequest) -> WindowSolution:
                 return candidate
         return None
 
+    req = dataclasses.replace(req, speed_min=speed_min, speed_max=speed_max)
     for raw_speed in _candidate_speeds(req, usable_us, timeline_us, span):
         speed = _snapped_speed_that_fits(raw_speed)
         if speed is None:
@@ -623,20 +628,10 @@ def solve_window_waste_aware(req: WindowRequest, head_waste: Any = 0.0,
 
 
 def effective_speed_range(role: Any, *, time_sensitive: bool = False,
-                          override: Any = None) -> tuple[float, float]:
-    """场景规则给出的 ``speed_range_override`` 优先于画面角色的变速范围。
-
-    卫品指令明确允许用倍速把完整动作塞进句子（例如吸水实验倒水、擦拭最高 1.6 倍），
-    这时 direct_evidence 的 1.0 锁由场景规则显式解除，并随段落写进报告。
-    """
-    if isinstance(override, (list, tuple)) and len(override) == 2:
-        try:
-            lo, hi = float(override[0]), float(override[1])
-        except (TypeError, ValueError):
-            lo = hi = 0.0
-        if lo > 0 and hi > 0:
-            return (min(lo, hi), max(lo, hi))
-    return speed_range_for_role(role, time_sensitive=time_sensitive)
+                          override: Any = None, playback_observation=None) -> tuple[float, float]:
+    """All production paths use reviewed playback permissions, not role guesses."""
+    return playback.speed_range(time_sensitive=time_sensitive,
+                                observation=playback_observation, override=override)
 
 
 # ---- 多镜组合（用户定案第 6 条：一句话跨多个镜头）---------------------------
@@ -795,7 +790,10 @@ def solve_span(req: SpanRequest) -> SpanSolution:
                 "evidence_start_us": int(seg.evidence_start_us),
                 "evidence_end_us": int(seg.evidence_end_us)})
         speed_min = min(float(seg.speed_min), float(seg.speed_max))
-        speed_max = max(float(seg.speed_min), float(seg.speed_max))
+        speed_max = min(playback.PROCESS_MAX, max(float(seg.speed_min), float(seg.speed_max)))
+        if not (math.isfinite(speed_min) and math.isfinite(speed_max) and 0 < speed_min <= speed_max):
+            return SpanSolution(ok=False, reason=REASON_SPEED_OUT_OF_RANGE,
+                                detail={"segment_index": index, "policy_version": playback.VERSION})
         # 该段在**输出时间线**上最多能盖多长：素材消耗 = 输出时长 × 速度，
         # 所以最慢速度给出最大覆盖（慢放把同样的素材摊得更长）。
         caps.append(int(math.floor(seg.usable_us / speed_min)) if speed_min > 0 else 0)
@@ -1246,9 +1244,10 @@ def check_invariants(items: Iterable[dict], *, fps: float = DEFAULT_FPS,
                     f"[{int(ev_start)/US:.3f},{int(ev_end)/US:.3f}]s",
                     expected=int(ev_end) - int(ev_start), actual=end - start)
 
-        allowed = item.get("speed_range")
+        allowed = item.get("speed_range") or [0.05, playback.PROCESS_MAX]
         if allowed:
             lo, hi = float(allowed[0]), float(allowed[1])
+            hi = min(hi, playback.PROCESS_MAX)
             # 变速吸附在 1µs 栅格上（frame_speed），区间收成一个点时吸附值最多偏半格。
             grid = 1.0 / frame_us(fps)
             if speed < lo - grid or speed > hi + grid:

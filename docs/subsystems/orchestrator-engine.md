@@ -26,7 +26,7 @@
 - 口播段时间等式：`segment_us == audio_duration_us + tail_pad_us`（容差 ≤1 帧，`timing_contract.check_invariants`）
 - 源窗口几何链：`0 <= source_start < source_end <= material_duration_us`（零容差；与写入层同尺）
 - 最终切片必须覆盖证据区间；证据窗口来自 AI 明确时间段或“审核帧邻域”
-- 默认 AI 模式按当前审核收据求解速度（最高 20 倍，尽量接近原速），完整覆盖关键动作和结果；legacy 保留按角色和 `time_sensitive` 决定的速度范围。变速范围须与最终窗口及 QC 同源，详见包内 `docs/AI_EDITOR.md`。
+- 默认选镜、补选、求解和写稿共用版本化播放政策：已复看纯过程优先≤2、最多3倍；关键动作、结果、计时证明和未知阶段原速。旧缓存重验，后端能力不授予加速许可，详见[生产播放规则](../production-playback.md)。
 - 预览稿：不得标成正式交付；结果中带 `coverage.certification != CERTIFIED` 与逐条未认证理由。未认证状态以当前报告/交付合同判断，不以历史画面标注代替证据。
 
 ## 4. 输入/输出（字段与状态）

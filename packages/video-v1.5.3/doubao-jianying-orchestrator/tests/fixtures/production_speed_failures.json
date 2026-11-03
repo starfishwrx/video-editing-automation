@@ -1,0 +1,51 @@
+{
+  "source_commit": "090df84",
+  "scope": "sanitized read-only production timing; no media, script or private paths",
+  "cases": [
+    {
+      "case": "NhQU",
+      "sentence_index": 10,
+      "source_start_us": 20804000,
+      "source_end_us": 31207008,
+      "target_us": 1096208,
+      "video_speed": 9.4899949,
+      "time_sensitive": false,
+      "evidence_intervals_us": [
+        {
+          "start": 20804000,
+          "end": 31206000
+        }
+      ]
+    },
+    {
+      "case": "Fnrsh",
+      "sentence_index": 14,
+      "source_start_us": 2532000,
+      "source_end_us": 15191491,
+      "target_us": 1155062,
+      "video_speed": 10.9600096,
+      "time_sensitive": false,
+      "evidence_intervals_us": [
+        {
+          "start": 2532000,
+          "end": 15191000
+        }
+      ]
+    },
+    {
+      "case": "2x8K",
+      "sentence_index": 5,
+      "source_start_us": 6198000,
+      "source_end_us": 23253154,
+      "target_us": 1353583,
+      "video_speed": 12.600006,
+      "time_sensitive": false,
+      "evidence_intervals_us": [
+        {
+          "start": 6198000,
+          "end": 23242000
+        }
+      ]
+    }
+  ]
+}

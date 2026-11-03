@@ -8,7 +8,7 @@
 ## 2. 口径与常量
 - µs 口径：`US=1_000_000`；`frame_us(fps)`；`DEFAULT_FPS=30`
 - 尾留白/保护区：`DEFAULT_TAIL_PAD_US=120_000`，`DEFAULT_HEAD_GUARD_US=300_000`，`DEFAULT_TAIL_GUARD_US=200_000`
-- 速度范围：随 `visual_role`（`SPEED_RANGE_BY_ROLE`）；与时间相关的直接证据锁 1.0；缺失/未知时锁 1.0
+- 生产速度范围：共用 `policy/playback.py`，实际复看的纯过程优先≤2、最多3倍；与时间相关的直接证据、关键动作、结果和未知阶段锁1.0。`speed_range_for_role` 仅保留旧API参考值，不能授予生产加速许可。旧 override 只可收紧当前许可。
 - 真实音频时长：优先 ffprobe；合成失败时显式降级（`timing_certainty="estimated"`），绝不在正常路径伪装成真值
 
 ## 3. 素材时长探针（与写入层同尺）

@@ -481,6 +481,7 @@ class OrchestrationEngine:
                     time_sensitive=bool(it.get("time_sensitive")),
                     speed_range_override=it.get("speed_range_override"),
                     preferred_speed=it.get("preferred_speed", 1.0),
+                    playback_observation=it.get("playback_observation"),
                     guard_override=it.get("guard_override"),
                     raw_index=i - 1,
                 )
@@ -839,6 +840,7 @@ class OrchestrationEngine:
                 speed_range_override=(part.get("speed_range_override")
                                       or raw.get("speed_range_override")),
                 preferred_speed=part.get("preferred_speed", raw.get("preferred_speed", 1.0)),
+                playback_observation=part.get("playback_observation"),
                 raw_index=c.raw_index,
             )
             if sub.audio_mode == "file":
@@ -1402,7 +1404,8 @@ class OrchestrationEngine:
         speed_min, speed_max = timing_contract.effective_speed_range(
             self._clip_role(clip),
             time_sensitive=bool(getattr(clip, "time_sensitive", False)),
-            override=getattr(clip, "speed_range_override", None))
+            override=getattr(clip, "speed_range_override", None),
+            playback_observation=getattr(clip, "playback_observation", None))
         # 可用源区间 = **被分析过的场景窗口**，不是整条素材。规划阶段抽帧、AI 打
         # 标签都只覆盖这一段；窗口越过 scene_source_end 会播到没分析过的画面，
         # 会被 final_visual_evidence_gate 拦下。段落没写 source_end 时才退回整条素材。
@@ -1884,7 +1887,8 @@ class OrchestrationEngine:
             row = by_index.get(index, {})
             speed_min, speed_max = timing_contract.effective_speed_range(
                 self._clip_role(c), time_sensitive=bool(c.time_sensitive),
-                override=getattr(c, "speed_range_override", None))
+                override=getattr(c, "speed_range_override", None),
+                playback_observation=getattr(c, "playback_observation", None))
             speed = float(c.video_speed or 1.0)
             # 源出点优先取**求解器给的那个数**（`solved_window`），拿不到才按
             # 「入点 + 输出时长 × 速度」回算。回算本身没错，但它是用吸附后的速度
@@ -2316,7 +2320,34 @@ class OrchestrationEngine:
         return None
 
     # ---------- 需求6/7：构建并安全写入草稿 ----------
+    def _playback_gate(self, clips: list[Clip]) -> Optional[dict]:
+        from ..policy import playback
+        conflicts = []
+        for index, clip in enumerate(clips):
+            solved = clip.solved_window if isinstance(clip.solved_window, dict) else {}
+            try:
+                start = to_us(clip.source_start)
+                target = to_us(clip.duration)
+                end = (to_us(float(solved["source_end"])) if "source_end" in solved
+                       else start + round(target * clip.video_speed))
+            except (ValueError, TypeError, OverflowError):
+                start = end = target = None
+            conflicts.extend(playback.conflicts(start_us=start, end_us=end, target_us=target,
+                speed=clip.video_speed, time_sensitive=clip.time_sensitive,
+                observation=clip.playback_observation,
+                index=clip.raw_index + 1 if clip.raw_index >= 0 else index + 1))
+        if conflicts:
+            return {"status": "TIMING_INFEASIBLE", "failure_class": "timing",
+                    "failure_code": "PLAYBACK_POLICY_CONFLICT", "retryable": False,
+                    "resume_stage": "semantic_match", "draft_path": None,
+                    "formal_delivery_allowed": False, "playback_policy_version": playback.VERSION,
+                    "conflicts": conflicts}
+        return None
+
     def write_draft(self, clips: list[Clip], bgm_path: Optional[str]) -> dict:
+        gate = self._playback_gate(clips)
+        if gate:
+            return gate
         backend = str(self.m.get("draft_backend") or os.environ.get("JY_DRAFT_BACKEND") or "headless")
         if backend == "headless":
             from .headless_production import write_draft

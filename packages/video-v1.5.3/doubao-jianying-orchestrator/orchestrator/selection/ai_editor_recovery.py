@@ -13,6 +13,14 @@ class WindowFailure(ValueError):
 def failure_fields(message: str, *, stage: str = "semantic_match") -> dict:
     """A request outage is not evidence of a material/semantic gap."""
     text = message.upper()
+    if any(code in text for code in ("WINDOW_INFEASIBLE", "KNOWN_WINDOWS_INFEASIBLE",
+                                    "PLAYBACK_SPEED_CONFLICT", "PLAYBACK_TIMING_INVALID")):
+        from ..policy import playback
+        return {"status": "TIMING_INFEASIBLE", "failure_class": "timing",
+                "failure_code": "PLAYBACK_POLICY_CONFLICT", "reason": message,
+                "retryable": False, "failed_stage": stage, "resume_stage": "semantic_match",
+                "playback_policy_version": playback.VERSION,
+                "next_action": "reselect_short_complete_window_or_review_related_group"}
     transient = any(code in text for code in (
         "DEADLINE_EXCEEDED", "REQUEST_TIMEOUT", "CONNECT_TIMEOUT", "TIMED OUT", "TIMEOUT", "EMPTY_CONTENT",
         "CONNECTION RESET", "CONNECTION REFUSED", "429", "502", "503", "TEMPORARILY UNAVAILABLE"))

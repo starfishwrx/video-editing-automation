@@ -40,7 +40,7 @@ legacy 通过 `vision_analyzer.match_sentences` 执行描述语义匹配，保�
 
 - 唯一时钟为 `timing_contract` 的整数微秒。口播段满足 `segment_us == audio_duration_us + tail_pad_us`（容差最多一帧）。
 - 源窗口满足 `0 <= source_start < source_end <= material_duration_us`，最终窗口覆盖当前有效证据；重复或变化后的窗口重新核验。
-- 默认 AI 模式按已审核画面和音频求解速度，沿用最高 20 倍边界并尽量接近原速；关键动作和结果必须覆盖。legacy 保留按角色决定的速度范围。
+- 默认选镜、补选、求解与写稿共用版本化[生产播放规则](production-playback.md)：纯过程优先≤2、最多3倍；关键动作、结果和未知阶段原速；旧计划重验并局部重选。
 - `formal` 的正式交付只接受规定的真实 `PASS`；预览、证据不足、调用失败或旧报告保持未认证/阻断。体验展示不被解释成物理实验结果。
 - 媒体解码/编码由 `video_decode` / `video_encode` 控制 GPU 与硬件回退；配音响度和 BGM 由各自模块处理。
 - 1.5.4/1.5.5 的索引检索实验是独立包路线，不在本默认数据流中。

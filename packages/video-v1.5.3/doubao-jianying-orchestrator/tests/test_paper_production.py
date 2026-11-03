@@ -83,6 +83,8 @@ class PaperProductionTests(unittest.TestCase):
 
     def test_preference_is_bound_and_reaches_actual_engine_request(self):
         fixture = self.fixture
+        fixture.review["playback_observation"] = {"schema": contract.playback.OBSERVATION_SCHEMA,
+            "kind": "process", "start_us": 0, "end_us": 6_000_000, "observed": "reviewed cleaning process"}
         fixture.review["preferred_speed"] = 1.3
         fixture.review["scene_ids"] = fixture.sentence["scene_ids"] = ["cleaning_wipe"]
         result = fixture.result()

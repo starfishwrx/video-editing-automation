@@ -313,7 +313,9 @@ scene_ids只列出本句语义适用且本镜实际支持的纸品semantic_contr
 具体香型、成分、数量和数值须有画面可读的对应标称或可确认的直接证据；香薰、花朵等氛围只能表达一般香味体验，不能证明某种具体香型。检测仪外观或数字本身也不能证明仪器用途与检测结论。
 相邻口播可连续承接同一实验；结合全稿，只返回本句实际承担的动作阶段/结果区间，不要求每一句从头重播整个实验。
 sentence.audio_durations_us是真实配音时长。请给最短但足够支持判断的一个紧凑片段，不要把整条素材或多次重复演示全部列为必需证据。
-优先返回足以体现卖点的完整源区间，不因比配音长而否决正确镜头。程序允许按需变速，最高20倍。
+优先返回足以体现卖点的完整源区间；时长不够时优先查找另一段短且完整的演示。
+可选返回playback_observation={"schema":"reviewed-playback-window-v1","kind":"process","start_us":1000000,"end_us":2000000,"observed":"本次看到的纯过程及边界事实"}。
+仅当该整个窗口不含关键接触、完成、提起、结果、计时证明时才能声明process；有这些内容或阶段不确定时省略，程序保持原速。不得凭口播或旧描述填写过程许可。
 轻薄/柔软/舒适展示不要求从第一次持握一直播到最后一次抚摸，也不要为凑配音时长裁掉关键动作与结果。
 evidence_intervals_us内各区间会被当作全部必须保留，不能把多个可替代的重复演示都列入；选最贴切的一次。
 性能实验仍要保留本句必要过程和可见结果，无法在时长内支持时如实返回不确定或部分卖点，不为缩短而删除必需证据。
@@ -353,6 +355,11 @@ evidence_intervals_us内各区间会被当作全部必须保留，不能把多�
             if (not isinstance(ev, dict) or any(type(ev.get(k)) is not int for k in ("start", "end"))
                     or not round(start * 1e6) <= ev["start"] < ev["end"] <= round(end * 1e6)):
                 raise ValueError("AI_EDITOR_EVIDENCE_INVALID")
+        playback_observation = result.get("playback_observation")
+        if playback_observation is not None:
+            process = contract.playback.process_window(playback_observation)
+            if process is None or not round(start * 1e6) <= process[0] < process[1] <= round(end * 1e6):
+                raise ValueError("AI_EDITOR_PLAYBACK_OBSERVATION_INVALID")
     durations = sentence.get("audio_durations_us") or []
     valid_durations = [v for v in durations if type(v) is int and v > 0]
     intervals = result.get("evidence_intervals_us") or []
@@ -365,40 +372,53 @@ evidence_intervals_us内各区间会被当作全部必须保留，不能把多�
             "frame_times_us": [round(t * 1e6) for t in times], "sheet": str(sheet)}
 
 
+def _cached_reviews_feasible(manifest, sentence, shots, reviews, audio):
+    """Validate timing using existing pixels; never invoke a model."""
+    from . import shot_analyzer
+    required = {p["id"] for p in sentence["selling_points"]}
+    good = [r for r in reviews if r.get("verdict") == "matched" and r.get("shot_id") in shots]
+    durations = sentence.get("audio_durations_us") or [timing_contract.duration_for(
+        audio, sentence["index"], segment={"text": sentence["text"]})[0]]
+    for duration in durations:
+        available = False
+        for size in range(1, min(len(good), int(manifest.get("span_max_parts", 3))) + 1):
+            for group in combinations(good, size):
+                if not contract.points_supported(required, {p for r in group for p in r.get("supported_point_ids", [])}):
+                    continue
+                observed = [_observed_shot(shots[r["shot_id"]], r) for r in group]
+                spans = tuple(shot_analyzer.span_segment_for(s, manifest=manifest,
+                    time_sensitive=r["time_sensitive"], video=s["video"], shot_id=s["shot_id"])
+                    for s, r in zip(observed, group))
+                if timing_contract.solve_span(timing_contract.SpanRequest(segments=spans,
+                    audio_duration_us=duration, tail_pad_us=round(float(manifest.get("tail_pad_s", 0)) * 1e6),
+                    fps=float(manifest.get("fps", 30)))).ok:
+                    available = True
+                    break
+            if available:
+                break
+        if not available:
+            return False
+    return True
+
+
 def _review_pool(manifest: dict, sentence: dict, shots: dict, directory: Path, audio: dict, *,
                  exhaustive: bool = False,
                  existing_reviews: list[dict] | None = None) -> tuple[list[dict], dict]:
     from . import shot_analyzer
     def feasible(good: list[dict]) -> bool:
-        durations = sentence.get("audio_durations_us") or [timing_contract.duration_for(
-            audio, sentence["index"], segment={"text": sentence["text"]})[0]]
-        for duration in durations:
-            available = False
-            for size in range(1, min(len(good), int(manifest.get("span_max_parts", 3))) + 1):
-                for group in combinations(good, size):
-                    group_points = {p for r in group for p in r.get("supported_point_ids", [])}
-                    if not contract.points_supported(required, group_points):
-                        continue
-                    observed = [_observed_shot(shots[r["shot_id"]], r) for r in group]
-                    segments = tuple(shot_analyzer.span_segment_for(s, manifest=manifest,
-                        time_sensitive=r["time_sensitive"], video=s["video"], shot_id=s["shot_id"])
-                        for s, r in zip(observed, group))
-                    if timing_contract.solve_span(timing_contract.SpanRequest(segments=segments,
-                        audio_duration_us=duration, tail_pad_us=round(float(manifest.get("tail_pad_s", 0)) * 1e6),
-                        fps=float(manifest.get("fps", 30)))).ok:
-                        available = True
-                        break
-                if available:
-                    break
-            if not available:
-                return False
-        return True
+        return _cached_reviews_feasible(manifest, sentence, shots, good, audio)
     reviewed_by_id = {str(row.get("shot_id")): row for row in (existing_reviews or [])
                       if isinstance(row, dict) and row.get("shot_id") in shots
                       and not failure_fields(str(row.get("error", ""))).get("retryable")}
     ids = sentence["candidate_ids"]
     required = {p["id"] for p in sentence["selling_points"]}
     for offset in range(0, len(ids), ROUND_SIZE):
+        existing_good = [r for r in reviewed_by_id.values() if r.get("verdict") == "matched"]
+        enough = ((required and (len(existing_good) >= 2
+                   or len(reviewed_by_id) >= min(ALTERNATIVE_REVIEW_LIMIT, len(ids))))
+                  or (not required and len(existing_good) >= min(3, len(ids))))
+        if not exhaustive and enough and feasible(existing_good):
+            break
         chunk = [sid for sid in ids[offset:offset + ROUND_SIZE] if sid not in reviewed_by_id]
         if not chunk:
             continue
@@ -514,9 +534,16 @@ def _observed_shot(shot: dict, review: dict) -> dict:
                  "claim": review["observation"], "evidence_source": "ai_editor_pixel_review"}
                 for ev in review["evidence_intervals_us"]]
     role = "direct_evidence" if review.get("time_sensitive") else "product_display"
-    minimum, _ = timing_contract.speed_range_for_role(role, time_sensitive=review.get("time_sensitive", False))
+    observation = review.get("playback_observation")
+    minimum, maximum = contract.playback.speed_range(
+        time_sensitive=review.get("time_sensitive", False), observation=observation)
+    process = contract.playback.process_window(observation)
+    if process and not review.get("time_sensitive"):
+        shot = {**shot, "source_start": max(float(shot["source_start"]), process[0] / 1e6),
+                "source_end": min(float(shot["source_end"]), process[1] / 1e6)}
     return {**shot, "evidence_intervals": evidence,
-            "selection_mode": "ai_editor", "speed_range_override": [minimum, contract.AI_SPEED_MAX],
+            "playback_observation": observation,
+            "selection_mode": "ai_editor", "speed_range_override": [minimum, maximum],
             "preferred_speed": review.get("preferred_speed", 1.0),
             "role": "direct_evidence" if review.get("time_sensitive") else "product_display",
             "visual_role": "direct_evidence" if review.get("time_sensitive") else "product_display",
@@ -615,6 +642,7 @@ def _assemble(manifest: dict, analysis: dict, plan: dict, *, narration_timing: d
                     "video_speed": solution.speed, "visual_role": observed["visual_role"],
                     "speed_range_override": observed["speed_range_override"],
                     "preferred_speed": observed["preferred_speed"],
+                    "playback_observation": observed.get("playback_observation"),
                     "time_sensitive": review["time_sensitive"],
                     "scene_source_start": shot["source_start"], "scene_source_end": shot["source_end"],
                     "evidence_intervals": observed["evidence_intervals"], "text": sentence["text"]}
@@ -701,7 +729,8 @@ def _build_edit_inventory(manifest: dict, analysis: dict, plan: dict,
                 time_sensitive=review["time_sensitive"])
             candidate["source_identity"] = source_ids[shot["video"]]
             candidate["technical_option"] = {**solution.to_dict(),
-                "within_preferred_speed": solution.ok and solution.speed <= 2.0,
+                "playback_policy_version": contract.playback.VERSION,
+                "within_preferred_speed": solution.ok and solution.speed <= contract.playback.PROCESS_PREFERRED_MAX,
                 "original_scene_start_us": round(float(shot["source_start"]) * 1e6),
                 "original_scene_end_us": round(float(shot["source_end"]) * 1e6)}
         inventory.append({"index": sentence["index"], "text": sentence["text"],
@@ -716,7 +745,16 @@ def _repair_selected_window(manifest: dict, analysis: dict, plan: dict, director
     row = next(r for r in plan["rows"] if r["index"] == failure.index)
     part = next((p for p in row["parts"] if p.get("shot_id") == failure.shot_id), None)
     shot = next(s for s in analysis["shots"] if s["shot_id"] == failure.shot_id)
-    window = proposed_window(shot, part or {})
+    proposal = dict(part or {})
+    if "source_start_us" not in proposal:
+        reviews = (plan["reviews"].get(str(failure.index), [])
+                   if sentence["kind"] == "selling_point" else plan["display_reviews"])
+        review = next((r for r in reviews if r.get("shot_id") == failure.shot_id
+                       and r.get("verdict") == "matched"), {})
+        intervals = review.get("evidence_intervals_us") or []
+        if intervals:
+            proposal["source_start_us"] = min(ev["start"] for ev in intervals)
+    window = proposed_window(shot, proposal, max_speed=contract.playback.PROCESS_PREFERRED_MAX)
     if window is None:
         return False
     source = contract.source_identity(shot["video"])
@@ -829,6 +867,76 @@ def _repair_repeated_window(manifest: dict, analysis: dict, plan: dict, director
     return try_reviewed()
 
 
+def _short_complete_rows(manifest, analysis, plan, index, narration_timing):
+    """Only already reviewed evidence may replace an infeasible selected row."""
+    from . import shot_analyzer
+    sentence = next(s for s in plan["sentences"] if s["index"] == index)
+    reviews = (plan["reviews"].get(str(index), []) if sentence["kind"] == "selling_point"
+               else plan["display_reviews"])
+    shots = {s["shot_id"]: s for s in analysis["shots"]}
+    original = timing_contract.split_sentences(manifest)
+    duration = timing_contract.duration_for(narration_timing, index, segment=original[index - 1])[0]
+    required = {p["id"] for p in sentence["selling_points"]}
+    candidates = []
+    for review in reviews:
+        if (review.get("verdict") != "matched" or review.get("shot_id") not in shots
+                or not contract.points_supported(required, set(review.get("supported_point_ids", [])))):
+            continue
+        shot = shots[review["shot_id"]]
+        try:
+            current_source = contract.source_identity(shot["video"])
+        except OSError:
+            continue
+        if review.get("source_identity") != current_source:
+            continue
+        solution = shot_analyzer.candidate_window(_observed_shot(shot, review),
+            audio_duration_us=duration, manifest=manifest, time_sensitive=review["time_sensitive"])
+        if solution.ok:
+            candidates.append((solution.speed > contract.playback.PROCESS_PREFERRED_MAX,
+                -float(review.get("confidence", 0)), solution.material_us, review["shot_id"]))
+    for _, _, _, sid in sorted(candidates):
+        yield {"index": index, "parts": [{"shot_id": sid, "audio_duration_us": duration}],
+               "reason": "short complete reviewed window under " + contract.playback.VERSION}
+
+
+def _revalidate_rows(manifest, analysis, plan, *, narration_timing=None):
+    """Re-solve cached rows; replace only failing sentences, without API calls."""
+    attempted = set()
+    while True:
+        try:
+            result = _assemble(manifest, analysis, plan, narration_timing=narration_timing,
+                               verify_sources=True)
+            plan["playback_policy_version"] = contract.playback.VERSION
+            return result
+        except WindowFailure as failure:
+            key = (failure.index, failure.shot_id)
+            if key in attempted:
+                raise
+            attempted.add(key)
+            old = next(row for row in plan["rows"] if row["index"] == failure.index)
+            replaced = False
+            for candidate in _short_complete_rows(manifest, analysis, plan, failure.index, narration_timing):
+                if (failure.index, candidate["parts"][0]["shot_id"]) in attempted:
+                    continue
+                trial = {**plan, "rows": [candidate if row["index"] == failure.index else row
+                                           for row in plan["rows"]]}
+                try:
+                    _assemble(manifest, analysis, trial, narration_timing=narration_timing,
+                              verify_sources=True)
+                except WindowFailure as other:
+                    if other.index == failure.index:
+                        continue
+                except (ValueError, KeyError, TypeError, OSError):
+                    continue
+                plan["rows"] = trial["rows"]
+                plan.setdefault("playback_repairs", []).append({"index": failure.index,
+                    "reason": failure.reason, "previous": copy.deepcopy(old), "replacement": copy.deepcopy(candidate)})
+                replaced = True
+                break
+            if not replaced:
+                raise
+
+
 def _edit_plan(manifest: dict, analysis: dict, plan: dict, directory: Path,
                narration_timing: dict | None = None) -> None:
     """Compile current editing instructions from frozen, pixel-reviewed candidates."""
@@ -842,7 +950,7 @@ def _edit_plan(manifest: dict, analysis: dict, plan: dict, directory: Path,
 同源连续实验顺接后续区间，不每句重播。source_start_us可省略，提供时不得裁掉必需证据。
 镜头变化和去重只是质量接近时的偏好，不得抢走唯一卖点候选。没有合格候选返回空parts，不编造支持。
 technical_option是按本句完整配音求出的实际可行窗口；分配多镜后程序会重新求解，不可用单镜无解淘汰组合。
-匹配质量相近时优先within_preferred_speed=true，不把2倍当硬上限或全片目标；超2倍仍可用于唯一正确卖点并交独立QC。
+匹配质量相近时优先within_preferred_speed=true；只有已复看的纯过程允许2到3倍，未知阶段和关键动作结果保持原速。technical_option无解时必须换完整短窗口或如实报告冲突。
 根据source_identity、源区间及可见动作描述减少近重复。优先中后段，但完整证据和唯一卖点先于取段偏好。
 确实只有一个实际支持的候选、卖点不得不复用时，可在该row写scarce_reuse_reason解释；介绍/钩子和有替代候选时不允许此例外，相关实验仍须顺接而非相邻重播。
 """
@@ -889,7 +997,7 @@ technical_option是按本句完整配音求出的实际可行窗口；分配多�
             if expanded:
                 continue  # second and final editor call sees the complete audited pool
         try:
-            _assemble(manifest, analysis, plan, narration_timing=narration_timing, verify_sources=True)
+            _revalidate_rows(manifest, analysis, plan, narration_timing=narration_timing)
             plan["ok"] = True
             plan["phase"] = "selection_complete"
             return
@@ -940,6 +1048,7 @@ def prepare(manifest: dict, analysis: dict, report_dir: Path, *, narration_timin
     directory = report_dir / "ai_editor"
     directory.mkdir(parents=True, exist_ok=True)
     plan: dict = {"schema": contract.PLAN_SCHEMA, "policy_version": contract.POLICY_VERSION,
+                  "playback_policy_version": contract.playback.VERSION,
                   "reviews": {}, "display_reviews": [], "coverage": {}, "issues": []}
     try:
         shots = [s for s in analysis.get("shots", []) if isinstance(s, dict) and s.get("status") == "ready_for_matching"]
@@ -988,7 +1097,12 @@ def prepare(manifest: dict, analysis: dict, report_dir: Path, *, narration_timin
                 sentence["index"], segment=original[sentence["index"] - 1])[0]]
             if sentence["kind"] == "selling_point":
                 key = str(sentence["index"])
-                if plan.get("coverage", {}).get(key, {}).get("feasible"):
+                # Coverage is a timing decision, not a reusable visual fact.
+                # Recompute it even for old successful plans, preserving reviews.
+                if (plan.get("coverage", {}).get(key, {}).get("feasible")
+                        and _cached_reviews_feasible(manifest, sentence, by_id,
+                                                     plan["reviews"].get(key, []), narration_timing or {})):
+                    plan["coverage"][key]["playback_policy_version"] = contract.playback.VERSION
                     continue
                 plan["phase"] = "selection_candidate_review"
                 reviews, coverage = _review_pool(manifest, sentence, by_id, directory, narration_timing or {},
@@ -1002,7 +1116,7 @@ def prepare(manifest: dict, analysis: dict, report_dir: Path, *, narration_timin
                         "text": sentence["text"], "selling_points": missing, "reason": "ALL_CANDIDATES_REVIEWED_NO_SUPPORT"})
                 _save(directory / "plan.json", plan)
         displays = [s for s in plan["sentences"] if s["kind"] != "selling_point"]
-        if displays and not plan.get("coverage", {}).get("display_pool", {}).get("feasible"):
+        if displays:
             shared = {**displays[0], "index": 0, "text": "同商品通用产品展示池", "kind": "product_intro", "selling_points": []}
             shared["audio_durations_us"] = [timing_contract.duration_for(narration_timing, s["index"],
                 segment=original[s["index"] - 1])[0] for s in displays]
@@ -1020,6 +1134,11 @@ def prepare(manifest: dict, analysis: dict, report_dir: Path, *, narration_timin
                 for review in plan["reviews"].get(str(row["index"]), []) + plan.get("display_reviews", []):
                     if failure_fields(str(review.get("error", ""))):
                         raise ValueError(review["error"])
+                # A known long observation may contain a shorter complete
+                # repetition. Let the bounded, pixel-reviewed window repair
+                # inspect it; never trim the original evidence to make it fit.
+                if coverage.get("reason") == "KNOWN_WINDOWS_INFEASIBLE" and row["candidates"]:
+                    continue
                 raise ValueError(f"AI_EDITOR_OBSERVATION_OR_WINDOW_PENDING:{row['index']}:{coverage.get('reason', 'UNKNOWN')}")
         plan["phase"] = "selection_edit"
         _edit_plan(manifest, analysis, plan, directory, narration_timing)
@@ -1043,12 +1162,17 @@ def match_manifest(manifest: dict, analysis: dict, *, narration_timing: dict | N
             raise ValueError("AI_EDITOR_INPUT_CHANGED")
         if identity.get("analysis_sha256") != contract.digest({k: v for k, v in analysis.items() if k != "ai_editor_plan"}):
             raise ValueError("AI_EDITOR_ANALYSIS_CHANGED")
-        return _assemble(manifest, analysis, plan, narration_timing=narration_timing)
+        current = copy.deepcopy(plan)
+        result = _revalidate_rows(manifest, analysis, current, narration_timing=narration_timing)
+        result["playback_policy_version"] = contract.playback.VERSION
+        result["playback_repairs"] = current.get("playback_repairs", [])
+        return result
     except (ValueError, KeyError, TypeError, OSError) as exc:
         return {"ok": False, "selection_mode": "ai_editor", "segments": [], "manifest": dict(manifest),
                 "pending_items": plan.get("issues") or [{"type": "AI_EDITOR_UNCERTIFIED", "message": str(exc)}],
                 "recommendations": [], "degraded_matches": [], "material_gaps": plan.get("material_gaps", []),
-                "material_gap_count": len(plan.get("material_gaps", [])), **plan.get("failure", {})}
+                "material_gap_count": len(plan.get("material_gaps", [])),
+                **plan.get("failure", {}), **failure_fields(str(exc))}
 
 
 def _heuristic_sentence(index: int, text: str) -> dict:
@@ -1264,6 +1388,8 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
             good = [r for r in reviews if r.get("verdict") == "matched"]
             partial = manifest.get("delivery_mode") == "preview" and manifest.get("allow_partial_selling_points") is True
             if not good or (not coverage.get("feasible") and not partial):
+                if good and coverage.get("reason") == "KNOWN_WINDOWS_INFEASIBLE":
+                    raise ValueError(f"AI_REFILL_WINDOW_INFEASIBLE:{index}")
                 raise ValueError(f"AI_REFILL_NO_MATCH:{index}")
             mini_manifest = {k: v for k, v in manifest.items() if k not in ("segments", "full_script", "script")}
             mini_manifest.update(full_script=sentence["text"], selection_mode="ai_editor")
@@ -1276,7 +1402,12 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
             from . import shot_analyzer
             required = {p["id"] for p in sentence["selling_points"]}
             point_order = {p["id"]: i for i, p in enumerate(sentence["selling_points"])}
-            ordered_good = sorted(good, key=lambda r: float(r.get("confidence", 0)), reverse=True)
+            def candidate_order(review):
+                solution = shot_analyzer.candidate_window(_observed_shot(shots[review["shot_id"]], review),
+                    audio_duration_us=audio_us, manifest=manifest, time_sensitive=review["time_sensitive"])
+                rank = (0 if solution.speed <= contract.playback.PROCESS_PREFERRED_MAX else 1) if solution.ok else 2
+                return rank, -float(review.get("confidence", 0))
+            ordered_good = sorted(good, key=candidate_order)
             # Singles stay first; multi-shot combinations are considered only
             # when their real reviewed evidence covers the whole sentence.
             def candidate_groups():
@@ -1358,6 +1489,8 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
         result[field] = [row for row in matched.get(field, []) if keep(row)]
     result["preview_unresolved"].extend(refill_unresolved)
     result["pending_items"].extend({"type": "AI_EDITOR_UNCERTIFIED", "message": error} for error in errors)
+    if errors:
+        result.update(failure_fields(";".join(errors)))
     result["ok"] = (bool(ordered) and len(ordered) == len(original) and not result["pending_items"]
                     and set(wanted) <= set(replaced)
                     and not contract.sequence_errors([s for s in ordered if contract.is_ai_segment(s)]))

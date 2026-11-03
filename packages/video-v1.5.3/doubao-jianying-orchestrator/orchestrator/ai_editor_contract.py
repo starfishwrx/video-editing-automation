@@ -19,7 +19,14 @@ POLICY_VERSION = "selling-points-first-reference-quality-v3"
 POINT_COVERAGE_POLICY = "at_least_one_specific_point"
 KINDS = {"selling_point", "product_intro", "hook"}
 BASES = {"editorial_fit", "visible_result", "readable_label", "product_display"}
-AI_SPEED_MAX = 20.0
+if __package__:
+    from .policy import playback
+else:
+    _playback_spec = importlib.util.spec_from_file_location(
+        "_chatcut_playback", Path(__file__).parent / "policy" / "playback.py")
+    playback = importlib.util.module_from_spec(_playback_spec)
+    _playback_spec.loader.exec_module(playback)
+AI_SPEED_MAX = playback.PROCESS_MAX
 POLICY = """先通读整稿，先安排具体卖点，再安排产品介绍和无具体卖点的钩子/衔接。
 句子按实际内容分类，开场包含具体卖点仍是selling_point。一句多个卖点至少实际呈现一个具体点，未覆盖项如实记录，不能声称全部已证实。
 轻薄、柔软、舒服允许能体现特点的真实展示，不强制实验或固定厚度对照。
@@ -27,7 +34,7 @@ POLICY = """先通读整稿，先安排具体卖点，再安排产品介绍和�
 产品介绍和无具体卖点的钩子可用同商品包装、手持、拆包、取出和本体展示，属于正常匹配。
 具体卖点不能用普通包装展示替代。看不到、只有口播、对象错误和不确定不得假装支持。
 相关实验按前后语义连续播放，不反复从头播放；匹配先于去重与机位变化。
-画面贴切优先，允许按配音时长变速并完整保留必要动作与结果；质量相近时优先2倍以内，原速适合就用原速，必要时仍允许最高20倍。
+画面贴切优先，完整保留必要动作和结果；变速必须遵守下述生产播放规则。
 优先原素材时间轴的中后段、尽量避开原素材前三秒；这是偏好，不是每个切分镜头再减三秒，短素材和开头唯一正确证据仍可用。
 奶被纸、棉柔巾、厨房纸、湿厕纸按口播匹配卖点及同商品展示；根据实际可见动作、机位和源区间减少近重复，不按文件名判断。
 素材描述仅供召回，最终判断必须依据本次提供的真实画面。不得修改口播或虚构素材。"""
@@ -75,7 +82,7 @@ def rules_identity(manifest: dict | None = None) -> dict:
 
 
 def policy_prompt(manifest: dict) -> str:
-    policy = POLICY
+    policy = POLICY + "\n" + playback.PROMPT
     if editorial_context(manifest)["category"] in {"zhipin", "weipin"}:
         policy += "\n本任务生效的品类制作与选镜合同（按口播含义适用，不能据此虚构画面）：\n" + json.dumps(
             editorial_context(manifest), ensure_ascii=False, sort_keys=True)
@@ -160,6 +167,8 @@ def make_receipt(segment: dict, *, index: int, sentence: dict, observation: dict
         "scarce_reuse_reason": observation.get("scarce_reuse_reason", ""),
         "video": str(segment["video"]), "shot_id": segment["temporary_shot_id"],
         "source_identity": source_identity, "window_us": _window(segment),
+        "playback_policy_version": playback.VERSION,
+        "playback_observation": observation.get("playback_observation"),
         "video_speed": segment.get("video_speed"),
         "speed_range_override": segment.get("speed_range_override"),
         "preferred_speed": segment.get("preferred_speed", 1.0),
@@ -197,8 +206,23 @@ def validate_segment_receipt(item: dict, *, text: str | None = None,
         if (type(speed) not in (int, float) or not math.isfinite(speed)
                 or not isinstance(bounds, (list, tuple)) or len(bounds) != 2
                 or any(type(v) not in (int, float) or not math.isfinite(v) for v in bounds)
-                or not 0 < bounds[0] <= speed <= bounds[1] <= AI_SPEED_MAX):
+                or not 0 < bounds[0] <= speed <= bounds[1]):
             reasons.append("AI_SELECTION_SPEED_INVALID")
+        window = _window(item)
+        target_seconds = (item.get("window_solution") or {}).get("segment_s", item.get("segment_s", 0))
+        target = item.get("segment_us") or round(float(target_seconds) * 1e6)
+        # Older receipts may omit target duration; their declared speed is still
+        # revalidated, and the writer independently checks final audio timing.
+        if not target and type(speed) in (int, float) and math.isfinite(speed) and speed > 0:
+            target = round((window["end"] - window["start"]) / speed)
+        # The parent of a multi-shot sentence summarizes semantic coverage;
+        # playback belongs to each physical part, checked recursively below.
+        problems = [] if item.get("multi_shot") else playback.conflicts(
+            start_us=window["start"], end_us=window["end"], target_us=target, speed=speed,
+            time_sensitive=receipt.get("time_sensitive"), observation=receipt.get("playback_observation"), index=index)
+        reasons.extend(p["code"] for p in problems)
+        if item.get("playback_observation") != receipt.get("playback_observation"):
+            reasons.append("PLAYBACK_OBSERVATION_CHANGED")
         if receipt.get("video_speed") != speed or receipt.get("speed_range_override") != bounds:
             reasons.append("AI_SELECTION_SPEED_CHANGED")
         preferred = item.get("preferred_speed", 1.0)
