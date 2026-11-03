@@ -23,7 +23,8 @@
 | CLI 子命令（env/build/recover/…） | `docs/subsystems/orchestrator-cli.md` | `orchestrator/application/cli.py` |
 | 选镜、视觉证据、语义闸门 | `docs/subsystems/visual-matching.md` | `orchestrator/{selection,vision,quality}/`、`policy/semantic_gate.py`；原位公共合同 `ai_editor_contract.py`、`visual_qc_contract.py` |
 | 文案驱动识别与无草稿复核 | `docs/plans/20261102-purpose-driven-selection.md` | `vision/purpose_review.py`、`selection/purpose_selection.py`、`application/purpose_production.py`；活包 `tools/purpose_production.py`；显式隔离入口，默认生产未切换 |
-| 展示镜头有效性与单句优化 | `docs/shot-usability.md` | `vision/{shot_quality_review,display_compare}.py`、`selection/shot_usability.py`、`application/display_optimization.py`、活包`tools/display_selection.py`；先无文案看清楚，再按口播取可读交集，最多三候选，固定音轨单句预览 |
+| 展示可读性与单句优化 | `docs/shot-usability.md` | `vision/{shot_quality_review,display_compare}.py`、`selection/shot_usability.py`、`application/display_optimization.py`、活包`tools/display_selection.py`；可读性仅作辅助，卖点信息优先见下一行；最多三候选，固定音轨单句预览 |
+| 动作是否传达卖点 | `docs/shot-selling-point-value.md` | `vision/shot_value_review.py`、`selection/shot_value.py`；动作/展示→可见信息→原文卖点，至少一个具体点即可选，其他只备注；信息价值先于清楚程度及数量，不把普通抚摸/折拢当成卖点 |
 | 卫品实验配对与局部变速 | `docs/weipin-experiments.md` | `vision/experiment_{review,pair_review,motion_review,event_review,detail}.py`、`selection/experiment_{contract,retiming,events}.py`、`media/temporal_samples.py`、`application/experiment_{production,optimization}.py`；`tools.weipin_experiment events → optimize --align-phases`观察事实、校正边界并约束按压句起点；显式吸收尾段覆盖须披露省略前段，同次实验可跨文件，局部2/3倍，配对/时长/成片分别验收 |
 | 品类规则包 / 场景规则 / 相位 | `packages/video-v1.5.3/doubao-jianying-orchestrator/references/production_quality_and_lessons.md` | `orchestrator/rulepack.py`、`policy/scene_rules.py`、`vision/phase_timing.py`、`rules/*.json` |
 | 口播/TTS/音色/BGM/响度 | `docs/subsystems/audio-voice.md`, `docs/programmatic-production.md` | `orchestrator/audio/`（含`final_bgm.py`业务音乐准备）、`orchestrator/policy/script_polish.py` |

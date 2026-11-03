@@ -214,7 +214,7 @@ class PurposeEvidenceTests(unittest.TestCase):
         result=list(app._parallel(jobs,lambda j:j*10,lambda prepared:{"value":prepared+1},workers=2))
         self.assertEqual(dict((j,r["value"]) for j,r in result),{1:11,2:21,3:31})
 
-    def test_output_reviewer_detects_compiler_omission(self):
+    def test_output_reviewer_records_omission_without_rejecting_one_supported_point(self):
         request={"index":1,"text":"thin and stays dry all day","checks":[{"id":"c1","type":"display"}],
             "require_action":False,"require_result":False}
         data={"checks":[{"id":"c1","status":"supported","observed":"thin"}],"action_complete":True,
@@ -225,9 +225,27 @@ class PurposeEvidenceTests(unittest.TestCase):
             'clear_intervals_us':[{'start':0,'end':1_000_000,'observed':'thin edge visible'}]}
         media={"start":0,"end":1,"before":{"size":1},"sheet":"sheet.jpg"}
         with patch.object(vision.ai_editor,"_call",return_value=data),patch.object(vision.contract,"source_identity",return_value=media["before"]),\
-                patch('orchestrator.vision.shot_quality_review.observe',return_value=data['shot_usability']):
+                patch('orchestrator.vision.shot_quality_review.observe',return_value=data['shot_usability']),\
+                patch('orchestrator.vision.shot_value_review.review',return_value={'assessment':{'status':'PARTIAL','supported_ids':['c1']}}):
             result=vision.review_output({"product":"fixture"},request,{"video":"preview.mp4"},media,Path("unused"))
-        self.assertEqual(result["status"],"EVIDENCE_PENDING")
+        self.assertEqual(result["status"],"SAMPLED_SUPPORT")
+        self.assertEqual(result['uncovered_claims'],['all-day dryness not shown'])
+        self.assertEqual(result['selling_point_coverage'],'PARTIAL')
+
+    def test_readable_output_with_no_selling_point_does_not_pass(self):
+        request={'index':1,'text':'不闷热','checks':[{'id':'c1','type':'display'}],'require_action':False,'require_result':False}
+        q={'view_kind':'stable_display','subject_visibility':'clear','relation':'visible_feature',
+            'demonstration_complete':False,'information_point':'product visible','limitations':'sampled',
+            'clear_intervals_us':[{'start':0,'end':1_000_000,'observed':'product visible'}]}
+        data={'checks':[{'id':'c1','status':'supported','observed':'hand moves'}],'action_complete':True,
+            'result_visible':True,'rhythm_ok':True,'all_script_claims_checked':True,'uncovered_claims':[],
+            'reason':'same product','shot_usability':q}
+        media={'start':0,'end':1,'before':{'size':1},'sheet':'sheet.jpg'}
+        with patch.object(vision.ai_editor,'_call',return_value=data),patch.object(vision.contract,'source_identity',return_value=media['before']),\
+                patch('orchestrator.vision.shot_quality_review.observe',return_value=q),\
+                patch('orchestrator.vision.shot_value_review.review',return_value={'assessment':{'status':'NO_SELLING_POINT_INFORMATION','supported_ids':[]}}):
+            result=vision.review_output({'product':'fixture'},request,{'video':'preview.mp4'},media,Path('unused'))
+        self.assertEqual(result['status'],'EVIDENCE_PENDING')
 
 
 if __name__ == "__main__":

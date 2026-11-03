@@ -21,7 +21,9 @@ def quality(end=2_000_000):
 
 
 def observation(end=2_000_000):
+    from test_shot_value import value
     return {'verdict':'matched','same_product':True,'supports_requirement':True,'confidence':.95,
+        'selling_point_value':{'observation':value(end=end)},
         'observation':'thin edge clearly presented','reason':'visible feature','time_sensitive':False,
         'window_us':{'start':0,'end':end},'evidence_intervals_us':[{'start':0,'end':end}],
         'phases':[{'start':0,'end':end,'kind':'display','can_speed':False,'reason':'clear view'}],
@@ -101,6 +103,7 @@ class DisplayOptimizationTests(unittest.TestCase):
 
     def run_case(self,change_source=False):
         row=observation();row['source_identity']=identity.source_identity(self.shots[0]['video'])
+        row['selling_point_value']['observation']['claims'][0]['claim_text']=self.request['text']
         def review(*args,**kwargs):
             if change_source:Path(self.shots[0]['video']).write_bytes(b'replaced after visual review')
             return row
@@ -132,6 +135,8 @@ class DisplayOptimizationTests(unittest.TestCase):
     def test_readable_information_intervals_stay_realtime_when_other_process_accelerates(self):
         row=observation(6_000_000);row['phases'][0]['can_speed']=True
         row['shot_usability']['clear_intervals_us']=[{'start':i*1_000_000,'end':i*1_000_000+700_000,'observed':'clear shape'} for i in range(5)]
+        row['selling_point_value']['observation']['claims'][0]['evidence_intervals_us']=[
+            {'start':s['start'],'end':s['end']} for s in row['shot_usability']['clear_intervals_us']]
         result=purpose_selection.fit(row,{'source_start':0,'source_end':6},request(4_500_000))
         self.assertTrue(result['ok']);self.assertGreater(result['maximum_speed'],1)
         self.assertTrue(all(p['speed']==1 for p in result['parts'] if p['locked']))

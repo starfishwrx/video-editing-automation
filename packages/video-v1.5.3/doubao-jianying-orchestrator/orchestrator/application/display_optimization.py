@@ -87,12 +87,14 @@ def refine(manifest,timeline,sentence_id,request,candidates,prior_origins,direct
                     +([] if part['locked'] else [{'bounded_process_speed_cap':3}])})
         updated=replace_group(timeline,(sentence_id,),clips,group_id=group_id,assets=(asset,),
             original_paths=origins,group_kind='montage')
+        value=winner['plan'].get('selling_point_value') or {}
         outside=lambda t:tuple(v for v in t.videos if v.target_start_us>=hi or v.target_start_us+v.duration_us<=lo)
         preserved={'sentences':updated.sentences==timeline.sentences,'audio':updated.audios==timeline.audios,
             'subtitles':updated.subtitles==timeline.subtitles,'outside_sentence_video':outside(updated)==outside(timeline)}
         if not all(preserved.values()):raise ValueError('DISPLAY_FIXED_INPUT_CHANGED')
         updated.save(root/'timeline.json')
         result.update(status='PLANNED_OUTPUT_REVIEW_PENDING',request=request,selected=winner,preserved=preserved,
+            selling_point_value=value,
             timeline=str(root/'timeline.json'),candidates=rows)
         if render:
             receipt=render_timeline(updated,root/'render',ffmpeg=ffmpeg,ffprobe=ffprobe,width=width,allow_real_tail=True)
