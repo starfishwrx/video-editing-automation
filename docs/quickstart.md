@@ -16,6 +16,8 @@ uv run --frozen python -X utf8 doubao-jianying-orchestrator/run.py --help
 
 后续命令都在这个包根执行。不要切到实验包，也不要对系统 Python 安装依赖。
 
+音色表和自动 BGM 曲库随仓库及源码包交付，无需从其他机器复制 `data/`。可离线运行 `run.py list-library --kw TVB` 检查名称；生产 `env` 会检查表是否缺失或损坏。元数据能查询不等于云端合成／下载已获授权或可用，详见[资源说明](../packages/video-v1.5.3/jianying-editor/resources/catalogs/README.md)。
+
 ## 2. 离线代码验证
 
 ```powershell
@@ -39,7 +41,7 @@ if (-not (Test-Path work/config.local.ps1)) {
 Copy-Item examples/manifest.preview.json work/quickstart/manifest.json
 ```
 
-配置模板明确使用 **GLM-5.3-Flash** / `glm-5.3-flash`，不写入或覆盖密钥。当前通用配置读取进程环境变量，`.env` 文件不会自动加载；完整变量说明见[环境合同](../packages/video-v1.5.3/ENVIRONMENT.md)。
+配置模板明确使用 **GLM-5.3-Flash** / `glm-5.3-flash`，不写入或覆盖密钥。运行时只支持 GLM（`volc_glm` / `glm` / `volc`）与 Qwen（`qwen` / `qwen_compatible`）直连，不需要启动额外的编码 Agent。使用 Qwen 时显式提供 `JY_QWEN_BASE_URL`、`JY_QWEN_MODEL` 和 `JY_QWEN_API_KEY`；旧通道及未知值直接报错。当前通用配置读取进程环境变量，`.env` 文件不会自动加载；文字复核、`JY_AI_EDITOR_QWEN` 与完整变量说明见[环境合同](../packages/video-v1.5.3/ENVIRONMENT.md)。
 
 准备 FFmpeg。若已配置 `FFMPEG_BIN` / `FFPROBE_BIN`，会直接复用；否则 Windows 引导器下载便携工具到技能的 `bin/`（需要网络，不运行安装器）。
 
@@ -72,13 +74,23 @@ if ($LASTEXITCODE -ne 0) { throw '抽帧失败；检查输出中的素材或探�
 通过本机安全配置为进程提供 Ark 凭据：优先 `ARK_API_KEY`，其次 `JY_VOLC_API_KEY`。本地环境检查不验证云端密钥。下面的视觉分析/建稿会发送实际帧与脚本文字并使用所配置服务的额度。
 
 ```powershell
-uv run --frozen python -X utf8 doubao-jianying-orchestrator/run.py env
-# 先处理 env 返回的本地依赖/草稿路径问题，再做真实服务调用。
+uv run --frozen python -X utf8 doubao-jianying-orchestrator/run.py env --profile base
+# 此处仅分析素材；base检查通用工具链，不声明无头建稿已就绪。
 uv run --frozen python -X utf8 doubao-jianying-orchestrator/run.py analyze-shots `
   --input work/quickstart/manifest.json --report-dir work/quickstart/vision-report
 ```
 
 核对 `shot_candidates.json` 的 `vision_analysis.errors`、模型摘要和各镜头观察。命令退出码或 `SHOT_ANALYSIS_READY` 本身不保证视觉成功，未知项需要先处理。
+
+建稿前，按环境合同准备已授权的独立无头后端，配置 `JIANYING_HEADLESS_ROOT`、匹配的 `JIANYING_INSTALL_DIR` 和静态字体 `JY_HEADLESS_FONT`（或任务的 `subtitle_font_path`）；草稿库放在剪映首页库之外。先运行默认生产环境检查：
+
+```powershell
+New-Item -ItemType Directory -Force $env:JY_DRAFT_ROOT | Out-Null
+uv run --frozen python -X utf8 doubao-jianying-orchestrator/run.py env --input work/quickstart/manifest.json
+if ($LASTEXITCODE -ne 0) { throw '请先处理生产环境报告中的阻断项。' }
+```
+
+`env` 默认检查基础工具链与实际所选写稿后端，未就绪返回非零退出码；基础环境和原生后端检查分别列出。它不认证云端密钥，正式build也会在配音/视觉开销前复验。
 
 ```powershell
 uv run --frozen python -X utf8 doubao-jianying-orchestrator/run.py build `
@@ -92,4 +104,4 @@ uv run --frozen python -X utf8 doubao-jianying-orchestrator/run.py build `
 
 ## 5. 接入生产前
 
-生产队列、NAS、飞书和 Mac 审阅需要额外部署变量及授权，见 `ENVIRONMENT.md` 的生产集成部分。按照[发布流程](release-process.md)和既定真实任务观察完成验收后再部署，保留当前队列和回滚依据。
+整个项目的手动与定时运行入口见 [Windows 脚本流水线](windows-pipeline.md)。生产队列、NAS 和飞书使用本机配置；Mac 交接已删除。历史 JyPoll/JyRun 入口（`jy_poll.ps1` / `run_task.template.ps1`）已退役，调用会立即失败；单条任务继续使用上述 manifest CLI，已有批队列使用 `scripts/run_pipeline.ps1` 运行一轮，内部直接调用 dispatcher。源码更新不会自动启用队列、修改计划任务或替换已有生产生成脚本。按照[发布流程](release-process.md)和既定真实任务观察完成验收后再部署，保留当前队列和回滚依据。

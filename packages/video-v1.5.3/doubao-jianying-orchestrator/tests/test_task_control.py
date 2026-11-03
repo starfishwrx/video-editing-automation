@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import argparse
 import sys
@@ -17,13 +19,13 @@ import batch_worker  # noqa: E402
 
 class ResultContractTests(unittest.TestCase):
     def test_runtime_version_is_read_from_package(self):
-        self.assertEqual(runtime_version(), "1.5.6")
+        self.assertEqual(runtime_version(), "1.6.0")
 
     def test_logger_ignores_stale_caller_version(self):
         with tempfile.TemporaryDirectory() as raw:
             logger = TaskLogger(Path(raw), {}, version="v1.3.13")
             try:
-                self.assertEqual(logger.version, "1.5.6")
+                self.assertEqual(logger.version, "1.6.0")
             finally:
                 logger.finalize({"status": "ERROR", "error": "test cleanup"})
 
@@ -32,7 +34,7 @@ class ResultContractTests(unittest.TestCase):
             {"status": "ERROR", "message": "VISION_CALL_FAILED: network timeout"},
             task_id="task", run_id="run", task_log="/tmp/task",
         )
-        self.assertEqual(result["pipeline_version"], "1.5.6")
+        self.assertEqual(result["pipeline_version"], "1.6.0")
         self.assertEqual(result["failure_class"], "vision")
         self.assertEqual(result["failure_code"], "VISION_CALL_FAILED")
         self.assertTrue(result["retryable"])
@@ -102,13 +104,13 @@ class ResultContractTests(unittest.TestCase):
             logger = TaskLogger(root, {"task_id": "source-task"})
             result = logger.finalize({"status": "SUCCESS"})
             self.assertEqual(result["run_id"], logger.run_id)
-            self.assertEqual(result["pipeline_version"], "1.5.6")
+            self.assertEqual(result["pipeline_version"], "1.6.0")
             self.assertTrue(result["manifest_sha256"])
             self.assertEqual(result["runtime"]["skill_root"], str(
                 Path(__file__).resolve().parents[1]))
             task = json.loads((logger.task_dir / "task.json").read_text(encoding="utf-8"))
             saved = json.loads((root / "last_result.json").read_text(encoding="utf-8"))
-            self.assertEqual(task["pipeline_version"], "1.5.6")
+            self.assertEqual(task["pipeline_version"], "1.6.0")
             self.assertIn("runtime", task)
             self.assertTrue(saved["safe_to_continue"])
 
@@ -143,6 +145,20 @@ class ResultContractTests(unittest.TestCase):
 
 
 class BatchContinuationTests(unittest.TestCase):
+    def test_voice_bgm_and_sentence_blockers_keep_their_reason(self):
+        for code, kind in (("VOICE_SELECTION_REQUIRED", "environment"),
+                           ("BGM_REQUIRED", "environment"),
+                           ("SENTENCE_PLAN_REVIEW_REQUIRED", "semantic")):
+            with self.subTest(code=code):
+                classified = batch_worker.classify_build_failure(code)
+                self.assertTrue(classified["deterministic_block"])
+                self.assertFalse(classified["transient"])
+                result = batch_worker._batch_result_contract("ERROR", run_id="test",
+                    failures=[{"message": code}])
+                self.assertEqual(result["failure_code"], code)
+                self.assertEqual(result["failure_class"], kind)
+                self.assertFalse(result["retryable"])
+
     def test_deterministic_block_is_not_retried_as_provider_failure(self):
         classified = batch_worker.classify_build_failure(
             "SHOT_MATCH_BLOCKED: material gaps reported")
@@ -368,6 +384,182 @@ class RecoveryStageTests(unittest.TestCase):
             self.assertEqual(saved["status"], "RECOVERY_MATCHED_MANIFEST_REQUIRED")
             self.assertFalse(saved["safe_to_continue"])
 
+    def test_successful_semantic_recovery_feeds_draft_write_without_rematching(self):
+        from orchestrator.selection import ai_editor
+        from orchestrator.vision import material_corrections
+        with tempfile.TemporaryDirectory() as raw, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(raw)
+            report = root / "report"
+            report.mkdir()
+            analysis = {"shots": [{"shot_id": "selected"}]}
+            (report / "shot_candidates.json").write_text(json.dumps(analysis), encoding="utf-8")
+            source = self._manifest(root, selection_mode="ai_editor")
+            selected = {"segments": [{"video": "selected.mov", "duration": 1}],
+                        "draft_name": "prior-draft", "force_overwrite": True,
+                        "recovery_stage": "semantic_match"}
+            with mock.patch.object(cli, "_run_shot_analysis", return_value=analysis) as analyze, \
+                    mock.patch.object(material_corrections, "apply", return_value=analysis), \
+                    mock.patch.object(ai_editor, "prepare", return_value=analysis), \
+                    mock.patch.object(cli.shot_analyzer, "match_manifest",
+                                      return_value={"ok": True, "manifest": selected}) as match, \
+                    mock.patch.object(cli, "_pre_synthesize_narration") as tts, \
+                    mock.patch.object(cli, "OrchestrationEngine") as engine:
+                engine.return_value.run.return_value = {"status": "SUCCESS"}
+                self.assertEqual(cli.cmd_recover(argparse.Namespace(
+                    input=str(source), report_dir=str(report), stage="semantic_match")), 0)
+                # The standalone build input remains a bare manifest.
+                self.assertEqual(json.loads((report / "matched_manifest.json").read_text()), selected)
+                self.assertEqual(cli.cmd_recover(argparse.Namespace(
+                    input=str(source), report_dir=str(report), stage="draft_write")), 0)
+            analyze.assert_called_once()
+            match.assert_called_once()
+            tts.assert_not_called()
+            self.assertEqual(engine.call_args.args[0]["segments"], selected["segments"])
+            self.assertFalse(engine.call_args.args[0]["auto_match_shots"])
+            self.assertFalse(engine.call_args.args[0]["force_overwrite"])
+            self.assertNotEqual(engine.call_args.args[0]["draft_name"], "prior-draft")
+            self.assertEqual(engine.call_args.args[0]["recovery_stage"], "draft_write")
+            saved = json.loads((report / "last_result.json").read_text(encoding="utf-8"))
+            self.assertEqual(saved["status"], "SUCCESS")
+            self.assertTrue(saved["matched_manifest_sha256"])
+
+    def test_explicit_segment_recovery_passes_original_timing_and_rejects_changed_text(self):
+        from orchestrator.selection import timing_contract
+        with tempfile.TemporaryDirectory() as raw, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(raw)
+            report = root / "report"
+            report.mkdir()
+            segment = {"text": "轻薄的表层"}
+            timing = {"rows": [{"key": timing_contract.sentence_key(segment, 1),
+                "text": segment["text"], "audio_duration_us": 1_234_567, "timing_certainty": "audio"}]}
+            timing_path = report / "narration_timing.json"
+            timing_path.write_text(json.dumps(timing), encoding="utf-8")
+            (report / "shot_candidates.json").write_text('{"shots": []}', encoding="utf-8")
+            source = self._manifest(root, segments=[segment], narration_timing_file=str(timing_path),
+                                    selection_mode="ai_editor")
+            args = argparse.Namespace(input=str(source), report_dir=str(report), stage="semantic_match")
+            with mock.patch.object(cli, "environment_report", return_value={"ready": True}), \
+                    mock.patch.object(cli, "_temporary_match", return_value=({"segments": [segment]}, None)) as match, \
+                    mock.patch.object(cli, "_pre_synthesize_narration") as tts:
+                self.assertEqual(cli.cmd_recover(args), 0)
+                self.assertEqual(match.call_args.kwargs["narration_timing"], timing)
+                timing["rows"][0]["text"] = "变化后的文案"
+                timing_path.write_text(json.dumps(timing), encoding="utf-8")
+                self.assertEqual(cli.cmd_recover(args), 1)
+            match.assert_called_once()
+            tts.assert_not_called()
+            self.assertEqual(json.loads((report / "last_result.json").read_text(encoding="utf-8"))["status"],
+                             "RECOVERY_SENTENCE_TIMING_REQUIRED")
+
+    def test_invalid_current_match_cannot_fall_back_to_an_older_success(self):
+        with tempfile.TemporaryDirectory() as raw, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(raw)
+            report = root / "report"
+            report.mkdir()
+            old_success = {"ok": True, "manifest": {"segments": [{"video": "old.mov"}]}}
+            (report / "matched_manifest.json").write_text(json.dumps(old_success), encoding="utf-8")
+            for current in ({"ok": False, "manifest": old_success["manifest"]},
+                            {"ok": True, "manifest": {}}, [], "broken-json"):
+                with self.subTest(current=current):
+                    text = current if isinstance(current, str) else json.dumps(current)
+                    (report / "shot_match_report.json").write_text(text, encoding="utf-8")
+                    with mock.patch.object(cli, "OrchestrationEngine") as engine:
+                        self.assertEqual(cli.cmd_recover(argparse.Namespace(
+                            input=str(self._manifest(root)), report_dir=str(report), stage="draft_write")), 1)
+                    engine.assert_not_called()
+
+    def test_draft_write_rejects_changed_input_without_rematching(self):
+        with tempfile.TemporaryDirectory() as raw, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(raw)
+            report = root / "report"
+            report.mkdir()
+            source = self._manifest(root)
+            original = json.loads(source.read_text(encoding="utf-8"))
+            (report / "shot_match_report.json").write_text(json.dumps({
+                "ok": True, "input_manifest": original,
+                "manifest": {"segments": [{"video": "selected.mov"}]},
+            }), encoding="utf-8")
+            for changes in ({"task_id": "other-task"}, {"full_script": "changed script"},
+                            {"segments": [{"video": "other.mov", "duration": 1}]}):
+                with self.subTest(changes=changes):
+                    source.write_text(json.dumps({**original, **changes}), encoding="utf-8")
+                    with mock.patch.object(cli, "OrchestrationEngine") as engine:
+                        self.assertEqual(cli.cmd_recover(argparse.Namespace(
+                            input=str(source), report_dir=str(report), stage="draft_write")), 1)
+                    engine.assert_not_called()
+
+    def test_failed_semantic_attempt_invalidates_an_older_success(self):
+        with tempfile.TemporaryDirectory() as raw, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(raw)
+            report = root / "report"
+            report.mkdir()
+            source = self._manifest(root, selection_mode="ai_editor")
+            original = json.loads(source.read_text(encoding="utf-8"))
+            old_success = {"ok": True, "input_manifest": original,
+                           "manifest": {"segments": [{"video": "old.mov"}]}}
+            (report / "shot_candidates.json").write_text("{}", encoding="utf-8")
+            for failure in ({"shots": []}, RuntimeError("model failed before report")):
+                with self.subTest(failure=failure):
+                    (report / "shot_match_report.json").write_text(json.dumps(old_success), encoding="utf-8")
+                    with mock.patch.object(cli, "_run_shot_analysis",
+                                           **({"side_effect": failure} if isinstance(failure, Exception)
+                                              else {"return_value": failure})):
+                        self.assertEqual(cli.cmd_recover(argparse.Namespace(
+                            input=str(source), report_dir=str(report), stage="semantic_match")), 1)
+                    for _ in range(2):
+                        with mock.patch.object(cli, "OrchestrationEngine") as engine:
+                            self.assertEqual(cli.cmd_recover(argparse.Namespace(
+                                input=str(source), report_dir=str(report), stage="draft_write")), 1)
+                        engine.assert_not_called()
+
+    def test_recovery_preflight_checks_the_selected_writer(self):
+        with tempfile.TemporaryDirectory() as raw, mock.patch.dict("os.environ", {}, clear=True), \
+                contextlib.redirect_stdout(io.StringIO()):
+            root = Path(raw)
+            source = root / "source.mov"
+            source.touch()
+            manifest = self._manifest(root, segments=[{"video": str(source), "duration": 1}])
+            with mock.patch.object(cli, "environment_report", return_value={"ready": True}), \
+                    mock.patch.object(cli, "OrchestrationEngine") as engine:
+                self.assertEqual(cli.cmd_recover(argparse.Namespace(
+                    input=str(manifest), report_dir=str(root / "report"), stage="preflight")), 1)
+            engine.assert_not_called()
+            saved = json.loads((root / "report/last_result.json").read_text(encoding="utf-8"))
+            self.assertEqual(saved["reason"], "HEADLESS_ROOT_REQUIRED")
+
+    def test_match_shots_early_failure_or_exception_invalidates_its_old_result(self):
+        from orchestrator.selection import ai_editor
+        with tempfile.TemporaryDirectory() as raw, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(raw)
+            report = root / "report"
+            report.mkdir()
+            source = self._manifest(root, selection_mode="ai_editor")
+            original = json.loads(source.read_text(encoding="utf-8"))
+            analysis = root / "analysis.json"
+            analysis.write_text('{"shots": []}', encoding="utf-8")
+            old_success = {"ok": True, "input_manifest": original,
+                           "manifest": {"segments": [{"video": "old.mov"}]}}
+            for failure in ("missing-analysis", "prepare", "matcher"):
+                with self.subTest(failure=failure):
+                    (report / "shot_match_report.json").write_text(json.dumps(old_success), encoding="utf-8")
+                    args = argparse.Namespace(input=str(source), report_dir=str(report),
+                        analysis=str(root / "missing.json" if failure == "missing-analysis" else analysis),
+                        topk=3, require_selection=False)
+                    with mock.patch.object(ai_editor, "prepare", **(
+                            {"side_effect": RuntimeError("prepare failed")} if failure == "prepare"
+                            else {"return_value": {"shots": []}})), \
+                            mock.patch.object(cli.shot_analyzer, "match_manifest",
+                                              side_effect=RuntimeError("matcher failed")):
+                        if failure == "missing-analysis":
+                            self.assertEqual(cli.cmd_match_shots(args), 1)
+                        else:
+                            with self.assertRaises(RuntimeError):
+                                cli.cmd_match_shots(args)
+                    with mock.patch.object(cli, "OrchestrationEngine") as engine:
+                        self.assertEqual(cli.cmd_recover(argparse.Namespace(
+                            input=str(source), report_dir=str(report), stage="draft_write")), 1)
+                    engine.assert_not_called()
+
     def test_draft_write_rejects_raw_manifest_cache(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -443,7 +635,7 @@ class VisionRetryTests(unittest.TestCase):
                 mock.patch.object(vision_analyzer.time, "sleep"):
             ok, text = vision_analyzer._run_vision_with_retry(
                 Path("sheet.jpg"), "prompt", Path("response.txt"),
-                profile="flash", timeout=1, max_retries=1)
+                timeout=1, max_retries=1)
         self.assertFalse(ok)
         self.assertEqual(text, "502")
         self.assertEqual(call.call_count, 1)

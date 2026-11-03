@@ -16,7 +16,64 @@ against the system interpreter for this package or its deployment host.
 
 Python must be **>=3.11,<3.13**, as declared in `pyproject.toml`.
 
-## Vision and selection (current defaults)
+## Shipped audio lookup resources
+
+`jianying-editor/resources/catalogs/` is versioned and included in source ZIPs:
+official voice display names/IDs/tags, historical voice aliases, and BGM
+IDs/titles/durations/categories. A clean clone needs no manually copied `data/`
+directory. Voice and BGM lookup use these package-local files, never an installed
+skill's private cache. See that directory's `README.md` for the field whitelist.
+
+Default `env`, `build` and `recover --stage preflight` check required tables
+before paid stages. `runtime_catalogs` reports paths and entry counts; missing,
+unreadable or invalid tables return `ENV_ERROR` with `RUNTIME_CATALOG_*` reasons.
+Existence/version is rechecked after a cached lookup, so repairing or removing a
+table takes effect without restarting. An explicit local `bgm.path` does not
+require the cloud music index; automatic BGM and ID/title selection do.
+
+These tables contain no signed URLs, audio, credentials or machine paths.
+The packaged CloudManager indexes the same BGM table, reuses complete local
+audio caches before contacting a service, and resolves a fresh URL by ID on a
+cache miss or explicit forced refresh. Private `data/`, `.cache/`, logs, task reports and downloaded media
+tools stay outside source packages. TTS login/authentication, service availability,
+authorized native backend and fonts remain external prerequisites; successful
+offline lookup does not establish cloud-service availability.
+
+## Default native draft production
+
+`draft_backend` / `JY_DRAFT_BACKEND` defaults to `headless`. Install the separately
+reviewed Jianying Headless backend with its `production_library` API and keep
+`JIANYING_HEADLESS_ROOT` pointing to that installation. `JIANYING_INSTALL_DIR`
+selects the locally installed, fingerprint-matched Windows native runtime;
+`JY_HEADLESS_FONT` selects a static TTF/OTF. `fonttools==4.60.2` is locked in uv.
+`ffmpeg` and `ffprobe` must be on PATH (the runner adds configured media-tool
+directories). Run `python -m tools.headless_runtime check` before activation.
+The CLI `run.py env` combines base toolchain facts with this same writer check
+and returns a nonzero exit code when not ready. Use `env --input manifest.json`
+for task-specific backend/font settings, or explicit `env --profile base` for
+the base toolchain only; these checks do not authenticate cloud credentials.
+The backend is a separate licensed dependency and is not redistributed in this
+package. Use an authorized backend build providing `headless-production-library/v1`
+and its source-pinned entrypoint; an unextended checkout is rejected before paid work.
+
+The private `JY_DRAFTS_ROOT` / `JY_PROJECTS_ROOT` library is outside the live
+Jianying home index. Creating new drafts does not require closing or controlling
+the editor. Old drafts are never overwritten; unsupported input/effects stop
+explicitly. `draft_backend=legacy` is an explicit historical recovery option;
+there is no automatic writer fallback.
+
+An empty BGM value (`null`, whitespace, empty object or missing field) selects
+music automatically using the final duration and script. Explicit path, catalog
+ID and exact title remain authoritative. Final music is -28 LUFS with baked
+0.4s/0.2s fades by default. A missing/too-short track blocks creation; it cannot
+become a silent successful draft. Normal voice confirmation does not ask for a
+BGM audition. Choice/title/actual audio hash are retained with the draft and the
+normal successful table write fills `BGM名称`.
+`LARK_ACTOR=bot|user` selects the already authorized CLI identity for table writes
+(default `bot`). Use the same identity verified by a read-only record query;
+per-task table/base identifiers take precedence over host defaults.
+
+## Vision defaults
 
 The exact default model is **GLM-5.3-Flash**, API ID `glm-5.3-flash`.
 GLM-5.3 and ChatGLM3 are different models. The implementation sends contact-sheet
@@ -27,11 +84,15 @@ See [model and image-call details](https://github.com/starfishwrx/video-editing-
 | --- | --- | --- |
 | `JY_SELECTION_MODE` | `ai_editor`; manifest `selection_mode` wins | `ai_editor`, `rule_then_ai` (rule recall plus pixel-reviewed gaps), or explicit `legacy` |
 | `JY_CONCURRENCY_POLICY_FILE` | Explicit JSON is authoritative | One host/account policy for every entry; see `examples/concurrency-policy.json` |
-| `JY_VISION_TRANSPORT` | `volc_glm` | Direct Ark chat completions; `glm`/`volc` are aliases |
-| `JY_VISION_MODEL` | `glm-5.3-flash` | Exact model ID, shared by image review and text planning |
+| `JY_VISION_TRANSPORT` | `volc_glm` | GLM direct HTTP: `volc_glm` / `glm` / `volc`; Qwen direct HTTP: `qwen` / `qwen_compatible`. Removed and unknown values are rejected |
+| `JY_VISION_MODEL` | `glm-5.3-flash` | Exact Ark model ID; the Qwen transport uses `JY_QWEN_MODEL` instead |
 | `ARK_API_KEY` | Required for direct calls | First credential source; process environment only |
 | `JY_VOLC_API_KEY` | Used only if `ARK_API_KEY` is empty | Alternative Ark credential; process environment only |
 | `JY_VOLC_BASE_URL` | `https://ark.cn-beijing.volces.com/api/plan/v3` | Base URL; code appends `/chat/completions` |
+| `JY_QWEN_BASE_URL`, `JY_QWEN_MODEL`, `JY_QWEN_API_KEY` | No default | Explicit Qwen-compatible endpoint, model, and process-only credential |
+| `JY_AI_EDITOR_QWEN` | Unset | Set to `1` to route AI editor planning and review to `JY_VISION_TEXT_BASE_URL`, `JY_VISION_TEXT_MODEL`, and `JY_VISION_TEXT_API_KEY` while retaining the selected material-analysis transport |
+| `JY_VISION_TEXT_DISABLE` | Unset | Set to `1` to keep high-resolution text reads on the selected material-analysis transport |
+| `JY_REUSE_VISION_TRANSPORT`, `JY_REUSE_VISION_MODEL` | Unset | Explicit prior observation identity for compatible Qwen runs; reused observations retain their original provenance |
 | `JY_VISION_BATCH_WORKERS` | `20` for direct Ark | Per-task API workers for material understanding and final QC |
 | `JY_VISION_SLOTS` | `20` by default | Cross-process vision slots; AI editor also shares these slots |
 | `JY_VISION_TEXT_WORKERS` | Same as batch workers; capped by batch workers | Concurrent text-review requests; both independent reads remain required |
@@ -42,12 +103,31 @@ See [model and image-call details](https://github.com/starfishwrx/video-editing-
 | `JY_AI_EDITOR_TIMEOUT_S` | `JY_VISION_TIMEOUT`, otherwise `360` | Can tighten the policy's request deadline |
 | `JY_POST_QC_STAGE_TIMEOUT_S` | `900` seconds | Separate QC stage budget; parent reserves another 30 seconds for cleanup |
 | `JY_STAGE_DEADLINE_TS`, `JY_TASK_DEADLINE_TS` | Inherited epoch deadlines | Requests can use only the remaining stage/task budget |
-| `JY_VISION_THINKING` | Always enabled for this model | Direct Ark uses `reasoning_effort=low`; legacy disable/budget overrides are ignored |
 | `JY_VISION_MAX_TOKENS` | `16384` | Initial completion cap; token semantics depend on the actual endpoint |
 | `JY_VISION_LENGTH_RETRY_VERIFIED` | off | Set `1` only after this endpoint is verified to support a 16384→32768 length retry |
 | `JY_VISION_CACHE_DIR` | Queue `work/.cache`; otherwise persistent user cache | Shared visual observations and completed text verification across tasks |
 | `JY_VISION_CACHE_WAIT_TIMEOUT` | `7200` seconds | Wait for another task recognizing the same product; timeout never starts duplicate calls |
 | `JY_VISION_RECHECK` | `reuse` | `reuse`, `vision` or `off`; explicit recheck policy |
+
+Thinking request fields are fixed by the direct adapters: GLM sends
+`reasoning_effort=low`, and Qwen sends `enable_thinking=false`. There is no
+separate environment switch for thinking mode.
+
+For `rule_then_ai`, the optional manifest field `ai_refill_max_sentences` limits
+automatic gap review (`0` or omitted means unlimited); explicit refill indices
+are not truncated. When capped, functional claims are reviewed before general
+display and promotion sentences. Unreviewed or partially supported claims remain preview-only.
+The optional `max_absorb_demo_speed` bounds the pour, absorption and wipe speeds
+for that task (finite value from 1 to 20). If a full observed action does not fit,
+the scene must try another candidate or remain unresolved; the limit never
+authorizes inventing or silently clipping the missing action.
+An explicitly enabled `retain_related_on_unmet_scene` keeps a relevant, already
+observed shot in preview when a complete group cannot fit; the scene remains
+unresolved and cannot be represented as complete evidence.
+
+Qwen visual and phase caches bind the model and endpoint; phase keys also bind
+the described actions. Explicitly reused observations from the older configured
+backend retain their original identity and are never relabelled as Qwen results.
 
 Media preparation and API calls run in separate stages: finish all frames and
 contact sheets, then start the API pool. Text review and final QC follow the
@@ -105,13 +185,17 @@ generic `.env` auto-loader. Copy `examples/config.example.ps1` to the ignored
 already supplied to the process. Keep real media, prompts, responses and caches
 private. A local `env` report does not authenticate an Ark credential.
 
-The AI editor requires `volc_glm`. `codex` and `anthropic` are explicit legacy
-rollback transports, so also select `legacy` when using them. Codex uses
-`JY_VISION_PROFILE`, optional `JY_VISION_PROVIDER` and `JY_VISION_MODEL`.
-Anthropic uses `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN` and
-`JY_VISION_MODEL` (or `ANTHROPIC_MODEL`), with an optional dedicated
-`JY_VISION_ANTHROPIC_ENV` file loader. That backend-specific loader is not a
-general `.env` loader. Verify the chosen backend's image capability separately.
+All selection modes (`ai_editor`, `rule_then_ai`, and `legacy`) use only the
+GLM or Qwen direct HTTP routes above. Codex CLI, Anthropic, and CCSwitch runtime
+calls have been removed. Removed transport names and unknown values fail
+explicitly; no service is selected as a silent fallback. High-resolution text
+verification and `JY_AI_EDITOR_QWEN` remain supported.
+
+Observation and phase-cache keys keep the fixed historical compatibility field
+`profile="volc"`; it is not configurable and is not read from environment or CLI
+options. Existing identity-matching observations remain reusable without a
+whole-library refresh. Model, endpoint, source and protocol identity checks
+still apply. The explicit observation-import command has no profile option.
 
 ## Local media and draft paths
 
@@ -127,6 +211,37 @@ general `.env` loader. Verify the chosen backend's image capability separately.
   isolated draft library when preparing a local preview or production launcher.
 
 ## Production integrations
+
+The historical JyPoll/JyRun chain is retired. `jy_poll.ps1` and
+`run_task.template.ps1` are fail-fast compatibility stubs; they do not read
+credentials, create work directories, mount NAS, invoke a worker or send
+notifications. The Windows full-pipeline entrypoint is
+`scripts/run_pipeline.ps1`, backed by `tools/workflow/scheduled.py`. Each run
+processes the configured local `batch_queue.json` through the existing dispatcher:
+material understanding, selection, TTS, draft writing, independent visual QC,
+Windows checks and eligible delivery. It does not fetch business tasks through
+an Agent or revive the old polling chain. Unknown or preview build modes never
+become formal delivery automatically.
+
+Use the existing `examples/config.example.ps1` template and its private copy
+`work/config.local.ps1`; the default `-ConfigPath` is `config.local.ps1` under
+`-WorkRoot`. Configuration reads the existing `JY_WORK_ROOT`, `JY_DRAFT_ROOT` and
+other process environment variables. Explicit `-PythonPath`, `-WorkRoot`,
+`-DraftRoot` and `-QueuePath` parameters win over configuration. The default
+Python executable is the package `.venv/Scripts/python.exe`; deployments should
+set it explicitly. Keep credentials in process/local configuration.
+
+```powershell
+powershell -NoProfile -File scripts/run_pipeline.ps1 -WorkRoot work -ConfigPath work/config.local.ps1 -DryRun
+powershell -NoProfile -File scripts/run_pipeline.ps1 -WorkRoot work -ConfigPath work/config.local.ps1
+```
+
+The first command checks/plans the configured queue without running production
+stages. The normal run uses a cross-process lock and saves its run record under
+`<work-root>/pipeline_runs/` and current state in `<work-root>/pipeline_state.json`. Windows Task Scheduler can invoke this same complete
+pipeline; `scripts/install_pipeline_task.ps1` provides explicit registration with
+`-TaskName` and `-IntervalMinutes`. Source updates do not register, modify or
+start host scheduled tasks and do not replace existing generated scripts.
 
 Captions use the original TTS sentence text and measured final audio durations.
 Tempo, edge trimming and loudness processing finish before caption timing is
@@ -145,21 +260,17 @@ The release has no embedded credentials or host paths. A deployment may set:
 
 | Variable | Purpose |
 | --- | --- |
-| `JY_PIPE_ROOT` | pipeline working root |
+| `JY_PIPE_ROOT` | package code root; fixed by the pipeline launcher |
 | `JY_WORK_ROOT` | task work directory |
-| `JY_SKILL_ROOT` | deployed orchestrator/editor skill root |
+| `JY_SKILL_ROOT` | editor/package lookup root for standalone CLI |
+| `JY_ORCHESTRATOR_ROOT` | worker orchestrator source directory; fixed by the pipeline launcher |
 | `JY_DRAFT_ROOT` | local Jianying drafts root |
 | `JY_NAS_SHARE` | NAS share used by the distributor |
 | `JY_NAS_USER` | NAS account name |
 | `NAS_PASSWORD` | NAS password, process environment only |
-| `JY_NAS_TEST_ROOT` | NAS test-output root |
 | `JY_NAS_DISTRIBUTION_ROOT` | grouped distribution parent root |
-| `JY_MAC_DRAFT_ROOT` | Mac review draft root |
-| `JY_MAC_REVIEW_STAGE` | Windows-accessible review staging directory paired with the Mac mount; separate from final distribution |
 | `JY_PRODUCT_IDENTITY_FILE` | Operator-owned JSON map of confirmed single-SKU source directories, with optional record exceptions; not packaged |
 | `JY_MATERIAL_INDEX_FILE` | Optional reviewed material-index cache; when set, only approved same-SKU sources may enter the contract |
-| `JY_EVAL_MODE` | `observe` until two real observations qualify; then `enforce` for new tasks |
-| `JY_EVAL_OBSERVATIONS` | Hash-bound two-task observation receipt for enforcement |
 | `LARK_BASE_TOKEN` | Feishu base token, process environment only |
 | `LARK_TABLE_ID` | Feishu table id |
 
@@ -174,6 +285,8 @@ for all tasks using it; `records` may override an exception:
 ```
 
 The map stays on the production host. Missing or changed identity prevents
-dispatch without writing a business failure to Feishu. The review staging
-root and Mac root must refer to the same shared files through their respective
-OS paths; successful staging is still `AWAITING_MAC_REVIEW`, not acceptance.
+dispatch without writing a business failure to Feishu. Final acceptance uses the
+current Windows draft, explicit formal build provenance, independent visual PASS
+and complete package/input/runtime checks. A matching directory or file hash is
+not a substitute for visual QC. Failed or incomplete checks remain blocked and
+preserve their evidence for targeted recovery on the next full-pipeline run.

@@ -58,7 +58,7 @@ def product_key(task: dict) -> str:
 
 
 def formal_delivery_count(receipt: dict) -> int:
-    """Count actual verified deliveries with independent PASS evidence only."""
+    """Count verified *draft* deliveries, not exported MP4s (legacy API name)."""
     if receipt.get("distribution_status") != "SHIPPED_VERIFIED":
         return 0
     passed = set()
@@ -98,7 +98,7 @@ def _qc_pending(task: dict, work: Path) -> bool:
 def _child_env(policy_file: Path, policy: RuntimePolicy, task: dict | None = None) -> dict:
     env = dict(os.environ, PYTHONUTF8="1",
         JY_CONCURRENCY_POLICY_FILE=str(policy_file), JY_SLOT_DIR=policy.slot_dir,
-        JY_VISION_TEXT_PASS="1", JY_VISION_RETRIES="2",
+        JY_VISION_TEXT_PASS="1",
         JY_VISION_SLOTS=str(policy.vision_slots),
         JY_VISION_BATCH_WORKERS=str(policy.api_workers),
         JY_VISION_PREP_WORKERS=str(policy.prep_workers),
@@ -114,6 +114,39 @@ def _child_env(policy_file: Path, policy: RuntimePolicy, task: dict | None = Non
     env.pop("JY_STAGE_DEADLINE_EPOCH", None)
     env["JY_TASK_DEADLINE_TS"] = env["JY_TASK_DEADLINE_EPOCH"]
     return env
+
+
+def _voice_error(task: dict) -> str | None:
+    """Validate the worker's normalized voice/tempo before paid analysis."""
+    from orchestrator.audio import library_resources
+    from orchestrator.task_inputs import normalize_meeting_task
+    from orchestrator.voice_catalog import resolve_voice
+    from orchestrator.voice_request import select_voice_tempo
+    try:
+        task = normalize_meeting_task(task)
+        if str(task.get("voice_tempo_status") or "").lower() == "invalid":
+            return "VOICE_TEMPO_INVALID: refusing category-default fallback"
+        # Match batch_worker's string contract, including voice_original fallback.
+        # Empty/default voices keep the existing automatic/default choice later.
+        voice = str(task.get("voice") or "").strip() or os.environ.get("JY_OPERATOR_VOICE", "").strip()
+        select_voice_tempo(voice, voice_tempo=task.get("voice_tempo"))
+        for name in ("jianying_voice_catalog.csv", "tts_speakers.csv"):
+            library_resources.read_catalog(name)
+        if voice and voice.lower() not in {"default", "默认"}:
+            resolve_voice(voice)
+    except (ValueError, TypeError, library_resources.RuntimeCatalogError) as exc:
+        return str(exc)
+    return None
+
+
+def _bgm_error(task: dict) -> str | None:
+    from orchestrator.audio import bgm_request, library_resources
+    try:
+        if not bgm_request.normalize(task.get("bgm")).get("path"):
+            library_resources.read_catalog("cloud_music_library.csv")
+    except (ValueError, TypeError, library_resources.RuntimeCatalogError) as exc:
+        return str(exc)
+    return None
 
 
 def prepare_product(task: dict, product_dir: Path, env: dict) -> str:
@@ -147,7 +180,13 @@ def run_task(task: dict, stage: str, env: dict, work: Path) -> dict:
     task_dir.mkdir(parents=True, exist_ok=True)
     path = task_dir / "task.json"
     prior_deliveries = formal_delivery_count(_read(task_dir / "done.json"))
-    atomic_write_text(path, json.dumps(task, ensure_ascii=False, indent=2))
+    if stage == "qc" and path.is_file():
+        # QC resumes the frozen run. Replacing its normalized task snapshot
+        # with a fresh queue row would invalidate the hash-bound review input.
+        if str(_read(path).get("record_id") or "") != str(task["record_id"]):
+            raise ValueError("TASK_SNAPSHOT_RECORD_MISMATCH")
+    else:
+        atomic_write_text(path, json.dumps(task, ensure_ascii=False, indent=2))
     env = dict(env, JY_WORK_ROOT=str(work))
     proc = subprocess.run([sys.executable, "-m", "tools.batch_dispatch", "_worker",
         "--task-file", str(path), "--stage", stage], cwd=str(ROOT), env=env,
@@ -155,8 +194,10 @@ def run_task(task: dict, stage: str, env: dict, work: Path) -> dict:
         timeout=max(1, float(env["JY_TASK_DEADLINE_EPOCH"]) - time.time()) + 30)
     atomic_write_text(task_dir / "dispatch_worker.log", (proc.stdout or "") + "\n" + (proc.stderr or ""))
     receipt = _read(task_dir / "done.json")
+    deliveries = max(0, formal_delivery_count(receipt) - prior_deliveries) if proc.returncode == 0 else 0
     return {"record_id": task["record_id"], "stage": stage, "rc": proc.returncode,
-            "formal_deliveries": max(0, formal_delivery_count(receipt) - prior_deliveries) if proc.returncode == 0 else 0,
+            "formal_deliveries": deliveries, "verified_draft_deliveries": deliveries,
+            "delivery_metric": "verified_draft_deliveries", "final_mp4_deliveries": None,
             "status": receipt.get("status", "ERROR" if proc.returncode else "UNCERTIFIED")}
 
 
@@ -168,7 +209,7 @@ def submit(tasks: list[dict], *, work: Path, policy: RuntimePolicy,
     path = spool / (str(time.time_ns()) + "-" + uuid.uuid4().hex + ".json")
     with file_lock(Path(policy.slot_dir) / "batch_dispatch_lifecycle"):
         atomic_write_text(path, json.dumps({"tasks": tasks, "work_root": str(work.resolve()),
-                          "resume_stage": resume_stage}, ensure_ascii=False, indent=2))
+                          "resume_stage": resume_stage, "submitted_at": time.time()}, ensure_ascii=False, indent=2))
     return path
 
 
@@ -192,6 +233,7 @@ def dispatch(tasks: list[dict], *, work: Path, policy: RuntimePolicy | None = No
              _pending_submission: tuple | None = None) -> list[dict]:
     policy = policy or load_policy()
     started_at = time.time()
+    started_clock = time.monotonic()
     unique, seen = [], set()
     for task in tasks:
         task = dict(task)
@@ -201,6 +243,8 @@ def dispatch(tasks: list[dict], *, work: Path, policy: RuntimePolicy | None = No
         if rid not in seen:
             seen.add(rid)
             task["record_id"] = rid
+            task["_dispatch_admitted_clock"] = started_clock
+            task["_dispatch_wait_origin"] = "supervisor_admission"
             unique.append(task)
     pending = [(task, "qc" if resume_stage == "qc" or
                 (not resume_stage and _qc_pending(task, work)) else "build") for task in unique]
@@ -222,28 +266,49 @@ def dispatch(tasks: list[dict], *, work: Path, policy: RuntimePolicy | None = No
                     resume_stage=resume_stage, _pending_submission=(submission, unique))
             submission, submitted_tasks = _pending_submission
             return [{"record_id": task["record_id"], "status": "SUBMITTED",
-                     "submission": str(submission), "formal_deliveries": 0} for task in submitted_tasks]
+                     "submission": str(submission), "formal_deliveries": 0,
+                     "verified_draft_deliveries": 0, "delivery_metric": "verified_draft_deliveries",
+                     "final_mp4_deliveries": None} for task in submitted_tasks]
         atomic_write_text(policy_file, json.dumps(policy.to_dict(), indent=2))
         progress = work / "batch_dispatch_progress.jsonl"
         atomic_write_text(progress, "")
         results, ready, preparing, failed = [], {}, set(), set()
+        material_ready_clock = {}
         submitted_files = set()
         run_file = work / "dispatch_runs" / (str(time.time_ns()) + "-" + uuid.uuid4().hex[:8] + ".json")
         atomic_write_text(run_file, json.dumps({"policy": policy.to_dict(),
             "started_at": started_at, "finished_at": None, "results": []}, indent=2))
 
-        def timed_runner(task, stage, env, task_work):
-            before = time.time()
-            outcome = runner(task, stage, env, task_work)
-            return dict(outcome, elapsed_s=time.time() - before,
-                        queue_wait_s=before - started_at)
+        def timed_runner(task, stage, env, task_work, ready_clock):
+            before = time.monotonic()
+            admitted = task["_dispatch_admitted_clock"]
+            try:
+                outcome = runner(task, stage, env, task_work)
+            except Exception as exc:
+                outcome = {"record_id": task["record_id"], "status": "ERROR",
+                           "error": str(exc), "formal_deliveries": 0, "rc": 1}
+            # Queue wait includes material wait; these two components partition
+            # it rather than representing additional elapsed wall-clock time.
+            material_wait = max(0.0, min(before, ready_clock) - admitted) if stage != "qc" else 0.0
+            queue_wait = max(0.0, before - admitted)
+            return dict(outcome, stage=stage, elapsed_s=time.monotonic() - before,
+                        queue_wait_s=queue_wait, material_wait_s=material_wait,
+                        worker_queue_wait_s=max(0.0, queue_wait - material_wait),
+                        queue_wait_origin=task["_dispatch_wait_origin"])
 
         def timed_preparer(task, directory, env):
-            before = time.time()
-            output = preparer(task, directory, env)
-            return output, time.time() - before
+            before = time.monotonic()
+            try:
+                output, error = preparer(task, directory, env), None
+            except Exception as exc:
+                output, error = None, str(exc)
+            return output, time.monotonic() - before, error
 
         def record(row):
+            # Legacy field is retained, but it never means a rendered MP4.
+            row.setdefault("verified_draft_deliveries", row.get("formal_deliveries", 0))
+            row["delivery_metric"] = "verified_draft_deliveries"
+            row["final_mp4_deliveries"] = None
             results.append(row)
             with progress.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(dict(row, at=time.time()), ensure_ascii=False) + "\n")
@@ -262,6 +327,14 @@ def dispatch(tasks: list[dict], *, work: Path, policy: RuntimePolicy | None = No
                             continue
                         task = dict(task, _dispatch_work_root=submission["work_root"],
                                     _dispatch_resume_stage=submission.get("resume_stage"))
+                        admitted = time.monotonic()
+                        submitted_at = submission.get("submitted_at")
+                        origin = "supervisor_admission"
+                        if isinstance(submitted_at, (int, float)) and 0 < submitted_at <= time.time():
+                            admitted -= time.time() - submitted_at
+                            origin = "submission"
+                        task["_dispatch_admitted_clock"] = admitted
+                        task["_dispatch_wait_origin"] = origin
                         seen.add(rid)
                         stage = "qc" if submission.get("resume_stage") == "qc" or _qc_pending(task, Path(submission["work_root"])) else "build"
                         pending.append((task, stage))
@@ -290,6 +363,14 @@ def dispatch(tasks: list[dict], *, work: Path, policy: RuntimePolicy | None = No
                             record({"record_id": task["record_id"], "status": "ALREADY_DELIVERED",
                                     "stage": "complete", "formal_deliveries": 0})
                             continue
+                    if stage != "qc":
+                        voice_error = _voice_error(task)
+                        audio_error = voice_error or _bgm_error(task)
+                        if audio_error:
+                            pending.remove((task, stage))
+                            record({"record_id": task["record_id"], "stage": "voice" if voice_error else "bgm",
+                                    "status": "BLOCKED", "error": audio_error, "formal_deliveries": 0})
+                            continue
                     if stage == "qc":
                         if sum(kind == "task" for kind, *_ in futures.values()) >= policy.task_workers:
                             continue
@@ -315,7 +396,8 @@ def dispatch(tasks: list[dict], *, work: Path, policy: RuntimePolicy | None = No
                     env = _child_env(policy_file, policy, task)
                     if key in ready:
                         env["JY_SHARED_ANALYSIS_FILE"] = ready[key]
-                    future = task_pool.submit(timed_runner, task, stage, env, task_work)
+                    future = task_pool.submit(timed_runner, task, stage, env, task_work,
+                                              material_ready_clock.get(key, task["_dispatch_admitted_clock"]))
                     futures[future] = ("task", key, task)
                     pending.remove((task, stage))
                 if not futures:
@@ -331,12 +413,18 @@ def dispatch(tasks: list[dict], *, work: Path, policy: RuntimePolicy | None = No
                     try:
                         outcome = future.result()
                         if kind == "prep":
-                            output, elapsed = outcome
-                            ready[key] = str(output)
+                            output, elapsed, error = outcome
                             preparing.remove(key)
+                            if error is not None:
+                                failed.add(key)
+                            else:
+                                ready[key] = str(output)
+                                material_ready_clock[key] = time.monotonic()
                             record({"record_id": task["record_id"], "stage": "material",
-                                    "status": "READY", "elapsed_s": elapsed,
-                                    "analysis_file": str(output), "formal_deliveries": 0})
+                                    "status": "ERROR" if error is not None else "READY",
+                                    "elapsed_s": elapsed, "timing_scope": "product_preparation",
+                                    "error": error, "analysis_file": str(output) if output else None,
+                                    "formal_deliveries": 0})
                         else:
                             record(outcome)
                     except Exception as exc:

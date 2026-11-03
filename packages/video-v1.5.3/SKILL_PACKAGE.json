@@ -1,6 +1,6 @@
 {
   "name": "doubao-jianying-skill-pack",
-  "version": "v1.5.6",
+  "version": "v1.6.0",
   "version_policy": {
     "major": "incompatible release +1",
     "minor": "daily feature iteration +1",
@@ -14,7 +14,13 @@
   "entrypoint": "doubao-jianying-orchestrator/run.py",
   "maintenance_entrypoints": {
     "draft_delivery": "python -m tools.draft_delivery",
-    "release_package": "python -m tools.release_package"
+    "release_package": "python -m tools.release_package",
+    "headless_runtime": "python -m tools.headless_runtime check"
   },
-  "maintenance_skill": "doubao-jianying-orchestrator/references/validated_fix_to_release.md"
+  "maintenance_skill": "doubao-jianying-orchestrator/references/validated_fix_to_release.md",
+  "production_defaults": {
+    "draft_backend": "headless",
+    "empty_bgm": "auto",
+    "scheduled_entrypoint": "scripts/run_pipeline.ps1"
+  }
 }

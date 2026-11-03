@@ -1,53 +1,48 @@
-# 发版流程（v1.5 系列）
+# 源码包发布与部署边界
 
-适用范围：`packages/video-v1.5.x/` 候选包的“源代码包”发布与归档（不包含渲染机/生产验收）。
+当前维护源码固定在 packages/video-v1.5.3，版本从包内 VERSION 读取。日常功能和文档修改不刷新库存、不创建 tag、不部署。历史包只读；索引实验沿用各自说明。
 
-当前维护主线固定在 `packages/video-v1.5.3/`，版本读 `VERSION`；1.5.4/1.5.5 是隔离索引实验。日常 PR 不刷新历史清单、不发 tag。准备发布时重新构建、验收，再将对应 tag、ZIP、校验文件和发布说明关联到 GitHub Release；同步根 README 的下载入口及 `docs/RELEASES.md`。发布附件和生产部署状态分别说明。
+## 当前包的唯一发布入口
 
-## 当前活包可执行入口（目录 video-v1.5.3，VERSION 见包内）
+从 packages/video-v1.5.3 执行：
 
-已验证修复的合包技能随包提供：
-[`validated_fix_to_release.md`](../packages/video-v1.5.3/doubao-jianying-orchestrator/references/validated_fix_to_release.md)。
-从 `packages/video-v1.5.3/` 运行：
-
-```powershell
+~~~powershell
 uv sync --frozen
-# 局部交付迭代：相关回归；输出必须是包外的新目录
+# 局部交付迭代；输出必须是包外且尚不存在的目录。
 uv run --frozen python -X utf8 -m tools.release_package build --output $deliveryOutput --checks delivery
-# 发版 PR：全新解压副本运行两套完整测试
+# 发版候选；在全新解压副本运行完整回归。
 uv run --frozen python -X utf8 -m tools.release_package build --output $releaseOutput --checks full
-```
+~~~
 
-命令生成单份文件路径清单、ZIP、测试日志与发布收据。解压检查使用 ZIP CRC，保留一份 ZIP SHA256 供下载时核对；不再生成逐文件 SHA 清单、源码树哈希或重复对照元数据哈希。
-`verify --package $unpackedPackage` 检查版本、必需文件、目录清单与路径边界；它不认证源码字节或成片质量。已有输出目录不覆盖。
-以下为各历史版本通用说明；当前包不再使用下述手工 PowerShell 清单命令。
+合包工具生成单份文件路径库存、ZIP、测试日志与收据；解压用 ZIP CRC 检查，保留一份 ZIP SHA256 供下载核对。当前包不生成逐文件 SHA 清单或源码树 hash。
 
-前置条件
-- 两套测试全绿：见 docs/test.md（uv + unittest；当前活包 packages/video-v1.5.3）
-- 规则版本与运行模式已复核：`RULES.md`（视觉规则 1.4.1）、preview 语义与未认证标注一致
-- 变更说明：更新 `doubao-jianying-orchestrator/CHANGELOG.md`（若有）
+~~~powershell
+uv run --frozen python -X utf8 -m tools.release_package verify --package $unpackedPackage
+~~~
 
-步骤
-1) 校验并冻结包内容
-- 在 `packages/video-v1.5.x/` 下生成/更新轻量内容收据：
-  - 执行（示例）：
-    - Windows PowerShell：`Get-ChildItem -Recurse | Get-FileHash -Algorithm SHA256 | ForEach-Object { '{0}  ./{1}' -f $_.Hash, $_.Path } | Set-Content -Encoding UTF8 PACKAGE_CONTENTS.sha256`
-    - 或使用现有脚本/工具生成，确保编码为 UTF-8（可带 BOM）
-- 确认存在并更新：`VERSION`、`release-manifest.json`（列出来源、文件清单、ZIP 构建方式）
+verify 核对版本、必需文件、目录库存与路径边界，不证明真实画面/字幕质量。已有输出目录不覆盖；失败后保留结果用于检查，并选择新输出目录重试。
 
-2) 版本记录与归档
-- 在仓库 `docs/RELEASES.md` 中追加或修订对应条目（来源、文件数、测试数量、ZIP SHA-256、状态）
-- 在 `releases/` 增加对应 `SHA256SUMS-video-v1.5.x.txt`（如需），并在 GitHub Release 附上 ZIP 与校验文件
+工具的完整合同见[已验证修复合包说明](../packages/video-v1.5.3/doubao-jianying-orchestrator/references/validated_fix_to_release.md)。
 
-3) 交付与生产验收（不在源码包 PR 中完成）
-- 源码包通过测试 ≠ 生产通过。部署到渲染机/Windows 工作器前：
-  - 从 ZIP 全新解压；核对 SHA-256 与 `PACKAGE_CONTENTS.sha256`
-  - 运行包级测试与编排器测试
-  - 执行两条“真实任务观察”（不同脚本/素材组合），并经人工审阅/Mac 审核通过
-- 成功交付的判据：`closed_loop.audit` 满足策略（`QC/PASS`、Mac 审阅绑定、打包完整）
+## 候选检查与 GitHub Release
 
-注意
-- 不得修改历史版本目录（v1.5.2 及更早）；如需修文档，在仓库 docs/ 层新增说明
-- 仅在“发版 PR”中更新 `PACKAGE_CONTENTS.sha256`；日常功能 PR 不动该文件
-- 生产凭据与路径不进入仓库；所有路径/凭据来自环境变量（见 `ENVIRONMENT.md` 与 `platform_env.environment_report()`）
+1. 按[测试策略](test.md)通过包级、编排器和架构检查；涉及媒体时记录 FFmpeg 条件、实际执行数和 skip 原因。
+2. 将待发布代码提交后，对同一候选执行 full 合包和全新解压验证。源码修改后重新验证，不能沿用旧包测试结果。
+3. 核对 VERSION、路径型 release-manifest、包内容与发布说明；只有准备发布或实际文件库存变化需要时才更新相应库存，不为普通修改增加身份门槛。
+4. 准备 tag、对应 ZIP、下载核对文件及说明，明确候选、预发布或正式状态；发布按本次授权执行。
+5. 同步根 README 的下载入口与 [RELEASES](RELEASES.md)，把可下载附件与当前功能分支区分。
+
+附件、tag 和发布说明必须对应同一候选。合包成功仅证明源码包可重建；生产运行身份以部署机器回读为准。
+
+## 生产安装与实际交付
+
+部署是单独动作：先保留在用配置和任务结果、安排现有批次，再核对实际安装文件及 ACTIVE_VIDEO_RUNTIME.json；源码合并不会自动升级运行机器。日常开发不注册计划任务、不启动真实队列、不读写业务表或 NAS。
+
+正式任务交付仍需 tools/acceptance 的四项当前证据全部 PASS：INPUT-IDENTITY、RUNTIME-IDENTITY、DRAFT-PACKAGE、VISUAL-QC。独立 QC 必须绑定实际草稿和素材；preview、超时和旧报告不能转正。共享交付继续检查实际媒体引用及可读性。
+
+真实画面、口播、字幕与草稿可编辑性按实际观察单独记录。Windows 打开、编辑和播放结果不能由源码测试数量、包库存或 ZIP hash 推断。运行入口与恢复方式见 [Windows 流水线](windows-pipeline.md)。
+
+## 历史记录
+
+旧包的 PACKAGE_CONTENTS.sha256 和手工 PowerShell 清单流程仅是历史合同，记录保留在 [RELEASES](RELEASES.md) 和对应只读包内，不用于当前包发布。不得为重整仓库而重写历史归档、第三方 vendor 或已有生产草稿。
 

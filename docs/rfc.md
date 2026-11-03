@@ -15,19 +15,19 @@
 ## 2. 端到端流水线
 
 ```
-环境注入 → manifest
+环境注入 → manifest → 通用工具链与所选写稿后端预检
   → shot_analyzer / vision_analyzer
   → ai_editor（描述召回 → 候选实际抽帧复审 → 整稿编排）
   → shot_analyzer / timing_contract（实际源窗、证据与音频分配重验）
   → OrchestrationEngine 顺序闸门
-  → jianying-editor 写草稿
+  → headless_production → 单独安装的无头后端写原生草稿
   → draft_visual_qc v4 / diagnostics
   → closed_loop / draft_delivery / NAS 分发
 ```
 
 引擎闸门形态统一为 `Optional[dict]`：`None` 放行，`dict` 终止并带原因。新增闸门必须带「必拦样例」测试。
 
-默认视觉后端为火山 Ark GLM-5.3-Flash（`glm-5.3-flash`）。模型名称与覆盖优先级见[模型说明](model-and-vision.md)。显式 `legacy` 才沿用旧 Top3、`scene_rules` / `phase_timing` 与 QC v3；`ai_editor` 不使用旧词表/旧换镜器裁决语义。QC v3 不能认证新模式草稿。
+默认视觉后端为火山 Ark GLM-5.3-Flash（`glm-5.3-flash`）。运行时只保留 GLM（`volc_glm` / `glm` / `volc`）与 Qwen（`qwen` / `qwen_compatible`）直连；Codex CLI、Anthropic 和 CCSwitch 通道已移除，旧值和未知值明确拒绝。文字复核与 `JY_AI_EDITOR_QWEN` 保留。模型名称与覆盖优先级见[模型说明](model-and-vision.md)。显式 `legacy` 才沿用旧 Top3、`scene_rules` / `phase_timing` 与 QC v3；`ai_editor` 不使用旧词表/旧换镜器裁决语义。QC v3 不能认证新模式草稿。
 
 ## 3. Formal vs Preview
 
@@ -45,7 +45,9 @@
 
 ## 5. 写稿与交付边界
 
-- 端到端写稿只走 `doubao-jianying-orchestrator`；`jianying-editor` 提供 JyProject / vendor API，不是 agent 手写 JSON 的后备通道。
+- 端到端写稿只走 `doubao-jianying-orchestrator`；默认 `headless_production` 使用独立授权后端，空 BGM 自动准备。`jianying-editor` 的 JyProject / vendor API 保留给显式 legacy 与兼容能力，默认不自动回退。
+- `env` 默认汇总生产环境，包含所选后端；`--input` 读取任务覆盖，`--profile base` 仅报告通用工具链。完整检查失败时返回非零；它不认证云端密钥。
+- 恢复写稿消费 `shot_match_report.json` 中的成功结果与原始输入绑定，裸 `matched_manifest.json` 仅作建稿输入。当前匹配失败会使当前报告失效；输入变化和无绑定旧报告不能自动用于写稿。
 - 禁止手改 `draft_content.json` / `draft_info.json` / `draft_meta_info.json`，禁止任务内临时 `gen_*.py`。
 - 共享交付后必须校验时间轴上的**字面绝对路径**与字节；副本哈希一致不等于媒体可打开。
 - 加密编辑会话禁止静默回落旧明文 sidecar；恢复生成版需用户确认 + 成功任务证据 + 新 UUID。
@@ -71,8 +73,11 @@
 
 子系统文档里的代码路径一律指向 `packages/video-v1.5.3/...`；若标题仍写历史版本号，以 `VERSION` 为准。
 
-## 8. 迁移与兼容
+## 8. Windows 脚本运行与迁移
+
+- 2026-10-30：采用技能内部功能包布局，保留双技能安装组件。50 个模块迁入 9 个功能包，Clip 数据模型独立为 domain；旧路径仅兼容导入，使用同一模块对象保持缓存/锁/patch 身份。按文件加载的证据合同、规则包和独立分发器保留位置。约束和已知留存耦合见 `docs/modular-development.md`。
+- 闭环以 `tools/workflow/closed_loop.py` 为单一实现，两条旧脚本统一执行Windows 自动验收与分发身份合同；worker 的纯任务合同进入 `tools/queueing/contracts.py`。整体运行由 Windows 定时脚本复用 dispatcher，不恢复历史 Agent 调度链。
 
 - 外部调度与现有 pipeline 联接保留；升级先备份再换 ACTIVE 指针。
 - 分析缓存键变更（如 `product-visual-v2`）会触发素材重分析，属预期成本。
-- Mac 审阅路径与 Windows 分发路径指向同一共享文件的不同 OS 视图；暂存成功仍是 `AWAITING_MAC_REVIEW`，不是验收通过。
+- Mac 交接、人工 prepare/collect 和批准标记已删除。`tools/acceptance` 只验证四项核心：输入身份、运行时身份、草稿包、独立视觉 QC；历史人工批准文件不参与运行。

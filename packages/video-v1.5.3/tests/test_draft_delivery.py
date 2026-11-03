@@ -13,6 +13,7 @@ from unittest.mock import patch
 from tools import draft_delivery as delivery
 from tools import nas_portable as n
 from tools.delivery_identity import tree_identity
+from acceptance_fixtures import make_acceptance, make_distribution, make_policy
 
 
 class DeliveryTests(unittest.TestCase):
@@ -170,20 +171,81 @@ class DeliveryTests(unittest.TestCase):
         import batch_worker as worker
         task_dir = self.base / 'task'
         task_dir.mkdir()
+        acceptance = make_acceptance(task_dir, self.source.parent, [self.source.name],
+            {"record_id": "resumed-fixture", "script": "Synthetic script"})
+        reports = acceptance['qc_reports']
+        policy = make_policy(self.base / 'policy.json')
         target = self.base / 'nas' / '测试产出' / '分发草稿' / self.source.name
         shutil.copytree(self.source, target)
         receipt = {'status': 'VERIFIED', 'draft_name': self.source.name,
+                   'task_id': acceptance['contract']['task_id'],
+                   'run_id': acceptance['contract']['run_id'],
+                   'contract_hash': acceptance['contract']['contract_hash'],
                    'source_output_sha256': worker.production_eval.output_identity([self.source])['sha256'],
                    'nas_target': str(target),
                    'transformed_tree_sha256': tree_identity(target)['sha256']}
-        n.write_json(task_dir / 'done.json', {'distribution_receipts': [receipt]})
+        n.write_json(task_dir / 'done.json', {**acceptance['done'], 'distribution_receipts': [receipt]})
         with patch.object(worker, 'DRAFTS', self.source.parent), \
-                patch.object(worker, 'MAC_REVIEW_REQUIRED', False), \
-                patch.dict(worker.os.environ, {'JY_EVAL_MODE': 'observe'}), \
+                patch.object(worker, 'CLOSED_LOOP_TOOL', delivery.PACKAGE_ROOT / 'tools' / 'closed_loop.py'), \
+                patch.object(worker, 'CLOSED_LOOP_POLICY', policy), \
+                patch.dict(worker.os.environ, {'JY_EVAL_MODE': 'observe',
+                    'JY_EVAL_RUNTIME_ROOT': str(acceptance['runtime_root'])}), \
                 patch.object(worker, 'ship_one') as ship:
-            result = worker.finalize_closed_loop(task_dir, {}, [self.source.name], [])
+            result = worker.finalize_closed_loop(task_dir, acceptance['task'], [self.source.name], reports)
         self.assertEqual(result['reason'], 'DISTRIBUTION_MEDIA_REFERENCE_INVALID')
         ship.assert_not_called()
+
+    def test_closed_loop_publishes_success_only_after_archive_and_table(self):
+        import batch_worker as worker
+        tool = delivery.PACKAGE_ROOT / 'tools' / 'closed_loop.py'
+        policy = make_policy(self.base / 'policy.json')
+        for failure in ('archive-parent', 'table-update', 'invalid-receipt', None):
+            with self.subTest(failure=failure):
+                task_dir = self.base / ('task-' + str(failure))
+                task_dir.mkdir()
+                acceptance = make_acceptance(task_dir, self.source.parent, [self.source.name],
+                    {"record_id": "delivery-fixture", "script": "Synthetic script"})
+                reports = acceptance['qc_reports']
+                receipt = {'draft_name': self.source.name, 'nas_target': 'verified-target'}
+
+                def run(command, **kwargs):
+                    authoritative = n.read_json(task_dir / 'done.json')
+                    self.assertEqual(authoritative['status'], 'PREVIEW_READY')
+                    candidate_path = Path(command[command.index('--done-json') + 1])
+                    self.assertEqual(candidate_path.name, 'closed_loop_candidate.json')
+                    self.assertEqual(n.read_json(candidate_path)['status'], 'OK')
+                    stage = command[2]
+                    if stage == failure:
+                        return subprocess.CompletedProcess(command, 1, '', 'failed')
+                    if stage == 'archive-parent':
+                        payload = n.read_json(candidate_path)
+                        payload['nas_parent_folder'] = 'verified-parent'
+                        n.write_json(candidate_path, payload)
+                    if stage == 'table-update' and failure == 'invalid-receipt':
+                        return subprocess.CompletedProcess(command, 0, '{}', '')
+                    return subprocess.CompletedProcess(command, 0, '{"ok": true}', '')
+
+                with patch.object(worker, 'DRAFTS', self.source.parent), \
+                        patch.object(worker, 'CLOSED_LOOP_TOOL', tool), \
+                        patch.object(worker, 'CLOSED_LOOP_POLICY', policy), \
+                        patch.dict(worker.os.environ, {'JY_EVAL_MODE': 'observe',
+                            'JY_EVAL_RUNTIME_ROOT': str(acceptance['runtime_root'])}), \
+                        patch.object(worker, 'ship_one', return_value={'rc': 0, 'receipt': receipt}) as ship, \
+                        patch.object(worker.subprocess, 'run', side_effect=run):
+                    result = worker.finalize_closed_loop(task_dir, acceptance['task'], [self.source.name], reports)
+                ship.assert_called_once()
+                done = n.read_json(task_dir / 'done.json')
+                if failure:
+                    self.assertFalse(result['ok'])
+                    self.assertEqual(result['reason'], {
+                        'archive-parent': 'ARCHIVE_PARENT_FAILED',
+                        'table-update': 'TABLE_UPDATE_FAILED',
+                        'invalid-receipt': 'TABLE_UPDATE_RECEIPT_INVALID'}[failure])
+                    self.assertEqual(done['status'], 'PREVIEW_READY')
+                else:
+                    self.assertTrue(result['ok'])
+                    self.assertEqual(done['status'], 'OK')
+                    self.assertEqual(done['nas_parent_folder'], 'verified-parent')
 
     def test_partial_copy_is_not_visible_as_final_delivery(self):
         target = self.base / 'published' / 'final-draft'
@@ -307,14 +369,21 @@ class DeliveryTests(unittest.TestCase):
         for name, value in docs.items():
             n.write_json(second / name, value)
         policy = self.base / 'policy.json'
-        n.write_json(policy, {'policy_id': 'synthetic', 'policy_version': 'fixture'})
+        make_policy(policy)
         published = []
         for index, module in enumerate((lightweight, audited)):
             with self.subTest(entrypoint=module.__name__):
                 work = self.base / str(index) / 'task'
-                n.write_json(work / 'task.json', {'record_id': 'synthetic', 'title': 'synthetic'})
-                n.write_json(work / 'done.json', {'nas_links': [str(self.source), str(second)]})
-                with patch.dict(module.os.environ, {'JY_NAS_DISTRIBUTION_ROOT': str(work / 'nas')}):
+                names = [self.source.name, second.name]
+                acceptance = make_acceptance(work, self.source.parent, names,
+                    {'record_id': 'synthetic', 'title': 'synthetic', 'script': 'Synthetic script'})
+                distributions = make_distribution(acceptance, self.source.parent, names, work / 'share')
+                n.write_json(work / 'done.json', {**acceptance['done'], 'status': 'OK',
+                    'distribution_receipts': distributions,
+                    'nas_links': [row['nas_target'] for row in distributions]})
+                with patch.object(module, 'DRAFTS', self.source.parent), \
+                     patch.dict(module.os.environ, {'JY_NAS_DISTRIBUTION_ROOT': str(work / 'nas'),
+                                                   'JY_EVAL_RUNTIME_ROOT': str(acceptance['runtime_root'])}):
                     receipt = module.archive_parent(work / 'task.json', work / 'done.json', policy)
                 self.assertTrue(receipt['self_contained_versions'])
                 self.assertEqual(len(receipt['versions']), 2)
@@ -324,7 +393,7 @@ class DeliveryTests(unittest.TestCase):
         for target in published:
             self.assertEqual(delivery.verify_shared(target, target)['status'], 'SHARED_MEDIA_VERIFIED')
 
-    def test_single_archive_cannot_certify_missing_literal_reference(self):
+    def test_single_archive_blocks_missing_literal_reference_before_copy(self):
         import closed_loop as lightweight
         from tools import closed_loop as audited
         wrong = copy.deepcopy(self.payload)
@@ -333,13 +402,24 @@ class DeliveryTests(unittest.TestCase):
         ship = delivery.ship_module()
         ship.inject_tools(str(self.source))
         policy = self.base / 'policy.json'
-        n.write_json(policy, {'policy_id': 'synthetic', 'policy_version': 'fixture'})
+        make_policy(policy)
         for index, module in enumerate((lightweight, audited)):
             work = self.base / str(index)
-            n.write_json(work / 'task.json', {'record_id': 'synthetic'})
-            n.write_json(work / 'done.json', {'nas_links': [str(self.source)]})
-            with self.assertRaisesRegex(RuntimeError, 'OUTSIDE_TARGET'):
-                module.archive_parent(work / 'task.json', work / 'done.json', policy)
+            acceptance = make_acceptance(work, self.source.parent, [self.source.name],
+                {'record_id': 'synthetic', 'script': 'Synthetic script'})
+            contract = acceptance['contract']
+            receipt = {'status': 'VERIFIED', 'draft_name': self.source.name,
+                'task_id': contract['task_id'], 'run_id': contract['run_id'],
+                'contract_hash': contract['contract_hash'],
+                'source_output_sha256': tree_identity(self.source)['sha256'],
+                'nas_target': str(self.source), 'transformed_tree_sha256': tree_identity(self.source)['sha256']}
+            n.write_json(work / 'done.json', {**acceptance['done'], 'status': 'OK',
+                'distribution_receipts': [receipt], 'nas_links': [str(self.source)]})
+            with patch.object(module, 'DRAFTS', self.source.parent), \
+                 patch.dict(module.os.environ, {'JY_EVAL_RUNTIME_ROOT': str(acceptance['runtime_root'])}):
+                result = module.archive_parent(work / 'task.json', work / 'done.json', policy)
+            self.assertEqual(result['status'], 'BLOCKED')
+            self.assertIn('DISTRIBUTION_READBACK_INVALID:' + self.source.name, result['audit']['reasons'])
             self.assertNotIn('distribution_status', n.read_json(work / 'done.json'))
 
 

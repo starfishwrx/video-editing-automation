@@ -2,35 +2,39 @@
 
 当前维护入口为 `packages/video-v1.5.3/`，真实版本读包内 `VERSION`。默认选镜为 `ai_editor`，视觉后端为火山方舟直连 **GLM-5.3-Flash**（`glm-5.3-flash`）。配置和覆盖优先级见[模型与视觉流程](model-and-vision.md)。
 
+实现已按功能包组织，见[模块化开发](modular-development.md)。本文模块名表示职责；旧平铺导入路径继续兼容，实际源码归属以 `orchestrator/module_map.json` 为准。CLI/引擎位于 application，数据模型位于 domain，底层抽帧位于 media；闭环由 tools/workflow 唯一维护。
+
+Windows 整体脚本入口是 `scripts/run_pipeline.ps1`，内部调用 `tools.workflow.scheduled` 与既有 dispatcher。定时调度、制作和验收在同一台 Windows 主机完成，详见[运行说明](windows-pipeline.md)。
+
 ## 默认数据流
 
 ```mermaid
 flowchart TD
-    A[环境配置与任务 manifest] --> B[shot_analyzer: 分镜与代表帧]
+    A[Windows 定时任务与本地任务队列] --> B[shot_analyzer: 分镜与代表帧]
     B --> C[vision_analyzer: 图片理解及描述缓存]
     C --> D[ai_editor: 全稿分类与描述召回]
     D --> E[候选源窗口重新抽帧: 8 帧或加密 16 帧]
     E --> F[GLM-5.3-Flash 画面复审与整稿编排]
     F --> G[程序核验音频分配、证据、源窗和重复区间]
-    G --> H[OrchestrationEngine 与 jianying-editor 写草稿]
+    G --> H[OrchestrationEngine 与无头后端写原生草稿]
     H --> I[最终切片重新抽帧: 独立视觉 QC v4]
-    I --> J[人工审阅及授权后的闭环交付]
+    I --> J[Windows 四项自动验收与配置的闭环交付]
 ```
 
-1. **输入与环境**：外部注入路径/凭据；`platform_env.environment_report()` 检查本地依赖和草稿根。它不证明云端凭据可用，也不证明渲染机已升级。
+1. **输入与环境**：外部注入路径/凭据；`platform_env.environment_report()` 提供缓存的基础工具链事实，`headless.production_environment_report()` 汇总所选写稿后端的即时预检。CLI `env` 默认使用完整生产报告，`--profile base` 显式只查基础环境；不认证云端密钥，也不表示渲染机已升级。
 2. **素材理解**：`shot_analyzer.analyze_manifest` 做场景切分和抽帧；`vision_analyzer.enrich_with_vision` 通过带标记的拼图获得描述、标签、动作和证据区间。有效缓存可复用，错误或缺字段不能补成观察成功。
 3. **AI 选镜**：`cli._temporary_match → ai_editor.prepare → shot_analyzer.match_manifest`。描述只用于全稿分类和候选召回；卖点候选需重新看实际像素。候选不明确时加密观察，未知项与确定缺素材分别报告。AI 负责语义和编排，程序重验实际素材、窗口、证据和音频分配。
-4. **建稿**：引擎依次检查环境、口播/音色、证据、容量、时序、转场/BGM，安全调用 `jianying-editor`。产出草稿、`report/`、`last_result.json` 和任务事件。建稿成功仍需后续 QC 与人工验收。
-5. **独立 QC**：`draft_visual_qc.py` 从实际草稿源窗口重新抽帧；`ai_editor_qc` 使用 `chatcut-visual-qc-response-v4`，不接收选镜分数、理由或通过结论。独立指输入与审查调用独立，默认模型仍是同一个视觉后端。worker/Eval 核对报告、草稿和源内容身份。
-6. **闭环**：队列由 `batch_worker.py` 管理，`closed_loop.py` 与交付工具验证视觉、人工审阅及文件证据后执行授权的 NAS/表格操作。
+4. **建稿**：引擎依次检查环境、口播/音色、证据、容量、时序、转场/BGM，默认经 `application/headless_production.py` 调用单独安装的无头后端；BGM为空时自动选曲。产出草稿、`report/`、`last_result.json` 和任务事件。`draft_backend=legacy` 仅显式启用旧写稿器，独立时间线仍是另一个开发入口；建稿成功仍需独立 QC 和自动验收。
+5. **独立 QC**：`draft_visual_qc.py` 从实际草稿源窗口重新抽帧；`ai_editor_qc` 使用 `chatcut-visual-qc-response-v5`，按至少一个具体卖点的共享口径独立检查，不接收选镜分数、理由或通过结论。独立指输入与审查调用独立，默认模型仍是同一个视觉后端。worker/Eval 核对报告、草稿和源内容身份，旧v4须重新复核。
+6. **闭环**：整体脚本读取本地队列，由 dispatcher 调用 worker；`tools/acceptance` 验证输入、运行时、草稿包和独立 QC，全部通过后才执行配置的 NAS/表格操作。
 
 ## 显式 legacy 路线
 
 `manifest.selection_mode=legacy` 可覆盖环境选择；其次读 `JY_SELECTION_MODE`，未设置时默认 `ai_editor`。
 
-legacy 沿用 `match_with_codex` 的描述语义匹配、Top3/Top1、复用/机位策略、`scene_rules` / `phase_timing` 和视觉 QC v3。历史函数名不代表当前一定启动 Codex；实际调用由视觉 transport 决定。新模式不使用旧词表和旧场景换镜器裁决语义，两个模式的收据不能互相认证。
+legacy 通过 `vision_analyzer.match_sentences` 执行描述语义匹配，保留 Top3/Top1、复用/机位策略、`scene_rules` / `phase_timing` 和视觉 QC v3。新模式不使用旧词表和旧场景换镜器裁决语义，两个模式的收据不能互相认证。`rule_then_ai` 同样保留规则召回与有界 AI 补选。
 
-新模式要求 `volc_glm` 直连。`codex` / `anthropic` 是旧路线的显式回滚通道；只改 transport 而保留 `ai_editor` 会被 `AI_EDITOR_REQUIRES_DIRECT_GLM` 阻断。回滚需同时明确选镜模式与 transport，并单独验证所选模型的图像能力。
+所有选镜策略统一使用 GLM 或 Qwen 的直连 HTTP 接口：GLM 为 `volc_glm`（别名 `glm` / `volc`），Qwen 为 `qwen`（别名 `qwen_compatible`）。Codex CLI、Anthropic 与 CCSwitch 调用已经移除；旧通道及未知值直接报错，不触发静默回落。选镜算法与调用通道分别配置；文字复核和 `JY_AI_EDITOR_QWEN` 路由继续保留。
 
 ## 共用不变量与边界
 

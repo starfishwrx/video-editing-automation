@@ -8,17 +8,35 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 EXCLUDED_NAMES = {"build_manifest.py", "release-manifest.json", "PACKAGE_CONTENTS.sha256"}
 EXCLUDED_PARTS = {"__pycache__", ".pytest_cache", ".venv", ".uv-cache", ".git",
-                  "media", "config", "backups", "validation_runs", "report", "work"}
+                  "media", "config", "backups", "validation_runs", "report", "reports", "work",
+                  ".cache", "logs", ".jy_run"}
 EXCLUDED_SUFFIXES = {".pyc", ".pyo", ".mp4", ".mov", ".m4v", ".wav", ".mp3",
                      ".ogg", ".m4a", ".aac", ".flac", ".zip"}
-EXCLUDED_PREFIXES = {("jianying-editor", "data")}  # 本机同步的音色、云音乐缓存。
+EXCLUDED_PREFIXES = {("jianying-editor", "data"),  # 私有同步数据和临时链接。
+                     ("doubao-jianying-orchestrator", "bin")}  # 本机下载的媒体工具。
+SOURCE_MEDIA_PREFIX = ("doubao-jianying-orchestrator", "orchestrator", "media")
+REQUIRED_RUNTIME_RESOURCES = tuple("jianying-editor/resources/catalogs/" + name for name in (
+    "jianying_voice_catalog.csv", "tts_speakers.csv", "cloud_music_library.csv"))
+
+
+def require_runtime_resources(root: Path) -> None:
+    for relative in REQUIRED_RUNTIME_RESOURCES:
+        if not (root / relative).is_file():
+            raise ValueError("PACKAGE_RUNTIME_RESOURCE_MISSING: " + relative)
 
 
 def files() -> list[Path]:
     values = []
     for path in ROOT.rglob("*"):
         rel = path.relative_to(ROOT)
-        if path.name in EXCLUDED_NAMES or any(part in EXCLUDED_PARTS for part in rel.parts):
+        # The media feature contains source code. Other media directories are
+        # private task assets and must remain excluded, including nested ones.
+        excluded_part = any(
+            part in EXCLUDED_PARTS and not (
+                index == 2 and rel.parts[:3] == SOURCE_MEDIA_PREFIX
+            ) for index, part in enumerate(rel.parts)
+        )
+        if path.name in EXCLUDED_NAMES or excluded_part:
             continue
         if rel.parts[:2] in EXCLUDED_PREFIXES:
             continue
@@ -32,6 +50,7 @@ def files() -> list[Path]:
 
 
 def main() -> int:
+    require_runtime_resources(ROOT)
     version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
     if not version:
         raise ValueError("PACKAGE_VERSION_MISSING")

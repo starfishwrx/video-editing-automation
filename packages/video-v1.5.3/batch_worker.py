@@ -1,20 +1,22 @@
 # -*- coding: utf-8 -*-
-"""批量任务 worker（渲染机侧常驻）。
+"""Windows 脚本流水线的单任务执行器，由定时入口或 dispatcher 调用。
 
 逐条消费 `work/batch_queue.json`：
-  enumerate materials -> manifest -> build(preview管线, 1.3.29 已无画面标注) x count
+  enumerate materials -> manifest -> build x count -> independent QC
   -> ship(unс 分发) -> 进度写 `work/batch_progress.jsonl` -> 结果写
   `work/<record_id>/done.json`。
-Mac 侧负责最终人工检查和成功交付回写；失败/部分失败可由 worker 在有
-`LARK_BASE_TOKEN` 时即时回写表格，缺少凭据则落盘回执供监控侧重试。
+正式草稿通过本机自动验收后分发和回写；预览仅保留本地。
+失败/部分失败写入本机证据，有配置时回写失败状态。
 
 原则：
 - 任务之间互不影响：单条失败记 `error` + 证据（stderr 尾部/退出码），继续下一条。
 - 幂等：任何阶段重跑不产生半成品（report dir 按 task 复用，TTS/素材缓存命中）。
-- 凭据不出渲染机：NAS 挂载复用 `jy_pipeline/probe_mount2.ps1`（内部从 jy_poll.ps1
-  内存解析），不在本文件出现。
+- 凭据不出渲染机：NAS 挂载委托部署环境配置的外部脚本，源码不保存凭据。
 """
 from __future__ import annotations
+
+from tools.process_liveness import assert_process_alive as _assert_process_alive
+from tools.process_liveness import process_created_at
 
 import json
 import hashlib
@@ -29,9 +31,14 @@ import time
 import traceback
 import uuid
 from tools import production_eval, material_index
+from tools.queueing import contracts as queue_contracts
+from tools.acceptance import task_review
 from tools.delivery_identity import tree_identity
 from tools.draft_delivery import verify_shared
 from tools.delivery_runtime import require_ship_dependencies
+from tools.acceptance import finalization as acceptance_finalization
+from tools.acceptance.finalization import DeliveryContext
+from tools.acceptance.delivery_gate import requested_mode, local_preview
 
 try:
     # Windows OpenSSH sessions may expose a GBK console even though the
@@ -44,7 +51,20 @@ except (AttributeError, ValueError):
 
 PIPE_ROOT = pathlib.Path(os.environ.get("JY_PIPE_ROOT", pathlib.Path(__file__).resolve().parent))
 WORK = pathlib.Path(os.environ.get("JY_WORK_ROOT", str(PIPE_ROOT / "work")))
-SKILL = pathlib.Path(os.environ.get("JY_SKILL_ROOT", str(PIPE_ROOT / "doubao-jianying-orchestrator")))
+def _worker_skill_root() -> pathlib.Path:
+    explicit = os.environ.get("JY_ORCHESTRATOR_ROOT", "").strip()
+    if explicit:
+        return pathlib.Path(explicit)
+    legacy = os.environ.get("JY_SKILL_ROOT", "").strip()
+    if legacy:
+        root = pathlib.Path(legacy)
+        for candidate in (root, root / "doubao-jianying-orchestrator", root.parent / "doubao-jianying-orchestrator"):
+            if (candidate / "orchestrator" / "cli.py").is_file():
+                return candidate
+    return PIPE_ROOT / "doubao-jianying-orchestrator"
+
+
+SKILL = _worker_skill_root()
 DRAFTS = pathlib.Path(os.environ.get("JY_DRAFT_ROOT", str(PIPE_ROOT / "drafts")))
 PY = os.environ.get("JY_PYTHON_EXE", sys.executable)
 POST_DRAFT_QC = SKILL / "orchestrator" / "draft_visual_qc.py"
@@ -52,16 +72,13 @@ CAPACITY_PROFILE = pathlib.Path(os.environ.get("JY_CAPACITY_PROFILE", str(PIPE_R
 PROGRESS = WORK / "batch_progress.jsonl"
 STATUS_SNAPSHOT = WORK / "task_status_snapshot.json"
 LOG = WORK / "batch_worker.log"
-NAS_PROBE = os.environ.get("JY_NAS_PROBE", str(PIPE_ROOT / "probe_mount2.ps1"))
-NAS_TEST = os.environ.get("JY_NAS_TEST_ROOT", "").strip()
 VIDEO_EXTS = (".mp4", ".mov", ".m4v")
 SKIP_SHIP = os.environ.get("JY_SKIP_SHIP", "").strip() == "1"
 _OUTPUT_LOCK = threading.Lock()
 ACTIVE_RECORD_ID = ""
-PIPE = WORK.parent
+PIPE = PIPE_ROOT
 CLOSED_LOOP_TOOL = PIPE / "tools" / "closed_loop.py"
 CLOSED_LOOP_POLICY = PIPE / "WINDOWS_VIDEO_CLOSED_LOOP_RULES_20260930.json"
-MAC_REVIEW_REQUIRED = os.environ.get("JY_MAC_REVIEW_REQUIRED", "1").strip() != "0"
 
 
 def _pipeline_version() -> str:
@@ -73,8 +90,9 @@ def _pipeline_version() -> str:
 
 def _runtime_facts() -> dict:
     """Capture the execution surface that produced a batch receipt."""
-    vision_profile = os.environ.get("JY_VISION_PROFILE", "volc").strip()
-    vision_model = os.environ.get("JY_VISION_MODEL", "").strip()
+    if str(SKILL) not in sys.path:
+        sys.path.insert(0, str(SKILL))
+    from orchestrator.runtime import vision_config
     return {
         "python": str(PY),
         "skill_root": str(SKILL),
@@ -82,8 +100,7 @@ def _runtime_facts() -> dict:
         "pipeline_version": _pipeline_version(),
         "ffmpeg": shutil.which("ffmpeg") or "",
         "ffprobe": shutil.which("ffprobe") or "",
-        "vision_profile": vision_profile,
-        "vision_model": vision_model,
+        **vision_config.facts(),
     }
 
 
@@ -94,21 +111,7 @@ def _payload_sha256(payload: object) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _meeting_bgm_spec(value: object) -> dict:
-    """Preserve an explicit worker BGM choice; strings never become random auto."""
-    if isinstance(value, dict):
-        return dict(value) if value else {"auto": True}
-    text = str(value or "").strip()
-    if not text:
-        return {"auto": True}
-    path_like = (pathlib.Path(text).is_absolute()
-                 or bool(re.match(r"^[A-Za-z]:[\\/]", text))
-                 or text.startswith("\\\\")
-                 or ("/" in text or "\\" in text)
-                 or pathlib.Path(text).suffix.lower() in {".mp3", ".m4a", ".wav", ".aac", ".flac"})
-    if path_like:
-        return {"path": text}
-    return {"music_id": text}
+_meeting_bgm_spec = queue_contracts.meeting_bgm_spec
 
 
 def _batch_result_contract(status: str, *, run_id: str, failures: list[dict] | None = None,
@@ -117,70 +120,11 @@ def _batch_result_contract(status: str, *, run_id: str, failures: list[dict] | N
                            manifest_sha256: str | None = None,
                            runtime: dict | None = None,
                            task_log: str | None = None) -> dict:
-    """Return the monitor contract used to decide whether another task is safe."""
-    rows = failures or []
-    text = " ".join(str(row) for row in rows) + " " + str(error)
-    lower = text.lower()
-    first = rows[0] if rows else {}
-    failure_type = str(first.get("type") or "").lower()
-    if any(marker in lower for marker in ("vision_call_failed", "vision_json_invalid")):
-        failure_class, failure_code = "vision", "VISION_CALL_FAILED"
-    elif any(marker in lower for marker in ("visual_match_blocked", "shot_match_blocked", "material gap", "visual-missing")):
-        failure_class, failure_code = "semantic", "VISUAL_MATCH_BLOCKED"
-    elif "audio_video_mismatch" in lower or "shot_timing" in lower:
-        failure_class, failure_code = "timing", "AUDIO_VIDEO_MISMATCH"
-    elif "invalid argument" in lower or "task_budget" in lower or "budget" in lower:
-        failure_class, failure_code = "environment", "INVALID_ARGUMENT" if "invalid argument" in lower else "TASK_BUDGET_EXHAUSTED"
-    elif "task_already_running" in lower or "task_lock" in lower:
-        failure_class, failure_code = "environment", "TASK_ALREADY_RUNNING"
-    elif failure_type in {"environment", "preflight"} or "environment_precheck" in lower:
-        failure_class, failure_code = "environment", "ENVIRONMENT_PRECHECK_FAILED"
-    elif any(marker in lower for marker in (
-        "nas mount", "material_dir", "no video files", "script empty",
-        "draft root", "pipeline version",
-    )):
-        failure_class, failure_code = "environment", "ENVIRONMENT_PRECHECK_FAILED"
-    elif "qc" in lower or "draft" in lower:
-        failure_class, failure_code = "draft", "DRAFT_INVALID"
-    elif failure_type == "transient":
-        failure_class, failure_code = "provider", "TRANSIENT_BUILD_FAILURE"
-    elif rows or error:
-        failure_class, failure_code = "unknown", "TASK_FAILED"
-    else:
-        failure_class, failure_code = None, None
-
-    retryable = bool(
-        failure_class in {"vision", "provider"}
-        and any(token in lower for token in (
-            "timeout", "timed out", "429", "502", "503", "network",
-            "connection reset", "temporarily unavailable",
-        ))
-    )
-    if status == "OK":
-        terminal_state, next_action = "SUCCESS", "complete"
-    elif status == "DEFERRED":
-        terminal_state, next_action = "DEFERRED", "skip_task"
-    elif status in {"PARTIAL", "PREVIEW_READY"}:
-        terminal_state, next_action = "UNCERTIFIED", "manual_review"
-    elif failure_class in {"environment", "semantic", "timing", "draft"}:
-        terminal_state, next_action = "BLOCKED", "fix_environment" if failure_class == "environment" else "manual_review"
-    else:
-        terminal_state, next_action = "ERROR", "retry_stage" if retryable else "manual_review"
-    return {
-        "task_id": task_id,
-        "run_id": run_id,
-        "parent_run_id": parent_run_id,
-        "pipeline_version": _pipeline_version(),
-        "terminal_state": terminal_state,
-        "failure_class": failure_class,
-        "failure_code": failure_code,
-        "retryable": retryable,
-        "safe_to_continue": terminal_state == "SUCCESS",
-        "next_action": next_action,
-        "manifest_sha256": manifest_sha256,
-        "runtime": runtime,
-        "task_log": task_log,
-    }
+    return queue_contracts.batch_result_contract(
+        status, pipeline_version=_pipeline_version(), run_id=run_id,
+        failures=failures, error=error, parent_run_id=parent_run_id,
+        task_id=task_id, manifest_sha256=manifest_sha256, runtime=runtime,
+        task_log=task_log)
 
 
 def _nas_path(name: str) -> str:
@@ -210,14 +154,7 @@ MAX_DRAFT_ATTEMPTS = _env_int("JY_MAX_DRAFT_ATTEMPTS", 3, 1)
 # genuinely large but healthy task to finish.
 TASK_BUDGET_SECONDS = _env_int("JY_TASK_BUDGET_S", 1200, 60)
 TIMEOUT_ESCALATION_MULT = _env_int("JY_TIMEOUT_ESCALATION", 2, 1)
-TRANSIENT_BUILD_MARKERS = (
-    "402", "502", "503", "429", "Too Many Requests", "temporarily unavailable",
-    "Insufficient Balance", "timed out", "SHOT_ANALYSIS_PENDING",
-    "VISION_CALL_FAILED", "SHOT_MATCH_BLOCKED", "Connection reset",
-    "VISION_JSON_INVALID",
-    "Connection refused", "could not resolve host", "network",
-    "vision analysis incomplete", "empty description",
-)
+TRANSIENT_BUILD_MARKERS = queue_contracts.TRANSIENT_BUILD_MARKERS
 
 
 def log(*args):
@@ -240,7 +177,10 @@ def log(*args):
 
 def progress(entry: dict):
     entry["ts"] = time.strftime("%Y-%m-%d %H:%M:%S")
-    with _OUTPUT_LOCK:
+    if str(SKILL) not in sys.path:
+        sys.path.insert(0, str(SKILL))
+    from orchestrator.file_safety import file_lock
+    with _OUTPUT_LOCK, file_lock(PROGRESS):
         with PROGRESS.open("a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     try:
@@ -261,7 +201,7 @@ def _read_json(path: pathlib.Path) -> dict:
 def _acquire_record_lock(task_dir: pathlib.Path, run_id: str) -> pathlib.Path:
     """Prevent two worker processes from touching one record at once."""
     lock_path = task_dir / ".task_run.lock"
-    payload = {"pid": os.getpid(), "run_id": run_id,
+    payload = {"pid": os.getpid(), "process_created_at": process_created_at(os.getpid()), "run_id": run_id,
                "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
                "pipeline_version": _pipeline_version()}
     for _ in range(2):
@@ -278,7 +218,7 @@ def _acquire_record_lock(task_dir: pathlib.Path, run_id: str) -> pathlib.Path:
                 if pid and int(pid) == os.getpid():
                     alive = True
                 elif pid:
-                    os.kill(int(pid), 0)
+                    _assert_process_alive(int(pid), current.get("process_created_at"))
                     alive = True
             except (OSError, TypeError, ValueError, ProcessLookupError):
                 alive = False
@@ -333,8 +273,30 @@ def _qc_state(task_dir: pathlib.Path, drafts: list[str], done: dict) -> tuple[st
     return "UNCERTIFIED", len(reports), reports
 
 
+def _record_lock_is_live(task_dir: pathlib.Path) -> bool:
+    """A lock owned by a live, matching process identifies another worker."""
+    owner = _read_json(task_dir / ".task_run.lock")
+    try:
+        pid = int(owner.get("pid") or 0)
+        if pid <= 0:
+            return False
+        _assert_process_alive(pid, owner.get("process_created_at"))
+        return True
+    except (OSError, TypeError, ValueError, ProcessLookupError):
+        return False
+
+
 def _write_status_snapshot() -> None:
-    """Publish authoritative status; terminal done.json beats old start events."""
+    """Serialize read, reduction and atomic publication across worker processes."""
+    if str(SKILL) not in sys.path:
+        sys.path.insert(0, str(SKILL))
+    from orchestrator.file_safety import file_lock
+    with file_lock(STATUS_SNAPSHOT):
+        _write_status_snapshot_locked()
+
+
+def _write_status_snapshot_locked() -> None:
+    """Terminal done.json beats old start events unless a fresh owner is live."""
     latest: dict[str, dict] = {}
     if PROGRESS.is_file():
         for raw in PROGRESS.read_text(encoding="utf-8", errors="replace").splitlines():
@@ -357,8 +319,9 @@ def _write_status_snapshot() -> None:
         qc_status, qc_count, qc_rows = _qc_state(task_dir, drafts, done)
         terminal = str(done.get("status") or "").upper()
         done_finished_at = str(done.get("finished_at") or "")
+        live_worker = rid == ACTIVE_RECORD_ID or _record_lock_is_live(task_dir)
         new_attempt = (
-            rid == ACTIVE_RECORD_ID
+            live_worker
             and str(event.get("event") or "").lower() == "start"
             and str(event.get("ts") or "") > done_finished_at
         )
@@ -367,7 +330,7 @@ def _write_status_snapshot() -> None:
         elif done_path.is_file() and terminal in {"OK", "PARTIAL", "PREVIEW_READY", "ERROR", "DEFERRED"}:
             state, source = terminal, "done.json"
         elif (str(event.get("event") or "").lower() == "start"
-              and rid == ACTIVE_RECORD_ID):
+              and live_worker):
             state, source = "RUNNING", "live_worker_event"
         elif event:
             state, source = "STALE_ORPHANED", "historical_progress_only"
@@ -400,23 +363,8 @@ def _write_status_snapshot() -> None:
         "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "tasks": tasks,
     }
-    tmp = STATUS_SNAPSHOT.with_suffix(".tmp")
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(STATUS_SNAPSHOT)
-
-
-def mount_nas() -> bool:
-    if os.path.exists(NAS_TEST):
-        return True
-    out = subprocess.run(
-        ["powershell", "-NoProfile", "-ExecutionPolicy", "RemoteSigned",
-         "-File", NAS_PROBE],
-        capture_output=True, text=True, encoding="utf-8", errors="replace",
-        timeout=120)
-    ok = out.returncode == 0 and os.path.exists(NAS_TEST)
-    if not ok:
-        log("MOUNT_FAIL rc=%s %s" % (out.returncode, (out.stdout or "")[-200:]))
-    return ok
+    from orchestrator.file_safety import atomic_write_text
+    atomic_write_text(STATUS_SNAPSHOT, json.dumps(payload, ensure_ascii=False, indent=2))
 
 
 def video_files(material_dir: str) -> list[str]:
@@ -464,16 +412,20 @@ def validate_visual_match(report_dir: pathlib.Path) -> tuple[bool, str]:
 
     vision = analysis.get("vision_analysis") or {}
     segments = match.get("segments") or []
+    mixed_rule_ai = match.get("selection_mode") == "rule_then_ai"
     if ((match.get("manifest") or {}).get("selection_mode") == "ai_editor"
             or match.get("selection_mode") == "ai_editor"
             or any(isinstance(s, dict) and "ai_selection" in s for s in segments)):
         contract = production_eval.ai_editor_contract
         if (match.get("ok") is not True or not isinstance(segments, list) or not segments
-                or match.get("selection_mode") != "ai_editor"
+                or match.get("selection_mode") not in ("ai_editor", "rule_then_ai")
+                or (mixed_rule_ai and (match.get("manifest") or {}).get("selection_mode") != "rule_then_ai")
                 or contract.digest(segments) != contract.digest((match.get("manifest") or {}).get("segments"))):
             return False, "VISUAL_MATCH_BLOCKED: AI selection report identity invalid"
         candidates = {s.get("shot_id"): s for s in analysis.get("shots", []) if isinstance(s, dict)}
         for index, segment in enumerate(segments, 1):
+            if mixed_rule_ai and isinstance(segment, dict) and segment.get("selection_mode") != "ai_editor" and "ai_selection" not in segment:
+                continue  # Rule segments still pass every legacy check below.
             if not isinstance(segment, dict) or segment.get("selection_mode") != "ai_editor":
                 return False, "VISUAL_MATCH_BLOCKED: mixed AI/legacy segments"
             check = contract.validate_segment_receipt(segment, index=index, verify_source=True, manifest=match.get("manifest"))
@@ -483,10 +435,11 @@ def validate_visual_match(report_dir: pathlib.Path) -> tuple[bool, str]:
                 sid = part.get("shot_id") or part.get("temporary_shot_id")
                 if sid not in candidates or str(part.get("video")) != str(candidates[sid].get("video")):
                     return False, "VISUAL_MATCH_BLOCKED: AI selection outside task source catalog"
-        sequence = contract.sequence_errors(segments)
+        sequence = contract.sequence_errors([s for s in segments if isinstance(s, dict) and s.get("selection_mode") == "ai_editor"])
         if sequence:
             return False, "VISUAL_MATCH_BLOCKED: " + ";".join(sequence)
-        return True, "ai_visual_match_valid_independent_qc_required"
+        if not mixed_rule_ai:
+            return True, "ai_visual_match_valid_independent_qc_required"
     errors = vision.get("errors") or []
     shots = analysis.get("shots") or []
     ready = [row for row in shots
@@ -620,71 +573,37 @@ def validate_visual_match(report_dir: pathlib.Path) -> tuple[bool, str]:
             return False, "VISUAL_MATCH_BLOCKED: segment %d claim gate blocked/uncovered" % index
     return True, "visual_match_valid"
 
-def safe_manifest_stem(name: str) -> str:
-    """Make a Windows-safe manifest filename without changing the draft name.
-
-    Only the on-disk manifest file is sanitized; the Jianying draft_name inside
-    the manifest keeps its original title, so drafts and their display names are
-    never altered or renamed.
-    """
-    stem = re.sub(r"[\\/:*?\"<>|\r\n\t]+", "_", str(name)).strip(" .")
-    return stem or "draft"
+safe_manifest_stem = queue_contracts.safe_manifest_stem
 
 
 def classify_build_failure(text: str) -> dict:
-    """Auto-classify a build failure so the loop can pick a repair strategy.
-
-    Transient = retryable with a different strategy (fresh vision, analysis
-    reuse, or a longer timeout).  Hard = a genuine visual-analysis blocker that
-    must be recorded, never faked as OK.
-    """
-    blob = text or ""
-    lower_blob = blob.lower()
-    hits = [m for m in TRANSIENT_BUILD_MARKERS if m.lower() in lower_blob]
-    transient_signals = (
-        "502", "503", "429", "too many requests", "temporarily unavailable",
-        "timed out", "timeout", "connection reset", "connection refused",
-        "could not resolve host", "network", "provider unavailable",
-    )
-    transient = any(marker in lower_blob for marker in transient_signals)
-    credential_or_input_block = any(marker in lower_blob for marker in (
-        "credential", "unauthorized", "forbidden", "invalid api key",
-        "insufficient balance", "401", "403", "invalid path", "path not found",
-        "file not found", "no such file", "encoding error", "unicode decode",
-    ))
-    deterministic_block = any(marker.lower() in lower_blob for marker in (
-        "VISUAL_MATCH_BLOCKED", "SHOT_MATCH_BLOCKED", "AUDIO_VIDEO_MISMATCH",
-        "TASK_BUDGET", "Invalid argument", "INVALID_ARGUMENT",
-        "DESKTOP_IMPORT_BLOCKED", "DRAFT_INVALID",
-    )) or credential_or_input_block or ("vision_call_failed" in lower_blob and not transient)
-    vision_hard = ("draft_visual_qc_blocked" in lower_blob) or (
-        "no auditable visual top1" in lower_blob) or (
-        "visual_match_blocked" in lower_blob and not hits)
-    return {
-        "transient": bool(hits and transient and not credential_or_input_block),
-        "vision_hard": vision_hard,
-        "deterministic_block": deterministic_block,
-        "markers": hits,
-    }
+    return queue_contracts.classify_build_failure(
+        text, transient_markers=TRANSIENT_BUILD_MARKERS)
 
 
-def _is_reusable_analysis_row(row: object) -> bool:
-    if not isinstance(row, dict):
-        return False
-    if not (str(row.get("description") or "").strip()
-            and row.get("visual_tags") and row.get("evidence_tags")):
-        return False
-    try:
-        return float(row.get("analysis_confidence") or 0) > 0
-    except (TypeError, ValueError):
-        return False
+_is_reusable_analysis_row = queue_contracts.is_reusable_analysis_row
 
 
 def run_build(manifest: dict, report_dir: pathlib.Path, draft_name: str, *,
               timeout: int | None = None, reuse_analysis: str | None = None,
-              attempt: int = 1) -> dict:
+              attempt: int = 1, force_rebuild: bool = False) -> dict:
     manifest = dict(manifest)
     manifest["draft_name"] = draft_name
+    manifest["delivery_mode"] = requested_mode(manifest)
+    from tools.workflow import selection_recovery
+    if force_rebuild:
+        selection_recovery.archive_state(report_dir)
+    if not force_rebuild and selection_recovery.pending(report_dir):
+        env = dict(os.environ, PYTHONUTF8="1")
+        deadline = time.time() + (timeout or BUILD_TIMEOUT_SECONDS)
+        inherited = env.get("JY_TASK_DEADLINE_TS") or env.get("JY_TASK_DEADLINE_EPOCH")
+        if inherited:
+            deadline = min(deadline, float(inherited))
+        env["JY_STAGE_DEADLINE_TS"] = env["JY_STAGE_DEADLINE_EPOCH"] = str(deadline)
+        log("resume selection only from frozen narration and observations: %s" % report_dir)
+        return selection_recovery.recover(manifest, report_dir,
+            prefix=[PY, "-m", "orchestrator.cli"], run=subprocess.run, env=env,
+            cwd=str(SKILL), deadline=deadline, drafts_root=DRAFTS)
     if reuse_analysis:
         try:
             cached_payload = json.loads(pathlib.Path(reuse_analysis).read_text(
@@ -710,19 +629,13 @@ def run_build(manifest: dict, report_dir: pathlib.Path, draft_name: str, *,
                      encoding="utf-8")
     cmd = [PY, "-m", "orchestrator.cli", "build",
            "--input", str(mpath), "--report-dir", str(report_dir),
-           "--delivery-mode", "preview"]
+           "--delivery-mode", manifest["delivery_mode"]]
     env = dict(os.environ, PYTHONUTF8="1")
-    # 视觉分析画像可通过 JY_VISION_PROFILE 切换。默认使用火山
-    # CodingPlan 的 OpenAI-compatible profile，避免旧的 CC Switch
-    # Anthropic Messages 路由返回空响应；需要回滚时显式传入其他 profile。
-    vp = os.environ.get("JY_VISION_PROFILE", "volc").strip().strip('"').strip("'").strip()
-    vm = os.environ.get("JY_VISION_MODEL", "").strip().strip('"').strip("'").strip()
-    if vp:
-        env["JY_VISION_PROFILE"] = vp
-    if not vm and vp == "aijws":
-        vm = "qwen3.8-flash"
-    if vm:
-        env["JY_VISION_MODEL"] = vm
+    if str(SKILL) not in sys.path:
+        sys.path.insert(0, str(SKILL))
+    from orchestrator.runtime import vision_config
+    env["JY_VISION_TRANSPORT"] = vision_config.transport()
+    vision_model = vision_config.model()
     timeout = timeout or BUILD_TIMEOUT_SECONDS
     deadline = time.time() + timeout
     inherited = env.get("JY_TASK_DEADLINE_TS") or env.get("JY_TASK_DEADLINE_EPOCH")
@@ -731,12 +644,27 @@ def run_build(manifest: dict, report_dir: pathlib.Path, draft_name: str, *,
     timeout = max(0.001, deadline - time.time())
     env["JY_STAGE_DEADLINE_EPOCH"] = str(deadline)
     env["JY_STAGE_DEADLINE_TS"] = str(deadline)
-    log("build draft=%s vision_profile=%s vision_model=%s timeout=%ss reuse=%s attempt=%s" % (
-        draft_name, vp or "volc(default)", vm or "profile-default", timeout,
+    log("build draft=%s vision_transport=%s vision_model=%s timeout=%ss reuse=%s attempt=%s" % (
+        draft_name, env["JY_VISION_TRANSPORT"], vision_model or "unconfigured", timeout,
         "yes" if reuse_analysis else "no", attempt))
-    p = subprocess.run(cmd, cwd=str(SKILL), env=env, capture_output=True,
-                       text=True, encoding="utf-8", errors="replace",
-                       timeout=timeout + 30)
+    previous_selection_run = _read_json(report_dir / "selection_resume.json").get("run_id")
+    try:
+        p = subprocess.run(cmd, cwd=str(SKILL), env=env, capture_output=True,
+                           text=True, encoding="utf-8", errors="replace",
+                           timeout=timeout + 30)
+    except subprocess.TimeoutExpired:
+        retained = selection_recovery.selection_timeout(report_dir, previous_run_id=previous_selection_run)
+        if retained:
+            return {**retained, "manifest": str(mpath)}
+        if selection_recovery.completed(report_dir, previous_run_id=previous_selection_run):
+            failure = {"status": "DRAFT_WRITE_TIMEOUT", "failure_class": "draft", "retryable": False,
+                       "resume_stage": "draft_write", "reason": "DRAFT_WRITE_DEADLINE_EXCEEDED"}
+            (report_dir / "last_result.json").write_text(json.dumps(failure), encoding="utf-8")
+            return {"rc": 1, "stdout": json.dumps(failure), "stderr": "", "combined": json.dumps(failure)}
+        (report_dir / "shot_match_report.json").write_text(json.dumps({
+            "ok": False, "input_manifest": manifest, "status": "BUILD_DEADLINE_EXCEEDED",
+        }, ensure_ascii=False), encoding="utf-8")
+        raise
     out = (p.stdout or "") + "\n" + (p.stderr or "")
     return {"rc": p.returncode, "stdout": (p.stdout or "")[-20000:],
             "stderr": (p.stderr or "")[-20000:], "manifest": str(mpath),
@@ -892,16 +820,38 @@ def resume_task_qc(task: dict) -> dict:
 
 
 def ship_one(draft_dir: pathlib.Path, task_dir: pathlib.Path | None = None,
-             frozen: dict | None = None) -> dict:
+             frozen: dict | None = None, *, context: DeliveryContext | None = None) -> dict:
     """Ship a verified copy so path rewriting never mutates the reviewed draft."""
-    require_ship_dependencies(SKILL.parent)
+    skill = context.skill_root if context else SKILL
+    work = context.work_root if context else WORK
+    python = context.python if context else PY
+    require_ship_dependencies(skill.parent)
     source_identity = production_eval.output_identity([draft_dir])
-    task_dir = task_dir or (WORK / '.manual-ship-stage')
+    task_dir = task_dir or (work / '.manual-ship-stage')
     staging = task_dir / 'shipping-stage' / (uuid.uuid4().hex) / draft_dir.name
-    cmd = [PY, str(SKILL / "orchestrator" / "ship_distribute.py"),
+    from tools.native_drafts import is_native
+    if is_native(draft_dir):
+        from tools.native_delivery import ship as ship_native
+        try:
+            payload = ship_native(draft_dir, staging)
+            if production_eval.output_identity([draft_dir]) != source_identity:
+                raise RuntimeError('SOURCE_CHANGED_DURING_DELIVERY')
+            receipt = {'schema_version': 1, 'status': 'VERIFIED', 'draft_name': draft_dir.name,
+                'task_id': (frozen or {}).get('task_id'), 'run_id': (frozen or {}).get('run_id'),
+                'contract_hash': (frozen or {}).get('contract_hash'),
+                'source_output_sha256': source_identity['sha256'], 'staging_path': str(staging),
+                'nas_target': payload['dist_target'], 'transformed_tree_sha256': payload['staged_tree_sha256'],
+                'transformed_file_count': payload['staged_file_count'], 'nas_root_verified': True,
+                'distribution_verified': True, 'shared_media_references_verified': True,
+                'shared_reference_root': payload['shared_reference_root'], 'draft_backend': 'headless'}
+            return {'rc': 0, 'out': 'HEADLESS_SHARED_COPY_VERIFIED', 'receipt': receipt, 'distribution': payload}
+        except (OSError, ValueError, RuntimeError) as exc:
+            return {'rc': 2, 'out': str(exc), 'staging_path': str(staging),
+                    'source_output_sha256': source_identity['sha256']}
+    cmd = [python, str(skill / "orchestrator" / "ship_distribute.py"),
            "--draft", str(draft_dir), "--style", "unc", "--work", str(staging.parent)]
     env = dict(os.environ, PYTHONUTF8="1")
-    p = subprocess.run(cmd, cwd=str(SKILL), env=env, capture_output=True,
+    p = subprocess.run(cmd, cwd=str(skill), env=env, capture_output=True,
                        text=True, encoding="utf-8", errors="replace",
                        timeout=600)
     raw = (p.stdout or "").strip().splitlines()
@@ -944,232 +894,39 @@ def ship_one(draft_dir: pathlib.Path, task_dir: pathlib.Path | None = None,
             "distribution": payload}
 
 
-def prepare_mac_review(task_dir: pathlib.Path, task: dict, draft_names: list[str]) -> pathlib.Path:
-    """Persist an exact Mac review handoff before NAS distribution."""
-    outputs = [DRAFTS / name for name in draft_names]
-    output_sha256 = production_eval.output_identity(outputs)["sha256"]
-    frozen_path = task_dir / "eval" / "active_contract.json"
-    frozen = production_eval.read(frozen_path) if frozen_path.is_file() else {}
-    package = task_dir / ("mac_review_package-" + output_sha256 + ".json")
-    payload = {
-        "record_id": task.get("record_id"),
-        "task_id": task.get("task_id"),
-        "run_id": frozen.get("run_id"),
-        "contract_hash": frozen.get("contract_hash"),
-        "output_sha256": output_sha256,
-        "draft_ids": production_eval.output_draft_ids(outputs),
-        "title": task.get("title"),
-        "drafts": [str(DRAFTS / name) for name in draft_names],
-        "review_required": True,
-        "approval_file": str(_mac_approval_path(task_dir, draft_names, frozen)),
-        "instruction": "Mac 检查通过后，由授权检查流程写入 mac_review_approved.json；未批准不得 NAS 分发或表格回写。",
-        "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-    }
-    production_eval.write_once(package, payload)
-    return package
-
-
-def _mac_approval_path(task_dir: pathlib.Path, draft_names: list[str], frozen: dict | None) -> pathlib.Path:
-    if not frozen or not frozen.get('run_id'):
-        return task_dir / 'mac_review_approved.json'
-    output_sha256 = production_eval.output_identity([DRAFTS / name for name in draft_names])['sha256']
-    return task_dir / ('mac_review_approved-' + output_sha256 + '.json')
+def _save_frozen_task(task_dir: pathlib.Path, task: dict, frozen: dict) -> None:
+    """Persist exactly the normalized task bound to the active run contract."""
+    if (str(task.get("task_id") or task.get("record_id") or "").strip() != str(frozen.get("task_id") or "")
+            or production_eval.digest(task) != frozen.get("task_sha256")):
+        raise ValueError("TASK_CONTRACT_CONTENT_MISMATCH")
+    from orchestrator.file_safety import atomic_write_text
+    atomic_write_text(task_dir / "task.json", json.dumps(task, ensure_ascii=False, indent=2))
 
 
 def finalize_closed_loop(task_dir: pathlib.Path, task: dict, drafts: list[str],
-                         qc_reports: list[dict],
-                         delivery_receipts: list[dict] | None = None) -> dict:
-    """Evaluate first, then ship hash-verified copies and write back the table."""
-    done_path = task_dir / "done.json"
-    existing_done = _read_json(done_path)
-    provisional = dict(existing_done)
-    provisional.update({"record_id": task.get("record_id"), "status": "PREVIEW_READY",
-        "drafts": list(drafts), "local_only_drafts": list(drafts),
-        "qc_reports": qc_reports, "nas_links": [],
-        "distribution_status": "PENDING_EVAL_OR_REVIEW",
-        "finished_at": time.strftime("%Y-%m-%d %H:%M:%S")})
-    frozen_path = task_dir / "eval" / "active_contract.json"
-    frozen = None
-    eval_result = None
-    if frozen_path.is_file():
-        frozen = production_eval.read(frozen_path)
-        result = evaluate_task(task_dir, task, drafts, qc_reports, frozen)
-        eval_result = result
-        provisional["eval_receipt"] = result
-        mac_status = next((row.get('status') for row in result.get('criteria', [])
-                           if row.get('id') == 'MAC-REVIEW'), 'UNCERTIFIED')
-        if MAC_REVIEW_REQUIRED and mac_status != 'PASS':
-            done_path.write_text(json.dumps(provisional, ensure_ascii=False, indent=2), encoding="utf-8")
-            return {"ok": False, "status": "BLOCKED", "reason": "MAC_REVIEW_EVAL_NOT_PASS", "eval": result}
-        if frozen["mode"] == "enforce" and result["status"] != "PASS":
-            done_path.write_text(json.dumps(provisional, ensure_ascii=False, indent=2), encoding="utf-8")
-            return {"ok": False, "status": "BLOCKED", "reason": "EVAL_DELIVERY_GATE", "eval": result}
-    elif os.environ.get('JY_EVAL_MODE') == 'enforce':
-        done_path.write_text(json.dumps(provisional, ensure_ascii=False, indent=2), encoding="utf-8")
-        return {"ok": False, "status": "BLOCKED", "reason": "EVAL_CONTRACT_MISSING"}
-    if MAC_REVIEW_REQUIRED and not _mac_approval_path(task_dir, drafts, frozen).is_file():
-        done_path.write_text(json.dumps(provisional, ensure_ascii=False, indent=2), encoding="utf-8")
-        return {"ok": False, "status": "BLOCKED", "reason": "MAC_REVIEW_PENDING"}
-
-    receipts = list(delivery_receipts or existing_done.get('distribution_receipts') or [])
-    by_name = {str(row.get('draft_name') or ''): row for row in receipts if isinstance(row, dict)}
-    if frozen is None:
-        frozen = {}
-    provisional['eval_receipt'] = eval_result or provisional.get('eval_receipt')
-    provisional['distribution_receipts'] = []
-    done_path.write_text(json.dumps(provisional, ensure_ascii=False, indent=2), encoding="utf-8")
-    for name in drafts:
-        source = DRAFTS / name
-        current_identity = production_eval.output_identity([source])
-        receipt = by_name.get(name)
-        if receipt:
-            if (receipt.get('status') != 'VERIFIED'
-                    or receipt.get('source_output_sha256') != current_identity['sha256']
-                    or receipt.get('draft_name') != name
-                    or (frozen.get('task_id') and receipt.get('task_id') != frozen['task_id'])
-                    or (frozen.get('run_id') and receipt.get('run_id') != frozen['run_id'])
-                    or (frozen.get('contract_hash')
-                        and receipt.get('contract_hash') != frozen['contract_hash'])):
-                return {"ok": False, "status": "BLOCKED", "reason": "DISTRIBUTION_SOURCE_DRIFT", "draft": name}
-            target = pathlib.Path(str(receipt.get('nas_target') or ''))
-            try:
-                target_identity = tree_identity(target)
-            except (OSError, ValueError):
-                return {"ok": False, "status": "BLOCKED", "reason": "DISTRIBUTION_READBACK_MISSING", "draft": name}
-            if target_identity['sha256'] != receipt.get('transformed_tree_sha256'):
-                return {"ok": False, "status": "BLOCKED", "reason": "DISTRIBUTION_READBACK_DRIFT", "draft": name}
-            # A legacy hash receipt may certify equally broken copies. Resume
-            # must recheck the shared files too, rather than trust old flags.
-            try:
-                reference_root = target.parent.parent / name
-                verify_shared(target, reference_root)
-            except (RuntimeError, OSError, ValueError) as exc:
-                return {"ok": False, "status": "BLOCKED", "reason": "DISTRIBUTION_MEDIA_REFERENCE_INVALID",
-                        "draft": name, "detail": str(exc)}
-            receipt['shared_media_references_verified'] = True
-            receipt['shared_reference_root'] = str(reference_root)
-        else:
-            shipped = ship_one(source, task_dir=task_dir, frozen=frozen)
-            if shipped.get('rc') != 0:
-                provisional['distribution_status'] = 'PENDING_SHIP_VERIFICATION'
-                done_path.write_text(json.dumps(provisional, ensure_ascii=False, indent=2), encoding="utf-8")
-                return {"ok": False, "status": "BLOCKED", "reason": "SHIP_OR_READBACK_FAILED",
-                        "draft": name, "detail": shipped.get('out')}
-            receipt = shipped['receipt']
-        if frozen.get('contract_hash'):
-            receipt['eval_receipt_sha256'] = (eval_result or {}).get('receipt_sha256')
-            receipt['eval_status'] = (eval_result or {}).get('status', 'UNCERTIFIED')
-        receipt['status'] = 'VERIFIED'
-        receipt_body = dict(receipt)
-        receipt_body.pop('receipt_sha256', None)
-        receipt['receipt_sha256'] = production_eval.digest(receipt_body)
-        receipt_dir = task_dir / 'eval' / (frozen.get('run_id') or 'legacy')
-        receipt_path = receipt_dir / ('distribution-' + receipt['receipt_sha256'] + '.json')
-        production_eval.write_once(receipt_path, receipt)
-        bound = dict(receipt, receipt_path=str(receipt_path))
-        provisional['distribution_receipts'].append(bound)
-        provisional['nas_links'].append(receipt['nas_target'])
-        provisional['distribution_status'] = 'SHIPPED_VERIFIED'
-        done_path.write_text(json.dumps(provisional, ensure_ascii=False, indent=2), encoding="utf-8")
-    if len(provisional['distribution_receipts']) != len(drafts):
-        return {"ok": False, "status": "BLOCKED", "reason": "DISTRIBUTION_RECEIPT_COUNT_MISMATCH"}
-    provisional['status'] = 'OK'
-    provisional['local_only_drafts'] = []
-    done_path.write_text(json.dumps(provisional, ensure_ascii=False, indent=2), encoding="utf-8")
-    if not CLOSED_LOOP_TOOL.is_file() or not CLOSED_LOOP_POLICY.is_file():
-        return {"ok": False, "status": "BLOCKED", "reason": "CLOSED_LOOP_TOOL_OR_POLICY_MISSING"}
-    common = [PY, str(CLOSED_LOOP_TOOL), "--task-json", str(task_dir / "task.json"), "--done-json", str(done_path), "--policy", str(CLOSED_LOOP_POLICY)]
-    archive = subprocess.run(common[:2] + ["archive-parent"] + common[2:], cwd=str(PIPE), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
-    if archive.returncode != 0:
-        return {"ok": False, "status": "BLOCKED", "reason": "ARCHIVE_PARENT_FAILED", "output": (archive.stdout or archive.stderr)[-2000:]}
-    update = subprocess.run(common[:2] + ["table-update"] + common[2:], cwd=str(PIPE), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
-    if update.returncode != 0:
-        return {"ok": False, "status": "BLOCKED", "reason": "TABLE_UPDATE_FAILED", "output": (update.stdout or update.stderr)[-2000:]}
-    try:
-        receipt = json.loads(update.stdout)
-    except (ValueError, TypeError):
-        receipt = {"raw": update.stdout[-2000:]}
-    return {"ok": True, "status": "CLOSED_LOOP_COMPLETE", "archive": archive.stdout[-2000:], "table": receipt}
+                         qc_reports: list[dict], delivery_receipts: list[dict] | None = None, *,
+                         context: DeliveryContext | None = None) -> dict:
+    explicit = context is not None
+    context = context or DeliveryContext(
+        draft_root=DRAFTS, workflow_root=PIPE, skill_root=SKILL, work_root=WORK,
+        runtime_root=pathlib.Path(os.environ.get("JY_EVAL_RUNTIME_ROOT", str(PIPE_ROOT))),
+        closed_loop_tool=CLOSED_LOOP_TOOL, closed_loop_policy=CLOSED_LOOP_POLICY,
+        python=PY)
+    evaluate = (lambda *args: evaluate_task(*args, context=context)) if explicit else evaluate_task
+    ship = (lambda *args, **kwargs: ship_one(*args, context=context, **kwargs)) if explicit else ship_one
+    return acceptance_finalization.finalize_closed_loop(
+        task_dir, task, drafts, qc_reports, delivery_receipts, context=context,
+        read_json=_read_json, evaluate=evaluate, validate_package=validate_draft_package,
+        ship=ship, run=subprocess.run, verify_shared=verify_shared, tree_identity=tree_identity)
 
 
 def evaluate_task(task_dir: pathlib.Path, task: dict, drafts: list[str],
-                  qc_reports: list[dict], frozen: dict) -> dict:
-    """Persist current-output evidence before any final distribution/table gate."""
-    outputs = [DRAFTS / name for name in drafts]
-    eval_dir = task_dir / "eval" / frozen["run_id"]
-    eval_dir.mkdir(parents=True, exist_ok=True)
-    identity = production_eval.output_identity(outputs)
-    binding = {"task_id": frozen["task_id"], "run_id": frozen["run_id"],
-               "contract_hash": frozen["contract_hash"], "output_sha256": identity["sha256"]}
-    checks = [validate_draft_package(path) for path in outputs]
-    package = dict(binding, status="PASS" if checks and all(c["ok"] for c in checks) else "FAIL",
-                   files_verified=bool(checks) and all(c["ok"] for c in checks), checks=checks)
-    package_path = eval_dir / ("package-" + identity["sha256"] + ".json")
-    production_eval.write_once(package_path, package)
-    output_by_name = {path.name: path for path in outputs}
-    report_rows = list(qc_reports) if isinstance(qc_reports, list) else []
-    qc_files = [pathlib.Path(str(row.get("report") or "")) if isinstance(row, dict)
-                else pathlib.Path("") for row in report_rows]
-    qc_payloads = [_read_json(path) if path.is_file() else {} for path in qc_files]
-    qc_payloads = [row if isinstance(row, dict) else {} for row in qc_payloads]
-    statuses = [production_eval.visual_qc_contract.report_status(row) for row in qc_payloads]
-    seen_drafts = set()
-    qc_identity_valid = len(report_rows) == len(outputs) and bool(outputs)
-    for ref, report in zip(report_rows, qc_payloads):
-        draft_name = ref.get("draft") if isinstance(ref, dict) else None
-        target = output_by_name.get(str(draft_name))
-        if (target is None or str(draft_name) in seen_drafts
-                or not production_eval.visual_qc_contract.report_matches_draft(report, target)):
-            qc_identity_valid = False
-        if target is not None:
-            seen_drafts.add(str(draft_name))
-    qc_identity_valid = qc_identity_valid and len(seen_drafts) == len(outputs)
-    qc_status = ("FAIL" if "FAIL" in statuses else
-                 "PASS_WITH_DEGRADED" if statuses and len(statuses) == len(drafts)
-                 and qc_identity_valid
-                 and all(s in {"PASS", "PASS_WITH_DEGRADED"} for s in statuses)
-                 and "PASS_WITH_DEGRADED" in statuses else
-                 "PASS" if len(statuses) == len(drafts) and statuses and qc_identity_valid
-                 and all(s == "PASS" for s in statuses)
-                 else "UNCERTIFIED")
-    contract_status = ("VALIDATED" if len(qc_payloads) == len(drafts) and qc_payloads and qc_identity_valid
-                       and all(isinstance(row.get("response_contract"), dict)
-                               and row["response_contract"].get("status") == "VALIDATED"
-                               and status in {"PASS", "PASS_WITH_DEGRADED", "FAIL"}
-                               for row, status in zip(qc_payloads, statuses)) else "UNCERTIFIED")
-    qc = dict(binding, qc_status=qc_status, contract_status=contract_status,
-              response_version=(qc_payloads[0].get("response_contract", {}).get("version")
-                                if qc_payloads and len({r.get("response_contract", {}).get("version") for r in qc_payloads}) == 1
-                                else "MIXED_OR_MISSING"),
-              status="FAIL" if qc_status == "FAIL" else "PASS" if qc_status in {"PASS", "PASS_WITH_DEGRADED"} else "UNCERTIFIED",
-              reports=[{"path": str(p), "sha256": production_eval.file_hash(p)} for p in qc_files if p.is_file()])
-    qc_path = eval_dir / ("qc-" + production_eval.digest(qc) + ".json")
-    production_eval.write_once(qc_path, qc)
-    proof_map = {"DRAFT-PACKAGE": package_path, "VISUAL-QC": qc_path}
-    selection_path = eval_dir / ("review-selection-" + identity["sha256"] + ".json")
-    try:
-        selection = production_eval.read(selection_path)
-        selection_hash = selection.pop('selection_sha256', None)
-        if selection_hash != production_eval.digest(selection):
-            raise ValueError('REVIEW_SELECTION_HASH_MISMATCH')
-        for key, criterion in (('gold_quality_review', 'GOLD-QUALITY'), ('mac_review', 'MAC-REVIEW')):
-            ref = selection.get(key) or {}
-            path = pathlib.Path(str(ref.get('path') or ''))
-            if production_eval.file_hash(path) != ref.get('sha256'):
-                raise ValueError('REVIEW_SELECTION_EVIDENCE_HASH_MISMATCH:' + key)
-            proof_map[criterion] = path
-    except (OSError, ValueError, KeyError, TypeError):
-        proof_map['GOLD-QUALITY'] = eval_dir / 'missing-gold-quality-review.json'
-        proof_map['MAC-REVIEW'] = eval_dir / 'missing-mac-review.json'
-    runtime_root = pathlib.Path(os.environ.get("JY_EVAL_RUNTIME_ROOT", str(PIPE_ROOT)))
-    try:
-        runtime = production_eval.runtime_identity(runtime_root)
-    except (OSError, ValueError, KeyError) as exc:
-        runtime = {"verification_error": str(exc)}
-    result = production_eval.evaluate(frozen, task, runtime, outputs, proof_map)
-    path = eval_dir / ("receipt-" + result["receipt_sha256"] + ".json")
-    production_eval.write_once(path, result)
-    return dict(result, receipt_path=str(path))
+                  qc_reports: list[dict], frozen: dict, *, context: DeliveryContext | None = None) -> dict:
+    runtime_root = context.runtime_root if context else pathlib.Path(os.environ.get("JY_EVAL_RUNTIME_ROOT", str(PIPE_ROOT)))
+    return task_review.evaluate_task(
+        task_dir, task, drafts, qc_reports, frozen, draft_root=context.draft_root if context else DRAFTS,
+        runtime_root=runtime_root, package_validator=validate_draft_package,
+        read_json=_read_json)
 
 
 def publish_failure_notification(task_dir: pathlib.Path) -> dict:
@@ -1202,64 +959,7 @@ def publish_failure_notification(task_dir: pathlib.Path) -> dict:
 
 
 def validate_draft_package(draft_dir: pathlib.Path) -> dict:
-    """Hard gate the package before NAS shipping.
-
-    A successful build or a timed-out visual model call is not evidence that
-    JianYing contains usable video.  Verify the draft graph and the resolved
-    local media paths first; otherwise shipping would turn an unverified
-    audio-only/empty draft into a false delivery.
-    """
-    info_path = next((p for p in (draft_dir / "draft_info.json",
-                                  draft_dir / "draft_content.json")
-                      if p.is_file()), None)
-    if info_path is None:
-        return {"ok": False, "issues": ["DRAFT_INFO_MISSING"]}
-    try:
-        info = json.loads(info_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError) as exc:
-        return {"ok": False, "issues": ["DRAFT_INFO_INVALID:%s" % exc]}
-    tracks = [t for t in (info.get("tracks") or []) if isinstance(t, dict)]
-    preferred = [t for t in tracks if str(t.get("name") or "").casefold() in {
-        "video_broll", "video", "main video", "主视频", "视频"
-    }]
-    video_tracks = preferred or [t for t in tracks if t.get("segments")]
-    segments = [s for t in video_tracks for s in (t.get("segments") or [])
-                if isinstance(s, dict)]
-    if not video_tracks:
-        return {"ok": False, "issues": ["VIDEO_TRACK_MISSING"]}
-    if not segments:
-        return {"ok": False, "issues": ["VIDEO_SEGMENTS_EMPTY"]}
-    materials = {}
-    for item in (info.get("materials") or {}).get("videos") or []:
-        if not isinstance(item, dict):
-            continue
-        key = str(item.get("id") or item.get("material_id") or "").strip()
-        if key:
-            materials[key] = item
-    issues = []
-    resolved = 0
-    real_segments = 0
-    for idx, segment in enumerate(segments, 1):
-        material_id = str(segment.get("material_id") or "").strip()
-        item = materials.get(material_id)
-        if not item:
-            issues.append("SEGMENT_%d_MATERIAL_MISSING:%s" % (idx, material_id))
-            continue
-        raw = str(item.get("path") or item.get("media_path") or "").strip()
-        source = pathlib.Path(raw) if raw else pathlib.Path()
-        if not source.is_file():
-            source = draft_dir / "media" / pathlib.Path(raw).name
-        if not source.is_file():
-            issues.append("SEGMENT_%d_MEDIA_MISSING:%s" % (idx, raw or material_id))
-            continue
-        resolved += 1
-        if source.suffix.lower() in VIDEO_EXTS:
-            real_segments += 1
-    if real_segments <= 0:
-        issues.append("VIDEO_MEDIA_RESOLVED_ZERO")
-    return {"ok": not issues, "issues": issues,
-            "video_tracks": len(video_tracks), "video_segments": len(segments),
-            "resolved_video_media": resolved, "real_video_segments": real_segments}
+    return task_review.validate_draft_package(draft_dir, video_extensions=VIDEO_EXTS)
 
 
 def reusable_analysis_rows(candidate_report: pathlib.Path) -> tuple[int, int]:
@@ -1456,8 +1156,6 @@ def process_task(task: dict, *, retry_partial: bool = False,
     try:
         if str(task.get("voice_tempo_status") or "").lower() == "invalid":
             raise RuntimeError("VOICE_TEMPO_INVALID: refusing category-default fallback")
-        if not mount_nas():
-            raise RuntimeError("NAS mount failed")
         mdir = str(task.get("material_dir") or "").strip()
         if not mdir:
             raise RuntimeError("material_dir empty")
@@ -1482,10 +1180,15 @@ def process_task(task: dict, *, retry_partial: bool = False,
         base_draft = str(task.get("title") or rid).strip() or rid
         manifest = {
             "mode": "standard",
+            "delivery_mode": requested_mode(task),
             "task_id": str(task.get("task_id") or rid),
             "record_id": rid,
             "parent_run_id": parent_run_id,
             "full_script": str(task.get("script") or "").strip(),
+            "product": str(task.get("product") or "").strip(),
+            "category": str(task.get("category") or "").strip(),
+            # Feedback guides editing; independent QC must verify the result.
+            "revision_feedback": str(task.get("revision_feedback") or "").strip(),
             "voice": str(task.get("voice") or "").strip(),
             "voice_tempo": task.get("voice_tempo"),
             **manifest_meeting_fields(task),
@@ -1531,20 +1234,13 @@ def process_task(task: dict, *, retry_partial: bool = False,
             manifest["material_index_sha256"] = production_eval.file_hash(pathlib.Path(index_file))
             manifest["material_cache_reused"] = True
             sources = manifest["material_sources"]
-        configured_mode = os.environ.get("JY_EVAL_MODE", "observe")
-        eval_mode = "enforce" if configured_mode == "enforce" else str(task.get("eval_mode") or configured_mode)
         runtime_root = pathlib.Path(os.environ.get("JY_EVAL_RUNTIME_ROOT", str(PIPE_ROOT)))
         runtime_identity = production_eval.runtime_identity(runtime_root)
-        if eval_mode == "enforce":
-            observations = os.environ.get("JY_EVAL_OBSERVATIONS", "").strip()
-            if not observations or not production_eval.verify_observations(pathlib.Path(observations), runtime_identity)["ready"]:
-                raise RuntimeError("EVAL_ROLLOUT_REQUIRES_TWO_VERIFIED_REAL_TASKS")
-        gold_path = pathlib.Path(os.environ.get("JY_GOLD_REFERENCE_MANIFEST", str(PIPE_ROOT / "gold-reference.json")))
-        gold = production_eval.read(gold_path)
         # A run-specific freeze precedes TTS, vision and draft generation. It
         # does not alter any retained historical contract or approval.
         frozen = production_eval.freeze(task, run_id, [pathlib.Path(p) for p in sources],
-                                         runtime_identity, gold, eval_mode)
+                                         runtime_identity, mode="enforce")
+        _save_frozen_task(tdir, task, frozen)
         frozen_path = tdir / "eval" / run_id / "contract.json"
         production_eval.write_once(frozen_path, frozen)
         active_contract = tdir / "eval" / "active_contract.json"
@@ -1555,7 +1251,6 @@ def process_task(task: dict, *, retry_partial: bool = False,
         qc_reports = []
         distribution_receipts = []
         qc_gaps = []
-        review_pending = False
         repair_visual_missing_indices = set()
         analysis_cache = None
         # A partial task may already have shipped draft 1 before the queue
@@ -1684,18 +1379,24 @@ def process_task(task: dict, *, retry_partial: bool = False,
                     inputs = build_progress_inputs(build_manifest, analysis_cache,
                                                    repair_visual_missing_indices)
                     previous_inputs = _read_json(attempt_state).get("input")
-                    if previous_inputs == inputs and not (force_rebuild and attempt == 1):
-                        last_failure = last_failure or {"index": i, "draft": name,
-                            "phase": "build", "type": "blocked"}
-                        last_failure["message"] = "BUILD_NO_PROGRESS: no new candidates, windows or observations"
-                        log(last_failure["message"])
+                    from tools.workflow.selection_recovery import pending as selection_recovery_pending
+                    if previous_inputs == inputs and not (force_rebuild and attempt == 1) and not selection_recovery_pending(rd):
+                        if last_failure:
+                            last_failure["no_progress"] = True
+                        else:
+                            last_failure = {"index": i, "draft": name, "phase": "build", "type": "blocked",
+                                "message": "BUILD_NO_PROGRESS: no new candidates, windows or observations"}
+                        log("BUILD_NO_PROGRESS: no new candidates, windows or observations")
                         break
                     from orchestrator.file_safety import atomic_write_text
                     atomic_write_text(attempt_state, json.dumps({"input": inputs,
                         "attempt": attempt, "status": "running", "updated_at": time.time()},
                         ensure_ascii=False, indent=2))
-                    res = run_build(build_manifest, rd, a_name, timeout=timeout,
-                                    reuse_analysis=reuse, attempt=attempt)
+                    build_options = {"timeout": timeout, "reuse_analysis": reuse, "attempt": attempt}
+                    if force_rebuild and attempt == 1:
+                        build_options["force_rebuild"] = True
+                    res = run_build(build_manifest, rd, a_name, **build_options)
+                    a_name = res.get("draft_name") or a_name
                     candidate_report = rd / "shot_candidates.json"
                     if analysis_cache is None and candidate_report.exists():
                         reusable_count, shot_count = reusable_analysis_rows(candidate_report)
@@ -1721,7 +1422,8 @@ def process_task(task: dict, *, retry_partial: bool = False,
                         else:
                             qc_result = run_post_draft_qc(DRAFTS / a_name, rd)
                             if (qc_result.get("status") not in {"PASS", "PASS_WITH_DEGRADED", "PASS_WITH_GAPS"}
-                                    and qc_result.get("status") != "UNCERTIFIED_TIMEOUT"):
+                                    and qc_result.get("status") != "UNCERTIFIED_TIMEOUT"
+                                    and not local_preview(task, qc_result)):
                                 failure_text = qc_result.get("message") or (
                                     "DRAFT_VISUAL_QC_BLOCKED: status=%s" % qc_result.get("status"))
                             elif qc_result.get("status") == "UNCERTIFIED_TIMEOUT":
@@ -1735,7 +1437,12 @@ def process_task(task: dict, *, retry_partial: bool = False,
                             else "transient",
                             "attempt": attempt, "markers": cls["markers"],
                             "message": failure_text[-800:],
+                            "stage_retry_exhausted": res.get("stage_retry_exhausted", False),
                         }
+                        stage_result = _read_json(rd / "last_result.json")
+                        if stage_result.get("resume_stage") == "semantic_match":
+                            last_failure.update({k: stage_result[k] for k in (
+                                "retryable", "resume_stage", "failed_stage", "failure_class", "failure_code") if k in stage_result})
                         if qc_result is not None:
                             last_failure["qc_report"] = qc_result.get("output")
                             last_failure["qc_status"] = qc_result.get("status")
@@ -1753,6 +1460,9 @@ def process_task(task: dict, *, retry_partial: bool = False,
                             i, count, attempt,
                             "hard" if cls["vision_hard"] else "transient",
                             failure_text[:160].replace("\n", " ")))
+                        if res.get("stage_retry_exhausted"):
+                            log("selection stage recovery stopped; no full-build fallback")
+                            break
                         # A post-draft visual mismatch is actionable: the QC
                         # report has already identified the bad sentence(s),
                         # and the next build will turn those exact segments
@@ -1833,7 +1543,8 @@ def process_task(task: dict, *, retry_partial: bool = False,
                     # Degraded/gapped visual QC is a usable preview, never a
                     # formal delivery. Retain the verified local draft and
                     # release the queue; do not send it to NAS or table write.
-                    if qc_result and qc_result.get("status") in {"PASS_WITH_DEGRADED", "PASS_WITH_GAPS"}:
+                    if qc_result and (qc_result.get("status") in {"PASS_WITH_DEGRADED", "PASS_WITH_GAPS"}
+                                      or local_preview(task, qc_result)):
                         preview_status = qc_result.get("status")
                         drafts.append(a_name)
                         local_only_drafts.append(a_name)
@@ -1851,68 +1562,16 @@ def process_task(task: dict, *, retry_partial: bool = False,
                         log("DRAFT %d/%d retained as %s preview; NAS shipping blocked: %s" % (
                             i, count, preview_status, a_name))
                         break
-                    current_review_approval = _mac_approval_path(
-                        tdir, drafts + [a_name], frozen)
-                    if (MAC_REVIEW_REQUIRED and frozen["mode"] != "enforce"
-                            and not current_review_approval.is_file()):
-                        package = prepare_mac_review(tdir, task, drafts + [a_name])
-                        drafts.append(a_name)
-                        local_only_drafts.append(a_name)
-                        if qc_result is not None:
-                            qc_reports.append({"draft": a_name,
-                                               "status": qc_result.get("status"),
-                                               "report": qc_result.get("output")})
-                        review_pending = True
-                        draft_ok = True
-                        log("DRAFT %d/%d pending Mac review; NAS shipping blocked: %s" % (
-                            i, count, a_name))
-                        break
-                    if SKIP_SHIP or frozen["mode"] == "enforce":
-                        drafts.append(a_name)
-                        local_only_drafts.append(a_name)
-                        if qc_result is not None:
-                            qc_reports.append({"draft": a_name,
-                                               "status": qc_result.get("status"),
-                                               "report": qc_result.get("output")})
-                        draft_ok = True
-                        log("DRAFT %d/%d ready locally; NAS shipping skipped pending Mac/Eval review: %s" % (
-                            i, count, a_name))
-                        break
-                    sh = ship_one(DRAFTS / a_name, task_dir=tdir, frozen=frozen)
-                    if sh["rc"] != 0:
-                        last_failure = {
-                            "index": i, "draft": a_name, "phase": "ship",
-                            "type": "transient", "attempt": attempt,
-                            "message": "ship rc=%s out=%s" % (
-                                sh["rc"], sh["out"][-300:]),
-                        }
-                        log("SHIP %d/%d attempt %d failed: %s" % (
-                            i, count, attempt, sh["out"][-160:]))
-                        if attempt >= MAX_DRAFT_ATTEMPTS:
-                            break
-                        continue
+                    # All drafts remain local until the shared task-level gate has
+                    # revalidated QC, package validity and output identity.
                     drafts.append(a_name)
-                    distribution_receipts.append(sh["receipt"])
+                    local_only_drafts.append(a_name)
                     if qc_result is not None:
                         qc_reports.append({"draft": a_name,
                                            "status": qc_result.get("status"),
                                            "report": qc_result.get("output")})
-                        if qc_result.get("status") == "PASS_WITH_GAPS":
-                            qc_gaps.append({
-                                "index": i, "draft": a_name,
-                                "phase": "post_draft_qc", "type": "uncertified_preview",
-                                "message": "预览稿已通过结构与独立视觉核验，但保留明确的留空段；补素材/改文案后再转正式交付",
-                                "qc_report": qc_result.get("output"),
-                            })
-                        elif qc_result.get("status") == "UNCERTIFIED_TIMEOUT":
-                            qc_gaps.append({
-                                "index": i, "draft": a_name,
-                                "phase": "post_draft_qc", "type": "uncertified_timeout",
-                                "message": qc_result.get("message") or "独立视觉验收超时；草稿已归档，待后续单独补验",
-                                "qc_report": qc_result.get("output"),
-                            })
                     draft_ok = True
-                    log("draft %d/%d shipped: %s" % (i, count, a_name))
+                    log("DRAFT %d/%d retained locally for acceptance: %s" % (i, count, a_name))
                     break
                 except subprocess.TimeoutExpired as exc:
                     if analysis_cache is None:
@@ -1959,20 +1618,12 @@ def process_task(task: dict, *, retry_partial: bool = False,
                 log("draft %d/%d unresolved after %d attempt(s); stop current task" % (i, count, MAX_DRAFT_ATTEMPTS))
                 break
 
-        if frozen.get("mode") == "enforce" and drafts and MAC_REVIEW_REQUIRED:
-            package = prepare_mac_review(tdir, task, drafts)
-            log("MAC_REVIEW_PACKAGE output_count=%d path=%s" % (len(drafts), package))
-
         closed_loop_result = None
         if not failures and not qc_gaps and not SKIP_SHIP:
             closed = finalize_closed_loop(tdir, task, drafts, qc_reports,
                                           delivery_receipts=distribution_receipts)
             closed_loop_result = closed
-            if not closed.get("ok") and closed.get("reason") in {
-                    "MAC_REVIEW_EVAL_NOT_PASS", "MAC_REVIEW_PENDING"}:
-                review_pending = True
-                log("MAC_REVIEW_PENDING: %s" % closed)
-            elif not closed.get("ok"):
+            if not closed.get("ok"):
                 failures.append({
                     "phase": "closed_loop",
                     "type": "delivery_or_table_gate",
@@ -1980,33 +1631,31 @@ def process_task(task: dict, *, retry_partial: bool = False,
                 })
                 log("CLOSED_LOOP_BLOCKED: %s" % closed)
 
-        if failures or qc_gaps or SKIP_SHIP or review_pending:
+        if failures or qc_gaps or SKIP_SHIP:
             status = ("PREVIEW_READY" if drafts and not failures else
                       "PARTIAL" if drafts else "ERROR")
             all_issues = [*failures, *qc_gaps]
             if SKIP_SHIP and drafts:
                 all_issues.append({
                     "phase": "distribution",
-                    "type": "pending_mac_review",
-                    "message": "草稿已生成并保留在 Windows，待 Mac 检查确认后再分发 NAS",
+                    "type": "local_only",
+                    "message": "草稿已生成并保留在 Windows；本次配置不分发",
                 })
             persisted_done = _read_json(done)
             distribution_receipts = (persisted_done.get("distribution_receipts")
                                      or distribution_receipts)
             verified_by_name = {row.get("draft_name"): row for row in distribution_receipts}
             shipped_drafts = [name for name in drafts if name in verified_by_name]
-            if review_pending:
-                distribution_status = "AWAITING_MAC_REVIEW"
-            elif SKIP_SHIP:
-                distribution_status = "PENDING_MAC_REVIEW"
+            if SKIP_SHIP:
+                distribution_status = "LOCAL_ONLY"
             elif len(shipped_drafts) == len(drafts) and drafts:
                 distribution_status = "SHIPPED_VERIFIED"
             elif frozen.get("mode") == "enforce" and shipped_drafts:
                 distribution_status = "SHIPPED_PARTIAL"
             elif frozen.get("mode") == "enforce":
-                distribution_status = "PENDING_EVAL_REVIEW"
+                distribution_status = "PENDING_ACCEPTANCE"
             elif local_only_drafts:
-                distribution_status = "PENDING_MAC_REVIEW"
+                distribution_status = "PENDING_ACCEPTANCE"
             elif shipped_drafts:
                 distribution_status = "SHIPPED_VERIFIED"
             else:
@@ -2030,23 +1679,6 @@ def process_task(task: dict, *, retry_partial: bool = False,
                 payload["eval_receipt"] = evaluate_task(tdir, task, drafts, qc_reports, frozen)
             done.write_text(json.dumps(payload, ensure_ascii=False, indent=2),
                             encoding="utf-8")
-            if drafts and status == "PREVIEW_READY" and MAC_REVIEW_REQUIRED:
-                try:
-                    from tools import eval_stage, mac_review_handoff
-                    eval_stage.prepare(tdir, DRAFTS)
-                    review_stage = os.environ.get("JY_MAC_REVIEW_STAGE", "").strip()
-                    mac_root = os.environ.get("JY_MAC_DRAFT_ROOT", "").strip()
-                    if not review_stage or not mac_root:
-                        raise ValueError("MAC_REVIEW_STAGE_CONFIG_MISSING")
-                    handoff = mac_review_handoff.stage(
-                        tdir, DRAFTS, pathlib.Path(review_stage), mac_root)
-                    payload["mac_review_handoff"] = handoff
-                    payload["distribution_status"] = "AWAITING_MAC_REVIEW"
-                except (OSError, ValueError, RuntimeError) as exc:
-                    payload["distribution_status"] = "PENDING_REVIEW_TRANSFER"
-                    payload["review_transfer_reason"] = str(exc)
-                done.write_text(json.dumps(payload, ensure_ascii=False, indent=2),
-                                encoding="utf-8")
             if status in {"ERROR", "PARTIAL"}:
                 notification = publish_failure_notification(tdir)
                 payload["failure_notification"] = notification
@@ -2142,15 +1774,7 @@ def _parallel_eligible(task: dict) -> bool:
                 or task.get("retry_deferred") or status in {"ERROR", "PARTIAL"})
 
 
-def _parallel_pair_safe(left: dict, right: dict) -> bool:
-    """Avoid same-title draft collisions and same-pool cache contention."""
-    left_title = str(left.get("title") or left.get("record_id") or "").strip().casefold()
-    right_title = str(right.get("title") or right.get("record_id") or "").strip().casefold()
-    left_material = str(left.get("material_dir") or "").strip().casefold()
-    right_material = str(right.get("material_dir") or "").strip().casefold()
-    return bool(left_title and right_title and left_title != right_title
-                and left_material and right_material
-                and left_material != right_material)
+_parallel_pair_safe = queue_contracts.parallel_pair_safe
 
 
 def _run_task(task: dict) -> None:
@@ -2162,30 +1786,21 @@ def _run_task(task: dict) -> None:
 def select_queue_for_single_run(queue: list[dict], *,
                                 record_id: str = "",
                                 force_rebuild: bool = False) -> list[dict]:
-    """Select exactly one task; a targeted run must never drain the queue."""
-    target = str(record_id or "").strip()
-    if force_rebuild and not target:
-        raise ValueError("force_rebuild requires an exact record_id")
-    if target:
-        matches = [task for task in queue
-                   if str(task.get("record_id") or "").strip() == target]
-        if len(matches) != 1:
-            raise ValueError("expected exactly one queued task for record_id=%s; found %d"
-                             % (target, len(matches)))
-        selected = dict(matches[0])
-        if force_rebuild:
-            selected["force_rebuild"] = True
-        if os.environ.get("JY_TASK_RESUME_PARTIAL", "").strip() == "1":
-            selected["force_rebuild"] = False
-            selected["retry_deferred"] = True
-            selected["retry_error"] = False
-        return [selected]
-    return [dict(queue[0])] if queue else []
+    return queue_contracts.select_queue_for_single_run(
+        queue, record_id=record_id, force_rebuild=force_rebuild,
+        resume_partial=os.environ.get("JY_TASK_RESUME_PARTIAL", "").strip() == "1")
 
 
 def _queue_preflight(task: dict) -> dict:
     """Check static queue inputs before starting the selected task."""
     issues = []
+    try:
+        requested_mode(task)
+    except ValueError as exc:
+        issues.append(str(exc))
+    configuration_error = _runtime_facts().get("vision_configuration_error")
+    if configuration_error:
+        issues.append(configuration_error)
     rid = str(task.get("record_id") or "").strip()
     if not rid:
         issues.append("record_id missing")
@@ -2368,9 +1983,8 @@ def main():
     if not queue:
         log("QUEUE empty; no task selected")
         return
-    # User-facing acceptance is required between tasks: each invocation is
-    # single-task and sequential. The old parallel trial is removed so stale
-    # environment settings cannot re-enable cross-task execution.
+    # This legacy command handles one queue item. Scheduled full runs use
+    # tools.workflow.scheduled and the shared dispatcher directly.
     log("QUEUE single-step total=%d selected=%s" % (
         len(all_tasks), queue[0].get("record_id")))
     allowed, prior = _continuation_allowed(queue[0])

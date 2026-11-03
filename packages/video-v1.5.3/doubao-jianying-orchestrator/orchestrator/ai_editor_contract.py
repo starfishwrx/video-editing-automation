@@ -15,12 +15,13 @@ from typing import Any
 
 PLAN_SCHEMA = "chatcut-ai-selection-v1"
 RECEIPT_SCHEMA = "chatcut-ai-selection-evidence-v1"
-POLICY_VERSION = "selling-points-first-meeting-paper-v1"
+POLICY_VERSION = "selling-points-first-reference-quality-v3"
+POINT_COVERAGE_POLICY = "at_least_one_specific_point"
 KINDS = {"selling_point", "product_intro", "hook"}
 BASES = {"editorial_fit", "visible_result", "readable_label", "product_display"}
 AI_SPEED_MAX = 20.0
 POLICY = """先通读整稿，先安排具体卖点，再安排产品介绍和无具体卖点的钩子/衔接。
-句子按实际内容分类，开场包含具体卖点仍是selling_point。一句多个卖点逐项覆盖。
+句子按实际内容分类，开场包含具体卖点仍是selling_point。一句多个卖点至少实际呈现一个具体点，未覆盖项如实记录，不能声称全部已证实。
 轻薄、柔软、舒服允许能体现特点的真实展示，不强制实验或固定厚度对照。
 明确性能结果、数值或比较必须有对应可见画面，包装文字只支持该标称。
 产品介绍和无具体卖点的钩子可用同商品包装、手持、拆包、取出和本体展示，属于正常匹配。
@@ -35,6 +36,10 @@ POLICY = """先通读整稿，先安排具体卖点，再安排产品介绍和�
 def digest(value: Any) -> str:
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True,
                                      separators=(",", ":"), allow_nan=False).encode("utf-8")).hexdigest()
+
+
+def points_supported(required: set, supported: set) -> bool:
+    return not required or bool(required & supported)
 
 
 def file_sha256(path: str | Path) -> str:
@@ -70,10 +75,16 @@ def rules_identity(manifest: dict | None = None) -> dict:
 
 
 def policy_prompt(manifest: dict) -> str:
-    if editorial_context(manifest)["category"] != "zhipin":
-        return POLICY
-    return POLICY + "\n本任务生效的品类制作与选镜合同（按口播含义适用，不能据此虚构画面）：\n" + json.dumps(
-        editorial_context(manifest), ensure_ascii=False, sort_keys=True)
+    policy = POLICY
+    if editorial_context(manifest)["category"] in {"zhipin", "weipin"}:
+        policy += "\n本任务生效的品类制作与选镜合同（按口播含义适用，不能据此虚构画面）：\n" + json.dumps(
+            editorial_context(manifest), ensure_ascii=False, sort_keys=True)
+    feedback = str(manifest.get("revision_feedback") or "").strip()
+    if feedback:
+        policy += ("\n以下是旧稿的历史反馈，时间码属于旧稿；把它作为修订线索，"
+                   "逐项对照当前文案和真实画面，不把反馈本身当画面证据：\n"
+                   + json.dumps(feedback, ensure_ascii=False))
+    return policy
 
 
 def selection_mode(manifest: dict | None = None) -> str:
@@ -233,8 +244,15 @@ def validate_segment_receipt(item: dict, *, text: str | None = None,
             reasons.append("AI_SELECTION_POINTS_INVALID")
         elif receipt.get("sentence_kind") == "selling_point":
             required = {p["id"] for p in points if isinstance(p, dict) and p.get("id") and p.get("text")}
-            if len(required) != len(points) or not required or not required.issubset(set(receipt.get("supported_point_ids") or [])):
+            supported = set(receipt.get("supported_point_ids") or [])
+            if (len(required) != len(points) or not required or not supported <= required
+                    or not points_supported(required, supported)):
                 reasons.append("AI_SELECTION_POINTS_UNCOVERED")
+            if item.get("selling_points", points) != points:
+                reasons.append("AI_SELECTION_POINTS_CHANGED")
+            missing = [p for p in points if p["id"] not in supported]
+            if item.get("uncovered_selling_points", []) != missing:
+                reasons.append("AI_SELECTION_COVERAGE_CHANGED")
         intervals = receipt.get("evidence_intervals_us")
         window = _window(item)
         if not isinstance(intervals, list) or not intervals:

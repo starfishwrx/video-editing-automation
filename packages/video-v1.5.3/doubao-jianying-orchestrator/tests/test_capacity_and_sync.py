@@ -1,9 +1,12 @@
+import contextlib
+import io
 import json
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -13,9 +16,26 @@ from orchestrator import ship_distribute
 from tools import nas_portable
 
 
+class CalibrationAudioTests(unittest.TestCase):
+    def test_only_silent_calibration_bypasses_audio_selection(self):
+        engine = cli._CapacityCalibrationEngine.__new__(cli._CapacityCalibrationEngine)
+        engine.capacity_guard = False
+        engine.m = {"allow_silent": True}
+        silent = [SimpleNamespace(audio_mode="mute", text="")]
+        with mock.patch.object(OrchestrationEngine, "audio_selection_gate", return_value={"status": "AUDIO_SELECTION_REQUIRED"}) as parent:
+            self.assertIsNone(engine.audio_selection_gate(silent))
+            parent.assert_not_called()
+            self.assertEqual(engine.audio_selection_gate([SimpleNamespace(audio_mode="tts", text="文案")])["status"], "AUDIO_SELECTION_REQUIRED")
+            engine.capacity_guard = True
+            self.assertEqual(engine.audio_selection_gate(silent)["status"], "AUDIO_SELECTION_REQUIRED")
+            engine.capacity_guard = False
+            engine.m["voice"] = "some voice"
+            self.assertEqual(engine.audio_selection_gate(silent)["status"], "AUDIO_SELECTION_REQUIRED")
+
+
 class ShipMetadataGateTests(unittest.TestCase):
     def _draft(self, root):
-        draft = root / "Mac Preview"
+        draft = root / "Windows Local"
         (draft / "media").mkdir(parents=True)
         (draft / "media" / "clip.mov").write_bytes(b"video")
         info = {
@@ -24,26 +44,52 @@ class ShipMetadataGateTests(unittest.TestCase):
             "last_modified_platform": {"os": "windows"},
             "tracks": [],
             "materials": {"videos": [{"name": "clip.mov",
-                                      "path": "C:/old/drafts/Mac Preview/media/clip.mov"}],
+                                      "path": "C:/old/drafts/Windows Local/media/clip.mov"}],
                           "audios": [], "images": [], "gifs": []},
         }
         (draft / "draft_info.json").write_text(json.dumps(info), encoding="utf-8")
         (draft / "draft_meta_info.json").write_text("{}", encoding="utf-8")
         return draft
 
-    def test_mac_ship_aligns_sidecar_identity_and_platform(self):
+    def test_windows_local_ship_aligns_sidecar_identity_and_keeps_platform(self):
         with tempfile.TemporaryDirectory() as tmp:
             draft = self._draft(Path(tmp))
-            with mock.patch.dict("os.environ", {"JY_MAC_DRAFT_ROOT": "/mac/drafts"}):
-                self.assertEqual(ship_distribute.rewrite(str(draft), "mac"), 1)
+            self.assertEqual(ship_distribute.rewrite(str(draft), "local"), 1)
             info = json.loads((draft / "draft_info.json").read_text())
             meta = json.loads((draft / "draft_meta_info.json").read_text())
-            self.assertEqual(info["platform"]["os"], "mac")
-            self.assertEqual(info["last_modified_platform"]["os"], "mac")
+            self.assertEqual(info["platform"]["os"], "windows")
+            self.assertEqual(info["last_modified_platform"]["os"], "windows")
             self.assertEqual(meta["draft_id"], info["id"])
             self.assertEqual(meta["draft_name"], draft.name)
-            self.assertEqual(meta["draft_fold_path"], f"/mac/drafts/{draft.name}")
-            self.assertTrue(info["materials"]["videos"][0]["path"].endswith("/media/clip.mov"))
+            self.assertEqual(meta["draft_fold_path"], str(draft))
+            self.assertEqual(meta["draft_root_path"], str(draft.parent))
+            self.assertEqual(info["materials"]["videos"][0]["path"], str(draft / "media" / "clip.mov"))
+
+    def test_removed_or_unknown_style_is_rejected_before_draft_access(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            draft = self._draft(Path(tmp))
+            snapshot = {str(path.relative_to(draft)): path.read_bytes()
+                        for path in draft.rglob("*") if path.is_file()}
+            for style in ("mac", "invalid", "", None):
+                with self.subTest(style=style), mock.patch.object(nas_portable, "inspect") as inspect:
+                    with self.assertRaisesRegex(ValueError, "UNSUPPORTED_SHIP_STYLE"):
+                        ship_distribute.rewrite(str(draft), style)
+                    inspect.assert_not_called()
+                    self.assertEqual({str(path.relative_to(draft)): path.read_bytes()
+                                      for path in draft.rglob("*") if path.is_file()}, snapshot)
+
+    def test_removed_style_cli_exits_before_rewrite(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            draft = self._draft(Path(tmp))
+            original = (draft / "draft_info.json").read_bytes()
+            with mock.patch.object(sys, "argv", ["ship", "--draft", str(draft), "--style", "mac"]), \
+                    mock.patch.object(ship_distribute, "rewrite") as rewrite, \
+                    contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as stopped:
+                    ship_distribute.main()
+            self.assertEqual(stopped.exception.code, 2)
+            rewrite.assert_not_called()
+            self.assertEqual((draft / "draft_info.json").read_bytes(), original)
 
     def test_invalid_sidecar_blocks_before_material_paths_change(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -223,7 +269,7 @@ class CapacityTests(unittest.TestCase):
             self.assertEqual(blocker["status"], "MATERIAL_BATCH_LIMIT_EXCEEDED")
             self.assertEqual(blocker["safe_source_limit"], 1)
 
-    def test_upload_then_capacity_check_keeps_upload_and_blocks_before_tts(self):
+    def test_capacity_check_blocks_before_copy_and_tts(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             videos = []
@@ -246,7 +292,7 @@ class CapacityTests(unittest.TestCase):
                 blocker = eng._upload_videos_and_check_capacity(clips)
             self.assertEqual(blocker["status"], "MATERIAL_BATCH_LIMIT_EXCEEDED")
             self.assertIn("上传数量单次只支持最多传 1 条", blocker["message"])
-            self.assertTrue((root / "report" / "uploads" / "videos" / "a.mov").exists())
+            self.assertFalse((root / "report" / "uploads").exists())
 
 
 class VisualDuplicateGateTests(unittest.TestCase):
@@ -506,7 +552,7 @@ class AudioSelectionGateTests(unittest.TestCase):
                  mock.patch.object(eng, "_event"):
                 result = eng.audio_selection_gate([clip])
             self.assertEqual(result["status"], "AUDIO_SELECTION_REQUIRED")
-            self.assertEqual(result["reply_format"], "音色 <序号>，BGM <序号>")
+            self.assertEqual(result["reply_format"], "音色 <序号>")
 
     def test_confirmed_normal_mode_can_pass_gate(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -520,7 +566,7 @@ class AudioSelectionGateTests(unittest.TestCase):
                         duration=1, text="测试口播", audio_mode="tts")
             self.assertIsNone(eng.audio_selection_gate([clip]))
 
-    def test_bgm_without_direct_preview_is_a_blocking_gate(self):
+    def test_empty_bgm_does_not_block_voice_confirmation_or_download_previews(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             eng = OrchestrationEngine({}, root, root / "report", capacity_guard=False)
@@ -532,7 +578,9 @@ class AudioSelectionGateTests(unittest.TestCase):
                             return_value=[{"music_id": "no-url", "url": ""}]), \
                  mock.patch.object(eng, "_event"):
                 result = eng.audio_selection_gate([clip])
-            self.assertEqual(result["status"], "BGM_PREVIEW_UNAVAILABLE")
+            self.assertEqual(result["status"], "AUDIO_SELECTION_REQUIRED")
+            self.assertEqual(result["missing"], ["voice"])
+            self.assertEqual(eng.m["bgm"], {"auto": True})
 
     def test_selection_gate_runs_before_video_upload(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -1,0 +1,195 @@
+"""Default worker recovery must reuse frozen audio and never restart a full build."""
+import copy
+import json
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import time
+from types import SimpleNamespace
+import unittest
+from unittest.mock import Mock, patch
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "doubao-jianying-orchestrator"))
+import batch_worker as worker
+from tools.workflow import selection_recovery, scheduled
+from tools.queueing import contracts
+from orchestrator.application import recovery_audio
+from orchestrator.selection import timing_contract
+
+
+class WorkerSelectionRecoveryTests(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name).resolve()
+        self.report = self.root / "report"
+        self.report.mkdir()
+        self.drafts = self.root / "drafts"
+        self.drafts.mkdir()
+        self.audio = self.root / "original.wav"
+        self.audio.write_bytes(b"retained audio fixture")
+        self.manifest = {"task_id": "offline", "full_script": "保持原句。", "voice": "fixed-voice",
+                         "delivery_mode": "formal", "draft_name": "original", "material_sources": ["source.mp4"]}
+        segment = {"text": "保持原句。"}
+        key = timing_contract.sentence_key(segment, 1)
+        self.timing = {"rows": [{"key": key, "text": "保持原句。", "tts_path": str(self.audio),
+                               "audio_duration_us": 1_000_000, "timing_certainty": "audio", "estimated": False}]}
+        frozen = {**self.manifest, "segments": [segment]}
+        stat = self.audio.stat()
+        self.snapshot = {"input_manifest": self.manifest, "manifest": frozen, "timing": self.timing,
+            "run_id": "current-attempt", "audio_files": [{"path": str(self.audio), "size": stat.st_size, "mtime_ns": stat.st_mtime_ns}]}
+        self.write("selection_resume.json", self.snapshot)
+        self.write("narration_timing.json", self.timing)
+        self.write("shot_candidates.json", {"shots": [{"shot_id": "retained"}]})
+        self.write("last_result.json", {"status": "VISION_CALL_FAILED", "retryable": True, "resume_stage": "semantic_match"})
+
+    def write(self, name, value):
+        path = self.report / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
+
+    def recover(self, manifest=None, run=None):
+        return selection_recovery.recover(manifest or self.manifest, self.report,
+            prefix=[sys.executable, "-m", "orchestrator.cli"], run=run or Mock(), env={},
+            cwd=str(ROOT), deadline=time.time() + 60, drafts_root=self.drafts)
+
+    def successful_cli(self, command, **kwargs):
+        stage = command[-1]
+        if stage == "draft_write":
+            draft = self.drafts / "unique-recovery"
+            draft.mkdir()
+            self.write("last_result.json", {"status": "SUCCESS", "draft_path": str(draft)})
+        else:
+            self.write("last_result.json", {"status": "PREFLIGHT_READY" if stage == "preflight" else "SHOT_MATCH_READY"})
+        return SimpleNamespace(returncode=0, stdout=json.dumps({"stage": stage}), stderr="")
+
+    def test_default_worker_runs_recovery_stages_and_keeps_original_audio_and_timing(self):
+        before = self.audio.read_bytes()
+        with patch.object(worker, "DRAFTS", self.drafts), patch.object(worker, "log"), \
+                patch.object(worker.subprocess, "run", side_effect=self.successful_cli) as run:
+            result = worker.run_build(self.manifest, self.report, "requested-name", timeout=60)
+        self.assertEqual(result["rc"], 0, result)
+        self.assertEqual(result["draft_name"], "unique-recovery")
+        self.assertEqual([c.args[0][-1] for c in run.call_args_list], ["preflight", "semantic_match", "draft_write"])
+        self.assertTrue(all("build" not in c.args[0] for c in run.call_args_list))
+        self.assertEqual(self.audio.read_bytes(), before)
+        self.assertEqual(json.loads((self.report / "narration_timing.json").read_text(encoding="utf-8")), self.timing)
+        frozen = json.loads((self.report / "selection_recovery_input.json").read_text(encoding="utf-8"))
+        self.assertEqual(frozen["parent_run_id"], "current-attempt")
+        bound = recovery_audio.bind(frozen)
+        self.assertEqual(bound["voice"], "fixed-voice")
+        self.assertEqual(bound["segments"][0]["audio"], str(self.audio.resolve()))
+        self.assertEqual(bound["segments"][0]["audio_duration_us"], 1_000_000)
+        self.assertEqual(bound["segments"][0]["audio_mode"], "file")
+        self.assertFalse(selection_recovery.pending(self.report))
+
+    def test_changed_task_input_never_launches_cli_or_falls_back_to_build(self):
+        run = Mock()
+        for field, value in (("voice", "another-speaker"), ("full_script", "另一句"), ("material_sources", ["different.mp4"])):
+            with self.subTest(field=field):
+                result = self.recover({**self.manifest, field: value}, run=run)
+                self.assertIn("SELECTION_RECOVERY_INPUT_CHANGED", result["stdout"])
+        run.assert_not_called()
+
+    def test_changed_audio_or_timing_is_not_regenerated_or_promoted(self):
+        run = Mock()
+        self.audio.write_bytes(b"changed recording")
+        result = self.recover(run=run)
+        self.assertIn("SELECTION_RECOVERY_AUDIO_CHANGED", result["stdout"])
+        run.assert_not_called()
+        self.snapshot["audio_files"][0].update(size=self.audio.stat().st_size, mtime_ns=self.audio.stat().st_mtime_ns)
+        self.snapshot["timing"]["rows"][0]["timing_certainty"] = "estimated"
+        self.write("selection_resume.json", self.snapshot)
+        self.write("narration_timing.json", self.snapshot["timing"])
+        self.assertIn("SELECTION_RECOVERY_AUDIO_REQUIRED", self.recover(run=run)["stdout"])
+        frozen = {**self.snapshot["manifest"], "narration_timing_file": str(self.report / "narration_timing.json")}
+        with self.assertRaisesRegex(ValueError, "TIMING_CHANGED"):
+            recovery_audio.bind(frozen)
+        run.assert_not_called()
+
+    def test_interrupted_recovery_is_persisted_and_cannot_return_to_full_build(self):
+        def interrupted(command, **kwargs):
+            if command[-1] == "preflight":
+                return self.successful_cli(command, **kwargs)
+            raise subprocess.TimeoutExpired(command, 1)
+        run = Mock(side_effect=interrupted)
+        first = self.recover(run=run)
+        self.assertTrue(first["stage_retry_exhausted"])
+        self.assertTrue(selection_recovery.pending(self.report))
+        with patch.object(worker, "DRAFTS", self.drafts), patch.object(worker, "log"), \
+                patch.object(worker.subprocess, "run", side_effect=AssertionError("must not launch another process")):
+            second = worker.run_build(self.manifest, self.report, "requested-name", timeout=60)
+        self.assertIn("SELECTION_STAGE_RETRY_EXHAUSTED", second["stdout"])
+        self.assertEqual(run.call_count, 2)
+
+    def test_parent_timeout_retains_only_the_current_selection_attempt(self):
+        self.write("last_result.json", {"status": "PREFLIGHT_READY"})
+        self.write("shot_match_report.json", {"ok": True, "segments": ["stale success"]})
+        def timed_out(command, **kwargs):
+            self.snapshot["run_id"] = "new-selection-attempt"
+            self.write("selection_resume.json", self.snapshot)
+            self.write("ai_editor/plan.json", {"phase": "selection_edit", "attempt_run_id": "new-selection-attempt"})
+            raise subprocess.TimeoutExpired(command, 1)
+        with patch.object(worker, "log"), patch.object(worker.subprocess, "run", side_effect=timed_out):
+            result = worker.run_build(self.manifest, self.report, "original", timeout=1)
+        self.assertEqual(json.loads(result["stdout"])["resume_stage"], "semantic_match")
+        self.assertFalse(json.loads((self.report / "shot_match_report.json").read_text(encoding="utf-8"))["ok"])
+        self.write("ai_editor/plan.json", {"phase": "selection_edit", "attempt_run_id": "old-attempt"})
+        self.assertIsNone(selection_recovery.selection_timeout(self.report))
+
+    def test_late_draft_timeout_retains_completed_matching_instead_of_reselecting(self):
+        self.write("last_result.json", {"status": "PREFLIGHT_READY"})
+        def timed_out(command, **kwargs):
+            self.snapshot["run_id"] = "completed-current-attempt"
+            self.write("selection_resume.json", self.snapshot)
+            self.write("ai_editor/plan.json", {"ok": True, "phase": "selection_complete", "attempt_run_id": "completed-current-attempt"})
+            self.write("shot_match_report.json", {"ok": True, "input_manifest": self.manifest})
+            raise subprocess.TimeoutExpired(command, 1)
+        with patch.object(worker, "log"), patch.object(worker.subprocess, "run", side_effect=timed_out):
+            result = worker.run_build(self.manifest, self.report, "original", timeout=1)
+        self.assertEqual(json.loads(result["stdout"])["resume_stage"], "draft_write")
+        self.assertFalse(json.loads(result["stdout"])["retryable"])
+        self.assertTrue(json.loads((self.report / "shot_match_report.json").read_text(encoding="utf-8"))["ok"])
+
+    def test_retry_budget_belongs_to_the_selection_generation(self):
+        self.write("selection_recovery_state.json", {"attempts": 1, "source_run_id": "old-generation", "status": "RUNNING"})
+        self.assertTrue(selection_recovery.pending(self.report))
+        run = Mock(side_effect=self.successful_cli)
+        self.assertEqual(self.recover(run=run)["rc"], 0)
+        self.assertEqual(run.call_count, 3)
+        self.snapshot["run_id"] = "another-explicit-build"
+        self.write("selection_resume.json", self.snapshot)
+        self.write("last_result.json", {"status": "VISION_CALL_FAILED", "retryable": True, "resume_stage": "semantic_match"})
+        self.assertTrue(selection_recovery.pending(self.report))
+        failed = Mock(return_value=SimpleNamespace(returncode=1, stdout="preflight blocked", stderr=""))
+        self.assertNotEqual(self.recover(run=failed)["rc"], 0)
+        failed.assert_called_once()
+        state = json.loads((self.report / "selection_recovery_state.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["source_run_id"], "another-explicit-build")
+
+    def test_explicit_force_build_archives_previous_recovery_state(self):
+        self.write("selection_recovery_state.json", {"attempts": 1, "source_run_id": "current-attempt", "status": "RUNNING"})
+        run = Mock(return_value=SimpleNamespace(returncode=0, stdout="{}", stderr=""))
+        with patch.object(worker, "log"), patch.object(worker.subprocess, "run", run):
+            worker.run_build(self.manifest, self.report, "requested-name", timeout=1, force_rebuild=True)
+        self.assertIn("build", run.call_args.args[0])
+        self.assertFalse((self.report / "selection_recovery_state.json").exists())
+        self.assertEqual(len(list(self.report.glob("selection_recovery_state.*.json"))), 1)
+
+    def test_exhausted_recovery_is_not_scheduled_as_another_build(self):
+        base = {"message": "VISION_CALL_FAILED:DEADLINE_EXCEEDED", "resume_stage": "semantic_match"}
+        def receipt(failure):
+            return contracts.batch_result_contract("ERROR", task_id="offline", run_id="offline",
+                parent_run_id=None, pipeline_version="test", manifest_sha256="test", runtime={}, failures=[failure])
+        self.assertTrue(receipt(base)["retryable"])
+        stopped = receipt({**base, "stage_retry_exhausted": True})
+        self.assertFalse(stopped["retryable"])
+        task_dir = self.root / "record"
+        task_dir.mkdir()
+        (task_dir / "done.json").write_text(json.dumps({"status": "ERROR", **stopped}), encoding="utf-8")
+        stage, reason = scheduled._plan({"record_id": "record", "delivery_mode": "formal"}, self.root, {})
+        self.assertIsNone(stage)
+        self.assertEqual(reason, "FAILED_OR_ATTEMPTED_REQUIRES_RECOVERY")

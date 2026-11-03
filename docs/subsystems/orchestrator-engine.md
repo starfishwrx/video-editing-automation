@@ -1,7 +1,7 @@
 # 子系统：编排引擎（orchestrator-engine）
 
-- 代码：`packages/video-v1.5.3/doubao-jianying-orchestrator/orchestrator/engine.py`
-- 入口：`cli.build`/`cli.recover` → `OrchestrationEngine(manifest, base_dir, report_dir, ...).run()`
+- 代码：`packages/video-v1.5.3/doubao-jianying-orchestrator/orchestrator/application/engine.py`；纯片段模型位于 `orchestrator/domain/clips.py`
+- 入口：`application.cli.cmd_build`/`application.cli.cmd_recover` → `OrchestrationEngine(manifest, base_dir, report_dir, ...).run()`
 - 相关：`RULES.md`（1.4.1）、`SKILL.md`、`references/*`、`timing_contract.py`
 
 ## 1. 职责
@@ -27,7 +27,7 @@
 - 源窗口几何链：`0 <= source_start < source_end <= material_duration_us`（零容差；与写入层同尺）
 - 最终切片必须覆盖证据区间；证据窗口来自 AI 明确时间段或“审核帧邻域”
 - 默认 AI 模式按当前审核收据求解速度（最高 20 倍，尽量接近原速），完整覆盖关键动作和结果；legacy 保留按角色和 `time_sensitive` 决定的速度范围。变速范围须与最终窗口及 QC 同源，详见包内 `docs/AI_EDITOR.md`。
-- 预览稿：不得标成正式交付；结果中带 `coverage.certification != CERTIFIED` 与逐条未认证理由；成片打“未认证”标注
+- 预览稿：不得标成正式交付；结果中带 `coverage.certification != CERTIFIED` 与逐条未认证理由。未认证状态以当前报告/交付合同判断，不以历史画面标注代替证据。
 
 ## 4. 输入/输出（字段与状态）
 - 输入 manifest（默认 AI 模式见 `ai_editor.match_manifest`，legacy 见旧 matcher；共同由 `shot_analyzer.match_manifest` 路由）：
@@ -65,6 +65,12 @@
 - [ ] 两套测试全绿；必要时补“必拦样例”参数化测试
 
 ## 8. 已知坑
+
+默认 `write_draft` 走 `application/headless_production`；显式历史恢复才用
+`draft_backend=legacy`。`HEADLESS_BUILD_BLOCKED`、`HEADLESS_TARGET_EXISTS`、
+`DRAFT_BACKEND_INVALID` 与 `BGM_REQUIRED` 会进入阻断合同，不重写同名草稿。
+按句验证音频切片从0连续覆盖最终配音末端；一帧容差不能吞掉句尾。画面尾留白
+可保留，实际音频长于该句画面时返回时长冲突，不能默默用 `min` 截短。
 - 版本闸门必须“下限”判断（见 `LESSONS.md#L-SEED-01`）
 - 选镜前必须在 CLI 写入 `delivery_mode`（见 `LESSONS.md#L-SEED-03`）
 - 4K HEVC CUDA 解码需 `-threads 1`，否则 NVDEC 静默退回 CPU（见 `LESSONS.md#L-SEED-02`）

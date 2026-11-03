@@ -9,13 +9,24 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "doubao-jianying-orchestrator"))
 import batch_worker as worker
 from tools import production_eval as pe
 
 
+def source_bindings_for(draft):
+    media = Path(draft) / "media" / "qc-source.mp4"
+    media.parent.mkdir(exist_ok=True)
+    if not media.exists():
+        media.write_bytes(b"synthetic current visual source")
+    info = media.stat()
+    return [{"path": str(media), "identity": {"path": str(media.resolve()),
+             "size": info.st_size, "mtime_ns": info.st_mtime_ns}}]
+
+
 def qc_report(status="PASS", draft=None):
     degraded = status == "PASS_WITH_DEGRADED"
-    result = {"version": pe.visual_qc_contract.REPORT_VERSION, "status": status,
+    result = {"version": pe.visual_qc_contract.REPORT_VERSION, "status": status, "delivery_mode": "formal",
             "issues": [], "response_contract": {"version": pe.visual_qc_contract.RESPONSE_VERSION,
                 "status": "VALIDATED", "validated_batches": [1], "errors": []},
             "segment_map": [{"claim_index": 1, "draft_segments": [1]}],
@@ -26,6 +37,7 @@ def qc_report(status="PASS", draft=None):
                 "reason": "合成观察对应测试要求"}]}
     if draft is not None:
         result["draft"] = str(draft)
+        result["source_bindings"] = source_bindings_for(draft)
         fingerprint = pe.visual_qc_contract.draft_metadata_fingerprint(draft)
         result["draft_metadata_sha256"] = fingerprint
         result["draft_metadata_sha256_final"] = fingerprint
@@ -49,8 +61,7 @@ class VisualQcDeliveryContractTests(unittest.TestCase):
                      "script": "合成测试脚本"}
         self.runtime = {"tool_version": "1.5.6", "visual_policy_version": "test",
                         "package_sha256": "a" * 64, "visual_policy_sha256": "b" * 64}
-        self.contract = pe.freeze(self.task, "qc-test-run", [self.source], self.runtime,
-                                  pe.read(ROOT / "gold-reference.json"))
+        self.contract = pe.freeze(self.task, "qc-test-run", [self.source], self.runtime)
 
     def write_report(self, payload):
         target = self.report_dir / "draft_visual_qc.json"
@@ -60,6 +71,7 @@ class VisualQcDeliveryContractTests(unittest.TestCase):
     def run_worker(self, payload, *, returncode=0):
         payload = dict(payload)
         payload.setdefault("draft", str(self.draft))
+        payload.setdefault("source_bindings", source_bindings_for(Path(payload["draft"])))
         fingerprint = pe.visual_qc_contract.draft_metadata_fingerprint(Path(payload["draft"]))
         payload.setdefault("draft_metadata_sha256", fingerprint)
         payload.setdefault("draft_metadata_sha256_final", payload["draft_metadata_sha256"])
@@ -75,6 +87,7 @@ class VisualQcDeliveryContractTests(unittest.TestCase):
     def wrapped_evidence(self, payload, *, qc_status="PASS", contract_status="VALIDATED"):
         payload = dict(payload)
         payload.setdefault("draft", str(self.draft))
+        payload.setdefault("source_bindings", source_bindings_for(Path(payload["draft"])))
         fingerprint = pe.visual_qc_contract.draft_metadata_fingerprint(Path(payload["draft"]))
         payload.setdefault("draft_metadata_sha256", fingerprint)
         payload.setdefault("draft_metadata_sha256_final", payload["draft_metadata_sha256"])
@@ -95,6 +108,13 @@ class VisualQcDeliveryContractTests(unittest.TestCase):
     @staticmethod
     def criterion(receipt):
         return next(row["status"] for row in receipt["criteria"] if row["id"] == "VISUAL-QC")
+
+    def package_evidence(self, qc_path):
+        binding = {key: pe.read(qc_path)[key] for key in
+                   ("task_id", "run_id", "contract_hash", "output_sha256")}
+        package = self.root / "package-proof.json"
+        package.write_text(json.dumps({**binding, "status": "PASS", "files_verified": True}))
+        return {"DRAFT-PACKAGE": package}
 
     def test_worker_accepts_complete_contract_and_blocks_legacy_pass(self):
         self.assertEqual(self.run_worker(qc_report())["status"], "PASS")
@@ -241,19 +261,55 @@ class VisualQcDeliveryContractTests(unittest.TestCase):
         payload.pop("draft_metadata_sha256_final")
         self.assertEqual(pe.visual_qc_contract.report_status(payload), "UNCERTIFIED")
 
+    def test_complete_eval_requires_strict_formal_qc(self):
+        for change in ("formal", "degraded", "preview"):
+            with self.subTest(change=change):
+                payload = qc_report("PASS_WITH_DEGRADED" if change == "degraded" else "PASS", self.draft)
+                payload["delivery_mode"] = "preview" if change == "preview" else "formal"
+                qc_path = self.wrapped_evidence(payload,
+                    qc_status="PASS_WITH_DEGRADED" if change == "degraded" else "PASS")
+                receipt = self.evaluate(qc_path, **self.package_evidence(qc_path))
+                expected = "PASS" if change == "formal" else "UNCERTIFIED"
+                self.assertEqual(self.criterion(receipt), expected)
+                self.assertEqual(receipt["status"], expected)
+                self.assertEqual(receipt["finished_output_acceptance"],
+                                 "ACCEPTED" if change == "formal" else "UNVERIFIED")
+                self.assertTrue(pe.verify_receipt(receipt, self.contract, self.task, self.runtime, [self.draft]))
+
+    def test_missing_package_proof_never_receives_accepted_label(self):
+        qc_path = self.wrapped_evidence(qc_report("PASS", self.draft), qc_status="PASS")
+        receipt = self.evaluate(qc_path)
+        self.assertEqual(receipt["status"], "UNCERTIFIED")
+        self.assertEqual(receipt["finished_output_acceptance"], "UNVERIFIED")
+
+    def test_missing_source_binding_is_uncertified_even_with_valid_metadata(self):
+        payload = qc_report(draft=self.draft)
+        payload.pop("source_bindings")
+        self.assertEqual(pe.visual_qc_contract.report_status(payload), "UNCERTIFIED")
+        self.assertFalse(pe.visual_qc_contract.report_matches_draft(payload, self.draft))
+
+    def test_source_bindings_must_cover_every_referenced_video(self):
+        payload = qc_report(draft=self.draft)
+        first = Path(payload["source_bindings"][0]["path"])
+        second = self.draft / "media" / "second.mp4"
+        second.write_bytes(b"second actually referenced source")
+        info = {"id": "draft-id-a", "materials": {"videos": [
+            {"id": "first", "path": str(first)}, {"id": "second", "path": str(second)}]},
+            "tracks": [{"type": "video", "segments": [{"material_id": "first"}, {"material_id": "second"}]}]}
+        (self.draft / "draft_info.json").write_text(json.dumps(info), encoding="utf-8")
+        fingerprint = pe.visual_qc_contract.draft_metadata_fingerprint(self.draft)
+        payload.update(draft_metadata_sha256=fingerprint, draft_metadata_sha256_final=fingerprint)
+        self.assertFalse(pe.visual_qc_contract.report_matches_draft(payload, self.draft))
+        stat = second.stat()
+        payload["source_bindings"].append({"path": str(second), "identity": {
+            "path": str(second.resolve()), "size": stat.st_size, "mtime_ns": stat.st_mtime_ns}})
+        self.assertTrue(pe.visual_qc_contract.report_matches_draft(payload, self.draft))
+        second.write_bytes(b"changed second source")
+        self.assertFalse(pe.visual_qc_contract.report_matches_draft(payload, self.draft))
+
     def test_unvalidated_qc_cannot_become_accepted_degraded(self):
         qc_path = self.wrapped_evidence({"status": "PASS_WITH_DEGRADED"}, qc_status="PASS_WITH_DEGRADED")
-        binding = {key: pe.read(qc_path)[key] for key in
-                   ("task_id", "run_id", "contract_hash", "output_sha256")}
-        package = self.root / "package-proof.json"
-        package.write_text(json.dumps({**binding, "status": "PASS", "files_verified": True}))
-        screenshot = self.root / "synthetic-mac-proof.png"
-        screenshot.write_bytes(b"synthetic review evidence")
-        mac = self.root / "mac-proof.json"
-        mac.write_text(json.dumps({**binding, "status": "PASS", "reviewed_by": "synthetic tester",
-            "approved": True, "review_surface": "mac_jianying", "editable_project_opened": True,
-            "draft_ids": ["draft-id-a"], "reports": [{"path": str(screenshot), "sha256": pe.file_hash(screenshot)}]}))
-        receipt = self.evaluate(qc_path, **{"DRAFT-PACKAGE": package, "MAC-REVIEW": mac})
+        receipt = self.evaluate(qc_path, **self.package_evidence(qc_path))
         self.assertEqual(self.criterion(receipt), "UNCERTIFIED")
         self.assertEqual(receipt["finished_output_acceptance"], "UNVERIFIED")
 

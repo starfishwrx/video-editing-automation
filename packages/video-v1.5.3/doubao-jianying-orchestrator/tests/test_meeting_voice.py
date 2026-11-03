@@ -40,6 +40,16 @@ class MeetingVoiceRequestTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             voice_request.resolve_voice_request("female_sweet9.0")
 
+    def test_table_tempo_suffix_variants_use_same_locked_voice(self):
+        for suffix in ("1.6倍", "1.6倍数", "1.6倍速", "1.6"):
+            with self.subTest(suffix=suffix):
+                req = voice_request.resolve_voice_request("female_sweet" + suffix)
+                self.assertEqual(req.preset.sami, "zh_female_xiaopengyou")
+                self.assertEqual(req.tempo, 1.6)
+                self.assertEqual(rulepack.voice_name_speed("female_sweet" + suffix), 1.6)
+        self.assertEqual(voice_request.resolve_voice_request(
+            "female_sweet1.6倍", voice_tempo=1.0).tempo, 1.0)
+
     def test_explicit_tempo_overrides_suffix_without_mutating_voice(self):
         spec = "甜美年轻女声1.3倍速"
         req = voice_request.resolve_voice_request(spec, voice_tempo="1.4", category_tempo=1.1)
@@ -201,6 +211,27 @@ class MeetingVoiceRequestTests(unittest.TestCase):
                 self.assertEqual(eng.m["voice"], env_voice)
                 self.assertEqual(eng.m["voice_tempo"], 1.6)
                 self.assertEqual(eng.decide_voice()[0].sami, preset.sami)
+
+
+    def test_shipped_catalog_resolves_operator_voice_names(self):
+        cases = (
+            ("憨熊1.2", "zh_male_xionger_stream_gpu", 1.2),
+            ("真人播客女1.1倍", "zh_female_mizai_saturn_bigtts", 1.1),
+            ("曼波1.2", "ICL_zh_female_xinmanbo", 1.2),
+            ("容嬷嬷1.6倍速", "BV430_streaming", 1.6),
+        )
+        for name, sami, tempo in cases:
+            with self.subTest(name=name):
+                req = voice_request.resolve_voice_request(name)
+                self.assertEqual(req.preset.sami, sami)
+                self.assertEqual(req.tempo, tempo)
+
+    def test_missing_catalog_does_not_offer_the_preset_list(self):
+        from orchestrator.audio import library_resources
+        from orchestrator.voice_catalog import resolve_voice
+        with tempfile.TemporaryDirectory() as tmp, patch.object(library_resources, "CATALOGS_ROOT", Path(tmp)):
+            with self.assertRaisesRegex(library_resources.RuntimeCatalogError, "RUNTIME_CATALOG_MISSING"):
+                resolve_voice("真人播客女")
 
 
 if __name__ == "__main__":

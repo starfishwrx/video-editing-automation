@@ -131,7 +131,7 @@ class BatchVsyncRetryTests(unittest.TestCase):
                 (work / "f_0001.jpg").write_bytes(b"\xff\xd8")
                 (work / "f_0002.jpg").write_bytes(b"\xff\xd8")
                 return subprocess.CompletedProcess(
-                    cmd, 0, stdout="", stderr="pts_time:0.4\npts_time:1.6\n")
+                    cmd, 0, stdout="", stderr="pts_time:0.25\npts_time:1.45\n")
             Path(cmd[-1]).write_bytes(b"\xff\xd8")
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
@@ -161,7 +161,7 @@ class BatchVsyncRetryTests(unittest.TestCase):
             (work / "f_0001.jpg").write_bytes(b"\xff\xd8")
             (work / "f_0002.jpg").write_bytes(b"\xff\xd8")
             return subprocess.CompletedProcess(
-                cmd, 1, stdout="", stderr="pts_time:0.4\npts_time:1.6\n")
+                cmd, 1, stdout="", stderr="pts_time:0.25\npts_time:1.45\n")
 
         reqs = [(0.4, out_dir / "a.jpg"), (1.6, out_dir / "b.jpg")]
         flags = self._run(reqs, fake_run)

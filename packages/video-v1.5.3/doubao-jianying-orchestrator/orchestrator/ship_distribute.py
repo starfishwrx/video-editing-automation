@@ -5,11 +5,10 @@ r"""定稿分发（ship & distribute）：一步完成
   3. 复制到 NAS：测试产出\<草稿名> 与 测试产出\分发草稿\<草稿名>（--style unc 时）
 
 用法：
-  python orchestrator/ship_distribute.py --draft <草稿目录> [--style unc|local|mac] [--skip-dist]
+  python orchestrator/ship_distribute.py --draft <草稿目录> [--style unc|local] [--skip-dist]
 风格：
   unc   改写为 NAS UNC 并复制到 NAS（默认，给剪辑同学）
   local 只改写为本机 media 绝对路径（不出货）
-  mac   改写为 Mac 预览库路径（不出货）
 """
 import argparse, io, json, os, shutil, subprocess, sys, tempfile
 from pathlib import Path
@@ -24,7 +23,6 @@ from tools.delivery_runtime import require_ship_dependencies
 NAS_SHARE_ENV = 'JY_NAS_SHARE'
 NAS_USER_ENV = 'JY_NAS_USER'
 NAS_PASSWORD_ENV = 'NAS_PASSWORD'
-MAC_DRAFT_ROOT_ENV = 'JY_MAC_DRAFT_ROOT'
 TEMPLATES = PIPE_ROOT / 'nas-tools'
 TOOLS = ('素材本地化修复.bat', 'fix_local.ps1', '一键取稿.bat', '上传草稿.bat', 'nas-tool.ps1')
 
@@ -38,6 +36,8 @@ def log(m):
 
 def rewrite(root, style):
     """改写 draft_info.json / draft_content.json 素材路径；返回改写条数。"""
+    if style not in ('unc', 'local'):
+        raise ValueError('UNSUPPORTED_SHIP_STYLE:' + str(style))
     # Check the actual migrated timelines before touching any root sidecar.
     # An encrypted active timeline cannot be certified using old plaintext.
     def document_snapshot():
@@ -47,7 +47,7 @@ def rewrite(root, style):
     before_documents = document_snapshot()
     verified_documents, verified_references = nas_portable.inspect(Path(root))
     base_name = os.path.basename(os.path.abspath(root))
-    sep = '\\' if style != 'mac' else '/'
+    sep = '\\'
     if style == 'unc':
         nas_share = os.environ.get(NAS_SHARE_ENV, '').strip()
         if not nas_share:
@@ -60,17 +60,9 @@ def rewrite(root, style):
         prefix = os.path.abspath(root) + os.sep + 'media' + os.sep
         root_prefix = os.path.abspath(root)
         root_dir_prefix = os.path.dirname(os.path.abspath(root))
-    else:  # mac
-        mac_base = os.environ.get(MAC_DRAFT_ROOT_ENV, '').strip()
-        if not mac_base:
-            raise RuntimeError(MAC_DRAFT_ROOT_ENV + '_MISSING')
-        prefix = mac_base + '/' + base_name + '/media/'
-        root_prefix = mac_base + '/' + base_name
-        root_dir_prefix = mac_base
-
     # Preflight the paired project metadata before changing any paths. A
-    # Windows-encrypted sidecar is not portable to the Mac client and must
-    # never be reported as a successful preview shipment.
+    # Encrypted active sidecar cannot be verified offline and must never
+    # be replaced with stale plaintext while publishing a draft.
     info_path = os.path.join(root, 'draft_info.json')
     meta_p = os.path.join(root, 'draft_meta_info.json')
     if not os.path.isfile(info_path):
@@ -104,12 +96,6 @@ def rewrite(root, style):
     planned = {name: nas_portable.map_values(payload, mapping)
                for name, payload in verified_documents.items()}
     planned['draft_meta_info.json'] = md
-    if style == 'mac':
-        for filename in ('draft_info.json', 'draft_content.json'):
-            for key in ('platform', 'last_modified_platform'):
-                platform = planned.get(filename, {}).get(key)
-                if isinstance(platform, dict):
-                    platform['os'] = 'mac'
     if document_snapshot() != before_documents:
         raise RuntimeError('DRAFT_CHANGED_DURING_REWRITE')
     for filename, payload in planned.items():
@@ -239,7 +225,7 @@ def _ship_staged(args, root, original_source=None, original_identity=None):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--draft', required=True)
-    ap.add_argument('--style', default='unc', choices=('unc', 'local', 'mac'))
+    ap.add_argument('--style', default='unc', choices=('unc', 'local'))
     ap.add_argument('--skip-dist', action='store_true')
     ap.add_argument('--work', type=Path, help='new private delivery evidence directory')
     args = ap.parse_args()

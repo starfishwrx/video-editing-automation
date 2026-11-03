@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import os
 import sys
@@ -86,7 +87,7 @@ class ResumeIntegrityTest(unittest.TestCase):
         with mock.patch.object(vision_analyzer, "_sample_frames", return_value=self.frames), \
                 mock.patch.object(vision_analyzer, "_run_vision_with_retry", side_effect=fake):
             result = vision_analyzer.enrich_with_vision(
-                manifest or self.manifest, analysis, self.report, profile="volc")
+                manifest or self.manifest, analysis, self.report)
         return result, prompts
 
     def _killed_during_text(self) -> dict:
@@ -226,7 +227,7 @@ class ResumeIntegrityTest(unittest.TestCase):
                 mock.patch.object(vision_analyzer, "_sample_frames", return_value=self.frames), \
                 mock.patch.object(vision_analyzer, "_run_vision_with_retry", side_effect=fake):
             result = vision_analyzer.enrich_with_vision(self.manifest, {"shots": shots},
-                                                        self.report, profile="volc")
+                                                        self.report)
         self.assertGreater(peak[0], 1)
         self.assertLessEqual(peak[0], 3)
         self.assertTrue(all(row["text_pass"] == "hires" for row in result["shots"]))
@@ -243,6 +244,28 @@ class SharedCacheMergeTest(unittest.TestCase):
             disk = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(set(disk), {"a", "b"})
             self.assertIn("a", second)
+
+    def test_stale_snapshot_cannot_erase_other_products_text_review(self):
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "material_vision.json"
+            old = {"paper": {"text_pass": "pending"}}
+            self.assertTrue(vision_analyzer._save_vision_cache(path, old))
+            stale_pants = copy.deepcopy(old)
+            paper = {"paper": {"text_pass": "hires", "readable_claims": ["80抽"]}}
+            self.assertTrue(vision_analyzer._save_vision_cache(path, paper, changed_keys={"paper"}))
+            stale_pants["pants"] = {"text_pass": "pending"}
+            self.assertTrue(vision_analyzer._save_vision_cache(path, stale_pants, changed_keys={"pants"}))
+            disk = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(disk["paper"]["text_pass"], "hires")
+            self.assertEqual(disk["paper"]["readable_claims"], ["80抽"])
+            self.assertIn("pants", disk)
+
+    def test_invalid_shared_cache_is_not_replaced_by_stale_snapshot(self):
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "material_vision.json"
+            path.write_text("invalid", encoding="utf-8")
+            self.assertFalse(vision_analyzer._save_vision_cache(path, {"a": {}}, changed_keys={"a"}))
+            self.assertEqual(path.read_text(encoding="utf-8"), "invalid")
 
 
 class UnverifiedTextEvidenceTest(unittest.TestCase):
@@ -305,8 +328,8 @@ class NarrationProbeTest(unittest.TestCase):
         engine_ruler = {"duration_us": 1_545_771, "source": "container_duration", "confidence": "LOW"}
         with mock.patch("orchestrator.platform_env.find_ffmpeg",
                         return_value=(Path("ffmpeg"), Path("ffprobe"))), \
-                mock.patch.object(cli.timing_contract, "probe_material_duration_us",
-                                  return_value=engine_ruler) as probe:
+                mock.patch("orchestrator.audio.narration_probe.probe_audio",
+                           return_value={"duration": 1.545771, "duration_us": 1_545_771}) as probe:
             measured = cli._audio_probe()("tts.ogg")
         probe.assert_called_once()
         self.assertEqual(round(measured["duration"] * 1_000_000), 1_545_771)

@@ -7,6 +7,318 @@
 
 ## 新增条目
 
+### L-20261103-10 品名修正要通过真实品类入口验证
+- status: OPEN
+- hits: 1
+- 模块: rulepack、rules/zhipin
+- 现象: 奶被纸写成奶杯纸，真实品名无法命中纸品默认规则；旧测试只比较显式覆盖值，没有检查商品识别到的品类。
+- 以后怎么做: 业务名称和别名统一维护，验证实际品名经过apply_manifest_defaults后的品类与默认口播倍速，再检查显式覆盖仍生效；同时更新生产说明和行为记录，不用本机商品映射代替仓库规则。
+- 证据: test_paper_rulepack.py 的奶被纸、tad厨房纸、TAD厨房纸与显式覆盖断言；PR #26。
+
+### L-20261103-07 局部选镜失败应保留已完成观察与真实配音
+- status: OPEN
+- hits: 1
+- 模块: selection/ai_editor、application/recovery_audio、workflow/selection_recovery
+- 现象: 正式选镜仍强制整句卖点全覆盖；不适用品类标签使整次召回失败；换窗未补观察，服务超时又被包成不可重试的选错镜头。
+- 以后怎么做: 共享至少一个具体卖点口径并如实记录未覆盖项，忽略不适用品类标签但保留审计；失败只改当前句，源窗变化重新看实际小窗。冻结真实配音、句长和任务输入，按原始运行持久记录一次阶段恢复，完成观察可复用、失败调用可补；中断不清预算、耗尽不回退全流水线。音频绑定同步匹配报告与草稿身份，选镜完成后超时不能使成功匹配失效；协议升级同时验证生产者和独立QC消费者。
+- 证据: test_selection_recovery.py、test_selection_stage_resume.py、test_ai_editor_qc.py 的音频绑定至独立QC串接及新旧协议拒绝回归。
+
+### L-20261103-06 运行映射表不能与私有缓存一起排除
+- status: OPEN
+- hits: 1
+- 模块: audio/library_resources、application/cli、build_manifest、cloud_manager
+- 现象: 本机有音色／音乐 CSV 而 Git 和源码包没有，旧测试只用内置音色导致干净拉取失败；缺表被误报为音色选择或无候选。
+- 以后怎么做: 稳定名称／ID 元数据按字段白名单版本化，临时链接、音频和登录缓存另存；查询与下载共用同一索引。生产预检区分资源损坏和业务歧义，缓存命中前复查文件状态；合包拒绝缺少必需资源。用 Git 已跟踪文件及全新解压包，在隔离用户目录、禁网的新解释器验证真实名称、倍速和自动选曲链，不用本机安装目录补全。
+- 证据: test_runtime_catalogs.py、test_runtime_resources.py、test_release_version.py；资源白名单和同类排查报告留包外。
+
+### L-20261103-08 恢复阶段交接须校验真实产物与当前输入
+- status: OPEN
+- hits: 1
+- 模块: application/cli
+- 现象: 匹配生成裸manifest，写稿却要求完整成功结果；改读成功报告后，又可能消费本次匹配提前失败前留下的旧成功。
+- 以后怎么做: 匹配入口共用完整报告合同，记录匹配开始前的原始任务输入；写稿仅消费成功、片段有效且输入一致的报告，恢复控制字段由当前阶段保留。所有匹配失败与异常都使旧成功失效，保留本次失败细节；不能把裸输入或无绑定旧报告补成通过。先串接成功两阶段，再验证提前失败、异常、输入变化与重复恢复均被拦住，不重跑配音或隐式全库识别。
+- 证据: test_task_control.py 的实际匹配写出到恢复写稿串接及两入口失败反例；test_ai_editor.py 保持直接调用兼容。
+
+### L-20261103-09 环境就绪要对应实际选择的写稿后端
+- status: OPEN
+- hits: 1
+- 模块: runtime/headless、application/cli
+- 现象: 旧工具链ready为true、CLI退出0，却没有可用无头后端或字幕字体；通用缓存还可能掩盖配置修复。
+- 以后怎么做: 基础事实可以缓存，所选写稿后端即时复验；默认env汇总生产条件，base模式显式区分，任务后端和字体覆盖与build一致。返回实际ready和非零失败退出码，坏配置修复后可重新检查，不污染基础报告或要求云端调用。
+- 证据: test_default_headless.py 的缺后端、基础模式、任务覆盖、字体失败后修复，以及付费前阻断回归。
+
+### L-20261103-05 前置预检必须覆盖真实输入合同、异常与干净交付面
+- status: OPEN
+- hits: 1
+- 模块: tools/batch_dispatch、audio/library_resources、build_manifest
+- 现象: 仅捕获 VoiceResolutionError 漏掉倍速 ValueError，一个坏任务终止整批；只提交被发布库存排除的 CSV，开发目录查得到却无法交付，音乐表说明与提交不符。
+- 以后怎么做: 与下游共用字段规范化和倍速验证，测试坏／好任务混批、修正恢复、原文回填、独立字段及 QC 恢复；预期输入和资源错误在本任务内记录。公开检索元数据与私有缓存分目录，打包缺表必须失败；新解释器只取跟踪／发布库存、空用户目录、禁联网验证真实名称与下游 ID，而非依靠宿主已有文件或源码存在性。
+- 证据: `tests/test_batch_dispatch.py`、`tests/test_runtime_resources.py`、`tests/test_release_version.py`、`test_audio_catalog_admission.py`；PR #38 原 head `66c1e77` 与本轮修复。
+
+### L-20261103-04 具体卖点的召回排序不能被通用展示池覆盖
+- status: OPEN
+- hits: 1
+- 模块: vision/purpose_inventory、selection/purpose_retrieval、application/purpose_production
+- 现象: 体验句被当成通用介绍，其专属候选被包装/本体展示池覆盖；后端即使能拒绝普通动作，也可能见不到有实际展示目的的素材。模型输出精确句长算术或省略式引用又会使整次召回失败。
+- 以后怎么做: 按当前原句与至少一项具体卖点召回，描述只作带出处的线索，最终源窗重新看实际画面；展示句终点由程序计算。丢弃并记录无效单条线索，保留有效候选，先三条失败最多补三条。仅普通介绍允许同商品池分散，具体卖点不能靠通用补池通过。匿名ID复验、反例淘汰和跨案例分别记录，不用单个成功泛化整稿稳定。
+- 证据: `test_purpose_retrieval.py`、`test_shot_usability.py`、`docs/shot-selling-point-value.md`；卫品42自动召回、匿名ID及萌睡裤定向复验保存在包外。
+
+### L-20261103-03 同商品与手部动作不能替代有效的信息展示
+- status: OPEN
+- hits: 2
+- 模块: vision/shot_quality_review、selection/shot_usability、application/display_optimization
+- 现象: 给模型文案后，翻折整理被解释成薄软、舒适；单纯要求无文案复核时又可能过度要求实验，误拒正常手持展示。
+- 以后怎么做: 先不带目标观察实际主体/信息可读区间，再作语义对应；稳定展示、少量轻触与遮挡收拢分开。盲区间只作上限，与目标特征可读区间取交集，保留原答，不能把产品轮廓清楚扩张成某一卖点整段清楚。可读段原速，最终输出源窗比选，置信度靠后；有明显整理或未完成结果则不强塞。换源前核对观察身份，协议变化使完整旧产物失效，旧索引只召回。代码可用与实际功效、整片验收分开。
+- 证据: `test_shot_usability.py`、`test_purpose_production.py`、`docs/shot-usability.md`；卫品42第7句实际对照及失败记录留包外。
+- 补充: 先判断动作/展示是否传达当前原文卖点，再看可读性。至少一个具体卖点即可，未匹配其他项只备注，不把部分支持当淘汰条件；不能用“更清楚”证明卖点提升，也不能以多个间接关联压过一个直接演示。新合同与033/036反例、076相关表达见`docs/shot-selling-point-value.md`。
+
+### L-20261103-02 观察动作事实与编辑倍速分开，实验组能放下不等于逐句对齐
+- status: OPEN
+- hits: 1
+- 模块: vision/experiment_event_review、selection/experiment_events
+- 现象: 视频观察将准备阶段标成按压，吸收又被一概锁原速；共享预算虽能放下，反渗句仍播放倒液。
+- 以后怎么做: 模型先给实际接触/提起/可读结果编号，密集原帧校正，程序再执行允许的局部加速与关键节点保护。吸收过程也可加速，计时/瞬吸主张则整段禁速。固定句长分别约束相位，无解明确记录；定性吸收可显式选连续倒液尾段，报告省略的前段，不能将此说成完整倒液。按原生PTS核算末态保护，不把3个10fps采样误当300ms。输出模型抽样误读两侧相同时保留失败，实际逐时点帧对照另行核验，不能只引用有利评分。
+- 证据: `test_experiment_events.py`、`docs/weipin-experiments.md`；卫品42实际2倍过程、反渗句对应及独立帧复核记录留包外。
+
+### L-20261103-01 阶段规格不能替旧观察绑定新素材
+- status: OPEN
+- hits: 1
+- 模块: application/experiment_optimization
+- 现象: 规格只记录来源路径时，同名文件替换并重新配对后，旧帧编号可能被错误绑定到新媒体。
+- 以后怎么做: 用正常命令从当前配对生成带原输入身份的待复核模板，规格复用必须核对包含有序来源、采样映射、复核窗口及规则的既有配对输入身份。媒体、映射或窗口改变后明确拒绝；不能为旧规格自动生成新绑定。空复核说明不可直接执行；记录自动观察与定向复核的来源区别。
+- 证据: `test_experiment_optimization.py`的同路径替换、采样映射与窗口变化反例，以及`phase-template → optimize`正常入口回归。
+
+### L-20261102-10 原速冲突不代表允许局部加速也无解
+- status: OPEN
+- hits: 1
+- 模块: application/experiment_production、selection/experiment_retiming
+- 现象: 用户允许局部加速，新入口却把整个实验窗口保护为原速，随后把时长冲突作为验证结果。
+- 以后怎么做: 按实际动作分开首尾、过程和结果，关键区间原速，组内共享预算先≤2倍再≤3倍；保留连续源区间，优先选一次完整验证，省去之前重复演示。原速、允许变速下可行性及实际成片质量分别记录。模型边界不稳定时保留分歧，人工或主线程定向帧校正明确标注，不假称全自动。源码测试不替代输出视频复核。
+- 证据: `test_experiment_retiming.py`、`docs/weipin-experiments.md`；计划2.94倍、整数帧实际过程3.0/2.4倍、25帧纸巾结果及独立对照复核留包外。必须检查实际采样跨段边界，不凭计划倍率宣称执行上限成立。
+
+### L-20261102-09 同一次实验不能收窄为同一个文件
+- status: OPEN
+- hits: 1
+- 模块: selection/experiment_contract、vision/experiment_pair_review、application/experiment_production
+- 现象: 把“按压不能换实验”解释成禁止跨文件，错误排除相邻拍摄的倒液与纸巾验证。
+- 以后怎么做: 同次实验可跨文件，相邻序号只作召回；联合核对商品、承载物、巾体状态及验证关系，保留非相邻正例与相邻错配反例。复核输入绑定有序源文件、窗口、实际帧和图片摘要，换输入必须重查。配对、时长和最终成片分别验收；041单文件缺阶段不能推成整组缺实验。
+- 证据: `test_experiment_pairs.py`、`docs/weipin-experiments.md`；真实配对请求与画面留包外。此澄清覆盖下方L-20261102-08中的“必须同源”解释。
+
+### L-20261102-08 新入口须逐条接入已有品类规则，技术通过不能替代业务验收
+- status: OPEN
+- hits: 1
+- 模块: ai_editor_contract、purpose_production、experiment_production
+- 现象: 新实验借透气主题时间，模型匹配数上升后误报改善；早期又将实验对应要求误解成必须单文件，已由L-20261102-09更正。
+- 根因: 品类规则注入仅覆盖纸品；新组装只检查时长、倍速和重复，缺少业务条件；审阅与测试范围也未逐条对应原规则。
+- 以后怎么做: 新旧入口共享当前品类合同，复用旧描述时重新编译原文，不沿用旧支持结论。完整实验必须同一次、阶段齐全且主题兼容，允许画面已确认对应的跨文件组合；原件/代理关系由受控准备保存，未知来源停止。增加旧入口、跨实验错配、跨主题、错序、漏结果、错商品与输出覆盖反例。定向补查只恢复实际看到的部分事实，不能拼回答获得完整实验认证。未得到更优合格成片时明确报告未提升。
+- 证据: `test_weipin_experiment.py`、`test_temporal_samples.py`、`docs/weipin-experiments.md`；真实卫品验证与独立审阅收据留包外。
+
+### L-20261102-12 视频输入不等于可靠时间定位，短句可共享完整视觉演示
+- status: OPEN
+- hits: 1
+- 模块: vision/temporal_video、selection/temporal_groups
+- 现象: 服务能识别原生视频的颜色切换，却对短真实视频返回越界时间；逐句完整实验又因固定短口播无法容纳。
+- 根因: 视频理解仍是抽样且时间定位会漂移；把每句都当独立剪辑单元，会重复占用准备、动作与结果预算。合并保护区也可能意外丢掉结果的最少帧数。
+- 以后怎么做: 实测服务能力，保存真实视频输入与FPS身份，越界时间直接拒绝；按真实PTS帧复核拟用源窗。允许连续相邻句共享真实动作链，关键动作及结果保留原速，结果独立保留帧数约束。组外画面、音频字幕和非视觉未解决项不能被组装覆盖。功能补齐后再看整片卖点关联，不能只拿模型匹配计数宣布整体提升。
+- 证据: `test_temporal_video_groups.py`、`docs/temporal-shot-groups.md`；真实媒体与请求账本留包外。
+
+### L-20261102-11 目的性识别须保留反证与完整原文复核
+- status: OPEN
+- hits: 1
+- 模块: vision/purpose_review、selection/purpose_selection、application/purpose_production
+- 现象: 粗召回能把包装或固体道具误列为实验；需求编译也可能把修辞变成证明任务，或漏掉持续时间断言。
+- 根因: 文案会诱导观察，模型生成的需求和时间线索并非事实。将编译器的用途解释交给复核，会继续传递偏见；只看音频边界还可能把邻句一帧当作本句证据。
+- 以后怎么做: 只复用同任务素材白名单与有效缓存；实际窗口重新看图，观察不接收目标句长；体验/展示沿用业务用途，明确性能保留动作和结果。最终复核独立读全部原文，不接收编译器分类解释，能报告遗漏；按实际分配的画面帧界限抽样，诊断占位必须有结构否决。修复预留所有仍使用的源窗，覆盖漏句、输入变化和反复处理旧目录等反例。抽样支持不等于正式验收。
+- 证据: `test_purpose_production.py` 与目的性识别方案；真实输入与结果仅保存在隔离验证目录。
+
+### L-20261102-07 按改动范围测试，避免重复全量
+- status: OPEN
+- hits: 1
+- 模块: 测试策略、AGENTS、包级与字幕回归
+- 现象: 把每次小修改都当发版，在开发树、解压包、安装面反复跑全量，拖长迭代；源码字符串和文档数字断言还会因无关格式变更失败。
+- 以后怎么做: 小改动先跑对应模块与直接调用方；共享合同／正式门禁变化和范围不确定时全量，发版保留最终解压验收，安装只补入口与案例。删除已有行为覆盖的重复检查，取消无业务价值的静态文字约束；不同的音频、证据、formal和恢复失败边界不能为减少数量而删。
+- 证据: 35项BGM／默认无头定向验证约7秒，完整历史源码回归约136秒；5项静态／重复检查移除后，保留的入口及字幕测试读取实际执行结果，独立审阅通过。
+
+### L-20261102-06 默认后端切换要贯穿读稿与交付
+- status: OPEN
+- hits: 1
+- 模块: application/headless_production、runtime/draft_documents、tools/native_delivery
+- 现象: 原生稿已建出，但旧QC、交付和版本归档只读明文；新副本codec也可能因目标文件已存在而拒绝操作。
+- 以后怎么做: 默认入口、付费前预检、当前镜像读取、字体资源、独立QC、分发及恢复一起回归。编码写入新临时密文，再替换唯一新副本；六镜像和活动指针逐一核验。音频时长使用最终音频探针，不能套视频首帧修正。用真实复制、已存在目标、单侧中断、版本重命名以及内容漂移反例验证，保留正式质量门禁和源稿。
+- 证据: 默认入口测试、卫品固定缓存回归、原生NAS传输／版本恢复收据与独立代码审阅；文件技术成功不替代商品内容验收。
+
+### L-20261102-05 业务空BGM必须进入准备阶段且核验有效源长
+- status: OPEN
+- hits: 1
+- 模块: audio/final_bgm、application/production、tools/production
+- 现象: 固定输入测试将空BGM当成不添加，无头导出继续保留无音乐时间线；短音乐也可被APAD补成长静音后仍通过整体LUFS检查。
+- 根因: 技术时间线入口绕过worker空值规范化，响度门槛没有证明全片都有有效音乐。
+- 以后怎么做: 业务命令必须有任务输入，统一空值自动选曲和重试/批次选择记录；显式ID/标题/路径保持优先。按实际选用音频源长检查去静音和起点后的完整窗口，拒绝短源与含视频的歧义源，不将静音补齐当成成功。淡变仅处理一次，BGM独立轨，旁白/字幕/视频时序和字节按本次修订回读；缺音乐明确阻断。
+- 证据: `test_final_bgm.py` 的空值合同、默认CLI必填、短源/前置静音、带视频短音频、批次别名、真实PCM/LUFS及原编辑决定保留；独立复验与真实交付收据分别留证。
+
+### L-20261102-04 无头草稿交接应验证当前格式和实际路径
+- status: OPEN
+- hits: 1
+- 模块: delivery/jianying_export、quality/timeline_export、tools/headless_review_delivery
+- 现象: 明文 writer 对最终音频按毫秒截短；切换原生加密后，旧 NAS 工具无法读取实际活动时间轴，字幕粗体也可能被静默丢掉。
+- 根因: 不同底座的媒体时长、文字参数和草稿格式有不同表达，结构成功不代表参数已经完整映射。
+- 以后怎么做: 固定最终时间线，用外部后端的正式计划与 codec API 构建；逐微秒回读时序，显式映射并核对粗体、源窗、附加速度材料和字面媒体路径。NAS 收集包括字体，复制到新目录后再读实际加密镜像；拒绝设备路径和报告/草稿目录重叠。不得用旧明文替代、放宽成片认证或把参数验证当成观看通过。
+- 证据: `test_timeline_export.py`、后端 detached handoff 单元测试及本次真实待审构建/共享路径回读；支持范围见 `docs/programmatic-production.md`。
+
+### L-20261102-03 精确选帧表达式必须覆盖真实连续动作长度
+- status: OPEN
+- hits: 1
+- 模块: media/timeline_render / quality/production_qc
+- 现象: 一秒合成片可渲染，真实多句连续动作的 188 项平铺选帧表达式却报 Cannot allocate memory，GPU/CPU 编码器均失败。
+- 根因: FFmpeg 表达式解析有递归深度限制，平铺求和在尚未触及命令长度预算时已超限；不是换编码器或加内存可以解决。
+- 以后怎么做: 对同一精确索引集合生成平衡表达式，不改成平均 FPS 或删帧规避。回归包含长连续事件、保护末帧和实际像素对应；按结构、内容分别记录失败，内容证据不足不能混记成媒体损坏，也不得借此放行。
+- 证据: `test_timeline_render.py::test_long_continuous_action_does_not_exceed_expression_parser_depth`、内容缺口及非法类型回归；独立复核 1–1000 项中的 12 种规模逐字节符合预期。
+
+### L-20261102-02 时间线末端与保护区必须核验真实输出帧
+- status: OPEN
+- hits: 2
+- 模块: domain/timeline / media/timeline_render
+- 现象: 非整帧配音若把整片帧数直接 floor，会有末尾旁白没有画面；名义源窗覆盖结果，也可能采不到所需结果帧。Matroska 的 60fps 还会因 1ms time_base 表现为 16/17ms 交替。
+- 根因: 业务微秒、容器时间基和输出帧预算混用，或仅凭 avg_frame_rate 判断源时间分布。
+- 以后怎么做: 内部切点共享累计 floor、整片末端 ceil，最后一帧必须有真实源画面；实际 PTS 在容器精度内核对 CFR，再核验选中源帧和保护区的输出帧数量。短源、缺帧、编码增删帧保持阻断，不靠尾帧克隆或截旁白补齐。
+- 证据: `test_edit_timeline.py`、`test_timeline_render.py` 的非整帧、非零 PTS、逐帧像素及保护结果反例；实现边界见 `docs/programmatic-production.md`。
+- 本轮追加: 手机旋转/VFR源必须显式派生为保比例、固定输出帧率的资产；普通展示入点对齐真实PTS时，依据实际观察的关键相位判断保护，不能只看请求布尔值。显式诊断尾量仅允许最后一个输出帧使用下一张真实源画面，并逐帧记账，formal和默认路径不变，双尾帧/缺源仍拒绝。新增反例见 `test_purpose_production.py`。
+
+### L-20261102-01 冻结计划复用必须自行建立输出目录
+- status: OPEN
+- hits: 1
+- 模块: application/cli / sentence-planning
+- 现象: 已冻结的 semantic-v1 清单换新 report 目录构建时，在选镜前因 sentence_planning 目录不存在而失败。
+- 根因: 首次规划器负责创建目录，复用计划会跳过该规划器；后续保存逻辑仍假定目录已经存在。
+- 以后怎么做: 保存冻结计划的阶段自行建立目标父目录。用真实临时目录复现“已有分句 + 新报告目录”，确认不重新分句、原句序与配音时长保持，并确实到达匹配阶段。
+- 证据: `test_sentence_planning.py::test_build_reuses_frozen_plan_in_fresh_report_directory` 先失败后通过；修复位于 `application/cli.py`，不向兼容入口写业务逻辑。
+
+### L-20261030-04 句长可行性与动作完整性必须分别核验
+- status: OPEN
+- hits: 2
+- 模块: selection / retiming / preview
+- 现象: 全片平均倍速下降仍可能保留半截动作；模型也会把下一次入手说成结果静置，或把一个固定机位误称为两个角度。横向拉宽的拼图还会影响包装厚实判断。
+- 根因: 仅凭历史描述、分段名称或时长合计不能证明实际使用窗口完整，短口播又容易诱导裁掉必要动作。
+- 以后怎么做: 保持图片比例，按最终连续源窗口重新看图；保护关键接触、完成与结果，只压缩明确允许的中间过程。微秒精确求解后还要核对输出帧边界并播放 A/B。放不下就保留时长冲突，不把方案就绪当成质量 PASS。参考工程要标注当前版本与归档快照及缺失媒体。
+- 证据: `test_paper_retiming.py`、`test_paper_selection.py`、`test_paper_review_media.py`、`test_selection_preview.py`、`docs/paper-selection-replay.md`。
+- 再次遇到: 名义源窗到达结果，fps中心重采样后的实际尾帧却仍在展开。先以真实PTS和不带时长目标的观察记录动作，再搜索连续窗口与帧预算；实际输出重验源帧对应。新增 `test_paper_action_events.py`、`test_paper_action_windows.py` 与显式映射真实渲染测试，说明见 `docs/paper-action-windows.md`。
+
+### L-20261030-03 定时流水线必须使用当前证据并隔离代码根与工作根
+- status: OPEN
+- hits: 1
+- 模块: windows-runner / acceptance / delivery
+- 现象: 旧流程信任 PASS 字符串或历史批准，可能先分发后验收；外置工作目录与旧宿主环境又会把子进程指向错误代码或 Python。
+- 根因: 输入模式、验收与交付分支各自裁决，路径从工作目录反推，重复触发没有稳定的重试预算。
+- 以后怎么做: 整体脚本只负责选任务和限制次数，正式放行共享四项当前证据检查且发生在所有交付动作之前。代码根、工作根和草稿根分开传递；子进程固定当前包和解释器。Windows 大小写同名记录不能重置预算，分发副本存在也不等于归档和回写完成。用真实本地夹具、跨进程锁和 PowerShell 参数往返验证这些边界。
+- 证据: `tests/test_scheduled_pipeline.py`、`tests/test_acceptance_delivery_gate.py`、`tests/test_production_eval.py`、`docs/windows-pipeline.md`。
+
+### L-20261030-02 删除模型后端要覆盖整条执行链和提前拒绝配置
+- status: OPEN
+- hits: 1
+- 模块: vision / task-preflight / retired-runners
+- 现象: 视觉旧通道删除后，历史调度模板仍能启动整条 Agent；直接建稿也可能先生成配音再发现通道不支持。
+- 根因: 后端选择散落在模型调用、调度、运行事实和缓存中，失败诊断又依赖相同配置。
+- 以后怎么做: 通道统一解析，诊断保存无效配置但不自行失败，建稿和生成恢复在任何收费准备前阻断。退役执行器在读配置/写任务/外发之前退出。保留通用证据、QC 和 HTTP 重试合同，用真实旧新缓存键对照验证清理没有引起整库重分析。
+- 证据: `tests/test_vision_runtime_config.py`、`tests/test_retired_runners.py`、`doubao-jianying-orchestrator/tests/test_sentence_matching.py`、`docs/modular-development.md`。
+
+### L-20261030-01 功能拆分必须同时验证导入身份与发布库存
+- status: OPEN
+- hits: 1
+- 模块: module-layout / release-inventory / compatibility
+- 现象: 直接复制导出会使旧 patch 与实现状态分离；通用 media 目录排除会把新媒体代码包也漏掉。开发树回归通过仍可能无法在全新包中启动。
+- 根因: Python 模块对象和目录名称同时承担了运行时合同，单纯搬文件没有覆盖这些隐含依赖。
+- 以后怎么做: 旧导入指向同一实现对象；数据与媒体操作围绕明确输入输出抽取；资源根独立于实现深度。每次引入功能子目录在包外副本做 full 合包/解压回归，并验证私有媒体排除仍生效。按文件加载的证据合同必须读取同一包副本。
+- 证据: `tests/test_modular_architecture.py`、`tests/test_closed_loop_entrypoints.py`、`doubao-jianying-orchestrator/tests/test_media_boundary.py`、`docs/modular-development.md`。
+
+### L-20261028-09 混合选镜与缓存抽帧的证据身份
+- status: OPEN
+- hits: 1
+- 模块: visual-matching / independent-qc / draft
+- 现象: 规则与 AI 混排草稿缺 AI 身份收据；原始素材复制进草稿后路径变化被误报为内容变化；旧观察的临时帧被清理后又误报证据缺图。
+- 根因: 选镜、草稿复制和质检使用不同的身份口径，缓存观察绑定了临时路径。
+- 以后怎么做: 混排时封存选镜身份，复制素材同时核对原件状态和完整内容哈希；从匹配的源素材与已审时间重建缺失帧，仍需独立视觉和人工验收。
+- 证据: `test_ai_editor_qc.py`、`test_visual_match_recovery.py`。
+
+### L-20261028-08 功能动作聚焦不能落在前置展示
+- status: OPEN
+- hits: 1
+- 模块: visual-matching / scene-timing
+- 现象: 湿水句选中了包含实验的素材，但主题聚焦先命中干纸展开，最终切片漏掉浸水和提起。
+- 根因: 泛化“不破”主题与更具体的湿水主题共用候选动作，按时间顺序取到了前置动作。
+- 以后怎么做: 针对明确提及的具体动作优先定位对应已观察分段；未覆盖的其他卖点保留未认证。对完整动作不能在速度要求内放下的情况报告缺口或更换素材，不静默压到极高倍速。
+- 证据: `test_v156_selection_feedback.py`、`test_v152_meeting_rules.py`。
+### L-20261028-10 提速不能改变证据与交付计数单位
+- status: OPEN
+- hits: 1
+- 模块: 抽帧 / 调度 / staging / preview / throughput
+- 现象: 全轮准备屏障、逐帧进程与中间复制增加成本；草稿PASS被误读成成片产量；部分预览收据丢掉未覆盖要求。
+- 根因: 执行顺序与语义顺序耦合、复制身份只按同名串行假设、统计未明确artifact类型。
+- 以后怎么做: 就绪执行按ID归并且有背压；抽帧先证明PTS对应；并发复制从一开始用独立目标名并原子发布；保留完整需求且只显式preview容忍不足；草稿与MP4分别计量，未知为null。
+- 证据: `test_bounded_frame_batch.py`、`test_ready_work.py`、`test_single_copy_staging.py`、`test_ai_editor.py`、`test_throughput_calibration.py`；详见 `docs/plans/20261028-production-optimization.md`。
+
+### L-20261028-07 已选镜头的保护区与卖点覆盖
+- status: OPEN
+- hits: 1
+- 模块: ai-editor / timing / preview
+- 现象: 已确认的源窗口在写稿时重复扣除片头保护，或一句多个卖点因部分画面缺证而不能预览。
+- 根因: 保护区按选中窗口再次计算，且预览与正式证据覆盖要求没有分开记录。
+- 以后怎么做: 保护区始终相对原场景计算；允许的部分覆盖只用于显式预览，逐项标记未确认内容，正式模式和独立质检不放宽。
+- 证据: `test_paper_production.py`、`test_ai_editor.py`。
+
+### L-20261028-06 模型召回可能缩写素材编号
+- status: OPEN
+- hits: 1
+- 模块: visual-matching / ai-editor
+- 现象: 宽召回返回 source 编号而非完整 shot 编号，整稿被候选不存在错误阻断。
+- 根因: 模型输出格式与项目镜头标识不一致，但后续正式复看本就只接受真实镜头。
+- 以后怎么做: 仅在 source 与真实镜头一对一时解析缩写，并记录解析与忽略项；歧义和未知不进入候选，像素复核及 QC 原样执行。
+- 证据: `test_ai_editor.py` 的唯一和歧义编号测试。
+
+### L-20261028-05 旧任务清单缺商品导致同素材缓存隔离
+- status: OPEN
+- hits: 1
+- 模块: visual-matching / input-contract
+- 现象: 旧任务记录有商品，而旧分析清单缺商品；相同素材的新任务带商品后视觉键不一致，重复识别。
+- 根因: 商品身份只绑定在视觉键中，旧版编排没有贯通任务商品。
+- 以后怎么做: 显式核对旧任务、清单、素材范围，并重算前后键仅差商品的部分；只导入有效视觉观察，文字仍按原状态补验，候选复看和 QC 不绕过。
+- 证据: `test_legacy_cache_import.py`、`docs/subsystems/visual-matching.md`。
+
+### L-20261028-04 共享缓存不能整份合并旧快照
+- status: OPEN
+- hits: 1
+- 模块: visual-matching / runtime-and-recovery
+- 现象: 两个商品同时处理时，一方更新文字复核结果，另一方把同一缓存中的旧记录写回，后续任务重新调用文字模型。
+- 根因: 虽然持有文件锁，但每次仍用进程启动时的整份缓存覆盖磁盘的对应键。
+- 以后怎么做: 在锁内只合并调用方实际修改的键；失败保留待写集合，缓存损坏时不静默覆盖。缓存仍是加速器，不替代当前证据校验。
+- 证据: `test_v152_resume_integrity.py` 跨商品旧快照交错写入和损坏缓存测试。
+
+### L-20261028-03 视觉分析不可用时不继续批量文字复核
+- status: OPEN
+- hits: 1
+- 模块: visual-matching / runtime-and-recovery
+- 现象: 某视觉批次空响应后，流程仍准备并启动大批量文字复核，而这次正式匹配已被该错误阻断。
+- 根因: 视觉阶段错误与文字复核调度之间没有前置失败检查。
+- 以后怎么做: 保存成功观察和失败详情，推迟文字复核并保持任务未认证；只有恢复了缺失的视觉证据后才继续。
+- 证据: `test_material_cache.py` 的视觉失败延后文字测试。
+
+### L-20261028-02 闭环成功状态必须等外部步骤完成
+- status: OPEN
+- hits: 1
+- 模块: package-tools / runtime-and-recovery
+- 现象: 归档或表格回写失败前已将本地 done 写成 OK。
+- 根因: 外部工具需要待审核输入，却将它直接复用于最终状态快照。
+- 以后怎么做: 用单独的内部候选文件承载闭环工具输入；归档和回写成功并收到有效结果后再发布 OK，失败保留待处理状态和已分发收据。
+- 证据: `test_draft_delivery.py` 中闭环失败与回写收据测试。
+
+### L-20261028-01 可编辑节奏和长字幕必须在配音前区分
+- status: OPEN
+- hits: 1
+- 模块: timing / visual-matching / audio-voice
+- 现象: 整稿中可按语义停顿拆开的长句在合成后遇到字幕长度阻断；唯一可用卖点镜头提前终止复核，丧失同等证据下的编排选择。
+- 根因: 分句、音频时长、画面候选和字幕边界各自在不同阶段决定；表格音色“倍”后缀未纳入统一解析。
+- 以后怎么做: 只在保留原文与数字的自然标点处、合成前规划可读句段；显式分句仍尊重原输入。必要时有上限地扩展候选，继续保留证据和窗口的未知状态；统一解析音色倍速。
+- 证据: `test_reference_sentence_planning.py`、`test_ai_editor.py`、`test_meeting_voice.py`。
+
 ### L-20261027-01 并发槽位必须覆盖实际连接，重试预算必须跨恢复
 - status: OPEN
 - hits: 1

@@ -13,10 +13,6 @@
       "sha256": "88bb9699d4b71efe0688860ec16e4278e454386232da3a4fda51b356a6cbe48f"
     },
     {
-      "path": "tests/test_mac_review_handoff.py",
-      "sha256": "b628f797fa28107b9fa04063c2a23da5a496e12799b8152684fdc3929d22322d"
-    },
-    {
       "path": "doubao-jianying-orchestrator/orchestrator/ship_distribute.py",
       "sha256": "11252453a4ff853816040685746a6c3cb267edc9eda2291a5c8c638546785969"
     },
