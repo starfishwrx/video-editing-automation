@@ -8,6 +8,7 @@ from io import BytesIO
 import math
 import os
 from pathlib import Path
+import importlib.util
 import unicodedata
 
 from PIL import ImageFont
@@ -45,7 +46,10 @@ def _font(path, size):
 def _characters(text):
     result = []
     for char in text:
-        if result and (unicodedata.combining(char) or char in "\ufe0f\u200d"
+        regional_pair = (result and len(result[-1]) == 1
+            and 0x1F1E6 <= ord(result[-1]) <= 0x1F1FF and 0x1F1E6 <= ord(char) <= 0x1F1FF)
+        if result and (unicodedata.category(char).startswith('M') or char in "\ufe0f\u200d"
+                       or 0x1F3FB <= ord(char) <= 0x1F3FF or regional_pair
                        or result[-1].endswith("\u200d")):
             result[-1] += char
         else:
@@ -53,13 +57,29 @@ def _characters(text):
     return result
 
 
-def _wrap(text, measure, limit):
-    """Fewest lines, then balanced widths; preserve all original characters."""
+@lru_cache(maxsize=1)
+def _phrases():
+    spec = importlib.util.spec_from_file_location('_subtitle_phrase_boundaries',
+        Path(__file__).with_name('subtitle_phrases.py'))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _wrap(text, measure, limit, protected_terms=()):
+    """Preserve phrases before balancing widths; preserve original characters."""
     output = []
     for paragraph in text.split("\n"):
         chars = _characters(paragraph)
         n = len(chars)
-        best = {n: (0, 0, [])}
+        if measure(paragraph) <= limit:
+            output.append(paragraph)
+            continue
+        preferences = _phrases().boundary_preferences(paragraph, measure, limit, protected_terms)
+        offsets = [0]
+        for char in chars:
+            offsets.append(offsets[-1] + len(char))
+        best = {n: (0, 0, 0, 0, [])}
         for i in range(n - 1, -1, -1):
             choices = []
             for j in range(i + 1, n + 1):
@@ -67,24 +87,20 @@ def _wrap(text, measure, limit):
                 width = measure(line)
                 if width > limit:
                     break
-                # Prefer word boundaries, but allow an oversized word to split.
-                inside_word = (j < n and chars[j - 1].isascii() and chars[j].isascii()
-                               and chars[j - 1].isalnum() and chars[j].isalnum())
-                bad_punctuation = (j < n and chars[j] in "，。！？、；：,.!?;:）】》」』"
-                                   or chars[j - 1] in "（【《「『")
-                count, cost, rest = best[j]
-                penalty = limit * limit * (2 if inside_word or bad_punctuation else 0)
-                choices.append((count + 1, cost + (limit - width) ** 2 + penalty, [line] + rest))
+                hard, linguistic = preferences[offsets[j]]
+                splits, count, penalty, raggedness, rest = best[j]
+                choices.append((splits + hard, count + 1, penalty + linguistic,
+                                raggedness + (limit - width) ** 2, [line] + rest))
             if not choices:
                 raise ValueError("SUBTITLE_SINGLE_GLYPH_EXCEEDS_SAFE_WIDTH")
-            best[i] = min(choices, key=lambda row: row[:2])
-        output.extend(best[0][2] if n else [""])
+            best[i] = min(choices, key=lambda row: row[:4])
+        output.extend(best[0][4] if n else [""])
     return output
 
 
 def layout_subtitle(text, width, height, *, font_size_px=FONT_SIZE_PX,
                     font_name="Microsoft YaHei", bold=True, font_path=None,
-                    x=0.0, y=-.55, margin=SAFE_MARGIN, outline_px=2.0):
+                    x=0.0, y=-.55, margin=SAFE_MARGIN, outline_px=2.0, protected_terms=()):
     if (not isinstance(text, str) or not text.strip() or '\t' in text
             or not all(math.isfinite(v) for v in (width, height, font_size_px, x, y, margin, outline_px))
             or min(width, height, font_size_px) <= 0 or not 0 < margin < .5 or outline_px < 0):
@@ -105,7 +121,7 @@ def layout_subtitle(text, width, height, *, font_size_px=FONT_SIZE_PX,
                 measured += sum(max(0, size - font.getlength(c)) for c in value
                                 if unicodedata.east_asian_width(c) in {"W", "F"})
             return measured
-        lines = _wrap(text, measure, maximum)
+        lines = _wrap(text, measure, maximum, tuple(protected_terms))
         ascent, descent = font.getmetrics()
         advance = max(ascent + descent, math.ceil(size * 1.3))
         box_width = max(measure(line) for line in lines) + 2 * padding

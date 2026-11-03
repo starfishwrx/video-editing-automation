@@ -35,6 +35,63 @@ class CaptionLayoutTests(unittest.TestCase):
         self.assertLess(len(narrow['lines']), len(wide['lines']))
         self.assert_safe(wide)
 
+    def test_complete_subject_and_predicate_beat_balanced_widths(self):
+        row = layout_subtitle('但心相印的新品东方纸上抽纸真的很难不爱啊', 1080, 1920)
+        self.assertEqual(row['lines'], ['但心相印的新品东方纸上抽纸', '真的很难不爱啊'])
+        self.assert_safe(row)
+
+    def test_unseen_product_names_are_not_a_one_example_exception(self):
+        for name in ('晨曦柔云', '星河竹韵'):
+            row = layout_subtitle(f'但心相印的新品{name}抽纸真的很难不爱啊', 1080, 1920)
+            self.assertIn(name + '抽纸', row['text'])
+            self.assertEqual(row['lines'][-1], '真的很难不爱啊')
+            self.assert_safe(row)
+
+    def test_english_brand_and_effect_phrase_stay_intact(self):
+        row = layout_subtitle('Hello Kitty联名的云感洗脸巾用起来柔软又舒服', 1080, 1920)
+        self.assertEqual(row['lines'], ['Hello Kitty联名的云感洗脸巾', '用起来柔软又舒服'])
+        row = layout_subtitle('一次抽取一张不会连抽用起来特别省心', 1080, 1920)
+        self.assertIn('用起来特别省心', row['text'])
+        self.assert_safe(row)
+
+    def test_relative_clause_stays_with_its_product_noun(self):
+        text = '是哪个大冤种还在用那种擦完脸就泛红的杂牌洗脸巾啊'
+        row = layout_subtitle(text, 1080, 1920)
+        self.assertIn('擦完脸就泛红的杂牌洗脸巾啊', row['lines'])
+        self.assertEqual(row['text'].replace('\n', ''), text)
+        self.assert_safe(row)
+
+    def test_numeric_specification_and_supplied_name_are_never_split_when_they_fit(self):
+        text = '新上市星辉御柔洗脸巾足足200抽用起来特别省心'
+        row = layout_subtitle(text, 720, 1280, protected_terms=('星辉御柔',))
+        for term in ('星辉御柔', '洗脸巾', '200抽', '用起来特别省心'):
+            self.assertIn(term, row['text'])
+        self.assertEqual(row['text'].replace('\n', ''), text)
+        self.assert_safe(row)
+
+    def test_existing_punctuation_is_a_preferred_sentence_boundary(self):
+        text = '这款洗脸巾柔软亲肤，吸水性也很好'
+        row = layout_subtitle(text, 1080, 1920)
+        self.assertEqual(row['lines'], ['这款洗脸巾柔软亲肤，', '吸水性也很好'])
+        self.assert_safe(row)
+
+    def test_intro_quantified_feature_and_action_result_are_complete(self):
+        cases = [('关键是没有荧光增白剂给宝宝用也放心', ['关键是没有荧光增白剂', '给宝宝用也放心']),
+                 ('一包有120抽四层加厚一箱足足有24包', ['一包有120抽四层加厚', '一箱足足有24包']),
+                 ('把水倒上去很快就吸收了按压也不反渗', ['把水倒上去很快就吸收了', '按压也不反渗']),
+                 ('这种柔软又厚实的抽纸擦完脸也不掉絮', ['这种柔软又厚实的抽纸', '擦完脸也不掉絮'])]
+        for text, lines in cases:
+            with self.subTest(text=text):
+                row = layout_subtitle(text, 1080, 1920)
+                self.assertEqual(row['lines'], lines)
+                self.assert_safe(row)
+
+    def test_emoji_modifiers_flags_and_joined_sequences_are_not_split(self):
+        for emoji in ('👍🏻', '🇨🇳', '👩\u200d👩\u200d👧\u200d👦'):
+            row = layout_subtitle('柔软' * 5 + emoji + '亲肤不掉絮亲肤不掉絮', 1080, 1920)
+            self.assertIn(emoji, row['text'])
+            self.assert_safe(row)
+
     def test_multiline_near_edge_is_clamped_in_both_orientations(self):
         for width, height in ((1080, 1920), (1920, 1080)):
             row = layout_subtitle('测试字幕\n第二行字幕\n第三行字幕', width, height, x=1, y=-1)
