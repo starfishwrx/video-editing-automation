@@ -20,6 +20,16 @@ def packaging(**changes):
 
 
 class OpeningHookTests(unittest.TestCase):
+    def test_packaging_recall_priority_is_only_a_multilingual_description_hint(self):
+        primary=['手持包装正面展示','粉色洗脸巾盒展示','Front-facing retail packaging', 'A carton presentation',
+                 '白色背景前的整提包装正面居中展示','Centered retail packaging against a white background']
+        incidental=['揉搓动作，包装只在背景角落','Packaging is in the background']
+        negative=['揉搓纸巾，未见包装','Only rubbing, no packaging visible']
+        self.assertTrue(all(hook.packaging_recall_priority(s)==0 for s in primary))
+        self.assertTrue(all(hook.packaging_recall_priority(s)==1 for s in incidental))
+        self.assertTrue(all(hook.packaging_recall_priority(s)==3 for s in negative))
+        self.assertEqual(hook.packaging_recall_priority('揉搓后展开演示'),2)
+
     def test_only_first_three_no_point_clauses_receive_packaging_goal(self):
         rows=hook.normalize([request(i)for i in range(1,5)])
         self.assertTrue(all(hook.is_packaging_hook(r)for r in rows[:3]))

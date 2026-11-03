@@ -6,7 +6,7 @@ from .. import ai_editor_contract as identity
 from ..selection import ai_editor, purpose_retrieval
 from .purpose_review import save
 
-PROTOCOL = 'purpose-information-recall-v3-opening-hook'
+PROTOCOL = 'purpose-information-recall-v4-packaging-first'
 PROMPT = '''从缓存描述中为原句找有展示目的的候选；这是文字召回，绝不是画面已通过。
 优先考虑：具体动作/展示 -> 可见特点或结果 -> 本句至少一个具体卖点。
 不要求整句所有卖点都匹配，不要把“不闷热不粘腻”改成另一句更容易匹配的话。
@@ -68,7 +68,7 @@ def recall(manifest, requests, shots, index, directory):
             raise ValueError('PURPOSE_RECALL_SOURCE_CHANGED')
     save(root / 'recall.json', {'protocol': PROTOCOL, 'requests': requests, 'rankings': result,
         'catalog_size': len(entries), 'rejected_hints': rejected,
-        'hook_retrieval':'deterministic_pool_then_actual_packaging_review' if hooks else None,
+        'hook_retrieval':'deterministic_packaging_first_then_actual_review' if hooks else None,
         'scope': 'text retrieval hints only; mandatory actual-window review',
         'maximum_pixel_reviews_per_sentence': 6, 'formal_delivery_allowed': False})
     return result

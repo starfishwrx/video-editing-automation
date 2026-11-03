@@ -42,6 +42,59 @@ class PurposeRetrievalTests(unittest.TestCase):
         self.assertNotIn('observation',result[1][0])
         self.assertNotIn('plan',result[1][0])
 
+    def test_packaging_after_six_actions_reaches_both_allocation_stages(self):
+        from orchestrator.selection.opening_hook import normalize
+        request=normalize([{**self.request,'text':'谁还在用杂牌啊',
+            'has_product_selling_point':False,'display_goal':'general_product',
+            'checks':[{'id':'c1','type':'display','claim_text':'谁还在用杂牌啊'}]}])[0]
+        descriptions=['A动作：揉搓纸巾后展开'+str(i)for i in range(8)]+['白色背景前的整提包装正面居中展示']
+        shots=[];scans={};sources=[]
+        for i,description in enumerate(descriptions):
+            source=self.root/f'opaque-{20-i}.mov';source.write_bytes(b'media identity fixture')
+            shot={**self.shots[0],'shot_id':f'opaque-{20-i}','video':str(source)}
+            shots.append(shot);sources.append(str(source))
+            scans[shot['shot_id']]={'description':description,'source_identity':identity.source_identity(source),'hints':[]}
+        manifest={**self.manifest,'material_sources':sources}
+        index={**self.index,'sources':sources,'scans':scans}
+        packaging=shots[-1]['shot_id']
+        for ordering in (shots,list(reversed(shots))):
+            with self.subTest(order=ordering[0]['shot_id']),patch.object(vision.ai_editor,'_call') as call:
+                recalled=vision.recall(manifest,[request],ordering,index,self.root/ordering[0]['shot_id'])
+            call.assert_not_called()
+            self.assertEqual(recalled[1][0]['shot_id'],packaging)
+            final=selection.allocate([request],recalled,selection.catalog(ordering,scans))
+            self.assertEqual(final[1][0]['shot_id'],packaging)
+            self.assertEqual(len(final[1]),6)
+            self.assertNotIn('observation',final[1][0])
+            self.assertNotIn('plan',final[1][0])
+
+    def test_hook_packaging_purpose_beats_reservations_and_negative_mentions(self):
+        from orchestrator.selection.opening_hook import normalize
+        requests=normalize([{**self.request,'index':i,'text':'谁还在用杂牌啊',
+            'has_product_selling_point':False,'display_goal':'general_product',
+            'checks':[{'id':'c1','type':'display','claim_text':'谁还在用杂牌啊'}]}for i in (1,2)])
+        entries=[{'shot_id':f'action-{i}','description':'揉搓动作，未见包装',
+                  'start_us':0,'end_us':5_000_000}for i in range(8)]
+        entries += [{'shot_id':'background','description':'揉搓动作，背景角落有包装',
+                     'start_us':0,'end_us':5_000_000},
+                    {'shot_id':'package','description':'整提外包装正面展示',
+                     'start_us':0,'end_us':5_000_000}]
+        final=selection.allocate(requests,{1:[],2:[]},entries)
+        self.assertEqual([final[i][0]['shot_id']for i in (1,2)],['package','package'])
+        self.assertFalse(final[1][0]['generic_reservoir'])
+        # Available actual packaging must still reject if pixel review says
+        # it is the wrong product; ranking is not visual eligibility.
+        from orchestrator.selection import purpose_selection
+        candidates=[{'source':'package','plan':{'ok':False,'reason':'EVIDENCE_UNKNOWN'}}]
+        self.assertEqual(purpose_selection.eligible(candidates,[]),[])
+
+    def test_feature_ranking_is_unchanged_by_packaging_priority(self):
+        entries=[{'shot_id':'package','description':'整提包装展示','start_us':0,'end_us':5_000_000},
+                 {'shot_id':'action','description':'真实揉搓后展开','start_us':0,'end_us':5_000_000}]
+        feature={**self.request,'display_goal':'visible_feature'}
+        ranked=[{**self.candidate,'shot_id':'action'}]
+        self.assertEqual(selection.allocate([feature],{1:ranked},entries),{1:ranked})
+
     def validate(self):
         return selection.validate(self.data,[self.request],selection.catalog(self.shots,self.index['scans']))
 

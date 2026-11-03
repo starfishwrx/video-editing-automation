@@ -1,8 +1,33 @@
 """A packaging accompaniment is not proof of a spoken pain-point claim."""
 from copy import deepcopy
+import re
 
 PURPOSE = 'opening_hook_packaging'
 RULE = 'first_three_no_product_selling_point_packaging_v1'
+
+
+def packaging_recall_priority(description):
+    """Rank cache hints only; a high rank never certifies a packaging picture."""
+    packaging = r'(?:包装|外盒|外袋|纸巾盒|洗脸巾盒|纸盒|纸箱|整箱|整提|整包|盒装|袋装|\bpackag(?:e|ing)\b|\bcarton\b)'
+    clauses = re.split(r'[，,。；;！!？?\n]', description.lower())
+    incidental = False
+    for clause in clauses:
+        if not re.search(packaging, clause):
+            continue
+        if re.search(r'(?:没有|未见|看不到|未出现|不含|无)[^，,。；;]{0,8}' + packaging
+                     + r'|\b(?:no|without)\b.{0,20}' + packaging, clause):
+            continue
+        # "Against a white background" describes a backdrop, not a package
+        # relegated to the background. Require an actual location relation.
+        location = r'(?:背景(?:中|里|内|角落)?(?!前|墙|板)|角落|边角|边缘)'
+        if re.search(location + r'(?:有|只有|仅有|可见|放着|摆着|露出|出现).{0,12}' + packaging
+                     + '|' + packaging + r'.{0,6}(?:仅|只)?(?:在|位于|处于|放在|摆在|作为)' + location
+                     + '|' + packaging + r'.{0,16}\b(?:in|at) (?:the )?(?:background|corner)\b'
+                     + r'|\b(?:background|corner) (?:has|contains|shows) .{0,20}' + packaging, clause):
+            incidental = True
+            continue
+        return 0
+    return 1 if incidental else 2 if not re.search(packaging, description.lower()) else 3
 
 
 def eligible(request):
