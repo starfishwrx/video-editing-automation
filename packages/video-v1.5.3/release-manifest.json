@@ -6,7 +6,7 @@
     "machine-specific paths",
     "knowledge-base bodies"
   ],
-  "file_count": 434,
+  "file_count": 443,
   "files": [
     {
       "path": ".gitignore"
@@ -246,6 +246,9 @@
       "path": "doubao-jianying-orchestrator/orchestrator/media/action_frames.py"
     },
     {
+      "path": "doubao-jianying-orchestrator/orchestrator/media/caption_layout.py"
+    },
+    {
       "path": "doubao-jianying-orchestrator/orchestrator/media/ffmpeg_bootstrap.py"
     },
     {
@@ -262,6 +265,9 @@
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/media/probe.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/media/source_normalization.py"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/media/stability.py"
@@ -433,6 +439,9 @@
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/selection/experiment_retiming.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/selection/opening_hook.py"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/selection/paper_action_events.py"
@@ -633,6 +642,9 @@
       "path": "doubao-jianying-orchestrator/tests/test_capacity_and_sync.py"
     },
     {
+      "path": "doubao-jianying-orchestrator/tests/test_caption_layout.py"
+    },
+    {
       "path": "doubao-jianying-orchestrator/tests/test_default_headless.py"
     },
     {
@@ -669,6 +681,9 @@
       "path": "doubao-jianying-orchestrator/tests/test_gpu_runtime.py"
     },
     {
+      "path": "doubao-jianying-orchestrator/tests/test_headless_media.py"
+    },
+    {
       "path": "doubao-jianying-orchestrator/tests/test_legacy_cache_import.py"
     },
     {
@@ -685,6 +700,9 @@
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_meeting_voice.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/tests/test_opening_hook.py"
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_paper_action_events.py"
@@ -933,6 +951,12 @@
       "path": "jianying-editor/scripts/utils/skill_path.py"
     },
     {
+      "path": "jianying-editor/scripts/utils/subtitle_layout.py"
+    },
+    {
+      "path": "jianying-editor/scripts/utils/subtitle_phrases.py"
+    },
+    {
       "path": "jianying-editor/scripts/vendor/pyJianYingDraft/__init__.py"
     },
     {
@@ -1117,6 +1141,9 @@
     },
     {
       "path": "tests/test_feedback_candidates.py"
+    },
+    {
+      "path": "tests/test_headless_media_coldstart.py"
     },
     {
       "path": "tests/test_lark_command.py"

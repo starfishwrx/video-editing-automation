@@ -2188,9 +2188,8 @@ class OrchestrationEngine:
         """把所有 TTS 旁白归一到统一响度，返回 {原始路径: 归一后路径}。
 
         逐条 TTS 的固有电平差是「声音忽大忽小」的根因（R3 实测跨度 15.9 LU），
-        与具体某条视频无关，故按用户定案做成**通用规则**。只处理 `audio_mode
-        == "tts"`：`file` 模式是操作方明确指定的配音，属于操作决策，不擅自改
-        动它的电平（仍会记账，便于发现它是否也需要归一）。
+        与具体某条视频无关，故按用户定案做成**通用规则**。处理新合成 TTS 和
+        恢复时绑定的原 TTS；操作方明确指定的其他文件配音沿用原规则，不改变电平。
         """
         spec = self.m.get("narration_loudness")
         spec = spec if isinstance(spec, dict) else {}
@@ -2203,24 +2202,20 @@ class OrchestrationEngine:
         ffprobe = str(self.ffprobe) if self.ffprobe else "ffprobe"
         out_dir = self.report_dir / "loudness"
 
+        retained_tts = {str(Path(p).resolve()) for p in self.m.get("retained_tts_audio", [])}
         wanted: dict[str, str] = {}
         for c in clips:
-            if c.audio_mode != "tts" or not c.tts_path:
+            raw = c.tts_path if c.audio_mode == "tts" else c.audio if c.audio_mode == "file" else None
+            if not raw or (c.audio_mode == "file" and str(Path(raw).resolve()) not in retained_tts):
                 continue
-            src = Path(c.tts_path)
+            src = Path(raw)
             key = str(src)
             if key in wanted:
                 continue
-            try:
-                st = src.stat()
-                identity = f"{src}|{st.st_size}|{st.st_mtime_ns}"
-            except OSError:
-                identity = key
-            digest = hashlib.sha256(identity.encode()).hexdigest()[:16]
-            wanted[key] = str(out_dir / f"{src.stem}_{digest}.m4a")
+            wanted[key] = str(audio_loudness.normalized_path(src, out_dir, target_lufs=target + gain_db))
 
         file_mode = [str(c.audio) for c in clips
-                     if c.audio_mode == "file" and c.audio]
+                     if c.audio_mode == "file" and c.audio and str(Path(c.audio).resolve()) not in retained_tts]
         if file_mode:
             self._event("narration_loudness_file_mode_untouched",
                         count=len(file_mode),
@@ -2233,6 +2228,8 @@ class OrchestrationEngine:
             detail = audio_loudness.normalize_narration(
                 Path(src_key), Path(dst), ffmpeg=ffmpeg, ffprobe=ffprobe,
                 target_lufs=target + gain_db)
+            if detail.get("skipped") or not Path(dst).is_file():
+                raise ValueError("NARRATION_NORMALIZATION_FAILED:" + str(detail.get("skipped")))
             return src_key, dst, detail
 
         started = time.perf_counter()

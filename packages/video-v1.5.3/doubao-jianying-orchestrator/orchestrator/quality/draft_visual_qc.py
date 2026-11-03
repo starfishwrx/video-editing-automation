@@ -557,8 +557,10 @@ def main() -> int:
                 cursor += claim["slots"]
         if ai_mode:
             ai_claim_rows = [(claim, rows) for claim, rows in claim_rows if claim.get("selection_mode") == "ai_editor"]
+            from ..media.source_normalization import read_prepared_sources
+            prepared_sources = read_prepared_sources(draft)
             cut_errors = [error for claim, cut_rows in ai_claim_rows
-                          for error in ai_editor_qc.validate_cut(claim, cut_rows)]
+                          for error in ai_editor_qc.validate_cut(claim, cut_rows, prepared_sources)]
             issues.extend(cut_errors)
             result["final_windows_verified"] = bool(ai_claim_rows) and not cut_errors and not mixed
             result["ai_final_windows_verified"] = bool(ai_claim_rows) and not cut_errors
@@ -569,6 +571,13 @@ def main() -> int:
         result["source_bindings"] = [{"path": str(materials[key]["path"]),
                                       "identity": _source_identity(str(materials[key]["path"]))}
                                      for key in sorted(used_materials) if key in materials]
+        if ai_mode:
+            bound = {row["path"] for row in result["source_bindings"]}
+            for row in prepared_sources:
+                path = row["source"]["path"]
+                if path not in bound:
+                    result["source_bindings"].append({"path": path, "identity": _source_identity(path)})
+                    bound.add(path)
         result["segment_map"] = [
             {"claim_index": claim["index"], "draft_segments": [row["index"] for row in rows]}
             for claim, rows in claim_rows]

@@ -43,8 +43,9 @@ from typing import Any, Callable, Iterable, Optional
 
 US = 1_000_000
 
-# 音频处理版本：TTS 的后处理/编码链（采样率、容器、重采样、响度处理等）一变就 +1。
-# 它进 TTS 缓存键，保证「同样文本+音色但后处理变了」不会误复用旧音频字节。
+# 原始 TTS 生成/剪静音链的版本，进入云端 TTS 缓存键。
+# 写稿前的响度/48kHz PCM 资产另由 audio_loudness.NORMALIZATION_VERSION 管理；
+# 仅改变最终正规化时不要失效已付费生成的原始配音。
 AUDIO_PIPELINE_VERSION = "1"
 
 # 字符数估算语速（字/秒）。**只在 TTS 挂掉时**用作显式降级值（见

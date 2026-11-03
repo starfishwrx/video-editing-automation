@@ -70,6 +70,10 @@ uv run --frozen python -X utf8 -m tools.check_architecture
 
 合成 FFmpeg 测试验证源帧/PTS、变速、结果帧、音频和字幕执行；缺少 FFmpeg 时的 skip 不代表媒体行为通过。准备绿色工具后需把其目录加入当前进程 PATH，并设置 FFMPEG_BIN/FFPROBE_BIN，再运行两套回归。
 
+无头媒体修复的定向验证运行编排器 `test_headless_media.py`、`test_default_headless.py`、`test_ai_editor_qc.py` 和包级 `test_headless_media_coldstart.py`。媒体用例包含非整毫秒 48kHz 配音、旧格式和截断缓存、真实缺音拒绝、旧恢复来源迁移，以及 8/10bit 旋转后的解码像素/原声/帧时钟一致性。冷启动仅复制 Git 跟踪文件或解压库存，使用空用户目录的新解释器禁网执行真实 FFmpeg；CI 中只有外置无头后端被替代，不证明已安装的剪映或真实 native 草稿通过。
+
+真实缓存恢复须另外在隔离输出目录通过正常 `recover --stage draft_write` 和已授权后端验证：保留配音、选镜与句长缓存，禁用新增 TTS/视觉请求，复用已处理 BGM，写出后读回 native 时间轴、媒体及源窗。缓存替代范围和未运行的独立视觉 QC 必须如实披露，不把草稿写入成功称为成片验收。
+
 当前有 CLI、调度、草稿/交付夹具和合成媒体集成测试；真实商品从自动选镜到专业编辑接受的完整端到端质量，不由离线套件认证。纸品隔离验证保留已有失败，详情见[动作帧域窗口](paper-action-windows.md)和[回放说明](paper-selection-replay.md)。独立时间线方案的阶段验收见[实施方案](plans/20261101-programmatic-production.md)。
 
 ## 3. 发版验收（合包命令）

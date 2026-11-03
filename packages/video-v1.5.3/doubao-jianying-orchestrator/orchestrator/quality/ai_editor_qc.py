@@ -9,12 +9,16 @@ RESPONSE_VERSION = visual_qc_contract.AI_RESPONSE_VERSION
 REPORT_VERSION = visual_qc_contract.AI_REPORT_VERSION
 
 
-def source_matches_receipt(actual_path: str, expected: dict) -> bool:
+def source_matches_receipt(actual_path: str, expected: dict, prepared_sources=None) -> bool:
     """Accept a staged copy only after proving byte identity and stable stats."""
     try:
         actual_before = contract.source_identity(actual_path)
         if actual_before == expected:
             return True
+        if prepared_sources:
+            from ..media.source_normalization import matches_prepared_source
+            if matches_prepared_source(actual_path, expected, prepared_sources):
+                return True
         if not isinstance(expected, dict) or actual_before["size"] != expected.get("size"):
             return False
         original_path = expected.get("path")
@@ -54,7 +58,7 @@ DIRECT表示本句按其用途正常匹配：贴切的轻薄/柔软展示和普�
 """
 
 
-def validate_cut(claim: dict, rows: list[dict]) -> list[str]:
+def validate_cut(claim: dict, rows: list[dict], prepared_sources=None) -> list[str]:
     item = claim["ai_segment"]
     check = contract.validate_segment_receipt(item, index=claim["index"], manifest={
         "category": claim.get("category"), "product": claim.get("product")}
@@ -65,7 +69,7 @@ def validate_cut(claim: dict, rows: list[dict]) -> list[str]:
         return issues + ["AI_QC_PART_COUNT_CHANGED"]
     for part, actual in zip(expected, rows):
         receipt = part.get("ai_selection") or {}
-        if not source_matches_receipt(actual["source"], receipt.get("source_identity")):
+        if not source_matches_receipt(actual["source"], receipt.get("source_identity"), prepared_sources):
             issues.append("AI_QC_SOURCE_CONTENT_CHANGED")
         start = round(actual["source_start"] * 1e6)
         end = round((actual["source_start"] + actual["source_duration"]) * 1e6)
