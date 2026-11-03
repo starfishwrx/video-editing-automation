@@ -137,7 +137,7 @@ def validate_plan(manifest, analysis, plan, narration_timing):
 
 def repair(manifest, analysis, plan, directory, failure, narration_timing):
     from . import ai_editor as editor
-    from .ai_editor_recovery import WindowFailure, failure_fields
+    from .ai_editor_recovery import failure_fields, repairable_index
     attempts = plan.setdefault("continuity_attempts", {})
     for context in proposals(manifest, analysis, plan, failure.index, narration_timing):
         key = contract.digest(context)[:24]
@@ -162,11 +162,10 @@ def repair(manifest, analysis, plan, directory, failure, narration_timing):
         install(trial, key, group)
         try:
             editor._assemble(manifest, analysis, trial, narration_timing=narration_timing, verify_sources=True)
-        except WindowFailure as other:
-            if other.index in {m["index"] for m in context["members"]}:
+        except (ValueError, KeyError, TypeError, OSError) as other:
+            other_index = repairable_index(other)
+            if other_index is None or other_index in {m["index"] for m in context["members"]}:
                 continue
-        except (ValueError, KeyError, TypeError, OSError):
-            continue
         plan.update(trial)
         plan.setdefault("continuity_repairs", []).append({"indices": [m["index"] for m in context["members"]],
                                                           "reason": str(failure), "review_key": key})

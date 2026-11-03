@@ -110,6 +110,120 @@ class SentenceContinuityTests(unittest.TestCase):
         self.assertTrue(self.plan['ok'])
         self.assertEqual(self.plan['rows'][0]['parts'][0]['shot_id'], 'short')
 
+    def test_empty_model_selection_still_reviews_known_timing_conflict(self):
+        for row in self.plan['rows']:
+            row['parts'] = []
+        frozen = copy.deepcopy(self.plan['reviews'])
+        order = []
+        def narrow(*args):
+            order.append('short')
+            return False
+        def joint(manifest, context, shot, directory):
+            order.append('group')
+            return self.group(context)
+        with patch.object(editor, '_call', return_value={'rows': copy.deepcopy(self.plan['rows'])}) as edit, \
+                patch.object(editor, '_repair_selected_window', side_effect=narrow), \
+                patch.object(sharing, 'review_group', side_effect=joint):
+            editor._edit_plan(self.manifest, self.analysis, self.plan, self.root)
+        self.assertTrue(self.plan['ok'])
+        edit.assert_called_once()
+        self.assertEqual(order, ['short', 'group'])
+        self.assertEqual(self.plan['reviews'], frozen)
+        result = editor._assemble(self.manifest, self.analysis, self.plan, narration_timing=None)
+        self.assertEqual([(s['source_start'], s['source_end']) for s in result['segments']], [(0, 2), (2, 4)])
+
+    def test_empty_selection_uses_cached_short_candidates_before_paid_review(self):
+        self.analysis['shots'] += self.shots[1:]
+        self.plan['reviews']['1'].append(self.reviews[1])
+        self.plan['reviews']['2'] = [self.reviews[2]]
+        for row in self.plan['rows']:
+            row['parts'] = []
+        with patch.object(editor, '_call', return_value={'rows': copy.deepcopy(self.plan['rows'])}) as edit, \
+                patch.object(editor, '_repair_selected_window', side_effect=AssertionError('Unneeded review')), \
+                patch.object(sharing, 'review_group', side_effect=AssertionError('Unneeded group')):
+            editor._edit_plan(self.manifest, self.analysis, self.plan, self.root)
+        self.assertTrue(self.plan['ok'])
+        edit.assert_called_once()
+        self.assertEqual([r['parts'][0]['shot_id'] for r in self.plan['rows']], ['short', 'other'])
+
+    def test_empty_selection_without_matched_evidence_does_not_start_joint_review(self):
+        self.plan['rows'][0]['parts'] = []
+        self.plan['reviews']['1'][0]['verdict'] = 'uncertain'
+        with patch.object(editor, '_call', return_value={'rows': copy.deepcopy(self.plan['rows'])}) as edit, \
+                patch.object(editor, '_repair_selected_window', side_effect=AssertionError('No observed match')), \
+                patch.object(sharing, 'review_group', side_effect=AssertionError('No observed match')):
+            with self.assertRaisesRegex(ValueError, 'AI_EDITOR_NO_SELECTION:1'):
+                editor._edit_plan(self.manifest, self.analysis, self.plan, self.root)
+        self.assertFalse(self.plan['ok'])
+        self.assertEqual(edit.call_count, 3)
+
+    def four_groups(self, empty=False):
+        self.manifest['segments'] = [{'text': f'sentence {i}', 'audio_duration_us': 2_000_000} for i in range(1, 9)]
+        self.analysis['shots'] = []
+        self.plan.update(sentences=[], rows=[], reviews={})
+        for pair in range(4):
+            video = self.root / f'group-{pair}.mp4'
+            video.write_bytes(f'synthetic demonstration {pair}'.encode())
+            shot = {**self.shot, 'shot_id': f'group-{pair}', 'video': str(video)}
+            self.analysis['shots'].append(shot)
+            reviewed = {**copy.deepcopy(self.original_review), 'shot_id': shot['shot_id'],
+                        'source_identity': contract.source_identity(video)}
+            for index in (pair * 2 + 1, pair * 2 + 2):
+                self.plan['sentences'].append({'index': index, 'text': f'sentence {index}', 'kind': 'selling_point',
+                    'selling_points': [{'id': 'p1', 'text': f'benefit {pair}'}], 'candidate_ids': [shot['shot_id']]})
+                self.plan['rows'].append({'index': index, 'parts': [] if empty else [
+                    {'shot_id': shot['shot_id'], 'audio_duration_us': 2_000_000}]})
+                self.plan['reviews'][str(index)] = [copy.deepcopy(reviewed)]
+        self.identity()
+
+    def assert_four_group_repair(self, empty):
+        self.four_groups(empty)
+        frozen = copy.deepcopy(self.plan['reviews'])
+        with patch.object(editor, '_call', return_value={'rows': copy.deepcopy(self.plan['rows'])}) as edit, \
+                patch.object(editor, '_repair_selected_window', return_value=False), \
+                patch.object(sharing, 'review_group', side_effect=lambda m, c, s, d: self.group(c)) as review:
+            editor._edit_plan(self.manifest, self.analysis, self.plan, self.root)
+        self.assertTrue(self.plan['ok'], self.plan)
+        edit.assert_called_once()
+        self.assertEqual(review.call_count, 4)
+        self.assertEqual([r['indices'] for r in self.plan['continuity_repairs']], [[1, 2], [3, 4], [5, 6], [7, 8]])
+        self.assertEqual(self.plan['reviews'], frozen)
+        result = editor.match_manifest(self.manifest, {**self.analysis, 'ai_editor_plan': self.plan})
+        self.assertTrue(result['ok'], result)
+        self.assertEqual([s['audio_duration_us'] for s in result['segments']], [2_000_000] * 8)
+
+    def test_four_groups_do_not_spend_editor_retry_rounds(self):
+        self.assert_four_group_repair(empty=False)
+
+    def test_four_groups_from_empty_model_rows_all_complete(self):
+        self.assert_four_group_repair(empty=True)
+
+    def test_uncertain_fourth_group_keeps_first_three_but_blocks_final_plan(self):
+        self.four_groups()
+        def joint(manifest, context, shot, directory):
+            if context['members'][0]['index'] == 7:
+                raise ValueError('CONTINUITY_JOINT_REVIEW_UNCERTAIN')
+            return self.group(context)
+        with patch.object(editor, '_call', return_value={'rows': copy.deepcopy(self.plan['rows'])}) as edit, \
+                patch.object(editor, '_repair_selected_window', return_value=False), \
+                patch.object(sharing, 'review_group', side_effect=joint) as review:
+            with self.assertRaises(WindowFailure):
+                editor._edit_plan(self.manifest, self.analysis, self.plan, self.root)
+        self.assertFalse(self.plan['ok'])
+        self.assertEqual(edit.call_count, 3)
+        self.assertEqual(review.call_count, 4)
+        self.assertEqual([r['indices'] for r in self.plan['continuity_repairs']], [[1, 2], [3, 4], [5, 6]])
+
+    def test_repair_reporting_progress_without_changing_rows_cannot_loop(self):
+        with patch.object(editor, '_call', return_value={'rows': copy.deepcopy(self.plan['rows'])}) as edit, \
+                patch.object(editor, '_repair_selected_window', return_value=False), \
+                patch.object(sharing, 'repair', return_value=True) as repair:
+            with self.assertRaises(WindowFailure):
+                editor._edit_plan(self.manifest, self.analysis, self.plan, self.root)
+        self.assertFalse(self.plan['ok'])
+        self.assertEqual(edit.call_count, 3)
+        self.assertEqual(repair.call_count, 3)
+
     def test_joint_rejections_never_grant_shared_time(self):
         for key in ('same_product', 'same_demonstration', 'same_selling_point', 'semantic_continuity',
                     'complete_action', 'result_preserved'):

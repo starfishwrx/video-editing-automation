@@ -7,6 +7,14 @@
 
 ## 新增条目
 
+### L-20261103-16 修复入口和进展预算必须由程序掌握
+- status: OPEN
+- hits: 1
+- 模块: selection/ai_editor、selection/sentence_continuity、selection/ai_editor_recovery
+- 现象: 模型遵守时长约束而返回空选镜，反而进不了跨句修复；每轮只修一组时，四组合法连续演示被三轮文字纠错预算截断。
+- 以后怎么做: 空选择先检查真实候选，区分证据缺失和有证据但时长无解。已复核长窗只是修复提案，必须重新通过装配和像素观察才能认证。局部修复取得进展后继续求解，与模型纠错轮次分离；逐句付费复核预算持久化，重复状态和总步骤均有限。测试多组、全部空选择、末组不确定及无进展情形，不只测一组成功。
+- 证据: test_sentence_continuity.py 的7项复审回归；docs/production-playback.md。
+
 ### L-20261103-15 跨句预算不等于跨句证据成立
 - status: OPEN
 - hits: 1

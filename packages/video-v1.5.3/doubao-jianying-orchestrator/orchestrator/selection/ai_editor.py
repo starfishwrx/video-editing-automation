@@ -18,7 +18,7 @@ from typing import Any
 from .. import ai_editor_contract as contract
 from . import timing_contract
 from . import sentence_continuity
-from .ai_editor_recovery import WindowFailure, failed_index, failure_fields, proposed_window
+from .ai_editor_recovery import WindowFailure, failed_index, failure_fields, proposed_window, repairable_index
 
 ROUND_SIZE = 8
 # Explore at most one additional round for an editorial alternative after a
@@ -1008,11 +1008,9 @@ def _revalidate_rows(manifest, analysis, plan, *, narration_timing=None):
                 try:
                     _assemble(manifest, analysis, trial, narration_timing=narration_timing,
                               verify_sources=True)
-                except WindowFailure as other:
-                    if other.index == failure.index:
+                except (ValueError, KeyError, TypeError, OSError) as other:
+                    if repairable_index(other) in (None, failure.index):
                         continue
-                except (ValueError, KeyError, TypeError, OSError):
-                    continue
                 plan["rows"] = trial["rows"]
                 plan.setdefault("playback_repairs", []).append({"index": failure.index,
                     "reason": failure.reason, "previous": copy.deepcopy(old), "replacement": copy.deepcopy(candidate)})
@@ -1020,6 +1018,85 @@ def _revalidate_rows(manifest, analysis, plan, *, narration_timing=None):
                 break
             if not replaced:
                 raise
+
+
+def _retrieve_empty_selection(manifest, analysis, plan, failure, narration_timing):
+    """An empty model choice must not hide a known, reviewed timing conflict.
+
+    Retrieve a complete feasible candidate first. A long reviewed candidate is only
+    a repair proposal, never a certified selection; normal assembly still rejects it
+    until a short-window or joint pixel review and the timing checks succeed.
+    """
+    from . import shot_analyzer
+    if isinstance(failure, WindowFailure):
+        return False
+    index = repairable_index(failure)
+    if index is None:
+        return False
+    row = next((r for r in plan.get("rows", []) if isinstance(r, dict) and r.get("index") == index), None)
+    if row is None or row.get("parts") != [] or row.get("continuity_key"):
+        return False
+    candidate = next(_short_complete_rows(manifest, analysis, plan, index, narration_timing), None)
+    if candidate is None:
+        sentence = next(s for s in plan["sentences"] if s["index"] == index)
+        if sentence["kind"] != "selling_point":
+            return False
+        shots = {s["shot_id"]: s for s in analysis["shots"]}
+        required = {p["id"] for p in sentence["selling_points"]}
+        duration, _ = timing_contract.duration_for(narration_timing, index,
+            segment=timing_contract.split_sentences(manifest)[index - 1])
+        for review in plan["reviews"].get(str(index), []):
+            shot = shots.get(review.get("shot_id"))
+            if (not shot or review.get("verdict") != "matched" or review.get("same_product") is not True
+                    or not contract.points_supported(required, set(review.get("supported_point_ids", [])))
+                    or review.get("source_identity") != contract.source_identity(shot["video"])):
+                continue
+            solution = shot_analyzer.candidate_window(_observed_shot(shot, review),
+                audio_duration_us=duration, manifest=manifest, time_sensitive=review["time_sensitive"])
+            if solution.ok or solution.reason not in {timing_contract.REASON_EVIDENCE_SPAN_TOO_LONG,
+                                                      timing_contract.REASON_EVIDENCE_SPEED_CONFLICT}:
+                continue
+            candidate = {"index": index, "parts": [{"shot_id": shot["shot_id"], "audio_duration_us": duration}],
+                         "reason": "reviewed evidence requires window or continuity repair"}
+            break
+    if candidate is None:
+        return False
+    plan["rows"] = [candidate if r["index"] == index else r for r in plan["rows"]]
+    plan.setdefault("playback_repairs", []).append({"index": index, "reason": "EMPTY_SELECTION_RETRIEVAL",
+        "previous": copy.deepcopy(row), "replacement": copy.deepcopy(candidate)})
+    return True
+
+
+def _repair_reviewed_rows(manifest, analysis, plan, directory, narration_timing, duplicate_expanded):
+    """Drain useful local repairs without spending text-editor retry rounds.
+
+    Every loop must change the selected rows. The existing persistent per-sentence
+    pixel-review budgets still apply; a separate finite step ceiling is defensive
+    against faulty repair helpers, while repeated states stop immediately.
+    """
+    seen = set()
+    for _ in range(1 + 8 * len(plan.get("sentences", []))):
+        try:
+            return _revalidate_rows(manifest, analysis, plan, narration_timing=narration_timing)
+        except (ValueError, KeyError, TypeError, OSError) as exc:
+            failure = exc
+        state = contract.digest(plan.get("rows"))
+        if state in seen:
+            raise failure
+        seen.add(state)
+        if _retrieve_empty_selection(manifest, analysis, plan, failure, narration_timing):
+            continue
+        repeated = re.fullmatch(r"AI_EDITOR_REPEATED_SOURCE_WINDOW:\d+:(\d+)", str(failure))
+        if repeated and _repair_repeated_window(manifest, analysis, plan, directory,
+                narration_timing, int(repeated[1]), duplicate_expanded):
+            continue
+        if isinstance(failure, WindowFailure):
+            if _repair_selected_window(manifest, analysis, plan, directory, failure):
+                continue
+            if sentence_continuity.repair(manifest, analysis, plan, directory, failure, narration_timing):
+                continue
+        raise failure
+    raise ValueError("AI_EDITOR_REPAIR_PROGRESS_LIMIT")
 
 
 def _edit_plan(manifest: dict, analysis: dict, plan: dict, directory: Path,
@@ -1082,42 +1159,12 @@ technical_option是按本句完整配音求出的实际可行窗口；分配多�
             if expanded:
                 continue  # second and final editor call sees the complete audited pool
         try:
-            _revalidate_rows(manifest, analysis, plan, narration_timing=narration_timing)
+            _repair_reviewed_rows(manifest, analysis, plan, directory, narration_timing, duplicate_expanded)
             plan["ok"] = True
             plan["phase"] = "selection_complete"
             return
         except (ValueError, KeyError, TypeError, OSError) as exc:
             failure = exc
-            repeated = re.fullmatch(r"AI_EDITOR_REPEATED_SOURCE_WINDOW:\d+:(\d+)", str(failure))
-            for _ in range(len(plan.get("sentences", []))):
-                if not repeated or not _repair_repeated_window(manifest, analysis, plan, directory,
-                                                               narration_timing, int(repeated[1]), duplicate_expanded):
-                    break
-                try:
-                    _assemble(manifest, analysis, plan, narration_timing=narration_timing, verify_sources=True)
-                    plan["ok"] = True
-                    plan["phase"] = "selection_complete"
-                    return
-                except (ValueError, KeyError, TypeError, OSError) as revised_error:
-                    failure = revised_error
-                    repeated = re.fullmatch(r"AI_EDITOR_REPEATED_SOURCE_WINDOW:\d+:(\d+)", str(failure))
-            if isinstance(failure, WindowFailure) and _repair_selected_window(manifest, analysis, plan, directory, failure):
-                try:
-                    _assemble(manifest, analysis, plan, narration_timing=narration_timing, verify_sources=True)
-                    plan["ok"] = True
-                    plan["phase"] = "selection_complete"
-                    return
-                except (ValueError, KeyError, TypeError, OSError) as repaired_error:
-                    failure = repaired_error
-            if isinstance(failure, WindowFailure) and sentence_continuity.repair(
-                    manifest, analysis, plan, directory, failure, narration_timing):
-                try:
-                    _revalidate_rows(manifest, analysis, plan, narration_timing=narration_timing)
-                    plan["ok"] = True
-                    plan["phase"] = "selection_complete"
-                    return
-                except (ValueError, KeyError, TypeError, OSError) as group_error:
-                    failure = group_error
             plan.setdefault("repair_history", []).append({"round": attempt + 1, "reason": str(failure),
                                                            "index": failed_index(failure)})
             _save(directory / "plan.json", plan)

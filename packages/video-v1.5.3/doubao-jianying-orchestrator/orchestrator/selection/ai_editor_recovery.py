@@ -10,6 +10,14 @@ class WindowFailure(ValueError):
         super().__init__(f"AI_EDITOR_WINDOW_INFEASIBLE:{index}:{shot_id}:{reason}")
 
 
+def repairable_index(error: Exception) -> int | None:
+    """Only window conflicts and explicit empty selections can defer another row."""
+    if isinstance(error, WindowFailure):
+        return error.index
+    missing = re.fullmatch(r"AI_EDITOR_NO_SELECTION:(\d+)", str(error))
+    return int(missing[1]) if missing else None
+
+
 def failure_fields(message: str, *, stage: str = "semantic_match") -> dict:
     """A request outage is not evidence of a material/semantic gap."""
     text = message.upper()
