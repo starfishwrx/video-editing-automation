@@ -3,10 +3,12 @@ import os
 import re
 import threading
 import unicodedata
+from copy import copy
 from typing import Union
 
 import pyJianYingDraft as draft
 from utils.formatters import safe_tim
+from utils.subtitle_layout import layout_subtitle
 
 
 # 字幕几何口径以**剪映自己写出的草稿**为准（2026-09-17 实测）。
@@ -30,7 +32,7 @@ def _clean_subtitle_text(value: str) -> str:
         if unicodedata.category(char).startswith("P"):
             continue
         chars.append(char)
-    return re.sub(r"[ \t]+", " ", "".join(chars)).strip()
+    return re.sub(r"[ \t]+", " ", "".join(chars)).strip().replace('\r\n', '\n').replace('\r', '\n')
 
 
 def _is_subtitle_track(track_name: str) -> bool:
@@ -82,6 +84,44 @@ class TextOpsMixin:
         if "clip_settings" not in text_kwargs:
             text_kwargs["clip_settings"] = draft.ClipSettings(
                 transform_x=DEFAULT_SUBTITLE_X, transform_y=DEFAULT_SUBTITLE_Y)
+
+        if _is_subtitle_track(track_name):
+            style = text_kwargs['style'] = copy(text_kwargs['style'])
+            style.align, style.auto_wrapping, style.max_line_width = 1, True, .8
+            spans = [copy(s) for s in text_kwargs.get('rich_spans') or []]
+            largest = max([style.size] + [s.size for s in spans if s.size is not None])
+            clip = text_kwargs['clip_settings'] = copy(text_kwargs['clip_settings'])
+            layout = layout_subtitle(text, self.script.width, self.script.height,
+                font_size_px=largest * 7, bold=style.bold or any(s.bold for s in spans),
+                x=clip.transform_x, y=clip.transform_y)
+            # Only inserted newlines change offsets; preserve highlighted words.
+            positions, cursor = [], 0
+            for offset, char in enumerate(layout['text']):
+                if cursor < len(text) and char == text[cursor]:
+                    positions.append(offset)
+                    cursor += 1
+                elif char != '\n':
+                    raise ValueError('SUBTITLE_LAYOUT_CHANGED_TEXT')
+            factor = layout['font_size_px'] / (largest * 7)
+            for span in spans:
+                if not 0 <= span.start < span.end <= len(text):
+                    raise ValueError('SUBTITLE_RICH_SPAN_OUT_OF_BOUNDS')
+                span.start, span.end = positions[span.start], positions[span.end - 1] + 1
+                if span.size is not None:
+                    span.size *= factor
+            if spans:
+                text_kwargs['rich_spans'] = spans
+            text = layout['text']
+            style.size *= factor
+            clip.transform_x, clip.transform_y = layout['x'], layout['y']
+            if not hasattr(self, '_subtitle_layouts'):
+                self._subtitle_layouts = []
+            self._subtitle_layouts.append({'text': text, 'size': style.size,
+                'x': clip.transform_x, 'y': clip.transform_y, 'alignment': 1,
+                'max_line_width': .8, 'force_apply_line_max_width': False,
+                'styles': [{'range': [s.start, s.end], 'size': s.size if s.size is not None else style.size,
+                            'bold': s.bold if s.bold is not None else style.bold} for s in spans]
+                          or [{'range': [0, len(text)], 'size': style.size, 'bold': style.bold}]})
 
         seg = draft.TextSegment(text, draft.Timerange(start_us, dur_us), **text_kwargs)
 

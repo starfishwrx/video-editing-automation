@@ -4,6 +4,7 @@ from pathlib import Path
 
 from ..domain.timeline import TimelineError, VideoLayout, SubtitleStyle
 from ..media.timeline_render import timeline_identity
+from ..media.caption_layout import layout_subtitle
 from ..quality.production_qc import check_production
 
 
@@ -49,8 +50,12 @@ def headless_plan(timeline, name, font_path, *, review_only=False):
     for cue in sorted(timeline.subtitles, key=lambda e: e.start_us):
         if cue.style != SubtitleStyle():
             raise TimelineError("EXPORT_SUBTITLE_STYLE_UNSUPPORTED")
-        cues.append({"text": cue.text, "start_us": cue.start_us, "duration_us": cue.duration_us,
-            "size": 8, "bold": cue.style.bold, "x": cue.style.x, "y": cue.style.y, "color": cue.style.color,
+        layout = layout_subtitle(cue.text, timeline.canvas.width, timeline.canvas.height,
+                                 font_path=font, x=cue.style.x, y=cue.style.y)
+        cues.append({"text": layout['text'], "start_us": cue.start_us, "duration_us": cue.duration_us,
+            "size": 8 * layout['font_size_px'] / 56, "bold": cue.style.bold,
+            "x": layout['x'], "y": layout['y'], "color": cue.style.color,
+            "subtitle": True, "alignment": 1, "max_line_width": .8,
             "border_color": "#000000", "border_width": .05, "font_path": str(font)})
     if cues:
         tracks.append({"type": "text", "name": "Subtitles", "segments": cues})

@@ -134,6 +134,7 @@ class CaptionIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             project = JyProject("caption_roundtrip", drafts_root=tmp, overwrite=True)
             project.add_caption_cues([cue], track_name="Subtitles", transform_y=-800 / 960)
+            expected['subtitle_layout'] = project._subtitle_layouts
             project.save()
             draft_dir = Path(project.draft_dir)
             document = json.loads((draft_dir / "draft_info.json").read_text(encoding="utf-8"))

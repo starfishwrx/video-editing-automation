@@ -4,9 +4,12 @@ import json
 from pathlib import Path
 import sys
 import tempfile
+import shutil
+from PIL import ImageFont
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from orchestrator.media.caption_layout import layout_subtitle
 from orchestrator.domain.timeline import (Asset, AudioEvent, Canvas, EditTimeline, Sentence,
                                          SubtitleEvent, TimelineError, VideoEvent, VideoLayout)
 from orchestrator.delivery.jianying_export import headless_plan, prepare_headless_export
@@ -33,7 +36,7 @@ class HeadlessPlanTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name).resolve()
         self.font = self.root / "local.ttf"
-        self.font.write_bytes(b"font parsing is the headless backend's responsibility")
+        shutil.copyfile(ImageFont.truetype(layout_subtitle("x",1080,1920,font_name="Arial")["font_path"],12).path,self.font)
         self.t = example()
 
     def tearDown(self):
@@ -103,7 +106,7 @@ class HeadlessPlanTests(unittest.TestCase):
                 mid = track["name"] + str(i)
                 seg = {"material_id": mid, "target_timerange": {"start": spec["start_us"], "duration": spec["duration_us"]}}
                 if track["type"] == "text":
-                    doc["materials"]["texts"].append({"id": mid, "content": json.dumps({"text": spec["text"], "styles": [{"size": 8, "bold": True}]})})
+                    doc["materials"]["texts"].append({"id": mid, "alignment":1, "line_max_width":.8, "force_apply_line_max_width":True, "content": json.dumps({"text": spec["text"], "styles": [{"size": 8, "bold": True}]})})
                     seg["clip"] = {"transform": {"x": 0, "y": -.55}}
                 else:
                     asset = next(a for a in assets if a["source"] == spec["source"])

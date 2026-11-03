@@ -26,6 +26,20 @@ def observed():
 
 
 class PurposeEvidenceTests(unittest.TestCase):
+    def test_malformed_phase_permission_is_reobserved_once_without_local_override(self):
+        valid=observed();invalid=deepcopy(valid);invalid['phases'][-1]['can_speed']=True
+        shot={'source_start':0,'source_end':5};request={'require_action':True,'require_result':True}
+        with tempfile.TemporaryDirectory() as raw,patch.object(vision.ai_editor,'_call',side_effect=[invalid,valid]) as call:
+            result=vision._phase_observation('observe actual frames',Path(raw)/'call.json',Path('sheet.jpg'),shot,request)
+            self.assertEqual(call.call_count,2)
+            self.assertEqual(result['phases'],valid['phases'])
+            self.assertIs(invalid['phases'][-1]['can_speed'],True)
+            self.assertEqual(result['schema_recovery']['attempts'],1)
+        with tempfile.TemporaryDirectory() as raw,patch.object(vision.ai_editor,'_call',return_value=invalid) as call:
+            with self.assertRaisesRegex(ValueError,'PROTECTED_PHASE_ACCELERATED'):
+                vision._phase_observation('observe',Path(raw)/'call.json',Path('sheet.jpg'),shot,request)
+            self.assertEqual(call.call_count,2)
+
     def test_output_review_persists_status_summary_after_every_sentence(self):
         from test_timeline_export import example
         timeline=example()
@@ -121,10 +135,13 @@ class PurposeEvidenceTests(unittest.TestCase):
     def test_pre_blind_observation_protocol_cannot_reuse_completed_selection(self):
         with tempfile.TemporaryDirectory() as raw:
             manifest,narration,artifact,_=self.binding_fixture(raw)
-            artifact.update(rules=vision.contract.rules_identity(manifest),protocol='purpose-observation-v4-shot-usability')
+            artifact.update(rules=vision.contract.rules_identity(manifest),protocol='purpose-observation-v6-selling-point-value')
             with self.assertRaisesRegex(ValueError,'RULE_IDENTITY_CHANGED'):
                 app._binding(manifest,narration,artifact,rules_required=True)
             artifact['protocol']=vision.PROTOCOL
+            from orchestrator.selection.opening_hook import RULE
+            artifact['opening_hook_rule']=RULE
+            artifact['requests'][0]['has_product_selling_point']=True
             app._binding(manifest,narration,artifact,rules_required=True)
 
     def test_missing_output_sentence_stops_before_media_or_api(self):

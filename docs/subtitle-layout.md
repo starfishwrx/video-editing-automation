@@ -1,0 +1,23 @@
+# 字幕安全区与居中
+
+默认所有字幕水平居中，每行文字也居中；这不是把字幕移到画面正中央。沿用现有下方锚点 `x=0, y=-0.55`。默认安全区为画布四边各留 10%，字幕文字与描边都应位于内侧 80% 区域。
+
+长句先按词语和短语选择断点，再用字体实际字宽验证安全区；两行无需等长。优先保留商品名称、数量单位、修饰短语、动作与结果，避免助词悬空。完整词组保护、行数、语言断点的优先级均高于行宽均衡。保留已有换行，只插入显示换行，不修改原文、配音、字幕开始结束时间。多行高度超出安全区时调整位置；极长内容需缩字号才放得下时按实际高度缩小，仍不能在可读字号下容纳则明确失败，不截字。
+
+例如 `但心相印的新品东方纸上抽纸 / 真的很难不爱啊`，不拆成 `东方纸 / 上抽纸`；`Hello Kitty联名的云感洗脸巾 / 用起来柔软又舒服`；`一包有120抽四层加厚 / 一箱足足有24包`。新名字通过新品/新款等上下文识别并保护产品短语，不把单个样本的商品名硬编码为修复。
+
+共享几何实现是活包 `jianying-editor/scripts/utils/subtitle_layout.py`，语言边界在同目录 `subtitle_phrases.py`；编排器通过 `media/caption_layout.py` 加载纯布局入口。用固定版本jieba本地分词和词性加短语规则，依赖在pyproject/uv.lock冻结；渲染不调用远程模型或下载识别权重。它是确定性断行辅助，不宣称理解所有句法。FFmpeg ASS、默认无头生产、时间线导出和维护中的 JyProject 字幕入口使用同一策略，不单独为某一写入端注入不同商品词表。富文本按最大高亮字号保守计算布局，插入换行后重映射高亮区间。标题等非字幕轨不强制改样式。
+
+无头计划明确写入 `subtitle=true, alignment=1, max_line_width=0.8`，底层原生素材写 `alignment=1, line_max_width=0.8, force_apply_line_max_width=true`，并回读验证。旧 JyProject 保留底层序列化格式，通过显式换行及逐条布局检查验证。不能只看配置值宣称实际画面通过。
+
+## 后端依赖
+
+默认无头写入需要后端 `production_library.TEXT_LAYOUT_SCHEMA = centered-safe-subtitles/v1`。缺少该能力会在生产预检时明确阻断，避免完成付费分析/配音后才发现计划参数不支持。此依赖属于独立的 jianying-headless 工程，不能只更新视频包而继续使用未升级后端。
+
+本次后端变更在分支 `fix/subtitle-safe-area`，提交 `3fe525ce7075c6e8754c2de2a267d1cdeb386995`，见 [后端 PR #1](https://github.com/starfishwrx/jianying-headless-windows/pull/1)：新增两项有范围校验的文本参数、原生写入与回读检查，并按实测更新原有源码 pin。分支已推送，安装面未部署。部署时须同时安装经过验证的后端，并设置 `JIANYING_HEADLESS_ROOT`；开发验证不切换默认生产。
+
+## 验证
+
+专项：`test_caption_layout.py`、`test_meeting_caption_integration.py`、`test_default_headless.py`、`test_timeline_export.py`、`test_timeline_render.py`；跨共享合同修改还运行两套全量与架构检查。覆盖真实断句反例、不同新商品名、相对从句、数量规格、否定/效果短语、中文长句、中英混排、emoji肤色/旗帜/组合字符、多行高度、横竖屏、高亮偏移与逐项样式回读。
+
+真实字体的 FFmpeg 渲染与无头草稿参数回读分别记录。二者通过仍不能代替剪映原生输出的像素验收；当前原生导出对 production-library 附加标记的快照兼容性另有待解决项，不能跳过构建清单检查来获得通过。

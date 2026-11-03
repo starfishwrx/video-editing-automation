@@ -2633,6 +2633,7 @@ class OrchestrationEngine:
             "subtitle_bold": True,
             "subtitle_transform_x": subtitle_position["x"],
             "subtitle_transform_y": subtitle_position["y"],
+            "subtitle_layout": getattr(project, '_subtitle_layouts', None),
             "subtitle_strip_punctuation": True,
             "native_subtitles_required": caption_result is not None,
             "subtitle_cues": caption_result["cues"] if caption_result is not None else None,

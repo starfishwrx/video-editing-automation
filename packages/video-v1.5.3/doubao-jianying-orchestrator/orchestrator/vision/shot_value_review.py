@@ -38,7 +38,20 @@ def review(manifest,request,shot,media,directory):
         'display_goal':request.get('display_goal','visible_feature'),
         'claims':[{'check_id':c['id'],'claim_text':c.get('claim_text',request['text'])} for c in request['checks']],
         'sample_times_us':[round(t*1e6) for t in media['times']],'source_window_us':bounds}
-    prompt=PROMPT+json.dumps(context,ensure_ascii=False)
+    from ..selection.opening_hook import is_packaging_hook
+    instruction=PROMPT
+    if is_packaging_hook(request):
+        context['visual_purpose']='opening_hook_packaging'
+        instruction='''本次只核对开头钩子的包装承接。原句没有本品具体卖点，不要求画面证明泛红、竞品或痛点。
+只看实际帧：同商品包装是否为主要展示主体，品牌/包装识别点是否明确，在哪些源时间区间可读。
+仅背景出现小包装不算包装承接，packaging_primary必须如实为false。
+本体、洗手或其他材质动作不能替代包装。不要将同商品包装说成原句痛点/功效已经被证明。
+输出JSON {"claims":[],"hook_packaging":{"packaging_visible":true,"packaging_primary":true,"same_product":true,
+"identifiers_observed":"实际可见品牌、图案、规格等身份线索，不编造看不清的字",
+"evidence_intervals_us":[{"start":0,"end":1000000}]},"limitations":"实际观察限制"}。
+所有时间区间须在给定源窗口内；不能确认包装身份就same_product=false。
+'''
+    prompt=instruction+json.dumps(context,ensure_ascii=False)
     key=identity.digest(['shot-selling-point-information-v1',context,media['before'],identity.file_sha256(media['sheet'])])
     row=ai_editor._call(prompt,Path(directory)/'value_calls'/(key+'.json'),Path(media['sheet']))
     result=assess(row,request,bounds)

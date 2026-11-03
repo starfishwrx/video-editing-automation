@@ -205,6 +205,17 @@ def _subtitle_style_issues(material: dict, segment: dict, index: int,
     expected_bold = bool(expected_tracks.get("subtitle_bold", True))
     expected_x = float(expected_tracks.get("subtitle_transform_x", 0.0))
     expected_y = float(expected_tracks.get("subtitle_transform_y", -0.55))
+    layouts = expected_tracks.get('subtitle_layout')
+    layout = layouts[index - 1] if layouts is not None and index <= len(layouts) else None
+    if layout:
+        expected_size, expected_x, expected_y = layout['size'], layout['x'], layout['y']
+        if material.get('alignment') != layout['alignment']:
+            issues.append(f'字幕第 {index} 条未居中对齐')
+        if (material.get('line_max_width') != layout['max_line_width']
+                or material.get('force_apply_line_max_width') is not layout.get('force_apply_line_max_width', True)):
+            issues.append(f'字幕第 {index} 条缺少安全区行宽限制')
+        if _text_from_material(material) != layout['text']:
+            issues.append(f'字幕第 {index} 条排版文本不符')
     content = material.get("content")
     if isinstance(content, str):
         try:
@@ -215,6 +226,12 @@ def _subtitle_style_issues(material: dict, segment: dict, index: int,
     style = styles[0] if isinstance(styles, list) and styles and isinstance(styles[0], dict) else None
     if style is None:
         issues.append(f"字幕第 {index} 条缺少可检查的 styles")
+    elif layout and layout.get('styles'):
+        planned = layout['styles']
+        if (len(styles) != len(planned) or any(
+                actual.get('range') != wanted['range'] or actual.get('size') != wanted['size']
+                or actual.get('bold') is not wanted['bold'] for actual, wanted in zip(styles, planned))):
+            issues.append(f'字幕第 {index} 条分段样式不符')
     else:
         try:
             actual_size = float(style.get("size"))
