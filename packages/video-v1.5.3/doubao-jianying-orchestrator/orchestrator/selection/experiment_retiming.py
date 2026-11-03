@@ -14,6 +14,9 @@ def validate_motion(row,member):
     if not isinstance(row,dict)or row.get('verdict')not in {'observed','uncertain'}:
         raise ValueError('EXPERIMENT_MOTION_VERDICT_INVALID')
     if row['verdict']!='observed':raise ValueError('EXPERIMENT_MOTION_UNCERTAIN')
+    coverage=row.get('coverage','complete_pour' if member['part']=='A' else 'complete_verification')
+    if coverage not in ({'complete_pour','absorption_focus'} if member['part']=='A' else {'complete_verification'}):
+        raise ValueError('EXPERIMENT_MOTION_COVERAGE_INVALID')
     left,right=member['window_frame_ids'];window=row.get('effective_window_frame_ids')
     if (not isinstance(window,list)or len(window)!=2 or any(type(i)is not int for i in window)
             or not left<=window[0]<window[1]<=right):
@@ -64,8 +67,17 @@ def windows(members,observations,result_frames,*,fps=30):
     return result
 
 
-def fit_group(clips,target_us,*,fps=30):
+def fit_group(clips,target_us,*,fps=30,phase_boundary_us=None):
     """Allocate the shared budget at <=2x first, then <=3x, without cutting footage."""
+    if phase_boundary_us is not None:
+        if len(clips)!=2 or not 0<phase_boundary_us<target_us:
+            raise ValueError('EXPERIMENT_PHASE_BOUNDARY_INVALID')
+        result=[]
+        for index,(clip,budget) in enumerate(zip(clips,(phase_boundary_us,target_us-phase_boundary_us))):
+            try:result.extend(fit_group([clip],budget,fps=fps))
+            except ValueError as error:
+                raise ValueError(f'EXPERIMENT_PHASE_DURATION_CONFLICT:part={index};budget_us={budget};{error}') from error
+        return result
     lengths=[];owners=[];locked=[]
     for i,clip in enumerate(clips):
         start,end=clip['source_start_us'],clip['source_end_us']

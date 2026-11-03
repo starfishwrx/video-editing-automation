@@ -75,6 +75,17 @@ class ExperimentOptimizationTests(unittest.TestCase):
             self.run_program()
         self.assertEqual((self.directory / 'result.json').read_bytes(), before)
 
+    def test_previous_optimized_timeline_can_be_refined_in_a_new_output(self):
+        self.run_program()
+        previous=EditTimeline.load(self.directory/'timeline.json')
+        with patch.object(experiment_production,'probe_media',return_value=self.facts):
+            result=program.optimize(self.base.manifest,previous,self.roles,self.pair,self.base.origins,
+                self.base.root/'refined',phase_spec=self.spec,render=False)
+        refined=EditTimeline.load(result['timeline'])
+        self.assertTrue(all(result['preserved'].values()))
+        self.assertEqual(sum(v.duration_us for v in refined.videos if v.event_id.startswith('experiment-optimization-r')),4_000_000)
+        self.assertEqual((previous.sentences,previous.audios,previous.subtitles),(refined.sentences,refined.audios,refined.subtitles))
+
     def test_same_path_replaced_media_cannot_reuse_old_phase_spec(self):
         before = deepcopy(self.spec)
         samples = self.pair['members'][1]['samples']
