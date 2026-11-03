@@ -14,7 +14,7 @@
 
 默认无头写入需要后端 `production_library.TEXT_LAYOUT_SCHEMA = centered-safe-subtitles/v1`。缺少该能力会在生产预检时明确阻断，避免完成付费分析/配音后才发现计划参数不支持。此依赖属于独立的 jianying-headless 工程，不能只更新视频包而继续使用未升级后端。
 
-本次后端变更在隔离分支 `fix/subtitle-safe-area`（本地提交 `3fe525ce7075c6e8754c2de2a267d1cdeb386995`，尚未发布）：新增两项有范围校验的文本参数、原生写入与回读检查，并按实测更新原有源码 pin。未修改正在使用的安装目录。部署时须同时安装经过验证的后端，并设置 `JIANYING_HEADLESS_ROOT`；开发验证不切换默认生产。
+本次后端变更在分支 `fix/subtitle-safe-area`，提交 `3fe525ce7075c6e8754c2de2a267d1cdeb386995`，见 [后端 PR #1](https://github.com/starfishwrx/jianying-headless-windows/pull/1)：新增两项有范围校验的文本参数、原生写入与回读检查，并按实测更新原有源码 pin。分支已推送，安装面未部署。部署时须同时安装经过验证的后端，并设置 `JIANYING_HEADLESS_ROOT`；开发验证不切换默认生产。
 
 ## 验证
 
