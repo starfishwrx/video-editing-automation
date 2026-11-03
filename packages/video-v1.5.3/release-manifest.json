@@ -6,7 +6,7 @@
     "machine-specific paths",
     "knowledge-base bodies"
   ],
-  "file_count": 406,
+  "file_count": 434,
   "files": [
     {
       "path": ".gitignore"
@@ -96,6 +96,9 @@
       "path": "doubao-jianying-orchestrator/orchestrator/application/cli.py"
     },
     {
+      "path": "doubao-jianying-orchestrator/orchestrator/application/display_optimization.py"
+    },
+    {
       "path": "doubao-jianying-orchestrator/orchestrator/application/engine.py"
     },
     {
@@ -112,6 +115,9 @@
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/application/purpose_production.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/application/recovery_audio.py"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/application/task_inputs.py"
@@ -136,6 +142,9 @@
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/audio/final_bgm.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/audio/library_resources.py"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/audio/narration_probe.py"
@@ -414,7 +423,13 @@
       "path": "doubao-jianying-orchestrator/orchestrator/selection/ai_editor.py"
     },
     {
+      "path": "doubao-jianying-orchestrator/orchestrator/selection/ai_editor_recovery.py"
+    },
+    {
       "path": "doubao-jianying-orchestrator/orchestrator/selection/experiment_contract.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/selection/experiment_events.py"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/selection/experiment_retiming.py"
@@ -432,6 +447,9 @@
       "path": "doubao-jianying-orchestrator/orchestrator/selection/paper_selection.py"
     },
     {
+      "path": "doubao-jianying-orchestrator/orchestrator/selection/purpose_retrieval.py"
+    },
+    {
       "path": "doubao-jianying-orchestrator/orchestrator/selection/purpose_selection.py"
     },
     {
@@ -442,6 +460,12 @@
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/selection/shot_notes.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/selection/shot_usability.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/selection/shot_value.py"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/selection/temporal_groups.py"
@@ -495,7 +519,13 @@
       "path": "doubao-jianying-orchestrator/orchestrator/vision/__init__.py"
     },
     {
+      "path": "doubao-jianying-orchestrator/orchestrator/vision/display_compare.py"
+    },
+    {
       "path": "doubao-jianying-orchestrator/orchestrator/vision/experiment_detail.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/vision/experiment_event_review.py"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/vision/experiment_motion_review.py"
@@ -519,7 +549,16 @@
       "path": "doubao-jianying-orchestrator/orchestrator/vision/phase_timing.py"
     },
     {
+      "path": "doubao-jianying-orchestrator/orchestrator/vision/purpose_inventory.py"
+    },
+    {
       "path": "doubao-jianying-orchestrator/orchestrator/vision/purpose_review.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/vision/shot_quality_review.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/vision/shot_value_review.py"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/vision/temporal_video.py"
@@ -585,6 +624,9 @@
       "path": "doubao-jianying-orchestrator/tests/test_audio_captions.py"
     },
     {
+      "path": "doubao-jianying-orchestrator/tests/test_audio_catalog_admission.py"
+    },
+    {
       "path": "doubao-jianying-orchestrator/tests/test_bounded_frame_batch.py"
     },
     {
@@ -595,6 +637,9 @@
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_edit_timeline.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/tests/test_experiment_events.py"
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_experiment_optimization.py"
@@ -675,6 +720,9 @@
       "path": "doubao-jianying-orchestrator/tests/test_purpose_production.py"
     },
     {
+      "path": "doubao-jianying-orchestrator/tests/test_purpose_retrieval.py"
+    },
+    {
       "path": "doubao-jianying-orchestrator/tests/test_ready_work.py"
     },
     {
@@ -684,10 +732,16 @@
       "path": "doubao-jianying-orchestrator/tests/test_resource_profile.py"
     },
     {
+      "path": "doubao-jianying-orchestrator/tests/test_runtime_catalogs.py"
+    },
+    {
       "path": "doubao-jianying-orchestrator/tests/test_runtime_policy.py"
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_scene_evidence_contracts.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/tests/test_selection_recovery.py"
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_sentence_matching.py"
@@ -697,6 +751,12 @@
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_shared_product_vision_cache.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/tests/test_shot_usability.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/tests/test_shot_value.py"
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_single_copy_staging.py"
@@ -805,6 +865,18 @@
     },
     {
       "path": "jianying-editor/VERSION"
+    },
+    {
+      "path": "jianying-editor/resources/catalogs/README.md"
+    },
+    {
+      "path": "jianying-editor/resources/catalogs/cloud_music_library.csv"
+    },
+    {
+      "path": "jianying-editor/resources/catalogs/jianying_voice_catalog.csv"
+    },
+    {
+      "path": "jianying-editor/resources/catalogs/tts_speakers.csv"
     },
     {
       "path": "jianying-editor/scripts/cloud_manager.py"
@@ -1080,10 +1152,16 @@
       "path": "tests/test_retired_runners.py"
     },
     {
+      "path": "tests/test_runtime_resources.py"
+    },
+    {
       "path": "tests/test_scheduled_pipeline.py"
     },
     {
       "path": "tests/test_selection_preview.py"
+    },
+    {
+      "path": "tests/test_selection_stage_resume.py"
     },
     {
       "path": "tests/test_sentence_review.py"
@@ -1141,6 +1219,9 @@
     },
     {
       "path": "tools/delivery_runtime.py"
+    },
+    {
+      "path": "tools/display_selection.py"
     },
     {
       "path": "tools/draft_delivery.py"
@@ -1222,6 +1303,9 @@
     },
     {
       "path": "tools/workflow/scheduled.py"
+    },
+    {
+      "path": "tools/workflow/selection_recovery.py"
     },
     {
       "path": "uv.lock"

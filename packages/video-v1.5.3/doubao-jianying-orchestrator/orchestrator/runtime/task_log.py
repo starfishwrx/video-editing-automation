@@ -174,8 +174,13 @@ def result_contract(result: dict[str, Any], *, task_id: str, run_id: str,
     transient = any(token in marker_text for token in (
         "timed out", "timeout", "429", "502", "503", "connection reset",
         "temporarily unavailable", "network", "connection refused",
+        "deadline exceeded", "request timeout", "connect timeout", "limit wait timeout", "ledger wait timeout",
     ))
-    retryable = bool(failure_class in {"vision", "provider"} and transient)
+    credential_block = any(token in marker_text for token in (
+        "unauthorized", "forbidden", "invalid api key", "credential", "insufficient balance",
+        "http 401", "http 403", "[401]", "[403]"))
+    retryable = bool(failure_class in {"vision", "provider"} and transient
+                     and not credential_block and payload.get("retryable") is not False)
 
     coverage = payload.get("coverage") if isinstance(payload.get("coverage"), dict) else {}
     uncertified = bool(

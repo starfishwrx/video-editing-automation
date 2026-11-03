@@ -31,6 +31,8 @@
 ## 5. 只读诊断与分阶段恢复（`diagnostics.py`, `cli.recover`）
 - 诊断：不驱动 UI，只读草稿/媒资/磁盘状态/包签名/依赖，报告 `DESKTOP_IMPORT_BLOCKED` 等
 - 恢复：`preflight`（素材/环境就绪）→ `semantic_match`（消费已有 `shot_candidates.json` 与匹配报告）→ `draft_write`（严格只消费匹配缓存）→ `ui_acceptance`（只读桌面可见性诊断，保留 UNCERTIFIED，不授予正式交付）
+- 默认 worker 对选镜服务超时/限流保留原始错误，并指向 `semantic_match`。开始选镜前冻结 `selection_resume.json` 中的任务、真实配音、句长和文件状态；恢复复用已完成观察，不重合成配音或重扫全库。写稿绑定原音频，同时更新匹配报告与片段，使草稿和独立QC消费同一结果。
+- `selection_recovery_state.json` 按原始 `run_id` 持久记录一次阶段恢复预算。阶段失败或进程中断后仍保留预算，不因 preflight 的中间成功而回到完整 build；输入/音频变化、缓存损坏或预算耗尽均明确阻断。显式新建稿归档旧恢复状态；新原始运行使用新预算。选镜已完成后的BGM/写稿超时保留成功匹配，指向 `draft_write`，不重新选镜。
 
 整体脚本另有任务级恢复与有限重试，见 [Windows 流水线](../windows-pipeline.md)。正式交付依据 `tools/acceptance` 的四项当前证据，不消费 Mac/Gold 人工批准文件；`ui_acceptance` 兼容诊断与这条自动验收链分开。
 
@@ -51,5 +53,6 @@
 
 ## 8. 测试
 - `test_task_control.py`：合同字段、阶段状态、BLOCKED/UNCERTIFIED 效果、错误/重试分类
+- 包级 `test_selection_stage_resume.py`：真实 worker 到三阶段 CLI 的调用、原配音绑定、中断/耗尽不回退完整 build、运行身份和完成后超时分类
 - `test_capacity_and_sync.py`：恢复/持久化/容量校验
 

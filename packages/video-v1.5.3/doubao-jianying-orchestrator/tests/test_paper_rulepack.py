@@ -21,10 +21,16 @@ class PaperRulepackTests(unittest.TestCase):
         self.assertEqual(defaults["rulepack"]["voice_acceptance_max_gap_frames"], 5)
         self.assertFalse(defaults["auto_transition"])
         self.assertEqual(defaults["subtitle_position_px"], {"x": 0, "y": -528})
+        for name in ("奶被纸", "tad厨房纸", "TAD厨房纸"):
+            with self.subTest(product=name):
+                resolved = rulepack.apply_manifest_defaults({"product": name})
+                self.assertEqual(resolved["category"], "zhipin")
+                self.assertEqual(resolved["voice_tempo"], 1.3)
         overridden = rulepack.apply_manifest_defaults({
-            "product": "奶杯纸", "voice_tempo": 1.15,
+            "product": "奶被纸", "voice_tempo": 1.15,
             "subtitle_position_px": {"x": 12, "y": -700}, "auto_transition": True,
         })
+        self.assertEqual(overridden["category"], "zhipin")
         self.assertEqual(overridden["voice_tempo"], 1.15)
         self.assertEqual(overridden["subtitle_position_px"], {"x": 12, "y": -700})
         self.assertTrue(overridden["auto_transition"])

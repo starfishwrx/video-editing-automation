@@ -78,11 +78,13 @@ if (-not (Test-Path work/config.local.ps1)) {
 ```powershell
 . ./work/config.local.ps1
 New-Item -ItemType Directory -Force $env:JY_DRAFT_ROOT | Out-Null
-uv run --frozen python -X utf8 -m tools.headless_runtime check
+uv run --frozen python -X utf8 doubao-jianying-orchestrator/run.py env
 if ($LASTEXITCODE -ne 0) { throw '请先处理无头环境检查中的阻断项。' }
 ```
 
-通用 `run.py env` 目前不包含完整无头预检，不能单独作为默认生产就绪的依据。脚本正式执行前也会调用上述检查，在视觉和配音的付费阶段之前阻断缺失环境。
+`env` 默认检查生产环境，包含所选写稿后端及音频运行资源，未就绪会返回非零退出码。`env --input work/task/manifest.json` 按任务指定的后端、字体及 BGM 来源检查；`env --profile base` 只检查通用工具链。建稿与恢复预检会在付费阶段前复查这些条件，环境检查不认证云端密钥。
+
+音色显示名／ID、历史别名和 BGM 曲库已作为[运行资源](packages/video-v1.5.3/jianying-editor/resources/catalogs/README.md)随 Git 和源码包交付，干净拉取无需手工复制 `data/`。例如“TVB女声1.2”与“TVB女声Pro”会分别解析；缺表或坏表返回 `RUNTIME_CATALOG_MISSING`／`RUNTIME_CATALOG_INVALID`，不会误报成音色选择问题。资源不包含音频、临时链接或登录凭据。
 
 配置读取进程环境变量，复制 `.env` 不会自动加载。切换千问时，明确设置 `JY_VISION_TRANSPORT=qwen` 及 `JY_QWEN_BASE_URL`、`JY_QWEN_MODEL`、`JY_QWEN_API_KEY`；详见模型与视觉流程。
 
@@ -122,7 +124,7 @@ uv run --frozen python -X utf8 doubao-jianying-orchestrator/run.py build `
 
 通过 `work/pipeline_runs/`、`work/pipeline_state.json` 和任务的 `report/`、`eval/` 查看计划、失败原因和恢复次数。定向恢复优先复用现有素材观察、配音和草稿，具体操作见 Windows 脚本流水线；不要删除整个状态文件来重放全部任务。
 
-已知限制：manifest CLI 的 `recover --stage semantic_match` 与后续 `draft_write` 当前存在恢复缓存格式不一致，前一步成功的结果仍可能被下一步拒绝。该交接需要修复；不要把阶段成功提示视作整条恢复链已通过。
+分阶段恢复读取已成功匹配且绑定当前原始输入的选镜报告，再进入写稿；缺失、失败、损坏或不属于本次输入的报告会阻断。输入变化或旧报告没有输入绑定时，需基于已有素材分析显式执行 `semantic_match`，不会自动重跑全库识别或配音。
 
 ## 项目结构
 

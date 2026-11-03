@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import copy
 import hashlib
 import json
 import os
@@ -24,6 +25,7 @@ from ..selection import timing_contract
 from ..selection import usage_ledger
 from ..audio import voice_catalog
 from ..audio import voice_tts
+from ..audio.library_resources import RuntimeCatalogError
 from .engine import OrchestrationEngine
 from ..runtime.platform_env import clear_environment_cache, environment_report
 from ..runtime.task_log import TaskAlreadyRunningError, TaskLogger
@@ -69,7 +71,7 @@ def _compact_build_result(result: dict) -> dict:
                 "pipeline_version", "message", "problems", "reason", "error", "missing",
                 "voice_input", "voice_candidates", "voice_auditions", "bgm_candidates", "bgm_auditions",
                 "pending_items", "coverage", "report", "confirmation", "task_id", "task_log",
-                "issues", "caption_report")
+                "issues", "caption_report", "failed_stage", "resume_stage")
         return {k: result[k] for k in keys if k in result}
     draft_path = result.get("draft_path")
     artifacts = []
@@ -117,13 +119,52 @@ def _compact_control_result(result: dict) -> dict:
         "status", "terminal_state", "failure_class", "failure_code", "retryable",
         "safe_to_continue", "next_action", "task_id", "run_id", "pipeline_version",
         "parent_run_id", "recovery", "recovery_stage", "message", "error", "missing",
-        "analysis", "matched_manifest", "matched_manifest_sha256", "draft_path", "task_log",
+        "analysis", "match_report", "matched_manifest", "matched_manifest_sha256",
+        "draft_path", "task_log", "reason", "failed_stage", "resume_stage",
     )
     return {key: result[key] for key in keys if key in result}
 
 
-def cmd_env(_args) -> int:
-    return _emit(environment_report())
+def _production_environment_report(base_report: dict, manifest: dict | None = None) -> dict:
+    """Compose writer and audio-resource readiness at the application boundary."""
+    from ..runtime.headless import production_environment_report
+    from ..audio.bgm_request import normalize
+    from ..audio.library_resources import catalog_report
+    report = production_environment_report(base_report, manifest)
+    catalogs = catalog_report(require_music=not normalize((manifest or {}).get("bgm")).get("path"))
+    report["runtime_catalogs"] = catalogs
+    report["hints"].extend(catalogs["errors"])
+    report["ready"] = report["ready"] and catalogs["ready"]
+    report["status"] = "READY" if report["ready"] else "ENV_ERROR"
+    if not report["ready"]:
+        report["reason"] = (next(iter(catalogs["errors"]), None) or
+                            report["draft_backend_check"].get("reason") or "BASE_ENVIRONMENT_NOT_READY")
+    return report
+
+
+def _run_command(command, args) -> int:
+    try:
+        return command(args)
+    except RuntimeCatalogError as exc:
+        return _emit({"status": "ENV_ERROR", "failure_class": "environment", "reason": str(exc)}, 1)
+
+
+def cmd_env(args) -> int:
+    profile = getattr(args, "profile", "production")
+    input_file = getattr(args, "input", None)
+    try:
+        manifest = _read(Path(input_file).expanduser().resolve()) if input_file else {}
+        if not isinstance(manifest, dict):
+            raise ValueError("manifest must be an object")
+    except (OSError, ValueError, TypeError) as exc:
+        return _emit({"ready": False, "profile": profile, "status": "ENV_ERROR",
+                      "reason": "ENV_MANIFEST_INVALID", "error": str(exc)}, 1)
+    report = environment_report(refresh=True)
+    if profile == "production":
+        report = _production_environment_report(report, manifest)
+    else:
+        report = {**report, "profile": "base"}
+    return _emit(report, 0 if report.get("ready") else 1)
 
 
 def cmd_setup_ffmpeg(args) -> int:
@@ -217,7 +258,7 @@ def cmd_review_script(args) -> int:
 
 
 def cmd_list_library(args) -> int:
-    """浏览剪映全量音色库（默认164），支持性别/关键词筛选。"""
+    """浏览随包交付的全量音色库，支持性别/关键词筛选。"""
     from ..audio import voice_library as vl
     voices = vl.load_library()
     gender = {"男": "male", "女": "female", "童": "child"}.get(args.gender or "", args.gender or None)
@@ -237,7 +278,7 @@ def cmd_recommend_bgm(args) -> int:
                                     script=args.script or "")
     moods = cands[0]["moods"] if cands else bgm_selector.detect_bgm_moods(args.script or "")
     return _emit({"detected_moods": moods, "candidates": cands,
-                  "hint": "基于脚本/剧情对616首曲库相关性排序取Top；选定后把 bgm 设为 {\"music_id\": ...} 或 {\"path\": 本地文件}，无直链的需在剪映内同步后指定 path"})
+                  "hint": "按随包曲库排序；建稿时按 music_id 实时取链下载，bgm 为空则自动选曲，也可指定本地 path。"})
 
 
 def cmd_scan(args) -> int:
@@ -344,6 +385,8 @@ def _lock_voice_once(manifest: dict) -> tuple[object | None, dict | None]:
     try:
         preset = voice_catalog.resolve_voice_once(
             None, script=script, manifest=manifest, persist=True)
+    except RuntimeCatalogError as exc:
+        return None, {"status": "ENV_ERROR", "failure_class": "environment", "reason": str(exc)}
     except voice_catalog.VoiceResolutionError as exc:
         detail = getattr(exc, "voice_detail", None)
         detail = detail if isinstance(detail, dict) else {}
@@ -450,8 +493,40 @@ def _validate_preserved_match(manifest: dict, analysis: dict, prior: dict,
     return ""
 
 
+def _invalidate_match_report(report_dir: Path, matching_input: dict | None, failure: dict) -> None:
+    path = report_dir / "shot_match_report.json"
+    try:
+        current = _read(path)
+    except (OSError, ValueError):
+        current = {}
+    if (not isinstance(current, dict) or current.get("ok") is not False
+            or current.get("input_manifest") != matching_input):
+        current = {}
+    current.update({"ok": False, "input_manifest": matching_input,
+                    "status": failure.get("status", "SHOT_MATCH_BLOCKED"),
+                    "message": failure.get("message", "本次匹配未完成，旧成功结果不可用于恢复。")})
+    report_dir.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def _temporary_match(manifest: dict, input_path: Path, report_dir: Path,
                      narration_timing: dict | None = None) -> tuple[dict, dict | None]:
+    matching_input = None
+    try:
+        matching_input = _read(input_path) if input_path.is_file() else None
+        selected, blocker = _match_temporary_input(manifest, input_path, report_dir,
+                                                  narration_timing=narration_timing)
+    except BaseException:
+        _invalidate_match_report(report_dir, matching_input, {"status": "SHOT_MATCH_BLOCKED"})
+        raise
+    if blocker:
+        _invalidate_match_report(report_dir, matching_input, blocker)
+    return selected, blocker
+
+
+def _match_temporary_input(manifest: dict, input_path: Path, report_dir: Path,
+                           narration_timing: dict | None = None) -> tuple[dict, dict | None]:
+    matching_input = _read(input_path) if input_path.is_file() else None
     from ..selection import ai_editor
     from .. import ai_editor_contract
     mode = ai_editor_contract.selection_mode(manifest)
@@ -662,6 +737,8 @@ def _temporary_match(manifest: dict, input_path: Path, report_dir: Path,
             scene_report = scene_rules.apply(manifest, matched, analysis, report_dir)
             matched["scene_rules"] = {k: scene_report.get(k) for k in
                                       ("category", "rulepacks", "versions", "applied", "partial", "unmet")}
+    if matching_input is not None:
+        matched["input_manifest"] = matching_input
     (report_dir / "shot_match_report.json").write_text(
         json.dumps(matched, ensure_ascii=False, indent=2), encoding="utf-8")
     # DEMO_ACTIONS V0.2 §7（用户定案）：素材缺口单独落盘，交付前必须可见 ——
@@ -681,6 +758,7 @@ def _temporary_match(manifest: dict, input_path: Path, report_dir: Path,
             }, ensure_ascii=False, indent=2), encoding="utf-8")
     if not matched.get("ok"):
         return manifest, {"status": "SHOT_MATCH_BLOCKED",
+                          **{k: matched[k] for k in ("status", "failure_class", "failure_code", "retryable", "reason", "failed_stage", "resume_stage") if k in matched},
                           "message": "当前商品素材已切成候选镜头，但逐句匹配仍缺少可审计的画面描述、卖点证据或动作完成确认。",
                           "pending_items": matched.get("pending_items", []),
                           "recommendations": matched.get("recommendations", []),
@@ -775,12 +853,12 @@ def cmd_build(args) -> int:
         })
         return _emit(_compact_build_result(result), 1)
 
-    from ..runtime.headless import preflight as draft_preflight
-    try:
-        draft_preflight(manifest)
-    except (OSError, ValueError, RuntimeError, ImportError) as exc:
+    draft_env = _production_environment_report(env, manifest)
+    if not draft_env["ready"]:
         return _emit(_compact_build_result(finalize({'status': 'ENV_ERROR', 'failure_class': 'environment',
-            'message': '无头建稿环境预检未通过，未开始配音或视觉分析。', 'reason': str(exc)})), 1)
+            'message': '建稿环境预检未通过，未开始配音或视觉分析。',
+            'reason': draft_env['reason'],
+            'environment': draft_env})), 1)
 
     # Freeze one verified text plan before narration, matching and note binding.
     # Existing segment/audio mappings and explicit notes are never reindexed.
@@ -817,12 +895,24 @@ def cmd_build(args) -> int:
             # 装不下的镜头在**规划阶段**就被判 SHOT_TIMING_INFEASIBLE，
             # 而不是拖到 write_draft 才 AUDIO_VIDEO_MISMATCH。
             narration_timing = _pre_synthesize_narration(manifest, report_dir, locked_voice)
+            manifest["narration_timing_file"] = str(report_dir / "narration_timing.json")
             if manifest.get("sentence_plan_version") == "semantic-v1":
-                manifest["narration_timing_file"] = str(report_dir / "narration_timing.json")
                 # A frozen input skips the planner, including its directory setup.
                 (report_dir / "sentence_planning").mkdir(parents=True, exist_ok=True)
                 (report_dir / "sentence_planning" / "planned_manifest.json").write_text(
                     json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+            audio_files = []
+            for row in narration_timing.get("rows", []):
+                path = Path(str(row.get("tts_path") or ""))
+                if path.is_file():
+                    stat = path.stat()
+                    audio_files.append({"path": str(path.resolve()), "size": stat.st_size, "mtime_ns": stat.st_mtime_ns})
+            manifest["_selection_attempt"] = logger.run_id
+            (report_dir / "selection_resume.json").write_text(json.dumps({
+                "input_manifest": _read(input_path), "manifest": manifest,
+                "audio_files": audio_files, "timing": narration_timing,
+                "run_id": logger.run_id,
+            }, ensure_ascii=False, indent=2), encoding="utf-8")
             manifest, blocker = _temporary_match(manifest, input_path, report_dir,
                                                  narration_timing=narration_timing)
             shot_match_report = report_dir / "shot_match_report.json"
@@ -891,29 +981,37 @@ def cmd_analyze_shots(args) -> int:
 def cmd_match_shots(args) -> int:
     input_path = Path(args.input).expanduser().resolve()
     manifest = _read(input_path)
+    matching_input = copy.deepcopy(manifest)
     report_dir = Path(args.report_dir).expanduser().resolve()
     analysis_path = Path(args.analysis).expanduser().resolve()
+    completed = False
     try:
-        analysis = _read(analysis_path)
-    except (OSError, ValueError) as exc:
-        return _emit({"status": "SHOT_ANALYSIS_FILE_INVALID", "message": str(exc)}, 1)
-    from ..selection import ai_editor
-    from .. import ai_editor_contract
-    manifest = {**manifest, "selection_mode": ai_editor_contract.selection_mode(manifest)}
-    if manifest["selection_mode"] == "ai_editor":
-        analysis = ai_editor.prepare(manifest, analysis, report_dir)
-    result = shot_analyzer.match_manifest(manifest, analysis, topk=args.topk,
-                                          auto_accept_top1=not args.require_selection)
-    report_dir.mkdir(parents=True, exist_ok=True)
-    report_path = report_dir / "shot_match_report.json"
-    report_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
-    if result.get("ok"):
-        matched_path = report_dir / "matched_manifest.json"
-        matched_path.write_text(json.dumps(result["manifest"], ensure_ascii=False, indent=2), encoding="utf-8")
-        result["matched_manifest"] = str(matched_path)
-    result["status"] = "SHOT_MATCH_READY" if result.get("ok") else "SHOT_MATCH_BLOCKED"
-    result["match_report"] = str(report_path)
-    return _emit(result, 0 if result.get("ok") else 1)
+        try:
+            analysis = _read(analysis_path)
+        except (OSError, ValueError) as exc:
+            return _emit({"status": "SHOT_ANALYSIS_FILE_INVALID", "message": str(exc)}, 1)
+        from ..selection import ai_editor
+        from .. import ai_editor_contract
+        manifest = {**manifest, "selection_mode": ai_editor_contract.selection_mode(manifest)}
+        if manifest["selection_mode"] == "ai_editor":
+            analysis = ai_editor.prepare(manifest, analysis, report_dir)
+        result = shot_analyzer.match_manifest(manifest, analysis, topk=args.topk,
+                                              auto_accept_top1=not args.require_selection)
+        result["input_manifest"] = matching_input
+        report_dir.mkdir(parents=True, exist_ok=True)
+        report_path = report_dir / "shot_match_report.json"
+        report_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        if result.get("ok"):
+            matched_path = report_dir / "matched_manifest.json"
+            matched_path.write_text(json.dumps(result["manifest"], ensure_ascii=False, indent=2), encoding="utf-8")
+            result["matched_manifest"] = str(matched_path)
+        result["status"] = "SHOT_MATCH_READY" if result.get("ok") else "SHOT_MATCH_BLOCKED"
+        result["match_report"] = str(report_path)
+        completed = True
+        return _emit(result, 0 if result.get("ok") else 1)
+    finally:
+        if not completed:
+            _invalidate_match_report(report_dir, matching_input, {"status": "SHOT_MATCH_BLOCKED"})
 
 
 def cmd_diagnose_timeline(args) -> int:
@@ -933,6 +1031,7 @@ def cmd_recover(args) -> int:
     if not input_path.exists():
         return _emit({"status": "RECOVERY_MANIFEST_REQUIRED", "message": "恢复必须提供完整 manifest 文件。"}, 1)
     manifest = _read(input_path)
+    recovery_input = copy.deepcopy(manifest)
     if not (manifest.get("segments") or manifest.get("videos") or
             manifest.get("material_sources")):
         return _emit({"status": "RECOVERY_MANIFEST_REQUIRED",
@@ -964,6 +1063,10 @@ def cmd_recover(args) -> int:
         }, 1)
 
     def finalize(result: dict) -> dict:
+        if stage == "semantic_match" and result.get("status") != "SHOT_MATCH_READY":
+            # An early failure may occur before the matcher writes its report.
+            # It must invalidate a prior successful attempt in this directory.
+            _invalidate_match_report(report_dir, recovery_input, result)
         result["recovery"] = True
         result["recovery_stage"] = stage
         return logger.finalize(result)
@@ -976,13 +1079,15 @@ def cmd_recover(args) -> int:
     if stage == "preflight":
         missing = [str(path) for path in _manifest_sources(manifest, input_path.parent)
                    if not path.is_file()]
-        env = environment_report(refresh=True)
+        env = _production_environment_report(environment_report(refresh=True), manifest)
         if missing or not env.get("ready"):
             result = finalize({
                 "status": "ENV_ERROR",
                 "failure_class": "environment",
                 "message": "恢复前预检未通过，未进入生成阶段。",
                 "missing": missing,
+                "reason": (env.get("reason") or
+                           ("INPUT_SOURCES_MISSING" if missing else "BASE_ENVIRONMENT_NOT_READY")),
                 "environment": env,
             })
             return _emit(_compact_control_result(result), 1)
@@ -1038,7 +1143,7 @@ def cmd_recover(args) -> int:
     if stage == "semantic_match":
         from .. import ai_editor_contract
         timing = None
-        if manifest.get("sentence_plan_version") == "semantic-v1":
+        if manifest.get("narration_timing_file") or manifest.get("sentence_plan_version") == "semantic-v1":
             timing_path = Path(str(manifest.get("narration_timing_file") or ""))
             try:
                 if not timing_path.is_file():
@@ -1096,6 +1201,7 @@ def cmd_recover(args) -> int:
             "status": "SHOT_MATCH_READY",
             "message": "语义匹配已从已有分析恢复；下一步显式执行 draft_write。",
             "matched_manifest": str(matched_path),
+            "match_report": str(report_dir / "shot_match_report.json"),
         })
         return _emit(_compact_control_result(result), 0)
 
@@ -1105,7 +1211,9 @@ def cmd_recover(args) -> int:
 
     # draft_write 只消费已存在的匹配结果；没有缓存就明确阻断，避免恢复命令
     # 偷偷重新扫描视觉素材，造成“恢复”实际变成整稿重建。
-    cached_path = report_dir / "matched_manifest.json"
+    # Both matching entrypoints persist the successful result here; the
+    # separate matched_manifest.json is a bare build input, not match evidence.
+    cached_path = report_dir / "shot_match_report.json"
     if not cached_path.is_file():
         result = finalize({
             "status": "RECOVERY_MATCHED_MANIFEST_REQUIRED",
@@ -1118,9 +1226,8 @@ def cmd_recover(args) -> int:
         cached_result = _read(cached_path)
     except (OSError, ValueError, TypeError):
         cached_result = {}
-    # A raw input manifest can also contain segments.  Require the nested
-    # result shape emitted by semantic_match so draft_write cannot silently
-    # fall back to the original, unverified segments after a corrupt cache.
+    # Never infer successful matching from bare input segments, nor fall back
+    # to an older result when the current match report is invalid or blocked.
     cached = cached_result.get("manifest") if isinstance(cached_result, dict) else None
     if (not isinstance(cached_result, dict) or cached_result.get("ok") is not True
             or not isinstance(cached, dict)
@@ -1128,11 +1235,29 @@ def cmd_recover(args) -> int:
         result = finalize({
             "status": "RECOVERY_MATCHED_MANIFEST_REQUIRED",
             "failure_class": "semantic",
-            "message": "matched_manifest.json 缺少已匹配的 segments/videos，未进入写稿。",
+            "message": "匹配结果缺少成功状态或已匹配的 segments/videos，未进入写稿。",
             "matched_manifest": str(cached_path),
         })
         return _emit(_compact_control_result(result), 1)
+    if cached_result.get("input_manifest") != recovery_input:
+        result = finalize({
+            "status": "RECOVERY_MATCHED_MANIFEST_REQUIRED", "failure_class": "semantic",
+            "reason": "RECOVERY_MATCH_INPUT_MISMATCH",
+            "message": "匹配报告未绑定当前原始输入；请基于已有分析显式恢复 semantic_match。",
+            "matched_manifest": str(cached_path),
+        })
+        return _emit(_compact_control_result(result), 1)
+    recovery_controls = {key: manifest[key] for key in
+                         ("draft_name", "force_overwrite", "recovery_stage", "parent_run_id")}
     manifest.update(cached)
+    manifest.update(recovery_controls)
+    from . import recovery_audio
+    try:
+        manifest = recovery_audio.bind_and_record(manifest, cached_result, report_dir)
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        return _emit(_compact_control_result(finalize({"status": "RECOVERY_SENTENCE_TIMING_REQUIRED",
+            "failure_class": "environment", "reason": str(exc),
+            "message": "原配音或句长无法复用，未重新合成、未写入草稿。"})), 1)
     matched_manifest_sha256 = hashlib.sha256(
         json.dumps(cached_result, ensure_ascii=False, sort_keys=True, default=str).encode()
     ).hexdigest()
@@ -1360,7 +1485,11 @@ def main(argv=None) -> int:
                                      description="豆包剪映智能编排引擎（跨平台）")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("env", help="环境自检").set_defaults(func=cmd_env)
+    env_parser = sub.add_parser("env", help="环境自检，默认包含所选建稿后端")
+    env_parser.add_argument("--profile", choices=("production", "base"), default="production",
+                            help="production 检查默认生产；base 仅检查通用工具链")
+    env_parser.add_argument("--input", help="按任务 manifest 的写稿后端和字体配置检查")
+    env_parser.set_defaults(func=cmd_env)
 
     sf = sub.add_parser("setup-ffmpeg",
                         help="缺ffmpeg或被公司禁装时，自动下载绿色版到bin并复验（不安装）")
@@ -1487,7 +1616,7 @@ def main(argv=None) -> int:
         "review-script", "scan", "analyze-shots", "match-shots", "build", "diagnose-timeline", "recover", "migrate-encrypted",
         "calibrate-capacity"):
         args = parser.parse_args(argv)
-        return args.func(args)
+        return _run_command(args.func, args)
 
     # 旧式：--input x [--scan-only]
     legacy = argparse.ArgumentParser(add_help=False)
@@ -1498,11 +1627,11 @@ def main(argv=None) -> int:
     known, _ = legacy.parse_known_args(argv)
     if known.input:
         if known.scan_only:
-            return cmd_scan(argparse.Namespace(input=known.input,
-                                               report_dir=known.report_dir))
-        return cmd_build(argparse.Namespace(input=known.input,
-                                            report_dir=known.report_dir,
-                                            strict_script=False))
+            return _run_command(cmd_scan, argparse.Namespace(input=known.input,
+                                                             report_dir=known.report_dir))
+        return _run_command(cmd_build, argparse.Namespace(input=known.input,
+                                                          report_dir=known.report_dir,
+                                                          strict_script=False))
     parser.print_help()
     return 1
 

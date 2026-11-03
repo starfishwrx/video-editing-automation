@@ -262,7 +262,7 @@ def evaluate(contract: dict, task: dict, runtime: dict, outputs: list[Path],
                         verdict = 'FAIL'
                     elif (qc_status != 'PASS'
                             or row.get('contract_status') != 'VALIDATED'
-                            or row.get('response_version') not in {visual_qc_contract.RESPONSE_VERSION, 'chatcut-visual-qc-response-v4'}
+                            or row.get('response_version') not in {visual_qc_contract.RESPONSE_VERSION, visual_qc_contract.AI_RESPONSE_VERSION}
                             or any(r.get('response_contract', {}).get('version') != row.get('response_version') for r in report_payloads)
                             or not report_statuses
                             or not report_identity_valid

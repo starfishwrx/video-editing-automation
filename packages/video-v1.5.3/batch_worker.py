@@ -586,10 +586,24 @@ _is_reusable_analysis_row = queue_contracts.is_reusable_analysis_row
 
 def run_build(manifest: dict, report_dir: pathlib.Path, draft_name: str, *,
               timeout: int | None = None, reuse_analysis: str | None = None,
-              attempt: int = 1) -> dict:
+              attempt: int = 1, force_rebuild: bool = False) -> dict:
     manifest = dict(manifest)
     manifest["draft_name"] = draft_name
     manifest["delivery_mode"] = requested_mode(manifest)
+    from tools.workflow import selection_recovery
+    if force_rebuild:
+        selection_recovery.archive_state(report_dir)
+    if not force_rebuild and selection_recovery.pending(report_dir):
+        env = dict(os.environ, PYTHONUTF8="1")
+        deadline = time.time() + (timeout or BUILD_TIMEOUT_SECONDS)
+        inherited = env.get("JY_TASK_DEADLINE_TS") or env.get("JY_TASK_DEADLINE_EPOCH")
+        if inherited:
+            deadline = min(deadline, float(inherited))
+        env["JY_STAGE_DEADLINE_TS"] = env["JY_STAGE_DEADLINE_EPOCH"] = str(deadline)
+        log("resume selection only from frozen narration and observations: %s" % report_dir)
+        return selection_recovery.recover(manifest, report_dir,
+            prefix=[PY, "-m", "orchestrator.cli"], run=subprocess.run, env=env,
+            cwd=str(SKILL), deadline=deadline, drafts_root=DRAFTS)
     if reuse_analysis:
         try:
             cached_payload = json.loads(pathlib.Path(reuse_analysis).read_text(
@@ -633,9 +647,24 @@ def run_build(manifest: dict, report_dir: pathlib.Path, draft_name: str, *,
     log("build draft=%s vision_transport=%s vision_model=%s timeout=%ss reuse=%s attempt=%s" % (
         draft_name, env["JY_VISION_TRANSPORT"], vision_model or "unconfigured", timeout,
         "yes" if reuse_analysis else "no", attempt))
-    p = subprocess.run(cmd, cwd=str(SKILL), env=env, capture_output=True,
-                       text=True, encoding="utf-8", errors="replace",
-                       timeout=timeout + 30)
+    previous_selection_run = _read_json(report_dir / "selection_resume.json").get("run_id")
+    try:
+        p = subprocess.run(cmd, cwd=str(SKILL), env=env, capture_output=True,
+                           text=True, encoding="utf-8", errors="replace",
+                           timeout=timeout + 30)
+    except subprocess.TimeoutExpired:
+        retained = selection_recovery.selection_timeout(report_dir, previous_run_id=previous_selection_run)
+        if retained:
+            return {**retained, "manifest": str(mpath)}
+        if selection_recovery.completed(report_dir, previous_run_id=previous_selection_run):
+            failure = {"status": "DRAFT_WRITE_TIMEOUT", "failure_class": "draft", "retryable": False,
+                       "resume_stage": "draft_write", "reason": "DRAFT_WRITE_DEADLINE_EXCEEDED"}
+            (report_dir / "last_result.json").write_text(json.dumps(failure), encoding="utf-8")
+            return {"rc": 1, "stdout": json.dumps(failure), "stderr": "", "combined": json.dumps(failure)}
+        (report_dir / "shot_match_report.json").write_text(json.dumps({
+            "ok": False, "input_manifest": manifest, "status": "BUILD_DEADLINE_EXCEEDED",
+        }, ensure_ascii=False), encoding="utf-8")
+        raise
     out = (p.stdout or "") + "\n" + (p.stderr or "")
     return {"rc": p.returncode, "stdout": (p.stdout or "")[-20000:],
             "stderr": (p.stderr or "")[-20000:], "manifest": str(mpath),
@@ -1350,7 +1379,8 @@ def process_task(task: dict, *, retry_partial: bool = False,
                     inputs = build_progress_inputs(build_manifest, analysis_cache,
                                                    repair_visual_missing_indices)
                     previous_inputs = _read_json(attempt_state).get("input")
-                    if previous_inputs == inputs and not (force_rebuild and attempt == 1):
+                    from tools.workflow.selection_recovery import pending as selection_recovery_pending
+                    if previous_inputs == inputs and not (force_rebuild and attempt == 1) and not selection_recovery_pending(rd):
                         if last_failure:
                             last_failure["no_progress"] = True
                         else:
@@ -1362,8 +1392,11 @@ def process_task(task: dict, *, retry_partial: bool = False,
                     atomic_write_text(attempt_state, json.dumps({"input": inputs,
                         "attempt": attempt, "status": "running", "updated_at": time.time()},
                         ensure_ascii=False, indent=2))
-                    res = run_build(build_manifest, rd, a_name, timeout=timeout,
-                                    reuse_analysis=reuse, attempt=attempt)
+                    build_options = {"timeout": timeout, "reuse_analysis": reuse, "attempt": attempt}
+                    if force_rebuild and attempt == 1:
+                        build_options["force_rebuild"] = True
+                    res = run_build(build_manifest, rd, a_name, **build_options)
+                    a_name = res.get("draft_name") or a_name
                     candidate_report = rd / "shot_candidates.json"
                     if analysis_cache is None and candidate_report.exists():
                         reusable_count, shot_count = reusable_analysis_rows(candidate_report)
@@ -1404,7 +1437,12 @@ def process_task(task: dict, *, retry_partial: bool = False,
                             else "transient",
                             "attempt": attempt, "markers": cls["markers"],
                             "message": failure_text[-800:],
+                            "stage_retry_exhausted": res.get("stage_retry_exhausted", False),
                         }
+                        stage_result = _read_json(rd / "last_result.json")
+                        if stage_result.get("resume_stage") == "semantic_match":
+                            last_failure.update({k: stage_result[k] for k in (
+                                "retryable", "resume_stage", "failed_stage", "failure_class", "failure_code") if k in stage_result})
                         if qc_result is not None:
                             last_failure["qc_report"] = qc_result.get("output")
                             last_failure["qc_status"] = qc_result.get("status")
@@ -1422,6 +1460,9 @@ def process_task(task: dict, *, retry_partial: bool = False,
                             i, count, attempt,
                             "hard" if cls["vision_hard"] else "transient",
                             failure_text[:160].replace("\n", " ")))
+                        if res.get("stage_retry_exhausted"):
+                            log("selection stage recovery stopped; no full-build fallback")
+                            break
                         # A post-draft visual mismatch is actionable: the QC
                         # report has already identified the bad sentence(s),
                         # and the next build will turn those exact segments

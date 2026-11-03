@@ -15,12 +15,12 @@
 ## 2. 端到端流水线
 
 ```
-环境注入 → manifest
+环境注入 → manifest → 通用工具链与所选写稿后端预检
   → shot_analyzer / vision_analyzer
   → ai_editor（描述召回 → 候选实际抽帧复审 → 整稿编排）
   → shot_analyzer / timing_contract（实际源窗、证据与音频分配重验）
   → OrchestrationEngine 顺序闸门
-  → jianying-editor 写草稿
+  → headless_production → 单独安装的无头后端写原生草稿
   → draft_visual_qc v4 / diagnostics
   → closed_loop / draft_delivery / NAS 分发
 ```
@@ -45,7 +45,9 @@
 
 ## 5. 写稿与交付边界
 
-- 端到端写稿只走 `doubao-jianying-orchestrator`；`jianying-editor` 提供 JyProject / vendor API，不是 agent 手写 JSON 的后备通道。
+- 端到端写稿只走 `doubao-jianying-orchestrator`；默认 `headless_production` 使用独立授权后端，空 BGM 自动准备。`jianying-editor` 的 JyProject / vendor API 保留给显式 legacy 与兼容能力，默认不自动回退。
+- `env` 默认汇总生产环境，包含所选后端；`--input` 读取任务覆盖，`--profile base` 仅报告通用工具链。完整检查失败时返回非零；它不认证云端密钥。
+- 恢复写稿消费 `shot_match_report.json` 中的成功结果与原始输入绑定，裸 `matched_manifest.json` 仅作建稿输入。当前匹配失败会使当前报告失效；输入变化和无绑定旧报告不能自动用于写稿。
 - 禁止手改 `draft_content.json` / `draft_info.json` / `draft_meta_info.json`，禁止任务内临时 `gen_*.py`。
 - 共享交付后必须校验时间轴上的**字面绝对路径**与字节；副本哈希一致不等于媒体可打开。
 - 加密编辑会话禁止静默回落旧明文 sidecar；恢复生成版需用户确认 + 成功任务证据 + 新 UUID。

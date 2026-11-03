@@ -53,7 +53,7 @@ class AIEditorQCIntegrationTests(unittest.TestCase):
             code = qc.main()
         return code, json.loads((self.root / "qc.json").read_text(encoding="utf-8"))
 
-    def test_v4_saved_draft_qc_and_standalone_consumer_both_pass(self):
+    def test_current_saved_draft_qc_and_standalone_consumer_both_pass(self):
         code, result = self.run_qc()
         self.assertEqual((code, result["status"]), (0, "PASS"), result)
         self.assertEqual(result["delivery_mode"], "formal")
@@ -103,8 +103,31 @@ class AIEditorQCIntegrationTests(unittest.TestCase):
         self.assertEqual(visual_qc_contract.report_status(result), "UNCERTIFIED")
 
     def test_legacy_response_cannot_certify_ai_draft(self):
-        code, result = self.run_qc(visual_qc_contract.RESPONSE_VERSION)
-        self.assertEqual((code, result["status"]), (2, "UNCERTIFIED"), result)
+        for version in (visual_qc_contract.RESPONSE_VERSION, "chatcut-visual-qc-response-v4"):
+            with self.subTest(version=version):
+                code, result = self.run_qc(version)
+                self.assertEqual((code, result["status"]), (2, "UNCERTIFIED"), result)
+
+    def test_recovery_audio_binding_and_native_selection_identity_reach_qc_consumer(self):
+        from orchestrator.application import recovery_audio
+        from orchestrator.selection import timing_contract
+        audio = self.root / "retained.wav"
+        audio.write_bytes(b"retained audio fixture")
+        timing = self.root / "timing.json"
+        timing.write_text(json.dumps({"rows": [{"key": timing_contract.sentence_key(self.segment, 1),
+            "text": self.segment["text"], "tts_path": str(audio), "audio_duration_us": 2_000_000,
+            "timing_certainty": "audio"}]}), encoding="utf-8")
+        manifest = {**self.match["manifest"], "narration_timing_file": str(timing)}
+        bound = recovery_audio.bind_and_record(manifest, self.match, self.report)
+        identity_path = self.draft / "ai_selection_identity.json"
+        identity = json.loads(identity_path.read_text(encoding="utf-8"))
+        # This is the identity written by the native production backend.
+        identity["selection_sha256"] = contract.digest(bound["segments"])
+        identity_path.write_text(json.dumps(identity), encoding="utf-8")
+        code, result = self.run_qc()
+        self.assertEqual((code, result["status"]), (0, "PASS"), result)
+        self.assertEqual(visual_qc_contract.report_status(result), "PASS")
+        self.assertTrue(visual_qc_contract.report_matches_draft(result, self.draft))
 
     def test_actual_draft_cut_cannot_drop_the_result(self):
         info = json.loads((self.draft / "draft_info.json").read_text())

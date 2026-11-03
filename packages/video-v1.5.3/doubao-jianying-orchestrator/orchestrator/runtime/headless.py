@@ -77,3 +77,19 @@ def preflight(manifest=None):
     return {'status': 'READY', 'backend': 'headless', 'runtime_profile': runtime['runtime_profile'],
             'install_dir': runtime.get('install_dir'), 'font': str(Path(font).resolve()),
             'backend_root': str(Path(native.__file__).resolve().parent.parent)}
+
+
+def production_environment_report(base_report, manifest=None):
+    """Combine cached toolchain facts with a fresh check of the selected writer."""
+    report = {**base_report, 'profile': 'production',
+              'base_ready': bool(base_report.get('ready')),
+              'hints': list(base_report.get('hints') or [])}
+    try:
+        check = preflight(manifest)
+    except (OSError, ValueError, RuntimeError, ImportError, SyntaxError) as exc:
+        check = {'status': 'ENV_ERROR', 'reason': str(exc)}
+    report['draft_backend_check'] = check
+    report['ready'] = report['base_ready'] and check.get('status') == 'READY'
+    if check.get('status') != 'READY':
+        report['hints'].append(check.get('reason') or 'DRAFT_BACKEND_NOT_READY')
+    return report

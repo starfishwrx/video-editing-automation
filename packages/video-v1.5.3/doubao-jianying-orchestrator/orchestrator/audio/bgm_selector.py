@@ -1,6 +1,6 @@
 """背景音乐选择与铺底制作。
 
-- 读取 jianying-editor/data/cloud_music_library.csv（剪映云曲库，含风格分类与直链）。
+- 读取随包云音乐索引，按ID获取实时链接；下载缓存留在本机。
 - select_bgm：按情绪/风格关键词或 music_id / 本地路径选曲，返回候选供二次选择。
 - prepare_bgm_track：用 ffmpeg 裁剪到成片时长、自动压到铺底响度、首尾淡变，
   产出可直接铺到 BGM 轨的成品（固化“比人声低约 12dB、不抢旁白”的经验）。
@@ -8,22 +8,22 @@
 """
 from __future__ import annotations
 
-import csv
 import hashlib
 import json
 import random
 import re
 import shutil
 import subprocess
+import sys
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from . import audio_loudness
+from . import audio_loudness, library_resources
 from ..runtime.file_safety import atomic_write_text, file_lock
-from ..runtime.platform_env import find_jianying_editor_root
+from ..paths import PACKAGE_ROOT
 
 
 def _stable_json(value: object) -> str:
@@ -217,32 +217,15 @@ class MusicTrack:
 
 
 def _music_csv_path() -> Optional[Path]:
-    root = find_jianying_editor_root()
-    p = root / "data" / "cloud_music_library.csv"
+    p = library_resources.CATALOGS_ROOT / "cloud_music_library.csv"
     return p if p.exists() else None
 
 
 def load_library() -> list[MusicTrack]:
-    """读取云曲库；找不到时返回空列表（上层可回退到本地文件）。"""
-    path = _music_csv_path()
-    if not path:
-        return []
-    tracks: list[MusicTrack] = []
-    with path.open("r", encoding="utf-8", errors="ignore") as f:
-        for row in csv.reader(f):
-            if not row or row[0].startswith("#") or row[0] == "music_id":
-                continue
-            if len(row) < 4:
-                continue
-            try:
-                dur = float(row[2]) if row[2] else 0.0
-            except ValueError:
-                dur = 0.0
-            tracks.append(MusicTrack(
-                music_id=row[0].strip(), title=row[1].strip(), duration_s=dur,
-                categories=row[3].strip(), url=row[4].strip() if len(row) > 4 else "",
-            ))
-    return tracks
+    """Load shipped lookup metadata; missing resources are not an empty pool."""
+    return [MusicTrack(row["music_id"], row["title"], float(row["duration_s"] or 0),
+                       row["categories"], "")
+            for row in library_resources.read_catalog("cloud_music_library.csv")]
 
 
 def _score_track(t: MusicTrack, moods: list[str], explicit: list[str],
@@ -357,12 +340,16 @@ def select_bgm(mood: str = "", *, music_id: str = "", topk: int = 5,
 def _cloud_download(music_id: str) -> Optional[Path]:
     """用底层 CloudManager 按音乐 id 实时换链下载（csv 里的静态签名直链会过期导致 403）。"""
     try:
-        import sys
-        scripts = str(find_jianying_editor_root() / "scripts")
-        if scripts not in sys.path:
-            sys.path.insert(0, scripts)
-        from cloud_manager import CloudManager  # type: ignore
-        p = CloudManager().download_asset(music_id)
+        # Use the same package as the index, isolated from an installed skill or
+        # an already imported cloud_manager/utils module from another checkout.
+        script = PACKAGE_ROOT / "jianying-editor" / "scripts" / "cloud_manager.py"
+        run = subprocess.run([sys.executable, "-X", "utf8", str(script), str(music_id)],
+                             capture_output=True, text=True, encoding="utf-8", errors="replace",
+                             timeout=180)
+        if run.returncode:
+            return None
+        p = next((line.removeprefix("RESULT_PATH|") for line in run.stdout.splitlines()
+                  if line.startswith("RESULT_PATH|")), "")
         if p and Path(p).exists() and Path(p).stat().st_size > 1024:
             return Path(p)
     except Exception:

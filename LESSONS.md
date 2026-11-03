@@ -7,7 +7,7 @@
 
 ## 新增条目
 
-### L-20261103-05 字幕居中、安全行宽与多行高度必须共同验证
+### L-20261103-11 字幕居中、安全行宽与多行高度必须共同验证
 - status: OPEN
 - hits: 2
 - 模块: editor/utils/subtitle_layout、media/timeline_render、application/headless_production、quality/draft_safety
@@ -15,6 +15,54 @@
 - 以后怎么做: 字体测量与行数/描边共同计算安全框，默认水平居中；预览和原生写入共用策略，保留配音和时间。逐条回读实际布局和各高亮样式，插入换行重映射文字范围。无头后端能力必须在付费步骤前检查；源码结构、参数回读与原生像素验收分别报告。
 - 后续纠正: 只平衡行宽仍会拆开产品名或动作结果。换行先保护词组与语义断点，再检查字宽；不要为了两行等长把“东方纸上抽纸”“四层加厚”“按压也不反渗”拆开。用新品上下文、数量单位、引导短语和动作结果等通用规则处理，并用未见过的产品名验证，不能只添加当前商品名特例。
 - 证据: `docs/subtitle-layout.md`、`test_caption_layout.py`、`test_meeting_caption_integration.py`；包外真实字体9秒对照和原生待审草稿。
+
+### L-20261103-10 品名修正要通过真实品类入口验证
+- status: OPEN
+- hits: 1
+- 模块: rulepack、rules/zhipin
+- 现象: 奶被纸写成奶杯纸，真实品名无法命中纸品默认规则；旧测试只比较显式覆盖值，没有检查商品识别到的品类。
+- 以后怎么做: 业务名称和别名统一维护，验证实际品名经过apply_manifest_defaults后的品类与默认口播倍速，再检查显式覆盖仍生效；同时更新生产说明和行为记录，不用本机商品映射代替仓库规则。
+- 证据: test_paper_rulepack.py 的奶被纸、tad厨房纸、TAD厨房纸与显式覆盖断言；PR #26。
+
+### L-20261103-07 局部选镜失败应保留已完成观察与真实配音
+- status: OPEN
+- hits: 1
+- 模块: selection/ai_editor、application/recovery_audio、workflow/selection_recovery
+- 现象: 正式选镜仍强制整句卖点全覆盖；不适用品类标签使整次召回失败；换窗未补观察，服务超时又被包成不可重试的选错镜头。
+- 以后怎么做: 共享至少一个具体卖点口径并如实记录未覆盖项，忽略不适用品类标签但保留审计；失败只改当前句，源窗变化重新看实际小窗。冻结真实配音、句长和任务输入，按原始运行持久记录一次阶段恢复，完成观察可复用、失败调用可补；中断不清预算、耗尽不回退全流水线。音频绑定同步匹配报告与草稿身份，选镜完成后超时不能使成功匹配失效；协议升级同时验证生产者和独立QC消费者。
+- 证据: test_selection_recovery.py、test_selection_stage_resume.py、test_ai_editor_qc.py 的音频绑定至独立QC串接及新旧协议拒绝回归。
+
+### L-20261103-06 运行映射表不能与私有缓存一起排除
+- status: OPEN
+- hits: 1
+- 模块: audio/library_resources、application/cli、build_manifest、cloud_manager
+- 现象: 本机有音色／音乐 CSV 而 Git 和源码包没有，旧测试只用内置音色导致干净拉取失败；缺表被误报为音色选择或无候选。
+- 以后怎么做: 稳定名称／ID 元数据按字段白名单版本化，临时链接、音频和登录缓存另存；查询与下载共用同一索引。生产预检区分资源损坏和业务歧义，缓存命中前复查文件状态；合包拒绝缺少必需资源。用 Git 已跟踪文件及全新解压包，在隔离用户目录、禁网的新解释器验证真实名称、倍速和自动选曲链，不用本机安装目录补全。
+- 证据: test_runtime_catalogs.py、test_runtime_resources.py、test_release_version.py；资源白名单和同类排查报告留包外。
+
+### L-20261103-08 恢复阶段交接须校验真实产物与当前输入
+- status: OPEN
+- hits: 1
+- 模块: application/cli
+- 现象: 匹配生成裸manifest，写稿却要求完整成功结果；改读成功报告后，又可能消费本次匹配提前失败前留下的旧成功。
+- 以后怎么做: 匹配入口共用完整报告合同，记录匹配开始前的原始任务输入；写稿仅消费成功、片段有效且输入一致的报告，恢复控制字段由当前阶段保留。所有匹配失败与异常都使旧成功失效，保留本次失败细节；不能把裸输入或无绑定旧报告补成通过。先串接成功两阶段，再验证提前失败、异常、输入变化与重复恢复均被拦住，不重跑配音或隐式全库识别。
+- 证据: test_task_control.py 的实际匹配写出到恢复写稿串接及两入口失败反例；test_ai_editor.py 保持直接调用兼容。
+
+### L-20261103-09 环境就绪要对应实际选择的写稿后端
+- status: OPEN
+- hits: 1
+- 模块: runtime/headless、application/cli
+- 现象: 旧工具链ready为true、CLI退出0，却没有可用无头后端或字幕字体；通用缓存还可能掩盖配置修复。
+- 以后怎么做: 基础事实可以缓存，所选写稿后端即时复验；默认env汇总生产条件，base模式显式区分，任务后端和字体覆盖与build一致。返回实际ready和非零失败退出码，坏配置修复后可重新检查，不污染基础报告或要求云端调用。
+- 证据: test_default_headless.py 的缺后端、基础模式、任务覆盖、字体失败后修复，以及付费前阻断回归。
+
+### L-20261103-05 前置预检必须覆盖真实输入合同、异常与干净交付面
+- status: OPEN
+- hits: 1
+- 模块: tools/batch_dispatch、audio/library_resources、build_manifest
+- 现象: 仅捕获 VoiceResolutionError 漏掉倍速 ValueError，一个坏任务终止整批；只提交被发布库存排除的 CSV，开发目录查得到却无法交付，音乐表说明与提交不符。
+- 以后怎么做: 与下游共用字段规范化和倍速验证，测试坏／好任务混批、修正恢复、原文回填、独立字段及 QC 恢复；预期输入和资源错误在本任务内记录。公开检索元数据与私有缓存分目录，打包缺表必须失败；新解释器只取跟踪／发布库存、空用户目录、禁联网验证真实名称与下游 ID，而非依靠宿主已有文件或源码存在性。
+- 证据: `tests/test_batch_dispatch.py`、`tests/test_runtime_resources.py`、`tests/test_release_version.py`、`test_audio_catalog_admission.py`；PR #38 原 head `66c1e77` 与本轮修复。
 
 ### L-20261103-04 具体卖点的召回排序不能被通用展示池覆盖
 - status: OPEN

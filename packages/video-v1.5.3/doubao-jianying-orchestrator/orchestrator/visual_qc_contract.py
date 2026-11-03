@@ -12,6 +12,8 @@ from typing import Any
 
 REPORT_VERSION = "chatcut-visual-qc-v3"
 RESPONSE_VERSION = "chatcut-visual-qc-response-v3"
+AI_REPORT_VERSION = "chatcut-visual-qc-v5"
+AI_RESPONSE_VERSION = "chatcut-visual-qc-response-v5"
 MATCH_LEVELS = {"DIRECT", "ACCEPTABLE_DEGRADED", "MISMATCH", "INSUFFICIENT_EVIDENCE"}
 OVERALL_LEVELS = {"PASS", "PASS_WITH_DEGRADED", "PASS_WITH_GAPS", "FAIL", "UNCERTIFIED"}
 
@@ -159,7 +161,7 @@ def response_errors(model: dict[str, Any], expected_count: int, *, expected_vers
     for row in rows:
         errors.extend(f"S{row.get('index', '?')}:{error}" if isinstance(row, dict) else error
                       for error in row_errors(row))
-        if (expected_version.endswith("-v4") and isinstance(row, dict)
+        if (expected_version != RESPONSE_VERSION and isinstance(row, dict)
                 and normalize_match_level(row) in {"DIRECT", "ACCEPTABLE_DEGRADED"}
                 and type(row.get("confidence")) in (int, float) and row["confidence"] < .6):
             errors.append("AI_EDITOR_POSITIVE_CONFIDENCE_LOW")
@@ -187,13 +189,13 @@ def report_matches_draft(report: Any, draft: Path) -> bool:
         ai_identity = expected / "ai_selection_identity.json"
         mode = report.get("selection_mode")
         if ai_identity.exists() or (mode in {"ai_editor", "rule_then_ai"}
-                                    and report.get("version") == "chatcut-visual-qc-v4"):
+                                    and report.get("version") == AI_REPORT_VERSION):
             if not ai_identity.is_file() or mode not in {"ai_editor", "rule_then_ai"}:
                 return False
             identity = json.loads(ai_identity.read_text(encoding="utf-8"))
             if (identity.get("selection_mode") != mode
                     or identity.get("selection_sha256") != report.get("selection_sha256")
-                    or report.get("response_contract", {}).get("version") != "chatcut-visual-qc-response-v4"):
+                    or report.get("response_contract", {}).get("version") != AI_RESPONSE_VERSION):
                 return False
             if (not _current_editorial_rules(report) or identity.get("editorial_rules") != report.get("editorial_rules")
                     or identity.get("policy_version") != report.get("policy_version")):
@@ -225,9 +227,9 @@ def _report_status(report: Any) -> str:
         return "UNCERTIFIED"
     contract = report.get("response_contract") or {}
     mode = report.get("selection_mode")
-    ai_mode = (mode == "ai_editor" or (mode == "rule_then_ai" and report.get("version") == "chatcut-visual-qc-v4"))
-    expected_report = "chatcut-visual-qc-v4" if ai_mode else REPORT_VERSION
-    expected_response = "chatcut-visual-qc-response-v4" if ai_mode else RESPONSE_VERSION
+    ai_mode = (mode == "ai_editor" or (mode == "rule_then_ai" and report.get("version") == AI_REPORT_VERSION))
+    expected_report = AI_REPORT_VERSION if ai_mode else REPORT_VERSION
+    expected_response = AI_RESPONSE_VERSION if ai_mode else RESPONSE_VERSION
     if (report.get("version") != expected_report or not isinstance(contract, dict)
             or contract.get("version") != expected_response
             or contract.get("status") != "VALIDATED" or contract.get("errors") != []):

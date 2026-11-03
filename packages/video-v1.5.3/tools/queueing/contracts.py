@@ -84,7 +84,7 @@ def batch_result_contract(status: str, *, pipeline_version: str, run_id: str, fa
         failure_class, failure_code = "environment", "BGM_REQUIRED"
     elif "sentence_plan_review_required" in lower:
         failure_class, failure_code = "semantic", "SENTENCE_PLAN_REVIEW_REQUIRED"
-    elif any(marker in lower for marker in ("vision_call_failed", "vision_json_invalid")):
+    elif any(marker in lower for marker in ("vision_call_failed", "vision_json_invalid", "ai_editor_call_failed")):
         failure_class, failure_code = "vision", "VISION_CALL_FAILED"
     elif any(marker in lower for marker in ("visual_match_blocked", "shot_match_blocked", "material gap", "visual-missing")):
         failure_class, failure_code = "semantic", "VISUAL_MATCH_BLOCKED"
@@ -115,8 +115,12 @@ def batch_result_contract(status: str, *, pipeline_version: str, run_id: str, fa
         and any(token in lower for token in (
             "timeout", "timed out", "429", "502", "503", "network",
             "connection reset", "temporarily unavailable",
+            "deadline_exceeded", "request_timeout", "connect_timeout",
         ))
     )
+    if any(row.get("stage_retry_exhausted") is True or row.get("retryable") is False for row in rows) or any(
+            token in lower for token in ("unauthorized", "forbidden", "invalid api key", "insufficient balance", "http 401", "http 403")):
+        retryable = False
     if status == "OK":
         terminal_state, next_action = "SUCCESS", "complete"
     elif status == "DEFERRED":
@@ -141,6 +145,7 @@ def batch_result_contract(status: str, *, pipeline_version: str, run_id: str, fa
         "manifest_sha256": manifest_sha256,
         "runtime": runtime,
         "task_log": task_log,
+        "resume_stage": first.get("resume_stage") if retryable else None,
     }
 
 
@@ -158,6 +163,7 @@ def classify_build_failure(text: str, *, transient_markers=TRANSIENT_BUILD_MARKE
         "502", "503", "429", "too many requests", "temporarily unavailable",
         "timed out", "timeout", "connection reset", "connection refused",
         "could not resolve host", "network", "provider unavailable",
+        "deadline_exceeded", "request_timeout", "connect_timeout",
     )
     transient = any(marker in lower_blob for marker in transient_signals)
     credential_or_input_block = any(marker in lower_blob for marker in (
@@ -170,6 +176,7 @@ def classify_build_failure(text: str, *, transient_markers=TRANSIENT_BUILD_MARKE
         "TASK_BUDGET", "Invalid argument", "INVALID_ARGUMENT",
         "DESKTOP_IMPORT_BLOCKED", "DRAFT_INVALID", "VOICE_SELECTION_REQUIRED",
         "BGM_REQUIRED", "SENTENCE_PLAN_REVIEW_REQUIRED",
+        "SELECTION_STAGE_RETRY_EXHAUSTED", "SELECTION_RECOVERY_INPUT_CHANGED",
     )) or credential_or_input_block or ("vision_call_failed" in lower_blob and not transient)
     vision_hard = ("draft_visual_qc_blocked" in lower_blob) or (
         "no auditable visual top1" in lower_blob) or (

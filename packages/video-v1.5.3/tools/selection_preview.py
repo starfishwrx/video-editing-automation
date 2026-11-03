@@ -46,11 +46,15 @@ def materials(draft: dict) -> dict:
 
 def resolve_media(raw: str, draft_root: Path) -> Path:
     path = Path(str(raw))
-    if path.is_file():
-        return path.resolve()
     fallback = draft_root / "media" / str(raw).replace("\\", "/").rsplit("/", 1)[-1]
-    if fallback.is_file():
-        return fallback.resolve()
+    for candidate in (path, fallback):
+        try:
+            if candidate.is_file():
+                return candidate.resolve()
+        except OSError:
+            # A stale mapped drive can be inaccessible after draft migration.
+            # Only an existing package reference can replace it.
+            continue
     raise ValueError("MEDIA_MISSING:" + str(raw))
 
 

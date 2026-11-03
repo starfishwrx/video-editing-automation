@@ -3,9 +3,10 @@ from __future__ import annotations
 
 import math
 from .. import ai_editor_contract as contract
+from .. import visual_qc_contract
 
-RESPONSE_VERSION = "chatcut-visual-qc-response-v4"
-REPORT_VERSION = "chatcut-visual-qc-v4"
+RESPONSE_VERSION = visual_qc_contract.AI_RESPONSE_VERSION
+REPORT_VERSION = visual_qc_contract.AI_REPORT_VERSION
 
 
 def source_matches_receipt(actual_path: str, expected: dict) -> bool:
@@ -37,7 +38,8 @@ def prompt(claims: list[dict], frame_count: int) -> str:
 你是独立成片审稿人，这是全新调用，不知道选镜器的结论。仅根据最终切片中新抽出的实际画面判断。
 每个物理片段依时间顺序提供开始、过程、结束帧，并补充关键动作/结果帧，总共{frame_count}张。
 {mapping}
-独立检查每句实际内容，不盲信建议用途：含卖点的钩子仍须对应卖点，多个卖点必须全部覆盖。
+独立检查每句实际内容，不盲信建议用途：含卖点的钩子仍须对应卖点，多个卖点至少有一个具体点被画面实际支持。
+reason明确列出实际支持的具体点及未确认的其他点；部分呈现不等于整句全部功效已证实。没有任何具体点成立不得通过。
 DIRECT表示本句按其用途正常匹配：贴切的轻薄/柔软展示和普通介绍/钩子的同商品展示均可正常通过，
 不要求它们成为物理实验。明确性能结果、数量和数值比较仍须对应画面。包装淋水不能证明巾体干爽。
 价格/优惠/划算等普通促销口播，可用同商品包装或陈列承接；明确价格数值或价格比较仍须对应可读证据。
