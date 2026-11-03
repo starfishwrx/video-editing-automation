@@ -82,7 +82,9 @@ uv run --frozen python -X utf8 doubao-jianying-orchestrator/run.py env
 if ($LASTEXITCODE -ne 0) { throw '请先处理无头环境检查中的阻断项。' }
 ```
 
-`env` 默认检查生产环境，包含所选写稿后端，未就绪会返回非零退出码。`env --input work/task/manifest.json` 按任务指定的后端和字体检查；`env --profile base` 只检查通用工具链。环境检查不认证云端密钥，建稿与恢复预检也会在付费阶段前检查所选后端。
+`env` 默认检查生产环境，包含所选写稿后端及音频运行资源，未就绪会返回非零退出码。`env --input work/task/manifest.json` 按任务指定的后端、字体及 BGM 来源检查；`env --profile base` 只检查通用工具链。建稿与恢复预检会在付费阶段前复查这些条件，环境检查不认证云端密钥。
+
+音色显示名／ID、历史别名和 BGM 曲库已作为[运行资源](packages/video-v1.5.3/jianying-editor/resources/catalogs/README.md)随 Git 和源码包交付，干净拉取无需手工复制 `data/`。例如“TVB女声1.2”与“TVB女声Pro”会分别解析；缺表或坏表返回 `RUNTIME_CATALOG_MISSING`／`RUNTIME_CATALOG_INVALID`，不会误报成音色选择问题。资源不包含音频、临时链接或登录凭据。
 
 配置读取进程环境变量，复制 `.env` 不会自动加载。切换千问时，明确设置 `JY_VISION_TRANSPORT=qwen` 及 `JY_QWEN_BASE_URL`、`JY_QWEN_MODEL`、`JY_QWEN_API_KEY`；详见模型与视觉流程。
 

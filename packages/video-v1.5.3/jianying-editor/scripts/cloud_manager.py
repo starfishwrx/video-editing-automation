@@ -56,12 +56,13 @@ class CloudManager:
         db_files = ["cloud_music_library.csv", "cloud_video_assets.csv", "cloud_sound_effects.csv"]
 
         for db_name in db_files:
-            path = os.path.join(SKILL_ROOT, "data", db_name)
+            directory = "resources/catalogs" if db_name == "cloud_music_library.csv" else "data"
+            path = os.path.join(SKILL_ROOT, directory, db_name)
             if not os.path.exists(path):
                 continue
 
             try:
-                with open(path, "r", encoding="utf-8") as f:
+                with open(path, "r", encoding="utf-8-sig") as f:
                     lines = [line for line in f.readlines() if not line.startswith("#")]
                     reader = csv.DictReader(lines)
                     for row in reader:
@@ -267,6 +268,19 @@ class CloudManager:
 
         eid = asset["id"]
         safe_name = "".join([c for c in asset["name"] if c.isalnum() or c in (" ", "_")]).strip()
+
+        # Shipped indexes deliberately have no expiring URLs. A complete local
+        # file must remain reusable even when the URL service is unavailable.
+        if not force:
+            preferred = self._infer_extension(asset, url=asset.get("url") or "")
+            extensions = dict.fromkeys((preferred, ".m4a", ".mp3", ".wav", ".ogg", ".mp4"))
+            for extension in extensions:
+                cached = os.path.join(CACHE_DIR, f"{eid}_{safe_name}{extension}")
+                try:
+                    if os.path.isfile(cached) and os.path.getsize(cached) > 1024:
+                        return cached
+                except OSError:
+                    continue
 
         resolved_fresh = False
         url = asset.get("url")

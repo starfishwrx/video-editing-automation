@@ -16,6 +16,8 @@ uv run --frozen python -X utf8 doubao-jianying-orchestrator/run.py --help
 
 后续命令都在这个包根执行。不要切到实验包，也不要对系统 Python 安装依赖。
 
+音色表和自动 BGM 曲库随仓库及源码包交付，无需从其他机器复制 `data/`。可离线运行 `run.py list-library --kw TVB` 检查名称；生产 `env` 会检查表是否缺失或损坏。元数据能查询不等于云端合成／下载已获授权或可用，详见[资源说明](../packages/video-v1.5.3/jianying-editor/resources/catalogs/README.md)。
+
 ## 2. 离线代码验证
 
 ```powershell

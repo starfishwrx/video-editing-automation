@@ -25,6 +25,7 @@ from ..selection import timing_contract
 from ..selection import usage_ledger
 from ..audio import voice_catalog
 from ..audio import voice_tts
+from ..audio.library_resources import RuntimeCatalogError
 from .engine import OrchestrationEngine
 from ..runtime.platform_env import clear_environment_cache, environment_report
 from ..runtime.task_log import TaskAlreadyRunningError, TaskLogger
@@ -124,6 +125,30 @@ def _compact_control_result(result: dict) -> dict:
     return {key: result[key] for key in keys if key in result}
 
 
+def _production_environment_report(base_report: dict, manifest: dict | None = None) -> dict:
+    """Compose writer and audio-resource readiness at the application boundary."""
+    from ..runtime.headless import production_environment_report
+    from ..audio.bgm_request import normalize
+    from ..audio.library_resources import catalog_report
+    report = production_environment_report(base_report, manifest)
+    catalogs = catalog_report(require_music=not normalize((manifest or {}).get("bgm")).get("path"))
+    report["runtime_catalogs"] = catalogs
+    report["hints"].extend(catalogs["errors"])
+    report["ready"] = report["ready"] and catalogs["ready"]
+    report["status"] = "READY" if report["ready"] else "ENV_ERROR"
+    if not report["ready"]:
+        report["reason"] = (report["draft_backend_check"].get("reason") or
+                            next(iter(catalogs["errors"]), "BASE_ENVIRONMENT_NOT_READY"))
+    return report
+
+
+def _run_command(command, args) -> int:
+    try:
+        return command(args)
+    except RuntimeCatalogError as exc:
+        return _emit({"status": "ENV_ERROR", "failure_class": "environment", "reason": str(exc)}, 1)
+
+
 def cmd_env(args) -> int:
     profile = getattr(args, "profile", "production")
     input_file = getattr(args, "input", None)
@@ -136,8 +161,7 @@ def cmd_env(args) -> int:
                       "reason": "ENV_MANIFEST_INVALID", "error": str(exc)}, 1)
     report = environment_report(refresh=True)
     if profile == "production":
-        from ..runtime.headless import production_environment_report
-        report = production_environment_report(report, manifest)
+        report = _production_environment_report(report, manifest)
     else:
         report = {**report, "profile": "base"}
     return _emit(report, 0 if report.get("ready") else 1)
@@ -234,7 +258,7 @@ def cmd_review_script(args) -> int:
 
 
 def cmd_list_library(args) -> int:
-    """浏览剪映全量音色库（默认164），支持性别/关键词筛选。"""
+    """浏览随包交付的全量音色库，支持性别/关键词筛选。"""
     from ..audio import voice_library as vl
     voices = vl.load_library()
     gender = {"男": "male", "女": "female", "童": "child"}.get(args.gender or "", args.gender or None)
@@ -254,7 +278,7 @@ def cmd_recommend_bgm(args) -> int:
                                     script=args.script or "")
     moods = cands[0]["moods"] if cands else bgm_selector.detect_bgm_moods(args.script or "")
     return _emit({"detected_moods": moods, "candidates": cands,
-                  "hint": "基于脚本/剧情对616首曲库相关性排序取Top；选定后把 bgm 设为 {\"music_id\": ...} 或 {\"path\": 本地文件}，无直链的需在剪映内同步后指定 path"})
+                  "hint": "按随包曲库排序；建稿时按 music_id 实时取链下载，bgm 为空则自动选曲，也可指定本地 path。"})
 
 
 def cmd_scan(args) -> int:
@@ -361,6 +385,8 @@ def _lock_voice_once(manifest: dict) -> tuple[object | None, dict | None]:
     try:
         preset = voice_catalog.resolve_voice_once(
             None, script=script, manifest=manifest, persist=True)
+    except RuntimeCatalogError as exc:
+        return None, {"status": "ENV_ERROR", "failure_class": "environment", "reason": str(exc)}
     except voice_catalog.VoiceResolutionError as exc:
         detail = getattr(exc, "voice_detail", None)
         detail = detail if isinstance(detail, dict) else {}
@@ -826,12 +852,11 @@ def cmd_build(args) -> int:
         })
         return _emit(_compact_build_result(result), 1)
 
-    from ..runtime.headless import production_environment_report
-    draft_env = production_environment_report(env, manifest)
+    draft_env = _production_environment_report(env, manifest)
     if not draft_env["ready"]:
         return _emit(_compact_build_result(finalize({'status': 'ENV_ERROR', 'failure_class': 'environment',
             'message': '建稿环境预检未通过，未开始配音或视觉分析。',
-            'reason': draft_env['draft_backend_check'].get('reason') or 'DRAFT_BACKEND_NOT_READY',
+            'reason': draft_env['reason'],
             'environment': draft_env})), 1)
 
     # Freeze one verified text plan before narration, matching and note binding.
@@ -1041,15 +1066,14 @@ def cmd_recover(args) -> int:
     if stage == "preflight":
         missing = [str(path) for path in _manifest_sources(manifest, input_path.parent)
                    if not path.is_file()]
-        from ..runtime.headless import production_environment_report
-        env = production_environment_report(environment_report(refresh=True), manifest)
+        env = _production_environment_report(environment_report(refresh=True), manifest)
         if missing or not env.get("ready"):
             result = finalize({
                 "status": "ENV_ERROR",
                 "failure_class": "environment",
                 "message": "恢复前预检未通过，未进入生成阶段。",
                 "missing": missing,
-                "reason": (env["draft_backend_check"].get("reason") or
+                "reason": (env.get("reason") or
                            ("INPUT_SOURCES_MISSING" if missing else "BASE_ENVIRONMENT_NOT_READY")),
                 "environment": env,
             })
@@ -1572,7 +1596,7 @@ def main(argv=None) -> int:
         "review-script", "scan", "analyze-shots", "match-shots", "build", "diagnose-timeline", "recover", "migrate-encrypted",
         "calibrate-capacity"):
         args = parser.parse_args(argv)
-        return args.func(args)
+        return _run_command(args.func, args)
 
     # 旧式：--input x [--scan-only]
     legacy = argparse.ArgumentParser(add_help=False)
@@ -1583,11 +1607,11 @@ def main(argv=None) -> int:
     known, _ = legacy.parse_known_args(argv)
     if known.input:
         if known.scan_only:
-            return cmd_scan(argparse.Namespace(input=known.input,
-                                               report_dir=known.report_dir))
-        return cmd_build(argparse.Namespace(input=known.input,
-                                            report_dir=known.report_dir,
-                                            strict_script=False))
+            return _run_command(cmd_scan, argparse.Namespace(input=known.input,
+                                                             report_dir=known.report_dir))
+        return _run_command(cmd_build, argparse.Namespace(input=known.input,
+                                                          report_dir=known.report_dir,
+                                                          strict_script=False))
     parser.print_help()
     return 1
 

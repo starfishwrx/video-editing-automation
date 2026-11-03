@@ -1,6 +1,6 @@
 # 子系统：音频与音色（audio-voice）
 
-- 代码：`packages/video-v1.5.3/doubao-jianying-orchestrator/orchestrator/audio/{voice_tts,voice_catalog,voice_library,bgm_selector,audio_loudness,audio_captions,voice_request}.py`；文本审核位于 `orchestrator/policy/script_polish.py`
+- 代码：`packages/video-v1.5.3/doubao-jianying-orchestrator/orchestrator/audio/{voice_tts,voice_catalog,voice_library,library_resources,bgm_selector,audio_loudness,audio_captions,voice_request}.py`；文本审核位于 `orchestrator/policy/script_polish.py`
 
 ## 1. 职责
 - 口播音色解析/推荐/唯一决议，批量 TTS 合成与缓存，试听样本生成
@@ -15,6 +15,7 @@
   - 再不命中：退回默认音色 `male_energetic`
 - 解析失败抛 `VoiceResolutionError` 并返回候选清单给运营选择（不自动猜测）
 - “全库”来源：`voice_library.load_library()`（官方显示名 CSV + 历史别名），并做中文性别/风格画像与“排除方言/外语/角色/特效音”（除非剧情明确需要）
+- CSV 位于 `jianying-editor/resources/catalogs/`，随 Git 和源码 ZIP 交付；不从本机 `data/` 隐式补表。`TVB女声1.2` 对应 `BV409_streaming`、1.2 倍速，`TVB女声Pro` 是另一音色。缺失／坏表是 `ENV_ERROR / RUNTIME_CATALOG_*`，与名称歧义分开；应用层生产预检在付费前汇总资源状态。
 
 ## 3. TTS 并发与缓存
 - 缓存键仅看“文本+音色+后端+后处理版本”（`AUDIO_PIPELINE_VERSION`），与 `video_speed/窗口` 无关；命中即完全复用字节
@@ -28,7 +29,7 @@
 
 ## 5. BGM 推荐与铺底（`bgm_selector`）
 - 情绪规则：脚本/剧情关键词 → 情绪标签（轻快/舒缓/动感/可爱/大气/治愈/国风），并兼容英文风格词（categories 为空时用标题匹配）
-- 选曲：按情绪/显式关键词/曲库元信息综合打分；优先带直链；支持试听切片缓存
+- 选曲：按情绪/显式关键词/随包曲库元信息综合打分；只交付 ID、名称、时长和分类，不交付临时直链。下载固定使用当前包 CloudManager 及同一元数据索引，完整本机缓存优先，未命中或强制刷新才按 ID 实时取链。显式本地 BGM 不依赖音乐索引。
 - 铺底：裁剪到成片总长 → 归一到 -28 LUFS（比旁白低 ~12 LU）→ 首尾淡变与 APAD 固长 → 闭环复测响度，必要时二次纯增益修正
 
 ## 6. 脚本润色（`script_polish`）
@@ -36,6 +37,7 @@
 
 ## 7. 测试
 - 播放链/缓存键/分段恢复/响度测量与限幅/固定时长，见 `test_video_encode.py`、`test_task_control.py` 等
+- `test_runtime_catalogs.py` 覆盖真实音色、倍速、缓存后删表／坏表、修复和付费前阻断；包级 `test_runtime_resources.py` 只复制 Git 已跟踪文件（解压包使用交付库存），在无用户配置的新解释器内禁止联网，验证音色及自动 BGM 的下游 ID 索引。
 
 ## 8. 已知坑
 - 不要把 `video_speed` 混进 TTS 缓存键（只作用于画面）

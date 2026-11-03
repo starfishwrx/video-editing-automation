@@ -50,6 +50,7 @@ def verify(root: Path) -> dict:
     # Verify target files with our maintained inventory policy. Do not execute
     # Python from a directory that is merely being checked.
     inventory = builder(ROOT)
+    inventory.require_runtime_resources(root)
     inventory.ROOT = root
     actual = {path.relative_to(root).as_posix() for path in inventory.files()}
     if actual != set(declared):

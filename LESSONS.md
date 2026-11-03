@@ -7,6 +7,14 @@
 
 ## 新增条目
 
+### L-20261103-06 运行映射表不能与私有缓存一起排除
+- status: OPEN
+- hits: 1
+- 模块: audio/library_resources、application/cli、build_manifest、cloud_manager
+- 现象: 本机有音色／音乐 CSV 而 Git 和源码包没有，旧测试只用内置音色导致干净拉取失败；缺表被误报为音色选择或无候选。
+- 以后怎么做: 稳定名称／ID 元数据按字段白名单版本化，临时链接、音频和登录缓存另存；查询与下载共用同一索引。生产预检区分资源损坏和业务歧义，缓存命中前复查文件状态；合包拒绝缺少必需资源。用 Git 已跟踪文件及全新解压包，在隔离用户目录、禁网的新解释器验证真实名称、倍速和自动选曲链，不用本机安装目录补全。
+- 证据: test_runtime_catalogs.py、test_runtime_resources.py、test_release_version.py；资源白名单和同类排查报告留包外。
+
 ### L-20261103-04 恢复阶段交接须校验真实产物与当前输入
 - status: OPEN
 - hits: 1
