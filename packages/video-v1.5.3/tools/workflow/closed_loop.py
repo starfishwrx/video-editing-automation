@@ -219,6 +219,8 @@ def archive_parent(task_path: pathlib.Path, done_path: pathlib.Path, policy_path
         if not check.get("ok"):
             raise RuntimeError("SINGLE_PACKAGE_INVALID:%s:%s" % (source, check.get("issues")))
         verify_existing_shared(source)
+        # Hash the shipped tree once; it is reused for the receipt and its digest.
+        source_identity = tree_identity(source)
         receipt = {
             "record_id": task.get("record_id"),
             "parent_folder": parent,
@@ -228,9 +230,9 @@ def archive_parent(task_path: pathlib.Path, done_path: pathlib.Path, policy_path
             "policy_version": rules["policy_version"],
             "verified": True,
             "already_grouped": True,
-            "version_identities": [tree_identity(source)],
+            "version_identities": [source_identity],
             "receipt_hash": digest({"parent_folder": parent, "versions": [parent],
-                                    "source_links": links, "version_identities": [tree_identity(source)]}),
+                                    "source_links": links, "version_identities": [source_identity]}),
             "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         }
         write_json(done_path.parent / "distribution_receipt.json", receipt)

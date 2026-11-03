@@ -29,6 +29,9 @@ from . import gpu_runtime
 _ENCODER_LINE = re.compile(r"^\s*[A-Z.]{6}\s+([A-Za-z0-9_]+)\s+")
 
 GPU_ENCODERS = ("h264_nvenc", "h264_amf", "h264_qsv")
+# Visually transparent working-copy quality (upright source normalization).
+QUALITY_NVENC_CQ = 19
+QUALITY_X264_CRF = 18
 # libx264 是明确的 CPU 回退；后两个只在 libx264 也没有时保住占位片。
 CPU_FALLBACKS = ("libx264", "h264_mf", "mpeg4")
 
@@ -239,6 +242,9 @@ def run_h264_encode(
     timeout: float | None = 180,
     lossless: bool = False,
     lossless_pixel_format: str = "yuv420p",
+    quality_bitrate: int | None = None,
+    quality_maxrate: int | None = None,
+    pixel_format: str | None = None,
 ) -> tuple[str, subprocess.CompletedProcess]:
     """按 encoder_plan 依次编码。成功打印一行编码器；全部失败才抛错。
 
@@ -268,6 +274,25 @@ def run_h264_encode(
                               "-pix_fmt", lossless_pixel_format, "-tag:v", "avc1"]
             else:
                 continue  # Never replace a lossless working copy with a lossy fallback.
+        elif quality_bitrate:
+            # High-quality working copy sized like the camera original: constant
+            # quality, capped near the source bitrate. Only encoders with a real
+            # quality/rate-cap mode are allowed; never hand this to MF/mpeg4.
+            fmt = pixel_format or "yuv420p"
+            rate = int(quality_bitrate)
+            peak = int(quality_maxrate or rate)
+            caps = ["-maxrate", str(peak), "-bufsize", str(peak * 2)]
+            if name == "h264_nvenc":
+                if fmt not in {"yuv420p", "yuv444p"}:
+                    continue  # H.264 NVENC cannot preserve 10-bit samples.
+                codec_args = ["-c:v", name, "-preset", "p5", "-tune", "hq", "-rc", "vbr",
+                              "-cq", str(QUALITY_NVENC_CQ), "-b:v", str(rate), *caps,
+                              "-pix_fmt", fmt, "-tag:v", "avc1"]
+            elif name == "libx264":
+                codec_args = ["-c:v", name, "-preset", "medium", "-crf", str(QUALITY_X264_CRF),
+                              *caps, "-pix_fmt", fmt, "-tag:v", "avc1"]
+            else:
+                continue
         cmd = [ffmpeg_bin, *leading, *codec_args, *tail,
                "-movflags", "+faststart", str(dest)]
         if name in GPU_ENCODERS and not forced:

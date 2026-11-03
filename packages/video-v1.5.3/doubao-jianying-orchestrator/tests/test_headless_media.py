@@ -50,6 +50,14 @@ class HeadlessMediaTests(unittest.TestCase):
         output = self.command("-i", path, "-map", "0:v:0", "-an", "-f", "framemd5", "-").stdout
         return [line.split(",")[-1].strip() for line in output.splitlines() if not line.startswith("#")]
 
+    def ssim(self, reference, candidate):
+        # Both inputs are display-oriented after FFmpeg autorotate.
+        result = subprocess.run([FFMPEG, "-hide_banner", "-i", str(reference), "-i", str(candidate),
+                                 "-lavfi", "[0:v][1:v]ssim", "-f", "null", "-"],
+                                capture_output=True, text=True, check=True, timeout=120)
+        line = next(l for l in result.stderr.splitlines() if "SSIM" in l and "All:" in l)
+        return float(line.split("All:")[1].split()[0])
+
     def test_real_48k_sample_count_settings_cache_and_old_format_rejection(self):
         source = self.voice()
         before = normalization.identity(source)
@@ -95,11 +103,14 @@ class HeadlessMediaTests(unittest.TestCase):
         self.assertEqual((record["display_width"], record["display_height"]), (64, 96))
         self.assertEqual(record["frame_clock"]["count"], 10)
         self.assertTrue(probe_media(prepared, ffprobe=FFPROBE)["audio"])
-        self.assertEqual(self.frame_hashes(source), self.frame_hashes(prepared))
+        self.assertGreaterEqual(self.ssim(source, prepared), 0.97)
         def audio_hash(path):
             return self.command("-i", path, "-map", "0:a:0", "-c:a", "pcm_s16le", "-f", "md5", "-").stdout
         self.assertEqual(audio_hash(source), audio_hash(prepared))
         self.assertEqual(normalization.identity(source), original)
+        self.assertFalse(record["lossless"])
+        self.assertEqual(record["quality"]["mode"], normalization.QUALITY_MODE)
+        self.assertEqual(len(self.frame_hashes(source)), len(self.frame_hashes(prepared)))
         with patch.object(normalization, "run_h264_encode", side_effect=AssertionError("cache repeated encoding")):
             cached = normalization.normalize_video(source, self.root / "cache", ffmpeg=FFMPEG, ffprobe=FFPROBE)
         self.assertTrue(cached["reused"])
@@ -107,6 +118,18 @@ class HeadlessMediaTests(unittest.TestCase):
         shutil.copyfile(prepared, staged)
         self.assertTrue(source_matches_receipt(str(staged), original, [record]))
         self.assertFalse(source_matches_receipt(str(staged), original))
+        legacy = copy.deepcopy(record)
+        legacy.update(schema="upright-source-v4", lossless=True)
+        legacy.pop("quality")
+        self.assertTrue(source_matches_receipt(str(staged), original, [legacy]))
+        forged = copy.deepcopy(record)
+        forged.pop("quality")
+        self.assertFalse(source_matches_receipt(str(staged), original, [forged]))
+        draft = self.root / "legacy-draft"
+        draft.mkdir()
+        (draft / normalization.RECEIPT_FILE).write_text(json.dumps(
+            {"schema": "upright-source-v4", "sources": [legacy]}), encoding="utf-8")
+        self.assertEqual(normalization.read_prepared_sources(draft), [legacy])
         changed_mapping = copy.deepcopy(record)
         changed_mapping["time_mapping"]["offset_us"] = 10
         self.assertFalse(source_matches_receipt(str(staged), original, [changed_mapping]))
@@ -115,6 +138,25 @@ class HeadlessMediaTests(unittest.TestCase):
         with source.open("ab") as stream:
             stream.write(b"source replaced")
         self.assertFalse(source_matches_receipt(str(prepared), original, [record]))
+
+    def test_rotation_working_copy_stays_near_source_bitrate(self):
+        plain, source = self.root / "detail.mp4", self.root / "detail-rotated.mp4"
+        self.command("-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=30:duration=2",
+                     "-f", "lavfi", "-i", "sine=frequency=330:sample_rate=48000:duration=2",
+                     "-c:v", "libx264", "-b:v", "6M", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", plain)
+        self.command("-display_rotation", "90", "-i", plain, "-c", "copy", source)
+        facts = probe_media(source, ffprobe=FFPROBE)
+        with patch.dict(os.environ, {"JY_GPU_DISABLE": "1"}):
+            record = normalization.normalize_video(source, self.root / "cache", ffmpeg=FFMPEG, ffprobe=FFPROBE)
+        prepared = Path(record["prepared"]["path"])
+        actual = probe_media(prepared, ffprobe=FFPROBE)
+        self.assertEqual((actual["width"], actual["height"]), (720, 1280))
+        self.assertEqual((actual["fps_num"], actual["fps_den"]), (facts["fps_num"], facts["fps_den"]))
+        self.assertLessEqual(abs(actual["duration_us"] - facts["duration_us"]), 40_000)
+        source_rate = normalization.source_video_bitrate(facts)
+        self.assertLessEqual(normalization.source_video_bitrate(actual), source_rate * 1.6)
+        self.assertLessEqual(prepared.stat().st_size, source.stat().st_size * 1.6)
+        self.assertGreaterEqual(self.ssim(source, prepared), 0.97)
 
     def test_retained_tts_keeps_normalization_provenance_while_operator_file_does_not(self):
         voice = self.voice()
@@ -150,7 +192,7 @@ class HeadlessMediaTests(unittest.TestCase):
         prepared = Path(record["prepared"]["path"])
         self.assertEqual(record["pixel_format"], "yuv420p10le")
         self.assertEqual(record["color_metadata"]["color_space"], "bt2020nc")
-        self.assertEqual(self.frame_hashes(source), self.frame_hashes(prepared))
+        self.assertGreaterEqual(self.ssim(source, prepared), 0.97)
 
     def test_rotated_vfr_retains_demux_time_base_and_all_frame_timestamps(self):
         plain, source = self.root / "vfr.mp4", self.root / "vfr-rotated.mp4"
@@ -165,7 +207,7 @@ class HeadlessMediaTests(unittest.TestCase):
             record = normalization.normalize_video(source, self.root / "cache", ffmpeg=FFMPEG, ffprobe=FFPROBE)
         prepared = Path(record["prepared"]["path"])
         self.assertEqual(clock, normalization._clock(prepared, FFPROBE))
-        self.assertEqual(self.frame_hashes(source), self.frame_hashes(prepared))
+        self.assertGreaterEqual(self.ssim(source, prepared), 0.97)
 
 
 if __name__ == "__main__":

@@ -17,6 +17,37 @@ from ..runtime.draft_documents import native_backend
 from ..runtime.platform_env import find_drafts_root
 from ..quality import draft_safety
 from .engine import BRIGHTNESS_KEYFRAME_VALUE
+from contextlib import contextmanager
+import time
+from ..runtime.file_safety import file_lock
+
+
+@contextmanager
+def _draft_write_io_slot(engine, cache):
+    """Serialize the media-heavy draft-write stage across workers on this host.
+
+    Rotated camera sources are re-encoded to lossless upright working copies
+    (~10x the camera file size) and every copy is read several times for
+    integrity hashes and then copied into the draft. Three workers doing this
+    at once on one spinning disk thrash it (~40MB/s total, queue 8-12), which
+    is what pushed drafts past their stage deadline. One writer at a time keeps
+    the disk sequential; selection/vision stay parallel.
+    """
+    if os.environ.get('JY_DRAFT_WRITE_SERIALIZE', '1').strip() == '0':
+        yield
+        return
+    raw = os.environ.get('JY_STAGE_DEADLINE_EPOCH') or os.environ.get('JY_STAGE_DEADLINE_TS')
+    budget = 3600.0
+    if raw:
+        budget = max(1.0, float(raw) - time.time() - 120.0)
+    started = time.time()
+    emit = getattr(engine, '_event', None)
+    if callable(emit):
+        emit('draft_write_io_wait_start', budget_s=round(budget, 1))
+    with file_lock(Path(cache) / 'draft_write_io', timeout=budget):
+        if callable(emit):
+            emit('draft_write_io_slot_acquired', wait_s=round(time.time() - started, 3))
+        yield
 
 
 def _us(value):
@@ -165,28 +196,29 @@ def write_draft(engine, clips, bgm_path):
         if not font:
             raise ValueError('HEADLESS_SUBTITLE_FONT_REQUIRED')
         cache = Path(os.environ['JY_WORK_ROOT']) / '.cache' if os.environ.get('JY_WORK_ROOT') else engine.report_dir
-        prepared, video_overrides = {}, {}
-        for clip in clips:
-            path = str(Path(clip.video).resolve())
-            if path in prepared:
-                continue
-            record = source_normalization.normalize_video(path, cache / 'upright-sources',
-                ffmpeg=str(engine.ffmpeg or 'ffmpeg'), ffprobe=str(engine.ffprobe or 'ffprobe'))
-            prepared[path] = record
-            if record['changed']:
-                video_overrides[path] = record['prepared']['path']
-        for clip in clips:
-            record = prepared[str(Path(clip.video).resolve())]
-            end = _us(clip.source_start) + round(_us(clip.duration) * float(clip.video_speed or 1))
-            if record['changed'] and end > record['prepared_duration_us']:
-                raise ValueError('NORMALIZED_SOURCE_WINDOW_OUT_OF_BOUNDS')
-        plan, built, position = make_plan(engine, clips, bgm_path, overrides, cues, name, font,
-                                          video_overrides=video_overrides)
-        work = engine.report_dir / ('headless-' + uuid.uuid4().hex[:10])
-        work.mkdir(parents=True, exist_ok=False)
-        plan_file = work / 'plan.json'
-        plan_file.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding='utf-8')
-        native = backend.build(plan_file, work / 'build', root)
+        with _draft_write_io_slot(engine, cache):
+            prepared, video_overrides = {}, {}
+            for clip in clips:
+                path = str(Path(clip.video).resolve())
+                if path in prepared:
+                    continue
+                record = source_normalization.normalize_video(path, cache / 'upright-sources',
+                    ffmpeg=str(engine.ffmpeg or 'ffmpeg'), ffprobe=str(engine.ffprobe or 'ffprobe'))
+                prepared[path] = record
+                if record['changed']:
+                    video_overrides[path] = record['prepared']['path']
+            for clip in clips:
+                record = prepared[str(Path(clip.video).resolve())]
+                end = _us(clip.source_start) + round(_us(clip.duration) * float(clip.video_speed or 1))
+                if record['changed'] and end > record['prepared_duration_us']:
+                    raise ValueError('NORMALIZED_SOURCE_WINDOW_OUT_OF_BOUNDS')
+            plan, built, position = make_plan(engine, clips, bgm_path, overrides, cues, name, font,
+                                              video_overrides=video_overrides)
+            work = engine.report_dir / ('headless-' + uuid.uuid4().hex[:10])
+            work.mkdir(parents=True, exist_ok=False)
+            plan_file = work / 'plan.json'
+            plan_file.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding='utf-8')
+            native = backend.build(plan_file, work / 'build', root)
         draft_dir = Path(native['draft_path'])
         changed = [row for row in prepared.values() if row['changed']]
         if changed:
