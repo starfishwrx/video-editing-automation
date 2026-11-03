@@ -5,6 +5,8 @@
 ## 1. 职责
 统一“够不够长”的唯一真时钟：以 µs 为单位，在规划与引擎两侧用同一套求解器/不变量，解决“估长/占位探针/最终裁决不一致”导致的整支拦截。
 
+默认AI编辑的跨句最小入口见 `docs/production-playback.md`：`selection/sentence_continuity.py` 仅对联合复核通过的相邻2–3句分配同源原速连续窗口；每句音频及尾留白不变。`policy/continuity.py` 约束完整组和逐句阶段，`quality/continuity.py` 核验运行期与写稿后的真实片段。单候选覆盖和补选直接使用 `candidate_window`，不套用多镜的一帧最小分配余量。
+
 ## 2. 口径与常量
 - µs 口径：`US=1_000_000`；`frame_us(fps)`；`DEFAULT_FPS=30`
 - 尾留白/保护区：`DEFAULT_TAIL_PAD_US=120_000`，`DEFAULT_HEAD_GUARD_US=300_000`，`DEFAULT_TAIL_GUARD_US=200_000`

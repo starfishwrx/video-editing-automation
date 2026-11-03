@@ -20,12 +20,16 @@ POINT_COVERAGE_POLICY = "at_least_one_specific_point"
 KINDS = {"selling_point", "product_intro", "hook"}
 BASES = {"editorial_fit", "visible_result", "readable_label", "product_display"}
 if __package__:
-    from .policy import playback
+    from .policy import playback, continuity
 else:
     _playback_spec = importlib.util.spec_from_file_location(
         "_chatcut_playback", Path(__file__).parent / "policy" / "playback.py")
     playback = importlib.util.module_from_spec(_playback_spec)
     _playback_spec.loader.exec_module(playback)
+    _continuity_spec = importlib.util.spec_from_file_location(
+        "_chatcut_continuity", Path(__file__).parent / "policy" / "continuity.py")
+    continuity = importlib.util.module_from_spec(_continuity_spec)
+    _continuity_spec.loader.exec_module(continuity)
 AI_SPEED_MAX = playback.PROCESS_MAX
 POLICY = """先通读整稿，先安排具体卖点，再安排产品介绍和无具体卖点的钩子/衔接。
 句子按实际内容分类，开场包含具体卖点仍是selling_point。一句多个卖点至少实际呈现一个具体点，未覆盖项如实记录，不能声称全部已证实。
@@ -134,7 +138,7 @@ def sequence_conflict_details(segments: list[dict]) -> list[tuple]:
 
 
 def sequence_errors_all(segments: list[dict]) -> list[str]:
-    return [detail[0] for detail in sequence_conflict_details(segments)]
+    return continuity.sequence_errors(segments) + [detail[0] for detail in sequence_conflict_details(segments)]
 
 
 def sequence_errors(segments: list[dict]) -> list[str]:
@@ -169,6 +173,8 @@ def make_receipt(segment: dict, *, index: int, sentence: dict, observation: dict
         "source_identity": source_identity, "window_us": _window(segment),
         "playback_policy_version": playback.VERSION,
         "playback_observation": observation.get("playback_observation"),
+        "continuity_group": segment.get("continuity_group"),
+        "action_completeness_scope": segment.get("action_completeness_scope"),
         "video_speed": segment.get("video_speed"),
         "speed_range_override": segment.get("speed_range_override"),
         "preferred_speed": segment.get("preferred_speed", 1.0),
@@ -187,6 +193,12 @@ def validate_segment_receipt(item: dict, *, text: str | None = None,
     if not isinstance(receipt, dict):
         return {"ok": False, "reasons": ["AI_SELECTION_RECEIPT_MISSING"]}
     try:
+        reasons.extend(continuity.member_errors(item, index if index is not None else receipt.get("index")))
+        if item.get("continuity_group") and manifest is not None:
+            context = item["continuity_group"]["input"]
+            if (context.get("product") != manifest.get("product") or context.get("category") != manifest.get("category")
+                    or context.get("rules") != rules_identity(manifest)):
+                reasons.append("CONTINUITY_INPUT_CHANGED")
         if receipt.get("schema") != RECEIPT_SCHEMA or receipt.get("policy_version") != POLICY_VERSION:
             reasons.append("AI_SELECTION_CONTRACT_MISMATCH")
         if receipt.get("judgment") != "matched" or receipt.get("sentence_kind") not in KINDS:

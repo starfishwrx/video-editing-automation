@@ -482,6 +482,7 @@ class OrchestrationEngine:
                     speed_range_override=it.get("speed_range_override"),
                     preferred_speed=it.get("preferred_speed", 1.0),
                     playback_observation=it.get("playback_observation"),
+                    continuity_group=it.get("continuity_group"),
                     guard_override=it.get("guard_override"),
                     raw_index=i - 1,
                 )
@@ -2097,7 +2098,7 @@ class OrchestrationEngine:
         # 源侧真实出点：切片消耗的素材长度 = 输出时长 × 速度
         prev_end = prev.source_start + prev.duration * prev_speed
         peak = (cur.stability or {}).get("peak_motion")
-        if cut_inside_span:
+        if cut_inside_span or prev.continuity_group or cur.continuity_group:
             # 兄弟缝：一句话被拆成几段画面，中间**不得**有转场，也就**不得**有把手。
             # 求解器是拿 `handles=(0,0)` 解的这几段（规划层按 `solve_span` 逐段解），
             # 这里若留着上一轮/上一段写下的陈旧把手，等于事后偷偷把素材可用区间
@@ -2328,8 +2329,13 @@ class OrchestrationEngine:
             try:
                 start = to_us(clip.source_start)
                 target = to_us(clip.duration)
-                end = (to_us(float(solved["source_end"])) if "source_end" in solved
-                       else start + round(target * clip.video_speed))
+                # Both writers consume this exact integer source length. A
+                # stale solution must never substitute a shorter approved end.
+                end = start + round(target * clip.video_speed)
+                if "source_end" in solved and abs(to_us(float(solved["source_end"])) - end) > 2:
+                    conflicts.append({"code": "PLAYBACK_SOLVED_WINDOW_CHANGED",
+                                      "index": clip.raw_index + 1 if clip.raw_index >= 0 else index + 1,
+                                      "actual_end_us": end, "solved_end_us": to_us(float(solved["source_end"]))})
             except (ValueError, TypeError, OverflowError):
                 start = end = target = None
             conflicts.extend(playback.conflicts(start_us=start, end_us=end, target_us=target,
@@ -2345,6 +2351,11 @@ class OrchestrationEngine:
         return None
 
     def write_draft(self, clips: list[Clip], bgm_path: Optional[str]) -> dict:
+        from ..quality.continuity import runtime_errors
+        errors = runtime_errors(clips, self.m.get("segments", []))
+        if errors:
+            return {"status": "TIMING_INFEASIBLE", "failure_code": "CONTINUITY_CONFLICT",
+                    "issues": errors, "resume_stage": "semantic_match", "formal_delivery_allowed": False}
         gate = self._playback_gate(clips)
         if gate:
             return gate
@@ -2681,7 +2692,19 @@ class OrchestrationEngine:
                                   caption_source, caption_result, actual_total_us)
 
     def _draft_result(self, clips, bgm_path, name, draft_dir, expected_root, built,
-                      caption_source, caption_result, actual_total_us):
+                      caption_source, caption_result, actual_total_us, *, source_overrides=None):
+        from ..quality.continuity import draft_errors
+        errors = draft_errors(draft_dir, clips, source_overrides=source_overrides)
+        groups = list({str(c.continuity_group["input"]["members"][0]["index"]): c.continuity_group
+                       for c in clips if c.continuity_group}.values())
+        if groups:
+            (Path(draft_dir) / "continuity_review.json").write_text(json.dumps({
+                "schema": "sentence-continuity-readback-v1", "groups": groups,
+                "status": "PARAMETERS_VERIFIED" if not errors else "READBACK_FAILED", "issues": errors,
+                "visual_acceptance": "independent_output_qc_required"}, ensure_ascii=False, indent=2), encoding="utf-8")
+        if errors:
+            return {"status": "DRAFT_INVALID", "draft_path": str(draft_dir), "issues": errors,
+                    "formal_delivery_allowed": False}
         intelligent = self.intelligent_mode_authorized()
         voice_rec = getattr(self, "_voice_rec", None)
         selected_voice = getattr(self, "_global_voice", self.m.get('voice') or self.DEFAULT_VOICE_KEY)

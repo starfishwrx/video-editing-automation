@@ -14,7 +14,7 @@ def failure_fields(message: str, *, stage: str = "semantic_match") -> dict:
     """A request outage is not evidence of a material/semantic gap."""
     text = message.upper()
     if any(code in text for code in ("WINDOW_INFEASIBLE", "KNOWN_WINDOWS_INFEASIBLE",
-                                    "PLAYBACK_SPEED_CONFLICT", "PLAYBACK_TIMING_INVALID")):
+                                    "PLAYBACK_SPEED_CONFLICT", "PLAYBACK_TIMING_INVALID", "CONTINUITY_")):
         from ..policy import playback
         return {"status": "TIMING_INFEASIBLE", "failure_class": "timing",
                 "failure_code": "PLAYBACK_POLICY_CONFLICT", "reason": message,
