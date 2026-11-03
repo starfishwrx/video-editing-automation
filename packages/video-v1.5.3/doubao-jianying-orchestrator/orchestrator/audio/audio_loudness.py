@@ -18,18 +18,13 @@ ffmpeg 于是静默回退到动态模式，输出仍散在 -21.90 ~ -16.02（5.8
 
     输入跨度  15.90 LU  (-37.12 .. -21.22)
     输出跨度   1.88 LU  (-17.88 .. -16.00)
-    时长漂移  -6.5 ms 恒定（AAC 帧对齐，与素材长短无关）
-
-残余 1.88 LU 来自限幅器对最响几条的削峰，属可接受范围（远低于人耳能察觉的
-「忽大忽小」阈值，且比原始 15.9 LU 小一个数量级）。
+残余响度差来自限幅器对最响几条的削峰。实际输出响度随输入而变，记录测量值。
 
 ## 为什么时长必须钉死
 
--6.5 ms 是 AAC 编码器按 1024 采样帧对齐的结果，**恒定且不随素材长短累积**
-（0.762s 与 3.641s 的素材漂移量相同）。虽然极小，但 `media_ops.add_audio_safe`
-会按 `phys_duration - src_start` 裁切，末段因此可能短 6.5ms。所以这里用
-`apad` + `atrim=duration=D` 把输出**强制**成与源完全等长（D 由 ffprobe 量得，
-与 `engine.probe` 同口径），从根上消除这层不确定性。
+44.1kHz AAC 后处理会把原 48kHz TTS 的采样边界量化到另一时钟，导致整数微秒
+时长与选镜计划差几微秒。内部旁白资产改用 48kHz PCM WAV，以源时长对应的采样数
+执行 apad/atrim；写入层按同一采样边界校验，不放宽真实缺失音频的检查。
 """
 from __future__ import annotations
 
@@ -38,6 +33,51 @@ import re
 import subprocess
 from pathlib import Path
 from typing import Optional
+import hashlib
+import uuid
+import wave
+
+from ..media.probe import probe_media
+from ..runtime.file_safety import file_lock
+
+SAMPLE_RATE = 48000
+NORMALIZATION_VERSION = "narration-48k-pcm-v1"
+
+
+def normalized_path(src: Path, directory: Path, *, target_lufs: float = -16.0,
+                    tp_limit_db: float = -1.5, max_gain_db: float = 24.0) -> Path:
+    """Invalidate processed audio only; preserve the original cloud TTS cache."""
+    src = Path(src).resolve(strict=True)
+    stat = src.stat()
+    identity = [str(src), stat.st_size, stat.st_mtime_ns, NORMALIZATION_VERSION,
+                SAMPLE_RATE, "pcm_s16le", target_lufs, tp_limit_db, max_gain_db]
+    key = hashlib.sha256(json.dumps(identity, ensure_ascii=False).encode()).hexdigest()[:20]
+    return Path(directory) / f"{src.stem}-{key}.wav"
+
+
+def _audio_facts(path: Path, ffprobe: str) -> dict:
+    facts = probe_media(path, ffprobe=ffprobe)
+    audio = next((s for s in facts["streams"] if s.get("codec_type") == "audio"), None)
+    if not audio or any(s.get("codec_type") == "video" for s in facts["streams"]):
+        raise ValueError("NARRATION_AUDIO_ONLY_REQUIRED")
+    if path.suffix.lower() == ".wav" and str(audio.get("codec_name", "")).startswith("pcm_"):
+        try:
+            with wave.open(str(path), "rb") as stream:
+                remaining = stream.getnframes()
+                frame_bytes = stream.getnchannels() * stream.getsampwidth()
+                while remaining:
+                    count = min(remaining, 65536)
+                    if len(stream.readframes(count)) != count * frame_bytes:
+                        raise ValueError("NARRATION_PCM_DATA_TRUNCATED")
+                    remaining -= count
+        except wave.Error as exc:
+            raise ValueError("NARRATION_PCM_FORMAT_INVALID") from exc
+    return {**facts, "sample_rate": int(audio.get("sample_rate") or 0),
+            "channels": int(audio.get("channels") or 0)}
+
+
+def _samples(duration_us: int) -> int:
+    return (duration_us * SAMPLE_RATE + 500_000) // 1_000_000
 
 # 旁白目标响度：短视频人声常用 -16 LUFS（YouTube/抖音投放口径的常见取值）。
 TARGET_LUFS = -16.0
@@ -74,37 +114,40 @@ def measure_integrated_lufs(ffmpeg: str, src: Path) -> Optional[float]:
         return None
 
 
-def _probe_duration(ffprobe: str, src: Path) -> Optional[float]:
-    """与 `engine.probe` 同口径的时长（ffprobe format=duration，单位秒）。"""
-    proc = subprocess.run(
-        [ffprobe, "-v", "error", "-show_entries", "format=duration",
-         "-of", "default=nw=1:nk=1", str(src)],
-        capture_output=True, text=True)
-    try:
-        value = float((proc.stdout or "").strip())
-    except ValueError:
-        return None
-    return value if value > 0 else None
-
-
 def normalize_narration(src: Path, dst: Path, *, ffmpeg: str = "ffmpeg",
                         ffprobe: str = "ffprobe",
                         target_lufs: float = TARGET_LUFS,
                         tp_limit_db: float = TP_LIMIT_DB,
                         max_gain_db: float = MAX_GAIN_DB) -> dict:
+    """Serialize one processed cache entry and publish only complete media."""
+    with file_lock(dst, timeout=600):
+        return _normalize_narration(src, dst, ffmpeg=ffmpeg, ffprobe=ffprobe,
+            target_lufs=target_lufs, tp_limit_db=tp_limit_db, max_gain_db=max_gain_db)
+
+
+def _normalize_narration(src: Path, dst: Path, *, ffmpeg: str, ffprobe: str,
+                         target_lufs: float, tp_limit_db: float, max_gain_db: float) -> dict:
     """把一条旁白归一到 `target_lufs`，峰值钉在 `tp_limit_db`。
 
-    返回测量明细（供报告与复算）。``dst`` 已存在且大小非零时直接复用 —— 与
-    `engine._stage` 的幂等思路一致，重跑同一任务不重复编码。
+    内部调用使用48kHz PCM WAV。缓存按处理参数命名，复用前检查采样率与长度。
     """
     src = Path(src)
     dst = Path(dst)
     detail: dict = {"src": str(src), "dst": str(dst),
-                    "target_lufs": target_lufs, "tp_limit_db": tp_limit_db}
+                    "target_lufs": target_lufs, "tp_limit_db": tp_limit_db,
+                    "processing_version": NORMALIZATION_VERSION, "sample_rate": SAMPLE_RATE}
+    source = _audio_facts(src, ffprobe)
+    expected_samples = _samples(source["duration_us"])
     if dst.exists() and dst.stat().st_size > 0:
-        detail["reused"] = True
-        detail["out_lufs"] = measure_integrated_lufs(ffmpeg, dst)
-        return detail
+        try:
+            cached = _audio_facts(dst, ffprobe)
+            if (cached["sample_rate"] == SAMPLE_RATE and cached["channels"] == 2
+                    and _samples(cached["duration_us"]) == expected_samples):
+                detail.update(reused=True, out_lufs=measure_integrated_lufs(ffmpeg, dst),
+                              output_duration_us=cached["duration_us"], sample_count=expected_samples)
+                return detail
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass
 
     summary = _loudnorm_summary(ffmpeg, src)
     if not summary:
@@ -126,10 +169,10 @@ def normalize_narration(src: Path, dst: Path, *, ffmpeg: str = "ffmpeg",
     dst.parent.mkdir(parents=True, exist_ok=True)
     # 限幅器 level=disabled：只削峰，不再叠加自动增益，否则响度会被二次改动。
     af = f"volume={gain_db:.3f}dB,alimiter=limit={limit:.6f}:level=disabled"
-    # 时长钉死：apad 补到源长再 atrim 切齐，抵消 AAC 帧对齐造成的 -6.5ms。
-    src_duration = _probe_duration(ffprobe, src)
+    # 使用统一 48kHz 的整数采样数，避免跨采样率量化和有损编码延迟。
+    src_duration = source["duration_us"] / 1_000_000
     if src_duration:
-        af += f",apad=whole_dur={src_duration:.6f},atrim=duration={src_duration:.6f}"
+        af += f",aresample={SAMPLE_RATE},apad=whole_len={expected_samples},atrim=end_sample={expected_samples}"
         detail["pinned_duration_s"] = round(src_duration, 6)
         # 接缝微淡变（用户 2026-09-17 反馈：分镜衔接处旁白不连贯）。逐句 TTS 是
         # 硬切的：起音辅音/尾音截断在镜头切换点上听着像「跳了一下」。20/30ms 的
@@ -139,20 +182,28 @@ def normalize_narration(src: Path, dst: Path, *, ffmpeg: str = "ffmpeg",
         af += f",afade=t=in:st=0:d={FADE_IN_S},afade=t=out:st={out_start:.6f}:d={FADE_OUT_S}"
         detail["fade_in_s"] = FADE_IN_S
         detail["fade_out_s"] = FADE_OUT_S
-    proc = subprocess.run(
-        [ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-i", str(src),
-         "-af", af, "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
-         str(dst)], capture_output=True, text=True)
-    if proc.returncode != 0 or not dst.exists():
-        detail["skipped"] = "encode_failed"
-        detail["stderr"] = (proc.stderr or "")[-400:]
+    codec = ["-c:a", "pcm_s16le"] if dst.suffix.lower() == ".wav" else ["-c:a", "aac", "-b:a", "192k"]
+    temporary = dst.with_name(f".{dst.stem}-{uuid.uuid4().hex}{dst.suffix}")
+    try:
+        proc = subprocess.run(
+            [ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-i", str(src),
+             "-af", af, *codec, "-ar", str(SAMPLE_RATE), "-ac", "2", str(temporary)],
+            capture_output=True, text=True)
+        if proc.returncode != 0 or not temporary.is_file():
+            detail.update(skipped="encode_failed", stderr=(proc.stderr or "")[-400:])
+            return detail
+        actual = _audio_facts(temporary, ffprobe)
+        if (actual["sample_rate"] != SAMPLE_RATE or actual["channels"] != 2
+                or _samples(actual["duration_us"]) != expected_samples):
+            raise ValueError("NARRATION_NORMALIZATION_FORMAT_OR_LENGTH_CHANGED")
+        stat = src.stat()
+        if (stat.st_size, stat.st_mtime_ns) != (source["size"], source["mtime_ns"]):
+            raise ValueError("NARRATION_SOURCE_CHANGED_DURING_NORMALIZATION")
+        detail.update(gain_db=round(gain_db, 3), out_lufs=measure_integrated_lufs(ffmpeg, temporary),
+            output_duration_us=actual["duration_us"], sample_count=expected_samples,
+            out_duration_s=actual["duration_us"] / 1_000_000,
+            duration_delta_ms=(actual["duration_us"] - source["duration_us"]) / 1000)
+        temporary.replace(dst)
         return detail
-
-    detail["gain_db"] = round(gain_db, 3)
-    detail["out_lufs"] = measure_integrated_lufs(ffmpeg, dst)
-    if src_duration:
-        out_duration = _probe_duration(ffprobe, dst)
-        if out_duration:
-            detail["out_duration_s"] = round(out_duration, 6)
-            detail["duration_delta_ms"] = round((out_duration - src_duration) * 1000, 2)
-    return detail
+    finally:
+        temporary.unlink(missing_ok=True)

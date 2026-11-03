@@ -10,6 +10,7 @@ import uuid
 from ..audio import audio_captions
 from ..audio.narration_probe import probe_audio
 from ..media.probe import probe_media
+from ..media import source_normalization
 from ..policy.production_parameters import subtitle_transform
 from ..runtime.draft_documents import native_backend
 from ..runtime.platform_env import find_drafts_root
@@ -25,7 +26,18 @@ def _text(value):
     return ''.join(c for c in value if not unicodedata.category(c).startswith('P'))
 
 
-def make_plan(engine, clips, bgm_path, overrides, cues, name, font_path):
+def _same_audio_samples(covered_us, facts):
+    if covered_us == facts['duration_us']:
+        return True
+    audio = next((s for s in facts.get('streams', []) if s.get('codec_type') == 'audio'), {})
+    rate = int(audio.get('sample_rate') or 0)
+    if rate != 48000 or not str(audio.get('codec_name', '')).startswith('pcm_'):
+        return False
+    samples = lambda us: (us * rate + 500_000) // 1_000_000
+    return samples(covered_us) == samples(facts['duration_us'])
+
+
+def make_plan(engine, clips, bgm_path, overrides, cues, name, font_path, *, video_overrides=None):
     """Pure cut mapping; no selection, TTS, home registration or QC promotion."""
     for key in ('effects', 'filters', 'adjustments', 'subtitle_style', 'video_layout', 'canvas'):
         if engine.m.get(key):
@@ -51,6 +63,7 @@ def make_plan(engine, clips, bgm_path, overrides, cues, name, font_path):
     for c in clips:
         span, speed = _us(c.duration), float(c.video_speed or 1)
         source = str(Path(getattr(engine, '_uploaded_videos', {}).get(str(Path(c.video).resolve()), c.video)).resolve())
+        source = (video_overrides or {}).get(str(Path(c.video).resolve()), source)
         video = {'source': source, 'start_us': c.start_us, 'duration_us': span,
                  'source_start_us': _us(c.source_start), 'source_duration_us': round(span * speed),
                  'speed': speed, 'volume': 1 if c.audio_mode == 'native' else 0, 'brightness': brightness}
@@ -88,8 +101,10 @@ def make_plan(engine, clips, bgm_path, overrides, cues, name, font_path):
             if audio != path or offset != cursor or target != origin + offset:
                 raise ValueError('HEADLESS_NARRATION_SLICES_DISCONTINUOUS')
             cursor += span
-        if cursor != probe(path)['duration_us']:
-            raise ValueError('HEADLESS_NARRATION_DURATION_CONFLICT')
+        audio_facts = probe(path)
+        if not _same_audio_samples(cursor, audio_facts):
+            raise ValueError('HEADLESS_NARRATION_DURATION_CONFLICT:'
+                             f'covered_us={cursor},audio_us={audio_facts["duration_us"]}')
     for cue in cues:
         text = _text(cue['text'])
         if not text.strip():
@@ -145,13 +160,34 @@ def write_draft(engine, clips, bgm_path):
         font = engine.m.get('subtitle_font_path') or os.environ.get('JY_HEADLESS_FONT')
         if not font:
             raise ValueError('HEADLESS_SUBTITLE_FONT_REQUIRED')
-        plan, built, position = make_plan(engine, clips, bgm_path, overrides, cues, name, font)
+        cache = Path(os.environ['JY_WORK_ROOT']) / '.cache' if os.environ.get('JY_WORK_ROOT') else engine.report_dir
+        prepared, video_overrides = {}, {}
+        for clip in clips:
+            path = str(Path(clip.video).resolve())
+            if path in prepared:
+                continue
+            record = source_normalization.normalize_video(path, cache / 'upright-sources',
+                ffmpeg=str(engine.ffmpeg or 'ffmpeg'), ffprobe=str(engine.ffprobe or 'ffprobe'))
+            prepared[path] = record
+            if record['changed']:
+                video_overrides[path] = record['prepared']['path']
+        for clip in clips:
+            record = prepared[str(Path(clip.video).resolve())]
+            end = _us(clip.source_start) + round(_us(clip.duration) * float(clip.video_speed or 1))
+            if record['changed'] and end > record['prepared_duration_us']:
+                raise ValueError('NORMALIZED_SOURCE_WINDOW_OUT_OF_BOUNDS')
+        plan, built, position = make_plan(engine, clips, bgm_path, overrides, cues, name, font,
+                                          video_overrides=video_overrides)
         work = engine.report_dir / ('headless-' + uuid.uuid4().hex[:10])
         work.mkdir(parents=True, exist_ok=False)
         plan_file = work / 'plan.json'
         plan_file.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding='utf-8')
         native = backend.build(plan_file, work / 'build', root)
         draft_dir = Path(native['draft_path'])
+        changed = [row for row in prepared.values() if row['changed']]
+        if changed:
+            (draft_dir / source_normalization.RECEIPT_FILE).write_text(json.dumps({
+                'schema': source_normalization.VERSION, 'sources': changed}, ensure_ascii=False, indent=2), encoding='utf-8')
         if (engine.m.get('selection_mode') == 'ai_editor' or any(
                 isinstance(s, dict) and s.get('selection_mode') == 'ai_editor' for s in engine.m.get('segments', []))):
             from .. import ai_editor_contract

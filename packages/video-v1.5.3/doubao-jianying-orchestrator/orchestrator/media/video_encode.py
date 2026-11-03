@@ -237,6 +237,8 @@ def run_h264_encode(
     *,
     trailing: list[str] | None = None,
     timeout: float | None = 180,
+    lossless: bool = False,
+    lossless_pixel_format: str = "yuv420p",
 ) -> tuple[str, subprocess.CompletedProcess]:
     """按 encoder_plan 依次编码。成功打印一行编码器；全部失败才抛错。
 
@@ -255,6 +257,17 @@ def run_h264_encode(
     queue: list[tuple[EncodeAttempt, bool]] = [(item, False) for item in plan]
     for item, forced in queue:
         name, codec_args, ffmpeg_bin = item.encoder, item.args, item.ffmpeg
+        if lossless:
+            if name == "h264_nvenc":
+                if lossless_pixel_format not in {"yuv420p", "yuv444p"}:
+                    continue  # H.264 NVENC cannot preserve 10-bit samples.
+                codec_args = ["-c:v", name, "-preset", "p4", "-tune", "lossless",
+                              "-rc", "constqp", "-qp", "0", "-pix_fmt", lossless_pixel_format, "-tag:v", "avc1"]
+            elif name == "libx264":
+                codec_args = ["-c:v", name, "-preset", "ultrafast", "-qp", "0",
+                              "-pix_fmt", lossless_pixel_format, "-tag:v", "avc1"]
+            else:
+                continue  # Never replace a lossless working copy with a lossy fallback.
         cmd = [ffmpeg_bin, *leading, *codec_args, *tail,
                "-movflags", "+faststart", str(dest)]
         if name in GPU_ENCODERS and not forced:

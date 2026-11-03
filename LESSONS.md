@@ -7,6 +7,14 @@
 
 ## 新增条目
 
+### L-20261103-11 最终媒体正规化必须保留选镜时钟和证据来源
+- status: OPEN
+- hits: 1
+- 模块: audio/audio_loudness、application/recovery_audio、media/source_normalization、quality
+- 现象: 原 48kHz 配音转 44.1kHz AAC 后与计划差几微秒，严格写稿拒绝；iPhone 显示矩阵旋转素材也被无头后端拒绝。仅放宽容差或删除旋转标签会掩盖真实缺音或改变显示画面。
+- 以后怎么做: 最终旁白使用 48kHz PCM 的整数采样边界，检查实际 PCM 数据而不只读 WAV 头；处理缓存独立版本化、加锁并原子发布，不失效原 TTS。恢复保留生成来源并覆盖旧 file 绑定迁移。旋转通过完整无损工作副本解决，核对位深、解码像素、原声和帧 PTS；10bit x264 使用 qp=0，crf=0 并不保证逐像素相同。独立 QC 必须检查实际副本，同时绑定原证据和映射；另补空 profile 冷启动与真实缓存写出回读。
+- 证据: test_headless_media.py、test_headless_media_coldstart.py、test_ai_editor_qc.py；四条隔离缓存恢复的本机验证收据另存，不随源码交付。
+
 ### L-20261103-10 品名修正要通过真实品类入口验证
 - status: OPEN
 - hits: 1

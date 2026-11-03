@@ -65,6 +65,32 @@ class AIEditorQCIntegrationTests(unittest.TestCase):
         self.fixture.video.write_bytes(b"source changed after QC")
         self.assertFalse(production_eval.visual_qc_contract.report_matches_draft(result, self.draft))
 
+    def test_upright_working_copy_keeps_original_binding_and_invalidates_on_mapping_change(self):
+        from orchestrator.media import source_normalization as prepared
+        source = self.fixture.video
+        actual = self.root / "upright.mp4"
+        actual.write_bytes(b"synthetic transformed pixels with different bytes")
+        receipt = {"schema": prepared.VERSION, "source": contract.source_identity(source),
+            "prepared": prepared.identity(actual), "prepared_sha256": prepared.file_digest(actual),
+            "lossless": True, "rotation_degrees": 90, "frame_clock": {"count": 60},
+            "time_mapping": {"offset_us": 0, "rate_num": 1, "rate_den": 1}}
+        path = self.draft / prepared.RECEIPT_FILE
+        path.write_text(json.dumps({"schema": prepared.VERSION, "sources": [receipt]}), encoding="utf-8")
+        info = json.loads((self.draft / "draft_info.json").read_text(encoding="utf-8"))
+        info["materials"]["videos"][0]["path"] = str(actual)
+        (self.draft / "draft_info.json").write_text(json.dumps(info), encoding="utf-8")
+        code, result = self.run_qc()
+        self.assertEqual((code, result["status"]), (0, "PASS"), result)
+        self.assertTrue(visual_qc_contract.report_matches_draft(result, self.draft))
+        self.assertEqual({str(Path(r["path"]).resolve()) for r in result["source_bindings"]},
+                         {str(source.resolve()), str(actual.resolve())})
+        receipt["time_mapping"]["offset_us"] = 1
+        path.write_text(json.dumps({"schema": prepared.VERSION, "sources": [receipt]}), encoding="utf-8")
+        self.assertFalse(visual_qc_contract.report_matches_draft(result, self.draft))
+        code, rejected = self.run_qc()
+        self.assertNotEqual(code, 0)
+        self.assertIn("AI_QC_SOURCE_CONTENT_CHANGED", rejected["issues"])
+
     def test_preview_with_all_pixels_matching_never_becomes_formal_pass(self):
         self.match["manifest"]["delivery_mode"] = "preview"
         self.write_reports()
