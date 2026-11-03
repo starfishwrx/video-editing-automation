@@ -23,7 +23,7 @@
 | CLI 子命令（env/build/recover/…） | `docs/subsystems/orchestrator-cli.md` | `orchestrator/application/cli.py` |
 | 选镜、视觉证据、语义闸门 | `docs/subsystems/visual-matching.md` | `orchestrator/{selection,vision,quality}/`、`policy/semantic_gate.py`；原位公共合同 `ai_editor_contract.py`、`visual_qc_contract.py` |
 | 文案驱动识别与无草稿复核 | `docs/plans/20261102-purpose-driven-selection.md` | `vision/purpose_review.py`、`selection/purpose_selection.py`、`application/purpose_production.py`；活包 `tools/purpose_production.py`；显式隔离入口，默认生产未切换 |
-| 卫品实验配对与局部变速 | `docs/weipin-experiments.md` | `vision/experiment_{review,pair_review,motion_review,detail}.py`、`selection/experiment_{contract,retiming}.py`、`media/temporal_samples.py`、`application/experiment_production.py`；活包 `tools/weipin_experiment.py`，同次实验可跨文件，相邻只作召回，局部2/3倍、关键动作原速，配对/时长/成片分别验收 |
+| 卫品实验配对与局部变速 | `docs/weipin-experiments.md` | `vision/experiment_{review,pair_review,motion_review,detail}.py`、`selection/experiment_{contract,retiming}.py`、`media/temporal_samples.py`、`application/experiment_{production,optimization}.py`；活包 `tools.weipin_experiment optimize`复现已复核方案，同次实验可跨文件，相邻只作召回，局部2/3倍、关键动作原速，配对/时长/成片分别验收 |
 | 品类规则包 / 场景规则 / 相位 | `packages/video-v1.5.3/doubao-jianying-orchestrator/references/production_quality_and_lessons.md` | `orchestrator/rulepack.py`、`policy/scene_rules.py`、`vision/phase_timing.py`、`rules/*.json` |
 | 口播/TTS/音色/BGM/响度 | `docs/subsystems/audio-voice.md`, `docs/programmatic-production.md` | `orchestrator/audio/`（含`final_bgm.py`业务音乐准备）、`orchestrator/policy/script_polish.py` |
 | 时序契约 / 音画对齐 | `docs/subsystems/timing.md` | `orchestrator/selection/timing_contract.py`、`orchestrator/media/stability.py` |

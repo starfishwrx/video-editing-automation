@@ -6,7 +6,7 @@
     "machine-specific paths",
     "knowledge-base bodies"
   ],
-  "file_count": 403,
+  "file_count": 405,
   "files": [
     {
       "path": ".gitignore"
@@ -97,6 +97,9 @@
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/application/engine.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/application/experiment_optimization.py"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/application/experiment_production.py"
@@ -592,6 +595,9 @@
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_edit_timeline.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/tests/test_experiment_optimization.py"
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_experiment_pairs.py"

@@ -6,6 +6,27 @@
 
 当前仍为显式预览入口，未切换默认生产。素材关系、固定句长可行性、最终观看质量分别验收。
 
+## 用正常命令复现已复核方案
+
+已确认的配对、句子用途、源关系和阶段数据可直接交给程序，不再编写任务专属Python脚本。已有绑定motion时运行：
+
+```powershell
+uv run --frozen python -X utf8 -m tools.weipin_experiment optimize --manifest work/task.json --timeline work/fixed/timeline.json --roles work/roles.json --evidence work/pair.pair.json --motion work/verified.motion.json --prior-origins work/origin-bindings.json --report-dir work/optimization-new
+```
+
+需要定向修正自动观察的阶段时，先生成可编辑规格：
+
+```powershell
+uv run --frozen python -X utf8 -m tools.weipin_experiment phase-template --manifest work/task.json --evidence work/pair.pair.json --motion work/observed.motion.json --output work/phase-spec.json
+uv run --frozen python -X utf8 -m tools.weipin_experiment optimize --manifest work/task.json --timeline work/fixed/timeline.json --roles work/roles.json --evidence work/pair.pair.json --phase-spec work/phase-spec.json --prior-origins work/origin-bindings.json --report-dir work/optimization-new
+```
+
+两条命令之间依据实际编号帧核对并修改`members[].observation`，在`review_note`记录复核依据；空说明的模板不能直接使用。`phase-template`不带`--motion`时生成待填写的uncertain观察，不会假造已识别阶段。规格中的来源、复核窗口及`pair_input_sha256`由命令填写，不能挪作别的输入；同名换媒体、重新采样或窗口变化后旧规格拒绝复用。
+
+`optimize`只读取现有输入并在新目录输出`timeline.json`、绑定后的`motion.json`、逐句源窗/倍速变化表`changes.json`和`REPORT.md`、`render/preview.mp4`及`result.json`。它不重做配音、音乐或素材分析；输入已有音轨及组外视频不变。结果同时给出计划倍率、实际输出帧预算倍率、保护区帧数和反渗句与按压起点的滞后，不能把一个组能放下当作逐句已对齐。
+
+`--motion`与`--phase-spec`二选一。存在多个合法句组时用重复的`--sentence-id`明确选一个；默认只处理唯一句组。`--no-render`仅准备时间线和变化表，默认会实际渲染。输出目录已存在时拒绝覆盖，阶段失败保留`BLOCKED`结果。该能力不会自动回退重跑全库，不获得正式交付权限。
+
 ## 召回与画面配对
 
 `weipin.json`的`experiment_contracts.absorb_rewet`声明同次实验、可跨文件和结果最低帧数。有效规则同时进入新旧文案识别；旧描述只作召回，原文按当前规则重新编译，旧的支持结论不会自动获得当前认证。

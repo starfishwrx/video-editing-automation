@@ -9,19 +9,25 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1] / "doubao-jianying-orc
 
 def main(argv=None):
     p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument("stage",choices=("roles","observe","pair","motion","apply","detail"))
+    p.add_argument("stage",choices=("roles","observe","pair","motion","phase-template","apply","optimize","detail"))
     p.add_argument("--manifest",type=Path,required=True)
-    for name in ("timeline","source","report-dir","output","roles","evidence","motion","first-evidence","second-evidence","prior-origins","render-dir","font"):
+    for name in ("timeline","source","report-dir","output","roles","evidence","motion","phase-spec","first-evidence","second-evidence","prior-origins","render-dir","font"):
         p.add_argument("--"+name,type=Path)
     p.add_argument("--first-window",type=int,nargs=2);p.add_argument("--second-window",type=int,nargs=2)
     p.add_argument("--ffmpeg",default="ffmpeg");p.add_argument("--ffprobe",default="ffprobe")
+    p.add_argument('--sentence-id',action='append');p.add_argument('--width',type=int,default=540)
+    p.add_argument('--no-render',action='store_true')
     a=p.parse_args(argv)
     required={"roles":("timeline","output"),"observe":("source","report_dir","font"),
               "apply":("timeline","roles","evidence","prior_origins","output"),
               "pair":("first_evidence","second_evidence","first_window","second_window","output","font"),
               "motion":("evidence","output"),
+              "optimize":("timeline","roles","evidence","prior_origins","report_dir"),
+              "phase-template":("evidence","output"),
               "detail":("evidence","output","font")}[a.stage]
     if any(getattr(a,k) is None for k in required):p.error("missing required stage arguments: "+", ".join(required))
+    if a.stage=='optimize'and (a.motion is None)==(a.phase_spec is None):
+        p.error('optimize requires exactly one of --motion or --phase-spec')
     from orchestrator import ai_editor_contract as identity
     from orchestrator.domain.timeline import EditTimeline
     from orchestrator.media.temporal_samples import prepare,guard_paths
@@ -30,7 +36,7 @@ def main(argv=None):
     from orchestrator.vision.purpose_review import save
     def read(path):return json.loads(path.read_text(encoding="utf-8-sig"))
     manifest=read(a.manifest)
-    inputs=[v for k,v in vars(a).items() if isinstance(v,Path)and k in {"manifest","timeline","source","roles","evidence","motion","first_evidence","second_evidence","prior_origins","font"}]
+    inputs=[v for k,v in vars(a).items() if isinstance(v,Path)and k in {"manifest","timeline","source","roles","evidence","motion","phase_spec","first_evidence","second_evidence","prior_origins","font"}]
     if a.output:
         guard_paths(inputs,a.output,(".prompt.txt",".request.json",".evidence.json",".detail.json",".pair.json",".jpg",".binding.json",".motion.json"))
         if a.stage=='motion':
@@ -38,7 +44,17 @@ def main(argv=None):
                 guard_paths(inputs,a.output.with_name(a.output.stem+'-'+part+'.json'),
                     ('.input.json','.call.json','.video','.window.mp4','.candidate.json'))
         if a.output.exists():raise ValueError("EXPERIMENT_OUTPUT_ALREADY_EXISTS")
-    if a.stage=="roles":
+    if a.stage=='phase-template':
+        from orchestrator.application.experiment_optimization import phase_spec_template
+        save(a.output,phase_spec_template(manifest,read(a.evidence),read(a.motion)if a.motion else None))
+        result={'status':'PHASE_REVIEW_TEMPLATE_CREATED','output':str(a.output)}
+    elif a.stage=='optimize':
+        from orchestrator.application.experiment_optimization import optimize
+        result=optimize(manifest,EditTimeline.load(a.timeline),read(a.roles),read(a.evidence),
+            read(a.prior_origins),a.report_dir,phase_spec=read(a.phase_spec)if a.phase_spec else None,
+            motion=read(a.motion)if a.motion else None,sentence_ids=a.sentence_id,
+            render=not a.no_render,ffmpeg=a.ffmpeg,ffprobe=a.ffprobe,width=a.width)
+    elif a.stage=="roles":
         timeline=EditTimeline.load(a.timeline)
         if timeline.task_id!=manifest["task_id"]:raise ValueError("EXPERIMENT_TASK_MISMATCH")
         rows=classify_sentences(manifest,timeline,a.output)
