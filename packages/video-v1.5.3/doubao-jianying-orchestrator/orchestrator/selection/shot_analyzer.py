@@ -137,9 +137,12 @@ def candidate_evidence_interval(shot: dict[str, Any]) -> tuple[float, float, flo
         frame_ts = _number(shot.get("frame_time"), frame_times[0])
         if not any(s - 1e-6 <= frame_ts <= e + 1e-6 for s, e in spans):
             frame_ts = frame_times[0]
-        return (round(min(s for s, _ in spans), 3),
-                round(max(e for _, e in spans), 3),
-                round(frame_ts, 3))
+        # AI-editor reviews record evidence as integer microseconds; rounding
+        # those bounds to milliseconds can cut away a verified edge.
+        precision = 6 if shot.get("selection_mode") == "ai_editor" else 3
+        return (round(min(s for s, _ in spans), precision),
+                round(max(e for _, e in spans), precision),
+                round(frame_ts, precision))
 
     span_start = _number(shot.get("source_start"))
     span_end = _number(shot.get("source_end"), span_start)
