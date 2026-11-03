@@ -78,11 +78,14 @@ def validate(data, requests, entries, *, limit=6, rejected=None):
 def allocate(requests, rankings, entries, *, wave_size=3):
     """Diversify generic introductions without replacing a feature's own ranking."""
     from collections import Counter
+    from .opening_hook import is_packaging_hook, packaging_recall_priority
     result = {}; reservations = Counter()
+    descriptions = {e['shot_id']: e['description'] for e in entries}
     general = lambda r: r.get('display_goal') == 'general_product' and not (r['require_action'] or r['require_result'])
     for request in sorted(requests, key=lambda r: (general(r), r['index'])):
         pool = list(rankings[request['index']])
         if general(request):
+            hook = is_packaging_hook(request)
             known = {c['shot_id'] for c in pool}
             for e in entries:
                 if e['shot_id'] not in known and e['end_us']-e['start_us'] >= request['segment_us']:
@@ -90,10 +93,15 @@ def allocate(requests, rankings, entries, *, wave_size=3):
                     pool.append({'shot_id':e['shot_id'],'claim_id':check['id'],
                         'claim_text':check.get('claim_text',request['text']), 'mode':'uncertain',
                         'description_excerpt':e['description'],
-                        'information_link':'通用介绍同商品补充召回；必须实际复核，不是卖点证据',
+                        'information_link':('开头钩子包装线索召回；必须实际复核，不证明口播功效' if hook
+                                            else '通用介绍同商品补充召回；必须实际复核，不是卖点证据'),
                         'start_us':e['start_us'],'end_us':e['start_us']+request['segment_us'],
-                        'generic_reservoir':True})
-            pool = [c for _,c in sorted(enumerate(pool),key=lambda pair:(reservations[pair[1]['shot_id']],pair[0]))]
+                        'generic_reservoir':not hook})
+            # Keep purpose ahead of diversity and apply it before either wave's
+            # limit, including when allocate() is called again by select().
+            pool = [c for _,c in sorted(enumerate(pool),key=lambda pair:(
+                packaging_recall_priority(descriptions[pair[1]['shot_id']]) if hook else 0,
+                reservations[pair[1]['shot_id']],pair[0]))]
         result[request['index']] = pool[:wave_size*2]
         reservations.update(c['shot_id'] for c in pool[:wave_size])
     return result

@@ -49,8 +49,12 @@ def _binding(manifest, narration, artifact, *, rules_required=False):
         raise ValueError("PURPOSE_ARTIFACT_INPUT_CHANGED")
     _request_coverage(artifact.get("requests"),narration["rows"])
     if rules_required:
+        from ..selection.opening_hook import RULE,validate_completed
         if artifact.get("rules") != contract.rules_identity(manifest) or artifact.get("protocol") != vision.PROTOCOL:
             raise ValueError("PURPOSE_WEIPIN_RULE_IDENTITY_CHANGED")
+        if artifact.get('opening_hook_rule')!=RULE:
+            raise ValueError('PURPOSE_OPENING_HOOK_RULE_CHANGED')
+        validate_completed(artifact['requests'])
 
 
 def _parallel(jobs, prepare, consume, *, workers=6):
@@ -193,7 +197,8 @@ def select(manifest, analysis, narration, index, directory, *, workers=6, candid
         row["status"] = "SELECTED_FOR_PREVIEW" if winner else "EVIDENCE_OR_TIMING_PENDING"
         if winner:
             used.append({"source":winner["source"],"start":winner["plan"]["source_start_us"],"end":winner["plan"]["source_end_us"]})
-    result={"schema":"purpose-selection-v1","task_id":manifest["task_id"],"requests":requests,
+    from ..selection.opening_hook import RULE
+    result={"schema":"purpose-selection-v1","task_id":manifest["task_id"],"requests":requests,'opening_hook_rule':RULE,
         "rules":contract.rules_identity(manifest),"protocol":vision.PROTOCOL,
         "old_index_use":"retrieval descriptions only; requirements recompiled under current rules",
         "experiment_pair_candidates":experiment_pairs,

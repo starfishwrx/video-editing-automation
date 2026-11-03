@@ -43,7 +43,12 @@ manifest = recovery_audio.bind({'segments':[{'video':str(rotated),'text':'真实
 engine = OrchestrationEngine(manifest,work,work/'report',capacity_guard=False)
 engine.ffmpeg, engine.ffprobe, engine.total_us = ffmpeg, ffprobe, 1775958
 clips = engine.build_clips()
-font = work/'fixture.ttf'; font.write_bytes(b'font fixture; native backend is mocked only in CI')
+from PIL import ImageFont
+font_candidates = [pathlib.Path(os.environ.get('WINDIR','C:/Windows'))/'Fonts'/name
+                   for name in ('msyhbd.ttc','simhei.ttf','arial.ttf')]
+font_source = next((str(p) for p in font_candidates if p.is_file()), 'DejaVuSans.ttf')
+font = work/'fixture.ttf'
+shutil.copyfile(ImageFont.truetype(font_source,16).path,font)
 os.environ['JY_HEADLESS_FONT'] = str(font)
 library = work/'drafts'; library.mkdir()
 os.environ['JY_DRAFTS_ROOT'] = str(library)

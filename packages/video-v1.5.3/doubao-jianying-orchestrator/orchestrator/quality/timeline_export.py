@@ -33,6 +33,9 @@ def compare_headless_documents(timeline, plan, document, metadata, record):
             if expected["type"] == "text":
                 text = json.loads(mat.get("content", "{}"))
                 require(text.get("text") == spec["text"], "EXPORT_SUBTITLE_TEXT_MISMATCH:" + label)
+                require(mat.get('alignment') == spec['alignment'], 'EXPORT_SUBTITLE_ALIGNMENT_MISMATCH:' + label)
+                require(mat.get('line_max_width') == spec['max_line_width']
+                        and mat.get('force_apply_line_max_width') is True, 'EXPORT_SUBTITLE_SAFE_WIDTH_MISMATCH:' + label)
                 require(seg.get("clip", {}).get("transform") == {"x": spec["x"], "y": spec["y"]},
                         "EXPORT_SUBTITLE_POSITION_MISMATCH:" + label)
                 require(bool(text.get("styles")) and all(s.get("size") == spec["size"] for s in text["styles"]),

@@ -9,10 +9,12 @@ import tempfile
 import unittest
 import shutil
 import wave
+from PIL import ImageFont
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from orchestrator.media.caption_layout import layout_subtitle
 from orchestrator.application.engine import OrchestrationEngine
 from orchestrator.application import headless_production
 from orchestrator.audio import final_bgm
@@ -177,7 +179,7 @@ class DefaultHeadlessTests(unittest.TestCase):
 
     def test_plan_preserves_native_audio_brightness_slice_and_bgm(self):
         with tempfile.TemporaryDirectory() as raw:
-            root=Path(raw); font=root/'font.ttf'; font.write_bytes(b'fixture')
+            root=Path(raw); font=root/'font.ttf'; shutil.copyfile(ImageFont.truetype(layout_subtitle('x',1080,1920,font_name='Arial')['font_path'],12).path,font)
             engine=SimpleNamespace(m={"brightness":None}, _fps=lambda:30, ffprobe=None, total_us=1_200_001,
                                    _audio_slice_us=lambda c:c.start_us)
             first=Clip(str(root/'video.mp4'),0,.2,text='测试。',audio=str(root/'voice.wav'),
@@ -201,7 +203,7 @@ class DefaultHeadlessTests(unittest.TestCase):
 
     def test_one_frame_tolerance_cannot_silently_cut_twenty_ms_of_speech(self):
         with tempfile.TemporaryDirectory() as raw:
-            root=Path(raw);font=root/'font.ttf';font.write_bytes(b'fixture')
+            root=Path(raw);font=root/'font.ttf';shutil.copyfile(ImageFont.truetype(layout_subtitle('x',1080,1920,font_name='Arial')['font_path'],12).path,font)
             engine=SimpleNamespace(m={},_fps=lambda:30,ffprobe=None,total_us=1_000_000,
                                    _audio_slice_us=lambda c:0)
             clip=Clip(str(root/'video.mp4'),0,1,audio=str(root/'voice.wav'),audio_mode='file')
@@ -211,7 +213,7 @@ class DefaultHeadlessTests(unittest.TestCase):
 
     def test_unknown_transition_is_blocked_without_dropping_it(self):
         with tempfile.TemporaryDirectory() as raw:
-            root=Path(raw); font=root/'font.ttf'; font.write_bytes(b'fixture')
+            root=Path(raw); font=root/'font.ttf'; shutil.copyfile(ImageFont.truetype(layout_subtitle('x',1080,1920,font_name='Arial')['font_path'],12).path,font)
             engine=SimpleNamespace(m={},_fps=lambda:30,total_us=1_000_000)
             clip=Clip('video.mp4',0,1,transition={'type':'unknown','duration':.2})
             with self.assertRaisesRegex(ValueError,'TRANSITION_UNSUPPORTED'):
