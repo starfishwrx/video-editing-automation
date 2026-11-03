@@ -26,6 +26,19 @@ def observed():
 
 
 class PurposeEvidenceTests(unittest.TestCase):
+    def test_output_review_persists_status_summary_after_every_sentence(self):
+        from test_timeline_export import example
+        timeline=example()
+        requests=[{'index':i,'text':s.text} for i,s in enumerate(timeline.sentences,1)]
+        with tempfile.TemporaryDirectory() as raw:
+            root=Path(raw);render=root/'render';render.mkdir();(render/'preview.mp4').write_bytes(b'rendered')
+            with patch.object(app,'check_production',return_value={'structure_media':{'status':'PASS'}}),\
+                    patch.object(app.ai_editor,'_review_media',return_value={}),\
+                    patch.object(app.vision,'review_output',return_value={'status':'SAMPLED_SUPPORT'}):
+                result=app.review_render({'task_id':timeline.task_id},timeline,requests,render,root/'review',workers=1)
+            self.assertEqual(result['counts'],{'SAMPLED_SUPPORT':len(requests)})
+            self.assertTrue((root/'review/review.json').exists())
+
     def test_output_review_uses_assigned_picture_frames_before_neighboring_cut(self):
         from test_timeline_export import example
         timeline=example()

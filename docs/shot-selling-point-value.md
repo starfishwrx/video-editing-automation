@@ -19,3 +19,19 @@
 卫品42第7句复验：033折拢和036抚摸都没有给“不闷热/不粘腻”增加具体信息，被拒选。旧缓存召回的076显示背面照光后正面透光变化，有明确展示目的，可作薄透相关表达，支持一项即可入选；不把它当作空气透过率、实际温感或不粘腻证明。选择0–2.725397秒，配音和句长不变。真实对照、模型原答、固定音轨验证保存在包外。
 
 这更正上一轮仅因036主体更清楚而宣布卖点选镜改善的结论。[可读性说明](shot-usability.md)仍作为辅助检查，不能单独决定动作是否有效。
+
+## 后续同类任务的自动召回
+
+`vision/purpose_inventory.py`读取当前原句目标及旧描述索引，保留每句自己的具体候选排序，不再经过通用展示池覆盖。每条文字线索须引用原描述并指出与哪个原文卖点相关；否定描述不能作为正面证据。文字召回最多六条，实际源窗还必须经过独立卖点信息、可读性及语义复核，旧描述的“透光/柔软”结论不能直接使候选通过。
+
+展示句由模型定位有信息的起点，程序按固定句长计算终点、校验源边界；微秒算术不交给模型。结构或来源不符明确阻断，单条引用/窗口不合法的线索丢弃并记录原因，不拖累其余有效候选。先看前三个，只有无可用且未重复窗口时才补后三个；两轮无解保留待审，不强塞通用动作，不自动识别全库。
+
+整稿普通介绍句仍可从同商品描述池分散召回，避免多个句子都争用同一窗口；这条补池规则只作用于`display_goal=general_product`，不能填补具体卖点的证据缺口。每句像素复核预算仍最多六个，分配优先保留具体卖点候选。
+
+单句入口可免去手工候选表：
+
+```powershell
+uv run --frozen python -X utf8 -m tools.display_selection --manifest work/task.json --timeline work/fixed/timeline.json --sentence-id sentence-0007 --request work/display-request.json --analysis work/raw_analysis.json --index work/inspect/index.json --prior-origins work/origin-bindings.json --report-dir work/display-auto
+```
+
+`--analysis/--index`与手工`--candidates`互斥，结果保存在新目录的`retrieval/`和`selection/`。句长、配音、字幕、BGM及组外画面仍固定。该能力同时进入显式`purpose_production.select`，默认生产未切换；单句成功不能表述为整稿或所有同类素材已稳定通过。

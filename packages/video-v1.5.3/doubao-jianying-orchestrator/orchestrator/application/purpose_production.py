@@ -17,8 +17,9 @@ from ..media.video_encode import run_h264_encode
 from ..media.timeline_render import render_timeline, timeline_identity
 from ..quality.production_qc import check_production
 from ..runtime.ready_work import iter_ready
-from ..selection import ai_editor, purpose_selection
+from ..selection import ai_editor, purpose_selection, purpose_retrieval
 from ..vision import purpose_review as vision
+from ..vision import purpose_inventory
 
 
 def _audio_binding(narration):
@@ -118,14 +119,9 @@ def select(manifest, analysis, narration, index, directory, *, workers=6, candid
     # fixed script under current category rules rather than rescanning media.
     requests = [{**r, "segment_us":audio[r["index"]]["audio_duration_us"]}
         for r in vision.requirements(manifest,narration,root / "requirements")]
-    ranked_shots=[]
-    for sid,shot in shots.items():
-        scan=index["scans"].get(sid,{})
-        if scan.get("description"):
-            ranked_shots.append({**shot,"description":scan["description"],"visual_description":scan["description"]})
-    inventory=ai_editor._inventory(manifest,ranked_shots,root)
-    rankings={r["index"]:r["candidate_ids"] for r in inventory}
-    kinds={r["index"]:r["kind"] for r in inventory}
+    recalled=purpose_inventory.recall(manifest,requests,list(shots.values()),index,root/'retrieval')
+    recalled=purpose_retrieval.allocate(requests,recalled,purpose_retrieval.catalog(list(shots.values()),index['scans']),wave_size=candidate_limit)
+    rankings={i:[c['shot_id'] for c in cs] for i,cs in recalled.items()}
     experiment_pairs=[]
     if contract.editorial_context(manifest)["category"]=="weipin":
         from ..selection.experiment_contract import rank_pairs,adjacency_hint
@@ -139,49 +135,17 @@ def select(manifest, analysis, narration, index, directory, *, workers=6, candid
         experiment_pairs=rank_pairs(first,sorted(verification))[:8]
     jobs = []
     rows = {r["index"]:{"index":r["index"],"text":r["text"],"candidates":[]} for r in requests}
-    retrieval_use=Counter()
-    for request in sorted(requests,key=lambda r:(kinds[r["index"]] != "selling_point",r["index"])):
+    pending={}
+    for request in requests:
         if contract.editorial_context(manifest)["category"] == "weipin" and request.get("topic") in {"absorption","rewet"}:
             rows[request["index"]]["retrieved_candidates"] = 0
             rows[request["index"]]["reason"] = "SAME_EXPERIMENT_GROUP_REQUIRED"
             continue
-        hints = []
-        for sid, row in index["scans"].items():
-            if row.get("error"):
-                continue
-            if row.get("source_identity") != contract.source_identity(shots[sid]["video"]):
-                raise ValueError("PURPOSE_INDEX_SOURCE_CHANGED")
-            for h in row.get("hints", []):
-                if h["index"] == request["index"]:
-                    hints.append((sid,h))
-        # Duration is a retrieval priority, never a pixel verdict.
-        ranked=rankings[request["index"]]
-        hinted={sid for sid,_ in hints}
-        retrieval_order=sorted(ranked,key=lambda sid:(retrieval_use[sid],ranked.index(sid))) if kinds[request["index"]] != "selling_point" else ranked
-        for sid in retrieval_order[:candidate_limit]:
-            if sid not in hinted:
-                shot=shots[sid]
-                hints.append((sid,{"start_us":round(shot["source_start"]*1e6),"end_us":round(shot["source_end"]*1e6)}))
-        hints.sort(key=lambda pair:(retrieval_order.index(pair[0]) if pair[0] in retrieval_order else len(ranked),pair[0]))
-        seen = set()
-        for sid, hint in hints:
-            if sid in seen:
-                continue
-            seen.add(sid)
-            retrieval_use[sid]+=1
-            shot = dict(shots[sid])
-            start = max(round(shot["source_start"]*1e6),hint["start_us"]-1_000_000)
-            end = min(round(shot["source_end"]*1e6),max(hint["end_us"]+1_000_000,start+request["segment_us"]))
-            if not request["require_action"] and not request["require_result"]:
-                # A product display need not include picking it up and putting
-                # it away. Re-observe the exact real-speed proposed subwindow.
-                start=max(round(shot["source_start"]*1e6),min(hint["start_us"],round(shot["source_end"]*1e6)-request["segment_us"]))
-                end=min(round(shot["source_end"]*1e6),start+request["segment_us"])
-            shot.update(source_start=start/1e6,source_end=end/1e6)
-            jobs.append((request,shot))
-            if len(seen) == candidate_limit:
-                break
-        rows[request["index"]]["retrieved_candidates"] = len({sid for sid,_ in hints})
+        windows=purpose_retrieval.windows(recalled[request['index']],list(shots.values()))
+        jobs.extend((request,shot) for shot in windows[:candidate_limit])
+        pending[request['index']]=windows[candidate_limit:candidate_limit*2]
+        rows[request['index']]['retrieved_candidates']=len(windows)
+        rows[request['index']]['retrieval_hints']=recalled[request['index']]
     def prepare(job):
         request,shot = job
         return request,shot,ai_editor._review_media(shot,root,dense=True,fit=True)
@@ -197,6 +161,7 @@ def select(manifest, analysis, narration, index, directory, *, workers=6, candid
     for job, result in _parallel(jobs,prepare,consume,workers=workers):
         request,shot = job
         result.setdefault("shot_id",shot["shot_id"])
+        result.setdefault("source",shot["video"])
         rows[request["index"]]["candidates"].append(result)
         vision.save(root / f"sentence-{request['index']:02d}.json",rows[request["index"]])
     used=[]
@@ -207,6 +172,16 @@ def select(manifest, analysis, narration, index, directory, *, workers=6, candid
         row = rows[request["index"]]
         from ..selection.shot_usability import is_display
         feasible=purpose_selection.eligible(row['candidates'],used)
+        # One bounded refill, only when the first wave yields no usable window.
+        # Rejected candidates cannot be promoted from text metadata alone.
+        if is_display(request) and not feasible and pending.get(request['index']):
+            row['refill_reason']='NO_USABLE_UNREPEATED_FIRST_WAVE'
+            for (_,shot),candidate in _parallel([(request,s) for s in pending[request['index']]],prepare,consume,workers=workers):
+                candidate.setdefault('shot_id',shot['shot_id'])
+                candidate.setdefault('source',shot['video'])
+                row['candidates'].append(candidate)
+                vision.save(root/f"sentence-{request['index']:02d}.json",row)
+            feasible=purpose_selection.eligible(row['candidates'],used)
         if is_display(request) and len(feasible)>=2:
             from ..vision.display_compare import compare
             try:row['comparison']=compare(manifest,request,feasible,root/f"display-comparison-{request['index']:02d}")
@@ -225,7 +200,9 @@ def select(manifest, analysis, narration, index, directory, *, workers=6, candid
         "revision":1,
         "sources":sorted(sources),"narration":_audio_binding(narration),"context":_context(manifest),
         "rows":[rows[i] for i in sorted(rows)],"formal_delivery_allowed":False,
-        "search_limit":candidate_limit,"not_found_means":"not confirmed within this bounded search, not a library-wide gap"}
+        "search_limit":candidate_limit,"maximum_display_reviews":candidate_limit*2,
+        "retrieval_protocol":purpose_inventory.PROTOCOL,
+        "not_found_means":"not confirmed within this bounded search, not a library-wide gap"}
     vision.save(root / "selection.json",result)
     return result
 

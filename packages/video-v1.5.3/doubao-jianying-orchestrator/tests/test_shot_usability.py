@@ -132,6 +132,34 @@ class DisplayOptimizationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'REVIEW_SOURCE_CHANGED'):self.run_case(change_source=True)
         self.assertEqual(json.loads((self.output/'result.json').read_text('utf-8'))['status'],'BLOCKED')
 
+    def test_bounded_refill_reviews_only_one_more_wave_and_never_promotes_failed_hint(self):
+        shots=[{**self.shots[0],'shot_id':f'candidate-{i}'} for i in range(6)]
+        with patch.object(app.ai_editor,'_review_media',return_value={}),\
+                patch.object(app.vision,'review',side_effect=ValueError('no actual information')) as review:
+            result=app.refine(self.base.manifest,self.base.timeline,'s1',self.request,shots,
+                self.base.origins,self.output,render=False,refill=True)
+        self.assertEqual(review.call_count,6)
+        self.assertEqual(result['status'],'BLOCKED')
+        self.assertIn('refill_reason',result)
+        self.assertNotIn('selected',result)
+
+    def test_refill_is_skipped_if_first_wave_has_usable_candidate(self):
+        self.shots=[{**self.shots[0],'shot_id':f'candidate-{i}'} for i in range(6)]
+        with patch.object(app.purpose_selection,'eligible',return_value=[{'usable':'first wave'}]),\
+                patch.object(app.purpose_selection,'choose',return_value=None),patch.object(app,'compare'),\
+                patch.object(app.ai_editor,'_review_media',return_value={}),\
+                patch.object(app.vision,'review',side_effect=ValueError('fixture')) as review:
+            app.refine(self.base.manifest,self.base.timeline,'s1',self.request,self.shots,
+                self.base.origins,self.output,render=False,refill=True)
+        self.assertEqual(review.call_count,3)
+
+    def test_changed_fixed_sentence_prevents_automatic_recall(self):
+        with patch('orchestrator.vision.purpose_inventory.recall') as recall:
+            with self.assertRaisesRegex(ValueError,'IDENTITY_OR_TYPE'):
+                app.refine_from_index(self.base.manifest,self.base.timeline,'s1',
+                    {**self.request,'text':'rewritten'}, {},{},self.base.origins,self.output)
+        recall.assert_not_called()
+
     def test_readable_information_intervals_stay_realtime_when_other_process_accelerates(self):
         row=observation(6_000_000);row['phases'][0]['can_speed']=True
         row['shot_usability']['clear_intervals_us']=[{'start':i*1_000_000,'end':i*1_000_000+700_000,'observed':'clear shape'} for i in range(5)]

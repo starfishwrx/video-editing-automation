@@ -29,12 +29,12 @@ class PairHintTests(unittest.TestCase):
             paths=[str((Path(raw)/f'IMG_{n:04d}.MOV').resolve())for n in(31,32,90)]
             manifest={'task_id':'fixture','category':'weipin','material_sources':paths}
             request={'index':1,'text':'吸收','topic':'absorption','require_action':True,'require_result':True,'checks':[]}
-            analysis={'shots':[{'shot_id':'pour','video':paths[0]}]}
+            analysis={'shots':[{'shot_id':'pour','video':paths[0],'source_start':0,'source_end':5}]}
             narration={'rows':[{'index':1,'audio_duration_us':1_000_000}]}
             index={'scans':{'pour':{'description':'pouring only'}}}
             with patch.object(production,'_binding'),patch.object(production,'_audio_binding',return_value=[]), \
                  patch.object(purpose_review,'requirements',return_value=[request]), \
-                 patch.object(production.ai_editor,'_inventory',return_value=[{'index':1,'kind':'selling_point','candidate_ids':['pour']}]):
+                 patch.object(production.purpose_inventory,'recall',return_value={1:[{'shot_id':'pour'}]}):
                 result=production.select(manifest,analysis,narration,index,Path(raw)/'selection')
             pairs=result['experiment_pair_candidates']
             self.assertEqual([(p['first'],p['verification'])for p in pairs],[(paths[0],paths[1])])

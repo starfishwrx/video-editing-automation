@@ -7,6 +7,14 @@
 
 ## 新增条目
 
+### L-20261103-04 具体卖点的召回排序不能被通用展示池覆盖
+- status: OPEN
+- hits: 1
+- 模块: vision/purpose_inventory、selection/purpose_retrieval、application/purpose_production
+- 现象: 体验句被当成通用介绍，其专属候选被包装/本体展示池覆盖；后端即使能拒绝普通动作，也可能见不到有实际展示目的的素材。模型输出精确句长算术或省略式引用又会使整次召回失败。
+- 以后怎么做: 按当前原句与至少一项具体卖点召回，描述只作带出处的线索，最终源窗重新看实际画面；展示句终点由程序计算。丢弃并记录无效单条线索，保留有效候选，先三条失败最多补三条。仅普通介绍允许同商品池分散，具体卖点不能靠通用补池通过。匿名ID复验、反例淘汰和跨案例分别记录，不用单个成功泛化整稿稳定。
+- 证据: `test_purpose_retrieval.py`、`test_shot_usability.py`、`docs/shot-selling-point-value.md`；卫品42自动召回、匿名ID及萌睡裤定向复验保存在包外。
+
 ### L-20261103-03 同商品与手部动作不能替代有效的信息展示
 - status: OPEN
 - hits: 2
