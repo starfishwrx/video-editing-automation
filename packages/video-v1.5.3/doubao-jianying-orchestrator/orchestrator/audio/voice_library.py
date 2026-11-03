@@ -124,10 +124,14 @@ def _csv_path() -> Optional[Path]:
     return p if p.exists() else None
 
 
-def _catalog_path() -> Optional[Path]:
+def catalog_path() -> Optional[Path]:
     """剪映官方音色表（界面显示名 -> sami speaker_id）。"""
     p = find_jianying_editor_root() / "data" / "jianying_voice_catalog.csv"
     return p if p.exists() else None
+
+
+def _catalog_path() -> Optional[Path]:
+    return catalog_path()
 
 
 def _infer_gender(name: str, sid: str) -> str:

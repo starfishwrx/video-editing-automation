@@ -213,5 +213,32 @@ class MeetingVoiceRequestTests(unittest.TestCase):
                 self.assertEqual(eng.decide_voice()[0].sami, preset.sami)
 
 
+    def test_shipped_catalog_resolves_operator_voice_names(self):
+        cases = (
+            ("憨熊1.2", "zh_male_xionger_stream_gpu", 1.2),
+            ("真人播客女1.1倍", "zh_female_mizai_saturn_bigtts", 1.1),
+            ("曼波1.2", "ICL_zh_female_xinmanbo", 1.2),
+            ("容嬷嬷1.6倍速", "BV430_streaming", 1.6),
+        )
+        for name, sami, tempo in cases:
+            with self.subTest(name=name):
+                req = voice_request.resolve_voice_request(name)
+                self.assertEqual(req.preset.sami, sami)
+                self.assertEqual(req.tempo, tempo)
+
+    def test_missing_catalog_does_not_offer_the_preset_list(self):
+        from orchestrator.audio import voice_library
+        from orchestrator.voice_catalog import resolve_voice
+        voice_library.load_library.cache_clear()
+        try:
+            with patch.object(voice_library, "catalog_path", return_value=None):
+                with self.assertRaises(VoiceResolutionError) as caught:
+                    resolve_voice("真人播客女")
+            self.assertIn("VOICE_CATALOG_MISSING", str(caught.exception))
+            self.assertFalse(caught.exception.voice_detail["candidates"])
+        finally:
+            voice_library.load_library.cache_clear()
+
+
 if __name__ == "__main__":
     unittest.main()

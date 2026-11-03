@@ -116,6 +116,19 @@ def _child_env(policy_file: Path, policy: RuntimePolicy, task: dict | None = Non
     return env
 
 
+def _voice_error(task: dict) -> str | None:
+    """Resolve a queue voice before material analysis. Missing catalog stops here."""
+    voice = str(task.get("voice") or "").strip()
+    if not voice:
+        return None
+    from orchestrator.voice_catalog import VoiceResolutionError, resolve_voice
+    try:
+        resolve_voice(voice)
+    except VoiceResolutionError as exc:
+        return str(exc)
+    return None
+
+
 def prepare_product(task: dict, product_dir: Path, env: dict) -> str:
     """Validate hot caches or prepare a cold product through the canonical CLI."""
     import batch_worker
@@ -329,6 +342,13 @@ def dispatch(tasks: list[dict], *, work: Path, policy: RuntimePolicy | None = No
                             pending.remove((task, stage))
                             record({"record_id": task["record_id"], "status": "ALREADY_DELIVERED",
                                     "stage": "complete", "formal_deliveries": 0})
+                            continue
+                    if stage != "qc":
+                        voice_error = _voice_error(task)
+                        if voice_error:
+                            pending.remove((task, stage))
+                            record({"record_id": task["record_id"], "stage": "voice",
+                                    "status": "BLOCKED", "error": voice_error, "formal_deliveries": 0})
                             continue
                     if stage == "qc":
                         if sum(kind == "task" for kind, *_ in futures.values()) >= policy.task_workers:

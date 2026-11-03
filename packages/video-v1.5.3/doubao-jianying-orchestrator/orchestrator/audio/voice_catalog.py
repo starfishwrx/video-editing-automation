@@ -93,6 +93,8 @@ VOICE_ALIASES = {
     # 「熊二」是剪映「变声」面板里同一个音色的名字，文本朗读面板显示名为「憨熊」。
     # 运营与历史记录会用「熊二」，指向的确实是同一个 sami id（已试听确认）。
     "熊二": "zh_male_xionger_stream_gpu",
+    # 飞书配音名写「曼波」，剪映音色表的显示名是「曼波讲故事」，全表只有这一条。
+    "曼波": "ICL_zh_female_xinmanbo",
 }
 
 # 剧情关键词 → 偏好音色 key（命中越多越优先）
@@ -262,6 +264,11 @@ def resolve_voice(spec=None) -> VoicePreset:
         libv = vl.find_by_id_or_name(s)
         if libv is not None:
             return _preset_from_library(libv)
+        if vl.catalog_path() is None:
+            raise VoiceResolutionError(
+                "VOICE_CATALOG_MISSING: jianying-editor/data/jianying_voice_catalog.csv 不存在，"
+                "运营音色名无法解析",
+                voice_input=s)
         if s in _GENDER_ALIAS:
             candidates = vl.find_candidates(s)
             raise VoiceResolutionError(

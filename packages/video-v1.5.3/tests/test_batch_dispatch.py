@@ -181,5 +181,18 @@ class BatchDispatchTests(unittest.TestCase):
         self.assertEqual(json.loads((task_dir / 'task.json').read_text(encoding='utf-8')), frozen_task)
 
 
+    def test_unresolved_voice_does_not_start_material_prep(self):
+        prepared = []
+        result = dispatch.dispatch(
+            [{"record_id": "bad-voice", "material_dir": "pool", "voice": "不存在的音色XYZ"}],
+            work=self.root, policy=self.policy,
+            preparer=lambda *args: prepared.append("prepared") or "shared.json",
+            runner=lambda task, stage, env, work: {"record_id": task["record_id"]})
+        self.assertEqual(prepared, [])
+        self.assertEqual(result[0]["stage"], "voice")
+        self.assertEqual(result[0]["status"], "BLOCKED")
+        self.assertTrue(result[0]["error"])
+
+
 if __name__ == "__main__":
     unittest.main()
