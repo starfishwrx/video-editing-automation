@@ -35,10 +35,20 @@ $env:JY_DRAFT_ROOT = $DraftRoot
 $env:JY_DRAFTS_ROOT = $DraftRoot
 $env:JY_PROJECTS_ROOT = $DraftRoot
 $env:PYTHONUTF8 = '1'
+if (-not $env:JY_DRAFT_BACKEND) { $env:JY_DRAFT_BACKEND = 'headless' }
+foreach ($mediaTool in @($env:FFMPEG_BIN, $env:FFPROBE_BIN)) {
+    if ($mediaTool -and (Test-Path -LiteralPath $mediaTool -PathType Leaf)) {
+        $env:PATH = (Split-Path -Parent $mediaTool) + ';' + $env:PATH
+    }
+}
 $arguments = @('-X', 'utf8', '-m', 'tools.workflow.scheduled', '--queue', $QueuePath, '--work-root', $WorkRoot)
 if ($DryRun) { $arguments += '--dry-run' }
 Push-Location -LiteralPath $packageRoot
 try {
+    if (-not $DryRun) {
+        & $PythonPath -X utf8 -m tools.headless_runtime check
+        if ($LASTEXITCODE -ne 0) { throw 'HEADLESS_PRODUCTION_PREFLIGHT_FAILED' }
+    }
     & $PythonPath @arguments
     $pipelineExit = $LASTEXITCODE
 } finally {

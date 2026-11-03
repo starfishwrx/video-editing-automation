@@ -1,7 +1,7 @@
 """v1.5.2 卫品飞书反馈（2026-10-15）：配音无气口、字幕上移、拆包场景。"""
 from __future__ import annotations
 
-import re
+import json
 import sys
 import tempfile
 import unittest
@@ -406,20 +406,23 @@ class ShotLabelRecognitionTests(unittest.TestCase):
 
 
 class SubtitleDefaultTests(unittest.TestCase):
-    def test_text_ops_default_is_minus_055(self):
-        source = (PACKAGE_ROOT / "jianying-editor/scripts/core/text_ops.py").read_text(encoding="utf-8")
-        self.assertRegex(source, r"(?m)^DEFAULT_SUBTITLE_Y = -0\.55$")
-        self.assertRegex(source, r"(?m)^DEFAULT_SUBTITLE_X = 0\.0$")
-        self.assertNotRegex(source, r"(?m)^DEFAULT_SUBTITLE_Y = -1000")
-
     def test_engine_and_validator_agree(self):
-        engine = (PACKAGE_ROOT / "doubao-jianying-orchestrator/orchestrator/application/engine.py").read_text(
-            encoding="utf-8")
+        scripts = str(PACKAGE_ROOT / "jianying-editor/scripts")
+        with mock.patch.object(sys, "path", [scripts, str(Path(scripts) / "vendor"), *sys.path]):
+            from core.text_ops import DEFAULT_SUBTITLE_X, DEFAULT_SUBTITLE_Y
+            from jy_wrapper import JyProject
+        self.assertEqual((DEFAULT_SUBTITLE_X, DEFAULT_SUBTITLE_Y), (0.0, -0.55))
         from orchestrator.production_parameters import subtitle_transform
         self.assertEqual(subtitle_transform({"category": "weipin"}, 1080, 1920)["y"], -0.55)
-        self.assertIn('"subtitle_transform_y": subtitle_position["y"],', engine)
-        self.assertNotRegex(engine, r'"subtitle_transform_y":\s*-(0\.8|1000)')
-        material = {"content": '{"text": "字幕", "styles": [{"size": 8.0, "bold": true}]}'}
+        with tempfile.TemporaryDirectory() as raw:
+            project = JyProject("subtitle_defaults", drafts_root=raw, overwrite=True)
+            project.add_caption_cues([{"text": "字幕", "start_us": 0, "end_us": 1_000_000}])
+            project.save()
+            document = json.loads((Path(project.draft_dir) / "draft_info.json").read_text(encoding="utf-8"))
+            track = next(t for t in document["tracks"] if t["type"] == "text")
+            self.assertEqual(track["segments"][0]["clip"]["transform"], {"x": 0.0, "y": -0.55})
+            material = next(m for m in document["materials"]["texts"]
+                            if m["id"] == track["segments"][0]["material_id"])
         expected = {"subtitle_style_required": True}
 
         def issues(y):
@@ -429,14 +432,6 @@ class SubtitleDefaultTests(unittest.TestCase):
         self.assertEqual(issues(-0.55), [])
         self.assertTrue(issues(-0.8))
         self.assertTrue(issues(-1000.0))
-
-    def test_release_docs_use_minus_055(self):
-        rules = (PACKAGE_ROOT / "WINDOWS_VIDEO_CLOSED_LOOP_RULES_20260930.json").read_text(encoding="utf-8")
-        self.assertIn('"position": {"x": 0, "y": -0.55}', rules)
-        for name in ("RULES.md", "jianying-editor/SKILL.md"):
-            text = (PACKAGE_ROOT / name).read_text(encoding="utf-8")
-            self.assertTrue(re.search(r"Y=-0\.55", text), name)
-
 
 if __name__ == "__main__":
     unittest.main()

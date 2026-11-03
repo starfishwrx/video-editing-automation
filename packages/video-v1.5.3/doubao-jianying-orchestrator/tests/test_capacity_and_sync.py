@@ -552,7 +552,7 @@ class AudioSelectionGateTests(unittest.TestCase):
                  mock.patch.object(eng, "_event"):
                 result = eng.audio_selection_gate([clip])
             self.assertEqual(result["status"], "AUDIO_SELECTION_REQUIRED")
-            self.assertEqual(result["reply_format"], "音色 <序号>，BGM <序号>")
+            self.assertEqual(result["reply_format"], "音色 <序号>")
 
     def test_confirmed_normal_mode_can_pass_gate(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -566,7 +566,7 @@ class AudioSelectionGateTests(unittest.TestCase):
                         duration=1, text="测试口播", audio_mode="tts")
             self.assertIsNone(eng.audio_selection_gate([clip]))
 
-    def test_bgm_without_direct_preview_is_a_blocking_gate(self):
+    def test_empty_bgm_does_not_block_voice_confirmation_or_download_previews(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             eng = OrchestrationEngine({}, root, root / "report", capacity_guard=False)
@@ -578,7 +578,9 @@ class AudioSelectionGateTests(unittest.TestCase):
                             return_value=[{"music_id": "no-url", "url": ""}]), \
                  mock.patch.object(eng, "_event"):
                 result = eng.audio_selection_gate([clip])
-            self.assertEqual(result["status"], "BGM_PREVIEW_UNAVAILABLE")
+            self.assertEqual(result["status"], "AUDIO_SELECTION_REQUIRED")
+            self.assertEqual(result["missing"], ["voice"])
+            self.assertEqual(eng.m["bgm"], {"auto": True})
 
     def test_selection_gate_runs_before_video_upload(self):
         with tempfile.TemporaryDirectory() as tmp:

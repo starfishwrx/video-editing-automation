@@ -9,6 +9,10 @@ $env:JY_DRAFT_ROOT = $exampleDraftRoot
 $env:JY_DRAFTS_ROOT = $exampleDraftRoot
 $env:JY_PROJECTS_ROOT = $exampleDraftRoot
 $env:JY_SELECTION_MODE = 'ai_editor'
+$env:JY_DRAFT_BACKEND = 'headless'
+# Configure the separately installed, verified headless project and native font.
+# Set JIANYING_HEADLESS_ROOT, JIANYING_INSTALL_DIR and JY_HEADLESS_FONT locally.
+# Keep JY_DRAFT_ROOT outside the editor's live home library; no UI index is used.
 $env:JY_VISION_TRANSPORT = 'volc_glm'
 $env:JY_VISION_MODEL = 'glm-5.3-flash'
 $env:JY_VOLC_BASE_URL = 'https://ark.cn-beijing.volces.com/api/plan/v3'

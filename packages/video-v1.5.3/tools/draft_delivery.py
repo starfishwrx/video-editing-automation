@@ -32,6 +32,10 @@ def verify_shared(root: Path, reference_root: Path) -> dict:
     A distribution/recipient copy intentionally still references the main NAS
     directory. Compare its collected bytes with those literal shared files too.
     """
+    from tools import native_drafts
+    if native_drafts.is_native(root):
+        from tools.native_delivery import verify_shared as verify_native
+        return verify_native(root, reference_root)
     root, reference_root = Path(root).resolve(), Path(reference_root).resolve()
     docs, refs = transport.inspect(root)
     if not refs:
@@ -126,6 +130,10 @@ def publish_tree(source: Path, target: Path, expected: dict, *, copier=None,
 
 def verify_existing_shared(root: Path) -> dict:
     """Recheck the literal dependency of a previously published draft."""
+    from tools import native_drafts
+    if native_drafts.is_native(root):
+        payload = native_drafts.documents(root)
+        return verify_shared(root, Path(payload['reference_root']))
     docs, _ = transport.inspect(Path(root))
     recorded = docs['draft_meta_info.json'].get('draft_fold_path')
     if not isinstance(recorded, str) or not Path(recorded).is_absolute():
@@ -135,6 +143,10 @@ def verify_existing_shared(root: Path) -> dict:
 
 def archive_shared_copy(source: Path, target: Path) -> dict:
     """Create a self-contained version; no paths depend on the old NAS folder."""
+    from tools import native_drafts
+    if native_drafts.is_native(source):
+        from tools.native_delivery import archive_shared_copy as archive_native
+        return archive_native(source, target)
     source, target = Path(source).resolve(), Path(target).resolve()
     if target.exists():
         raise RuntimeError('DESTINATION_EXISTS')

@@ -16,7 +16,37 @@ against the system interpreter for this package or its deployment host.
 
 Python must be **>=3.11,<3.13**, as declared in `pyproject.toml`.
 
-## Vision and selection (current defaults)
+## Default native draft production
+
+`draft_backend` / `JY_DRAFT_BACKEND` defaults to `headless`. Install the separately
+reviewed Jianying Headless backend with its `production_library` API and keep
+`JIANYING_HEADLESS_ROOT` pointing to that installation. `JIANYING_INSTALL_DIR`
+selects the locally installed, fingerprint-matched Windows native runtime;
+`JY_HEADLESS_FONT` selects a static TTF/OTF. `fonttools==4.60.2` is locked in uv.
+`ffmpeg` and `ffprobe` must be on PATH (the runner adds configured media-tool
+directories). Run `python -m tools.headless_runtime check` before activation.
+The backend is a separate licensed dependency and is not redistributed in this
+package. Use an authorized backend build providing `headless-production-library/v1`
+and its source-pinned entrypoint; an unextended checkout is rejected before paid work.
+
+The private `JY_DRAFTS_ROOT` / `JY_PROJECTS_ROOT` library is outside the live
+Jianying home index. Creating new drafts does not require closing or controlling
+the editor. Old drafts are never overwritten; unsupported input/effects stop
+explicitly. `draft_backend=legacy` is an explicit historical recovery option;
+there is no automatic writer fallback.
+
+An empty BGM value (`null`, whitespace, empty object or missing field) selects
+music automatically using the final duration and script. Explicit path, catalog
+ID and exact title remain authoritative. Final music is -28 LUFS with baked
+0.4s/0.2s fades by default. A missing/too-short track blocks creation; it cannot
+become a silent successful draft. Normal voice confirmation does not ask for a
+BGM audition. Choice/title/actual audio hash are retained with the draft and the
+normal successful table write fills `BGM名称`.
+`LARK_ACTOR=bot|user` selects the already authorized CLI identity for table writes
+(default `bot`). Use the same identity verified by a read-only record query;
+per-task table/base identifiers take precedence over host defaults.
+
+## Vision defaults
 
 The exact default model is **GLM-5.3-Flash**, API ID `glm-5.3-flash`.
 GLM-5.3 and ChatGLM3 are different models. The implementation sends contact-sheet

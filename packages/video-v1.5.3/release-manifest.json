@@ -6,7 +6,7 @@
     "machine-specific paths",
     "knowledge-base bodies"
   ],
-  "file_count": 392,
+  "file_count": 403,
   "files": [
     {
       "path": ".gitignore"
@@ -102,6 +102,9 @@
       "path": "doubao-jianying-orchestrator/orchestrator/application/experiment_production.py"
     },
     {
+      "path": "doubao-jianying-orchestrator/orchestrator/application/headless_production.py"
+    },
+    {
       "path": "doubao-jianying-orchestrator/orchestrator/application/production.py"
     },
     {
@@ -120,6 +123,9 @@
       "path": "doubao-jianying-orchestrator/orchestrator/audio/audio_loudness.py"
     },
     {
+      "path": "doubao-jianying-orchestrator/orchestrator/audio/bgm_request.py"
+    },
+    {
       "path": "doubao-jianying-orchestrator/orchestrator/audio/bgm_selector.py"
     },
     {
@@ -127,6 +133,9 @@
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/audio/final_bgm.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/audio/narration_probe.py"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/audio/subtitle_units.py"
@@ -351,7 +360,13 @@
       "path": "doubao-jianying-orchestrator/orchestrator/runtime/capacity.py"
     },
     {
+      "path": "doubao-jianying-orchestrator/orchestrator/runtime/draft_documents.py"
+    },
+    {
       "path": "doubao-jianying-orchestrator/orchestrator/runtime/file_safety.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/runtime/headless.py"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/runtime/json_extract.py"
@@ -571,6 +586,9 @@
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_capacity_and_sync.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/tests/test_default_headless.py"
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_edit_timeline.py"
@@ -1020,6 +1038,9 @@
       "path": "tests/test_feedback_candidates.py"
     },
     {
+      "path": "tests/test_lark_command.py"
+    },
+    {
       "path": "tests/test_meeting_task_inputs.py"
     },
     {
@@ -1125,6 +1146,12 @@
       "path": "tools/headless_review_delivery.py"
     },
     {
+      "path": "tools/headless_runtime.py"
+    },
+    {
+      "path": "tools/lark_command.py"
+    },
+    {
       "path": "tools/material_index.py"
     },
     {
@@ -1132,6 +1159,12 @@
     },
     {
       "path": "tools/nas_portable.py"
+    },
+    {
+      "path": "tools/native_delivery.py"
+    },
+    {
+      "path": "tools/native_drafts.py"
     },
     {
       "path": "tools/paper_selection_replay.py"
@@ -1185,8 +1218,8 @@
       "path": "uv.lock"
     }
   ],
-  "release_id": "video-v1.5.6",
+  "release_id": "video-v1.6.0",
   "schema_version": 2,
-  "version": "1.5.6",
+  "version": "1.6.0",
   "visual_policy_version": "1.4.1"
 }

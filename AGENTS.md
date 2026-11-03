@@ -4,7 +4,7 @@
 
 ## 0. 开始前先读
 
-1. **版本身份**：可改的候选包目录是 `packages/video-v1.5.3/`（目录名是历史代号，不随小版本改名）。真实版本只读该目录下的 `VERSION`（当前主线 **1.5.6**）。生产以部署机器的 `ACTIVE_VIDEO_RUNTIME.json` 与实际安装文件为准。开发使用从 `main` 创建的干净功能分支/工作树。1.5.4/1.5.5 为隔离索引实验，不作默认入口。
+1. **版本身份**：可改的候选包目录是 `packages/video-v1.5.3/`（目录名是历史代号，不随小版本改名）。真实版本只读该目录下的 `VERSION`（当前候选 **1.6.0**）。生产以部署机器的 `ACTIVE_VIDEO_RUNTIME.json` 与实际安装文件为准。开发使用从 `main` 创建的干净功能分支/工作树。1.5.4/1.5.5 为隔离索引实验，不作默认入口。
 2. **文档入口**：先读 [`docs/README.md`](docs/README.md)。子系统文档与代码路径一律指向 `packages/video-v1.5.3/`。`packages/video-v1.5.2/` 及更早是历史归档，禁止修改。
 3. **凭据**：只能来自环境变量 `JY_SKILL_ROOT` `JY_DRAFT_ROOT` `JY_INSTALL_ROOT` `JY_NAS_SHARE` `JY_NAS_USER` `NAS_PASSWORD` `LARK_BASE_TOKEN` 等（完整列表见包内 `ENVIRONMENT.md`）。不得写进代码、测试、日志或提交。
 4. **闸门**：`RULES.md` 的成片证据要求继续生效；formal 模式只认 `PASS`。素材缺失、窗口越界、字幕内容不符或独立 QC 失败必须拦住。哈希、签名或逐文件发布清单不是成片质量证据，禁止为普通修改新增这类门槛。
@@ -19,7 +19,7 @@
 |---|---|---|
 | 新用户入口 / 模型和环境配置 | `docs/quickstart.md`, `docs/model-and-vision.md`, `ENVIRONMENT.md`（活包内） | 活包 `examples/`、`orchestrator/runtime/vision_config.py`、`orchestrator/vision/vision_analyzer.py` |
 | GitHub 协作 / 离线 CI | `CONTRIBUTING.md`, `docs/test.md` | `.github/workflows/ci.yml`, `.github/PULL_REQUEST_TEMPLATE.md` |
-| 编排主流程 / 闸门顺序 / 草稿写入 | `docs/subsystems/orchestrator-engine.md` | `orchestrator/application/engine.py`、`orchestrator/domain/clips.py` |
+| 编排主流程 / 闸门顺序 / 默认无头草稿写入 | `docs/subsystems/orchestrator-engine.md` | `orchestrator/application/{engine,headless_production}.py`、`orchestrator/runtime/{headless,draft_documents}.py`、`orchestrator/domain/clips.py` |
 | CLI 子命令（env/build/recover/…） | `docs/subsystems/orchestrator-cli.md` | `orchestrator/application/cli.py` |
 | 选镜、视觉证据、语义闸门 | `docs/subsystems/visual-matching.md` | `orchestrator/{selection,vision,quality}/`、`policy/semantic_gate.py`；原位公共合同 `ai_editor_contract.py`、`visual_qc_contract.py` |
 | 文案驱动识别与无草稿复核 | `docs/plans/20261102-purpose-driven-selection.md` | `vision/purpose_review.py`、`selection/purpose_selection.py`、`application/purpose_production.py`；活包 `tools/purpose_production.py`；显式隔离入口，默认生产未切换 |
@@ -41,18 +41,14 @@
 | 发版 | `docs/release-process.md`, `docs/RELEASES.md`, `.../references/validated_fix_to_release.md` | `packages/video-v1.5.3/tools/release_package.py`, `release-manifest.json`, `VERSION`, `releases/` |
 | 代码风格 | `docs/code-standards.md` | — |
 
-## 2. 改完必须做（本地验证）
+## 2. 改完必须做（按范围验证）
 
-```powershell
-cd packages/video-v1.5.3
-uv run --frozen python -X utf8 -m unittest discover -s tests -q
-uv run --frozen python -X utf8 -m unittest discover -s doubao-jianying-orchestrator/tests -q
-uv run --frozen python -X utf8 -m tools.check_architecture
-```
-
-- 完整策略见 `docs/test.md`。局部交付迭代可只跑 `test_draft_delivery.py`、`test_nas_portable.py`；发版 PR 用 `tools.release_package build --output <包外新目录> --checks full`。
-- 改了闸门/状态：补一个「该拦住的输入确实被拦住」的测试。
-- 测试通过 ≠ 生产通过。不要在 PR/回复里声称「已上线/已验收」。
+- 单模块小改动默认只跑对应模块及直接调用方，映射见 `docs/test.md`；不要每次修改都运行两套全量。
+- 例如 BGM：活包根执行 `uv run --frozen python -X utf8 -m unittest discover -s doubao-jianying-orchestrator/tests -p "test_*bgm.py" -q` 和 `-p test_default_headless.py`（同一 discover 目录），当前35项；再执行 `uv run --frozen python -X utf8 -m tools.check_architecture`。
+- 跨模块、共享合同或正式质量／交付门禁变更才本地全量；范围不确定也用全量。PR 的 CI 保持两套 discover。
+- 发版 PR 用 `tools.release_package build --output <包外新目录> --checks full`，在最终解压目录跑一次全量即可。最终代码未变时，不再分别在开发树、解压目录和安装面重跑全套；安装只验证入口、依赖和必要案例。
+- 改了闸门/状态：必须保留「该拦住的输入确实被拦住」的行为覆盖。低价值源码字符串、文档数字及重复存在性检查可以精简；音频、动作证据、formal和NAS恢复保护不能删。
+- 测试通过 ≠ 生产通过。不要将离线结果说成真实成片验收。
 
 常用 CLI：
 

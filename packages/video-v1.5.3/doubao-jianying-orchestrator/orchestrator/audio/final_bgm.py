@@ -33,6 +33,8 @@ def prepare_task_bgm(spec, *, script, task_id, batch_id, state_dir, output_dir,
             task_identity={"task_id": task_id, "script_sha256": hashlib.sha256(script.encode()).hexdigest()},
             batch_identity=batch_id or task_id, state_dir=Path(state_dir),
             explicit_music_id=str(candidates[0]["music_id"]) if requested else "")
+        if requested and requested != str(chosen.get('music_id') or ''):
+            chosen = dict(chosen, requested_label=requested)
         source = bgm_selector.download_track(chosen, out / "source")
         if source is None:
             raise TimelineError("BGM_REQUIRED_DOWNLOAD_FAILED")

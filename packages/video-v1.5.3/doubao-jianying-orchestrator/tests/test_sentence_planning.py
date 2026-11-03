@@ -90,7 +90,7 @@ class SentencePlanningTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             path = root / 'manifest.json'
-            path.write_text(json.dumps({'full_script': '原文内容', 'task_id': 'sentence-test',
+            path.write_text(json.dumps({'full_script': '原文内容', 'task_id': 'sentence-test', 'draft_backend': 'legacy',
                                         'temporary_material_analysis': True, 'selection_mode': 'rule_then_ai'}), encoding='utf8')
             args = argparse.Namespace(input=str(path), report_dir=str(root / 'report'),
                                       trigger_phrase='', delivery_mode='formal')
@@ -107,7 +107,7 @@ class SentencePlanningTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             path = root / 'manifest.json'
-            path.write_text(json.dumps({'full_script': '原文内容', 'task_id': 'sentence-test',
+            path.write_text(json.dumps({'full_script': '原文内容', 'task_id': 'sentence-test', 'draft_backend': 'legacy',
                 'temporary_material_analysis': True, 'shot_notes_by_index': {'1': '完整动作'}}), encoding='utf8')
             args = argparse.Namespace(input=str(path), report_dir=str(root / 'report'),
                                       trigger_phrase='', delivery_mode='formal')
@@ -137,7 +137,7 @@ class SentencePlanningTests(unittest.TestCase):
             root = Path(raw).resolve()
             report = root / 'new-report'
             segments = [{'text': '纸张厚实亲肤，湿水不破。'}, {'text': '立即下单'}]
-            manifest = {'task_id': 'reuse-plan', 'segments': segments,
+            manifest = {'task_id': 'reuse-plan', 'segments': segments, 'draft_backend': 'legacy',
                         'sentence_plan_version': 'semantic-v1',
                         'temporary_material_analysis': True,
                         'selection_mode': 'rule_then_ai'}
