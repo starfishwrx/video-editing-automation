@@ -29,6 +29,19 @@ class PurposeRetrievalTests(unittest.TestCase):
             'information_link':'薄透结构的相关表达，未测量温度','start_us':1_000_000,'end_us':3_000_000}
         self.data={'sentences':[{'index':1,'candidates':[self.candidate]}]}
 
+    def test_packaging_hook_recall_uses_deterministic_pool_then_requires_pixel_review(self):
+        from orchestrator.selection.opening_hook import normalize
+        request=normalize([{**self.request,'text':'谁还在用杂牌啊',
+            'has_product_selling_point':False,'display_goal':'general_product',
+            'checks':[{'id':'c1','type':'display','claim_text':'谁还在用杂牌啊'}]}])[0]
+        self.index['scans']['opaque-id']['description']='本品包装展示'
+        with patch.object(vision.ai_editor,'_call') as call:
+            result=vision.recall(self.manifest,[request],self.shots,self.index,self.root/'hook')
+        call.assert_not_called()
+        self.assertTrue(result[1])
+        self.assertNotIn('observation',result[1][0])
+        self.assertNotIn('plan',result[1][0])
+
     def validate(self):
         return selection.validate(self.data,[self.request],selection.catalog(self.shots,self.index['scans']))
 

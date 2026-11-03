@@ -14,6 +14,7 @@ from . import action_frames
 from .probe import probe_media
 from .video_decode import run_ffmpeg_decode
 from .video_encode import run_h264_encode
+from .caption_layout import layout_subtitle
 
 SAMPLE_RATE = 48000
 
@@ -68,11 +69,14 @@ def subtitle_ass(timeline, width, height):
             raise TimelineError("SUBTITLE_BELOW_ASS_TIME_QUANTUM")
         style = cue.style
         color = "&H00" + style.color[5:7] + style.color[3:5] + style.color[1:3]
-        font_size = style.font_size_px * width / timeline.canvas.width
+        layout = layout_subtitle(cue.text, timeline.canvas.width, timeline.canvas.height,
+            font_size_px=style.font_size_px, font_name=style.font_name, bold=style.bold,
+            x=style.x, y=style.y)
+        font_size = layout['font_size_px'] * width / timeline.canvas.width
         styles.append(f"Style: s{i},{style.font_name},{font_size:.4f},{color},{color},&H00000000,&H80000000,"
                       f"{-1 if style.bold else 0},0,0,0,100,100,0,0,1,1,0,5,0,0,0,1")
-        text = cue.text.replace("\r", "").replace("\n", "\\N")
-        x, y = width * (1 + style.x) / 2, height * (1 - style.y) / 2
+        text = layout['text'].replace("\n", "\\N")
+        x, y = width * (1 + layout['x']) / 2, height * (1 - layout['y']) / 2
         dialogues.append(f"Dialogue: 0,{_stamp(cue.start_us)},{_stamp(cue.start_us + cue.duration_us)},"
                          f"s{i},,0,0,0,,{{\\pos({x:.4f},{y:.4f})}}{text}")
     return (header + "\n".join(styles) + "\n[Events]\n"

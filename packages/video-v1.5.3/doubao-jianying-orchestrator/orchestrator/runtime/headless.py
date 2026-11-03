@@ -59,6 +59,8 @@ def preflight(manifest=None):
     if mode != 'headless':
         raise ValueError('DRAFT_BACKEND_INVALID')
     native = backend()
+    if getattr(native, 'TEXT_LAYOUT_SCHEMA', None) != 'centered-safe-subtitles/v1':
+        raise RuntimeError('HEADLESS_TEXT_LAYOUT_API_MISSING: update the headless backend before production')
     library = os.environ.get('JY_DRAFTS_ROOT') or os.environ.get('JY_PROJECTS_ROOT')
     if not library or not Path(library).is_absolute():
         raise ValueError('HEADLESS_LIBRARY_ROOT_REQUIRED')

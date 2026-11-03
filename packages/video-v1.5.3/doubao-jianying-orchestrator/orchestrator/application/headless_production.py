@@ -10,6 +10,7 @@ import uuid
 from ..audio import audio_captions
 from ..audio.narration_probe import probe_audio
 from ..media.probe import probe_media
+from ..media.caption_layout import layout_subtitle
 from ..policy.production_parameters import subtitle_transform
 from ..runtime.draft_documents import native_backend
 from ..runtime.platform_env import find_drafts_root
@@ -94,8 +95,11 @@ def make_plan(engine, clips, bgm_path, overrides, cues, name, font_path):
         text = _text(cue['text'])
         if not text.strip():
             continue
-        captions.append({'text': text, 'start_us': cue['start_us'], 'duration_us': cue['end_us'] - cue['start_us'],
-                         'size': 8, 'bold': True, 'subtitle': True, 'x': position['x'], 'y': position['y'],
+        layout = layout_subtitle(text, width, height, font_path=font_path,
+                                 x=position['x'], y=position['y'])
+        captions.append({'text': layout['text'], 'start_us': cue['start_us'], 'duration_us': cue['end_us'] - cue['start_us'],
+                         'size': 8 * layout['font_size_px'] / 56, 'bold': True, 'subtitle': True,
+                         'x': layout['x'], 'y': layout['y'], 'alignment': 1, 'max_line_width': .8,
                          'color': '#FFFFFF', 'border_color': '#000000', 'border_width': .05,
                          'font_path': str(Path(font_path).resolve(strict=True))})
     tracks = [{'type': 'video', 'name': 'Video_BRoll', 'segments': videos}]
@@ -165,6 +169,7 @@ def write_draft(engine, clips, bgm_path):
                     'bgm_required': bool(bgm_path), 'bgm_segments': 1, 'subtitle_style_required': bool(cues),
                     'subtitle_font_size': 8, 'subtitle_bold': True, 'subtitle_transform_x': position['x'],
                     'subtitle_transform_y': position['y'], 'subtitle_strip_punctuation': True,
+                    'subtitle_layout': next((t['segments'] for t in plan['tracks'] if t['name'] == 'Subtitles'), []),
                     'native_subtitles_required': source == 'audio', 'subtitle_cues': cues if caption else None}
         issues = draft_safety.post_write_validate(draft_dir, expected_tracks=expected)
         if issues:

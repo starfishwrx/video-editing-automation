@@ -9,6 +9,7 @@
 - [模型与视觉流程](model-and-vision.md)：默认 GLM-5.3-Flash 的完整型号、图片输入与配置优先级。
 - [环境配置](../packages/video-v1.5.3/ENVIRONMENT.md)：本地依赖、模型/API、路径与生产集成变量。
 - [贡献与分支约定](../CONTRIBUTING.md)：功能分支、PR、CI、tag/Release 的职责。
+- [字幕安全区与居中](subtitle-layout.md)：自动换行、位置保护、无头后端依赖和验证边界。
 
 当前维护包是 `video-v1.5.3/`（本功能分支候选 VERSION 为 1.6.0）；1.5.4/1.5.5 是隔离索引实验。
 下载包与生产安装分别核对，见根 README 的[版本与下载](../README.md#版本与下载)。
