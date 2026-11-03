@@ -25,8 +25,11 @@ def _prior_origins(timeline, prior_origins, allowed, lo, hi):
                         and any(isinstance(e, dict) and e.get('diagnostic_placeholder') is True
                             for e in v.evidence) for v in events)):
                 diagnostic.add(asset_id)
-    origins = {}
+    origins, seen = {}, set()
     for p in prior_origins:
+        if p['asset_id'] in seen:
+            raise ValueError('EXPERIMENT_PRIOR_ORIGIN_DUPLICATE')
+        seen.add(p['asset_id'])
         asset = assets[p['asset_id']]
         if (p.get('clock') != 'same_source_clock' or identity.source_identity(asset.path) != p['proxy']
                 or (p['original']['path'] not in allowed and asset.asset_id not in diagnostic)

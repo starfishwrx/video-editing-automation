@@ -90,6 +90,29 @@ class ExperimentPlaceholderTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'EXISTING_ORIGIN_UNKNOWN'):
             fixture.apply()
 
+    def test_duplicate_origin_cannot_replace_real_source_with_diagnostic_identity(self):
+        fixture = self.single()
+        old = fixture.timeline
+        fixture.timeline = replace(old,
+            videos=tuple(replace(v, evidence=({'diagnostic_placeholder': True},)) for v in old.videos),
+            unresolved=tuple({'sentence_id': s.sentence_id,
+                'reason': 'NO_CONFIRMED_FIT_WITHIN_SEARCH_BUDGET; black is diagnostic only'} for s in old.sentences))
+        fixture.samples['original'] = identity.source_identity(fixture.files['raw-old'])
+        fixture.save_samples()
+        fixture.evidence['original'] = fixture.samples['original']
+        for phase in fixture.evidence['observation']['phases']:
+            phase['first_frame'] += 55
+            phase['last_frame'] += 55
+        with self.assertRaisesRegex(ValueError, 'SOURCE_REPLAY'):
+            fixture.apply()
+        diagnostic = {'asset_id': 'v', 'original': identity.source_identity(fixture.files['proxy-old']),
+            'proxy': identity.source_identity(fixture.files['proxy-old']), 'clock': 'same_source_clock'}
+        real = fixture.origins[0]
+        for origins in ([real, diagnostic], [diagnostic, real]):
+            with self.subTest(order=origins[0]['original']['path']):
+                with self.assertRaisesRegex(ValueError, 'PRIOR_ORIGIN_DUPLICATE'):
+                    fixture.apply(prior_origins=origins)
+
 
 if __name__ == '__main__':
     unittest.main()
