@@ -126,11 +126,14 @@ def _inventory(manifest: dict, shots: list[dict], directory: Path) -> list[dict]
     catalog = [{"shot_id": s["shot_id"], "description": s.get("visual_description") or s.get("description"),
                 "action": s.get("action"), "object": s.get("object"), "result": s.get("result"),
                 "duration_us": round((float(s["source_end"]) - float(s["source_start"])) * 1e6)} for s in shots]
-    prompt = contract.policy_prompt(manifest) + "\n你负责整稿用途分类和宽召回，本轮描述只是索引，不是画面证据。\n" + json.dumps({
+    def inventory_prompt(sentence_rows):
+        return contract.policy_prompt(manifest) + "\n你负责整稿用途分类和宽召回，本轮描述只是索引，不是画面证据。\n" + json.dumps({
         "product": manifest.get("product"), "category": manifest.get("category"),
         "general_notes": manifest.get("shot_notes_general", []),
+        "full_script_context": [{"index": i, "text": timing_contract.sentence_text(s)}
+                                for i, s in enumerate(rows, 1)],
         "sentences": [{"index": i, "text": timing_contract.sentence_text(s),
-                       "notes": s.get("shot_note") or s.get("visual_requirements")} for i, s in enumerate(rows, 1)],
+                       "notes": s.get("shot_note") or s.get("visual_requirements")} for i, s in sentence_rows],
         "catalog": catalog}, ensure_ascii=False) + """
 输出JSON对象 {"sentences":[{"index":1,"kind":"selling_point|product_intro|hook",
 "selling_points":[{"id":"p1","text":"本句具体卖点"}],"candidate_ids":["最相关shot_id", "其余候选"],"scene_ids":[]}],
@@ -140,7 +143,30 @@ def _inventory(manifest: dict, shots: list[dict], directory: Path) -> list[dict]
 每句candidate_ids只返回最相关的前8个，display_pool_ids也只返回前8个，避免响应被整库ID挤满。
 程序会把未列出的镜头加入后续逐轮扩展。不能因描述不确定就宣布无素材，不用A/B强度或旧合同词表淘汰。
 """
-    data = _call(prompt, directory / "inventory.json")
+    def inventory_part(sentence_rows, path, *, split_allowed=True):
+        try:
+            data = _call(inventory_prompt(sentence_rows), path)
+        except ValueError as exc:
+            if (not any(code in str(exc) for code in ("[OUTPUT_TRUNCATED]", "[EMPTY_CONTENT]"))
+                    or len(sentence_rows) < 2 or not split_allowed):
+                raise
+            middle = len(sentence_rows) // 2
+            left = inventory_part(sentence_rows[:middle], path.with_name(path.stem + "_left.json"), split_allowed=False)
+            right = inventory_part(sentence_rows[middle:], path.with_name(path.stem + "_right.json"), split_allowed=False)
+            return {"sentences": left["sentences"] + right["sentences"],
+                    "display_pool_ids": list(dict.fromkeys(left["display_pool_ids"] + right["display_pool_ids"]))}
+        found = data.get("sentences")
+        display = data.get("display_pool_ids")
+        expected = {index for index, _ in sentence_rows}
+        if (not isinstance(found, list) or len(found) != len(expected)
+                or any(not isinstance(row, dict) or type(row.get("index")) is not int for row in found)
+                or {row["index"] for row in found} != expected):
+            raise ValueError("AI_EDITOR_SENTENCE_COVERAGE")
+        if not isinstance(display, list) or any(not isinstance(item, str) for item in display):
+            raise ValueError("AI_EDITOR_DISPLAY_POOL_INVALID")
+        return data
+
+    data = inventory_part(list(enumerate(rows, 1)), directory / "inventory.json")
     found = data.get("sentences")
     if not isinstance(found, list) or len(found) != len(rows):
         raise ValueError("AI_EDITOR_SENTENCE_COVERAGE")
@@ -498,7 +524,7 @@ def _observed_shot(shot: dict, review: dict) -> dict:
 
 
 def _assemble(manifest: dict, analysis: dict, plan: dict, *, narration_timing: dict | None,
-              verify_sources: bool = False) -> dict:
+              verify_sources: bool = False, validate_sequence: bool = True) -> dict:
     from . import shot_analyzer
     if {k: plan.get("identity", {}).get("editorial_rules", {}).get(k) for k in ("category", "versions")} != contract.rules_identity(manifest):
         raise ValueError("AI_EDITOR_RULES_CHANGED")
@@ -638,7 +664,7 @@ def _assemble(manifest: dict, analysis: dict, plan: dict, *, narration_timing: d
         "scope": "source_observation_only_independent_qc_required"}
     if unresolved:
         out_manifest["preview_unresolved"] = unresolved
-    overlap = contract.sequence_errors(output)
+    overlap = contract.sequence_errors(output) if validate_sequence else []
     if overlap:
         raise ValueError(";".join(overlap))
     return {"ok": True, "selection_policy": "ai_editor_selling_points_first", "selection_mode": "ai_editor",
@@ -722,6 +748,87 @@ def _repair_selected_window(manifest: dict, analysis: dict, plan: dict, director
     return True
 
 
+def _repair_repeated_window(manifest: dict, analysis: dict, plan: dict, directory: Path,
+                            narration_timing: dict | None, index: int, expanded: set[int]) -> bool:
+    """Try already pixel-reviewed single-shot alternatives; add at most one review round."""
+    row = next((r for r in plan.get("rows", []) if isinstance(r, dict) and r.get("index") == index), None)
+    sentence = next((s for s in plan.get("sentences", []) if s.get("index") == index), None)
+    if not row or not sentence or len(row.get("parts") or []) != 1:
+        return False
+    part = row["parts"][0]
+    if not isinstance(part, dict) or type(part.get("audio_duration_us")) is not int:
+        return False
+
+    try:
+        baseline = _assemble(manifest, analysis, plan, narration_timing=narration_timing,
+                             verify_sources=True, validate_sequence=False)
+        before = set(contract.sequence_conflict_details(baseline["segments"]))
+    except (ValueError, KeyError, TypeError, OSError):
+        return False
+    if not before:
+        return False
+
+    def try_reviewed():
+        inventory = next((item for item in _build_edit_inventory(manifest, analysis, plan, narration_timing)
+                          if item["index"] == index), None)
+        for candidate in (inventory or {}).get("candidates", []):
+            if not candidate.get("technical_option", {}).get("ok"):
+                continue
+            proposal = copy.deepcopy(plan)
+            target = next(r for r in proposal["rows"] if r.get("index") == index)
+            target.pop("scarce_reuse_reason", None)
+            target["parts"] = [{"shot_id": candidate["shot_id"],
+                                "audio_duration_us": part["audio_duration_us"]}]
+            target["reason"] = "已复核候选替换重复源区间，整稿窗口与证据重新校验。"
+            try:
+                checked = _assemble(manifest, analysis, proposal, narration_timing=narration_timing,
+                                    verify_sources=True, validate_sequence=False)
+                after = set(contract.sequence_conflict_details(checked["segments"]))
+                if not after < before:
+                    continue
+            except (ValueError, KeyError, TypeError, OSError):
+                continue
+            row.clear()
+            row.update(target)
+            return True
+        return False
+
+    if try_reviewed():
+        return True
+    if index in expanded:
+        return False
+    expanded.add(index)
+    display = sentence["kind"] != "selling_point"
+    reviews = plan.get("display_reviews", []) if display else plan.get("reviews", {}).get(str(index), [])
+    seen = {r.get("shot_id") for r in reviews if isinstance(r, dict)}
+    all_ids = list(dict.fromkeys(sentence.get("candidate_ids") or []))
+    new_ids = [sid for sid in all_ids if sid not in seen][:ROUND_SIZE]
+    if not new_ids:
+        return False
+    # Keep all previous observations, and cap newly reviewed candidates to one round.
+    retained = [r for r in reviews if isinstance(r, dict)
+                and not failure_fields(str(r.get("error", ""))).get("retryable")]
+    retained_ids = {r.get("shot_id") for r in retained}
+    subset = [sid for sid in all_ids if sid in retained_ids] + new_ids
+    target_sentence = {**sentence, "candidate_ids": subset,
+                       "audio_durations_us": [part["audio_duration_us"]]}
+    if display:
+        target_sentence.update(index=0, text="同商品通用产品展示池", kind="product_intro", selling_points=[])
+    shots = {str(shot["shot_id"]): shot for shot in analysis.get("shots", [])}
+    result, _coverage = _review_pool(manifest, target_sentence, shots, directory,
+                                     narration_timing or {}, existing_reviews=retained)
+    historical_failures = [r for r in reviews if isinstance(r, dict)
+                           and failure_fields(str(r.get("error", ""))).get("retryable")]
+    result = result + historical_failures
+    if display:
+        plan["display_reviews"] = result
+    else:
+        plan.setdefault("reviews", {})[str(index)] = result
+    plan.setdefault("duplicate_repair_reviews", []).append({"index": index, "new_candidates": new_ids})
+    _save(directory / "plan.json", plan)
+    return try_reviewed()
+
+
 def _edit_plan(manifest: dict, analysis: dict, plan: dict, directory: Path,
                narration_timing: dict | None = None) -> None:
     """Compile current editing instructions from frozen, pixel-reviewed candidates."""
@@ -745,8 +852,10 @@ technical_option是按本句完整配音求出的实际可行窗口；分配多�
                 + json.dumps(current_inventory, ensure_ascii=False) + instructions)
 
     focus = None
+    duplicate_expanded: set[int] = set()
+    repair_instruction = ""
     for attempt in range(3):
-        prompt = make_prompt()
+        prompt = make_prompt() + repair_instruction
         if attempt == 0 and plan.pop("_resume_rows", False):
             response = {"rows": plan["rows"]}
         else:
@@ -786,7 +895,20 @@ technical_option是按本句完整配音求出的实际可行窗口；分配多�
             return
         except (ValueError, KeyError, TypeError, OSError) as exc:
             failure = exc
-            if isinstance(exc, WindowFailure) and _repair_selected_window(manifest, analysis, plan, directory, exc):
+            repeated = re.fullmatch(r"AI_EDITOR_REPEATED_SOURCE_WINDOW:\d+:(\d+)", str(failure))
+            for _ in range(len(plan.get("sentences", []))):
+                if not repeated or not _repair_repeated_window(manifest, analysis, plan, directory,
+                                                               narration_timing, int(repeated[1]), duplicate_expanded):
+                    break
+                try:
+                    _assemble(manifest, analysis, plan, narration_timing=narration_timing, verify_sources=True)
+                    plan["ok"] = True
+                    plan["phase"] = "selection_complete"
+                    return
+                except (ValueError, KeyError, TypeError, OSError) as revised_error:
+                    failure = revised_error
+                    repeated = re.fullmatch(r"AI_EDITOR_REPEATED_SOURCE_WINDOW:\d+:(\d+)", str(failure))
+            if isinstance(failure, WindowFailure) and _repair_selected_window(manifest, analysis, plan, directory, failure):
                 try:
                     _assemble(manifest, analysis, plan, narration_timing=narration_timing, verify_sources=True)
                     plan["ok"] = True
@@ -800,13 +922,18 @@ technical_option是按本句完整配音求出的实际可行窗口；分配多�
             if attempt == 2:
                 raise failure
             focus = failed_index(failure)
-            instructions += "\n上一版技术检查失败：" + str(failure) + "。"
+            repair_instruction = "\n上一版技术检查失败：" + str(failure) + "。"
             if focus is not None:
-                instructions += f"只返回index={focus}的一行rows，更换无效候选或起点；其他句由程序原样保留。"
+                repair_instruction += f"只返回index={focus}的一行rows，更换无效候选或起点；其他句由程序原样保留。"
             else:
-                instructions += "重新输出完整rows。"
-            instructions += "不得把同一句的备选或修正各写成一行，每个index只保留最终决定的一行；多个镜头放在该行parts数组。"
-            instructions += "\n已检查窗口（不可把被拒窗口重标为通过）：" + json.dumps(plan.get("window_repair_attempts", {}), ensure_ascii=False)
+                repair_instruction += "重新输出完整rows。"
+            repair_instruction += "不得把同一句的备选或修正各写成一行，每个index只保留最终决定的一行；多个镜头放在该行parts数组。"
+            current = [{"index": row.get("index"), "parts": [
+                {key: part[key] for key in ("shot_id", "source_start_us", "audio_duration_us") if key in part}
+                for part in row.get("parts", []) if isinstance(part, dict)]}
+                for row in plan.get("rows", []) if isinstance(row, dict)]
+            repair_instruction += "\n当前选择（仅供修复，不作为视觉证据）：" + json.dumps(current, ensure_ascii=False)
+            repair_instruction += "\n已检查窗口（不可把被拒窗口重标为通过）：" + json.dumps(plan.get("window_repair_attempts", {}), ensure_ascii=False)
 
 
 def prepare(manifest: dict, analysis: dict, report_dir: Path, *, narration_timing: dict | None = None) -> dict:

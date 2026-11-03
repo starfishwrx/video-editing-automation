@@ -174,7 +174,7 @@ def result_contract(result: dict[str, Any], *, task_id: str, run_id: str,
     transient = any(token in marker_text for token in (
         "timed out", "timeout", "429", "502", "503", "connection reset",
         "temporarily unavailable", "network", "connection refused",
-        "deadline exceeded", "request timeout", "connect timeout", "limit wait timeout", "ledger wait timeout",
+        "deadline exceeded", "request timeout", "connect timeout", "limit wait timeout", "ledger wait timeout", "empty content",
     ))
     credential_block = any(token in marker_text for token in (
         "unauthorized", "forbidden", "invalid api key", "credential", "insufficient balance",

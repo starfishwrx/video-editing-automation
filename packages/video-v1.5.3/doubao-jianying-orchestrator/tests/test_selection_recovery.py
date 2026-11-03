@@ -99,6 +99,153 @@ class SelectionRecoveryTests(unittest.TestCase):
         self.assertEqual(review.call_count, 1)
         self.assertFalse(plan.get("window_reviews"))
 
+    def test_inventory_length_failure_splits_once_and_preserves_indices(self):
+        calls = []
+        def call(prompt, path):
+            calls.append(path.name)
+            if path.name == "inventory.json":
+                raise ValueError("AI_EDITOR_CALL_FAILED:vision request failed [OUTPUT_TRUNCATED]")
+            index = 1 if "left" in path.name else 2
+            return {"sentences": [copy.deepcopy(self.sentences[index - 1])], "display_pool_ids": []}
+        for code in ("OUTPUT_TRUNCATED", "EMPTY_CONTENT"):
+            calls.clear()
+            def attempt(prompt, path):
+                if path.name == "inventory.json":
+                    calls.append(path.name)
+                    raise ValueError("AI_EDITOR_CALL_FAILED: [" + code + "]")
+                return call(prompt, path)
+            with patch.object(editor, "_call", side_effect=attempt):
+                result = editor._inventory(self.manifest, self.shots, self.root)
+            self.assertEqual([row["index"] for row in result], [1, 2])
+            self.assertEqual(calls, ["inventory.json", "inventory_left.json", "inventory_right.json"])
+        with patch.object(editor, "_call", side_effect=ValueError("AI_EDITOR_CALL_FAILED: [OUTPUT_TRUNCATED]")) as call:
+            with self.assertRaisesRegex(ValueError, "OUTPUT_TRUNCATED"):
+                editor._inventory(self.manifest, self.shots, self.root)
+            self.assertEqual(call.call_count, 2)
+
+    def test_scoped_repair_does_not_leak_into_later_full_replan(self):
+        plan = self.plan()
+        proposals = [{"rows": copy.deepcopy(self.rows)},
+                     {"rows": [copy.deepcopy(self.rows[1])]},
+                     {"rows": copy.deepcopy(self.rows)}]
+        failures = [editor.WindowFailure(2, "shot2", "EVIDENCE_OUT_OF_RANGE"),
+                    ValueError("AI_EDITOR_PLAN_COVERAGE:missing=[1]"), {}]
+        with patch.object(editor, "_call", side_effect=proposals) as call, \
+                patch.object(editor, "_repair_selected_window", return_value=False), \
+                patch.object(editor, "_assemble", side_effect=failures):
+            editor._edit_plan(self.manifest, self.analysis, plan, self.root)
+        self.assertTrue(plan["ok"])
+        self.assertEqual([row["index"] for row in plan["rows"]], [1, 2])
+        self.assertIn("只返回index=2", call.call_args_list[1].args[0])
+        self.assertNotIn("只返回index=2", call.call_args_list[2].args[0])
+        self.assertIn("重新输出完整rows", call.call_args_list[2].args[0])
+
+    def test_repeated_window_repairs_later_sentence_only(self):
+        self.assertEqual(editor.failed_index(ValueError("AI_EDITOR_REPEATED_SOURCE_WINDOW:1:2")), 2)
+        plan = self.plan()
+        with patch.object(editor, "_call", side_effect=[{"rows": copy.deepcopy(self.rows)},
+                          {"rows": [copy.deepcopy(self.rows[1])]}]) as call, \
+                patch.object(editor, "_repair_repeated_window", return_value=False), \
+                patch.object(editor, "_assemble", side_effect=[ValueError("AI_EDITOR_REPEATED_SOURCE_WINDOW:1:2"), {}]):
+            editor._edit_plan(self.manifest, self.analysis, plan, self.root)
+        self.assertEqual(plan["rows"][0], self.rows[0])
+        self.assertIn("只返回index=2", call.call_args_list[1].args[0])
+        self.assertIn('"shot_id": "shot1"', call.call_args_list[1].args[0])
+        self.assertIn('"shot_id": "shot2"', call.call_args_list[1].args[0])
+
+    def test_repeated_window_uses_existing_pixel_reviewed_alternative(self):
+        plan = self.plan()
+        plan["rows"][1]["parts"][0]["shot_id"] = "shot1"
+        duplicate_review = {**copy.deepcopy(self.reviews["2"][0]), "shot_id": "shot1",
+                            "source_identity": contract.source_identity(self.shots[0]["video"])}
+        plan["reviews"]["2"].insert(0, duplicate_review)
+        before = copy.deepcopy(plan["rows"][0])
+        with patch.object(editor, "_call", return_value={"rows": copy.deepcopy(plan["rows"])}) as call:
+            editor._edit_plan(self.manifest, self.analysis, plan, self.root)
+        self.assertTrue(plan["ok"])
+        self.assertEqual(plan["rows"][0], before)
+        self.assertEqual(plan["rows"][1]["parts"][0]["shot_id"], "shot2")
+        self.assertEqual(call.call_count, 1)
+        self.assertTrue(editor._assemble(self.manifest, self.analysis, plan,
+                          narration_timing=None, verify_sources=True)["ok"])
+
+    def test_repeat_repair_expands_at_most_one_round_of_actual_reviews(self):
+        plan = self.plan()
+        plan["rows"][1]["parts"][0]["shot_id"] = "shot1"
+        duplicate = {**copy.deepcopy(self.reviews["2"][0]), "shot_id": "shot1",
+                     "source_identity": contract.source_identity(self.shots[0]["video"])}
+        plan["reviews"]["2"] = [duplicate]
+        plan["sentences"][1]["candidate_ids"] = ["shot1", "shot2"]
+        expanded = set()
+        with patch.object(editor, "_review_pool", return_value=([duplicate, self.reviews["2"][0]], {})) as review:
+            fixed = editor._repair_repeated_window(self.manifest, self.analysis, plan, self.root, None, 2, expanded)
+        self.assertTrue(fixed)
+        self.assertEqual(plan["rows"][1]["parts"][0]["shot_id"], "shot2")
+        self.assertEqual(review.call_count, 1)
+        self.assertEqual(plan["duplicate_repair_reviews"][0]["new_candidates"], ["shot2"])
+
+        plan["rows"][1]["parts"][0]["shot_id"] = "shot1"
+        plan["reviews"]["2"] = [duplicate, {"shot_id": "shot2", "verdict": "uncertain"}]
+        with patch.object(editor, "_review_pool") as review:
+            self.assertFalse(editor._repair_repeated_window(self.manifest, self.analysis, plan, self.root, None, 2, expanded))
+            review.assert_not_called()
+        self.assertEqual(plan["rows"][1]["parts"][0]["shot_id"], "shot1")
+
+    def test_conflict_details_do_not_fold_distinct_spans_into_one_pair(self):
+        def segment(windows):
+            return {"span_parts": [{"video": "same", "ai_selection": {"video": "same",
+                "window_us": {"start": a * 1_000_000, "end": b * 1_000_000}}} for a, b in windows]}
+        before = [segment([(0, 1)]), segment([(2, 3), (5, 6), (7, 8)]), segment([(.5, 2.5)])]
+        after = [segment([(0, 1)]), segment([(2, 3), (5, 6), (7, 8)]), segment([(5.5, 7.5)])]
+        # Error labels alone misleadingly look like a reduction from two pairs to one.
+        self.assertLess(set(contract.sequence_errors_all(after)), set(contract.sequence_errors_all(before)))
+        self.assertFalse(set(contract.sequence_conflict_details(after)) < set(contract.sequence_conflict_details(before)))
+        self.assertEqual(len(contract.sequence_conflict_details(after)), 2)
+
+    def test_multiple_duplicate_pairs_are_fixed_without_losing_full_gate(self):
+        plan = self.plan(); manifest = copy.deepcopy(self.manifest); analysis = copy.deepcopy(self.analysis)
+        plan["rows"][1]["parts"][0]["shot_id"] = "shot1"
+        plan["reviews"]["2"].insert(0, {**copy.deepcopy(self.reviews["2"][0]), "shot_id": "shot1",
+            "source_identity": contract.source_identity(self.shots[0]["video"])})
+        for index in (3, 4):
+            video = self.root / f"source{index}.mp4"; video.write_bytes(b"synthetic source")
+            sid = f"shot{index}"
+            analysis["shots"].append({"shot_id": sid, "video": str(video), "source_start": 0,
+                "source_end": 10, "duration": 10, "status": "ready_for_matching"})
+            text = f"测试卖点{index}"
+            manifest["segments"].append({"text": text, "audio_duration_us": 1_000_000})
+            plan["sentences"].append({"index": index, "text": text, "kind": "selling_point",
+                "selling_points": [{"id": "p1", "text": text}], "candidate_ids": [sid], "scene_ids": []})
+            plan["reviews"][str(index)] = [{**copy.deepcopy(self.reviews["2"][0]), "shot_id": sid,
+                "source_identity": contract.source_identity(video)}]
+            plan["rows"].append({"index": index, "parts": [{"shot_id": sid, "audio_duration_us": 1_000_000,
+                                                             "source_start_us": 2_000_000}]})
+        plan["rows"][3]["parts"][0]["shot_id"] = "shot3"
+        plan["reviews"]["4"].insert(0, {**copy.deepcopy(plan["reviews"]["4"][0]), "shot_id": "shot3",
+            "source_identity": contract.source_identity(analysis["shots"][2]["video"])})
+        with patch.object(editor, "_call", return_value={"rows": copy.deepcopy(plan["rows"])}) as call:
+            editor._edit_plan(manifest, analysis, plan, self.root)
+        self.assertTrue(plan["ok"])
+        self.assertEqual(plan["rows"][1]["parts"][0]["shot_id"], "shot2")
+        self.assertEqual(plan["rows"][3]["parts"][0]["shot_id"], "shot4")
+        self.assertEqual(call.call_count, 1)
+        self.assertTrue(editor._assemble(manifest, analysis, plan, narration_timing=None, verify_sources=True)["ok"])
+
+    def test_duplicate_expansion_excludes_historical_transient_failures_from_new_budget(self):
+        plan = self.plan()
+        plan["rows"][1]["parts"][0]["shot_id"] = "shot1"
+        duplicate = {**copy.deepcopy(self.reviews["2"][0]), "shot_id": "shot1",
+                     "source_identity": contract.source_identity(self.shots[0]["video"])}
+        timeout = {"shot_id": "shot2", "verdict": "uncertain", "error": "AI_EDITOR_CALL_FAILED: [REQUEST_TIMEOUT]"}
+        plan["reviews"]["2"] = [duplicate, timeout]
+        plan["sentences"][1]["candidate_ids"] = ["shot1", "shot2"] + [f"extra{i}" for i in range(12)]
+        with patch.object(editor, "_review_pool", return_value=([duplicate], {})) as review:
+            self.assertFalse(editor._repair_repeated_window(self.manifest, self.analysis, plan, self.root, None, 2, set()))
+        sentence = review.call_args.args[1]
+        self.assertNotIn("shot2", sentence["candidate_ids"])
+        self.assertEqual(len(plan["duplicate_repair_reviews"][0]["new_candidates"]), 8)
+        self.assertNotIn(timeout, review.call_args.kwargs["existing_reviews"])
+
     def test_transient_resume_reuses_successful_sentence_and_invalidates_changed_input(self):
         coverage = {"feasible": True, "exhausted": True, "uncertain": 0, "checked": 1, "total": 1}
         def first(manifest, sentence, *args, **kwargs):
@@ -130,7 +277,8 @@ class SelectionRecoveryTests(unittest.TestCase):
         input_path = self.root / "input.json"
         input_path.write_text(json.dumps(self.manifest), encoding="utf-8")
         for message, retryable in (("AI_EDITOR_CALL_FAILED:vision request failed [DEADLINE_EXCEEDED]", True),
-                                   ("AI_EDITOR_CALL_FAILED:HTTP 401 unauthorized; request timeout", False)):
+                                   ("AI_EDITOR_CALL_FAILED:HTTP 401 unauthorized; request timeout", False),
+                                   ("AI_EDITOR_CALL_FAILED: [EMPTY_CONTENT]", True)):
             with self.subTest(message=message), patch.object(editor, "_editor_model", return_value="offline"), \
                     patch.object(editor, "_inventory", side_effect=ValueError(message)):
                 analysis = editor.prepare(self.manifest, self.analysis, self.root)

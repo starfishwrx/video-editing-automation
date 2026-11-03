@@ -271,6 +271,19 @@ class AIEditorTests(unittest.TestCase):
         plan["policy_version"] = "selling-points-first-v1"
         self.assertFalse(self.result(plan)["ok"])
 
+    def test_microsecond_evidence_is_not_rounded_inward_by_candidate_solver(self):
+        self.manifest["segments"][0]["audio_duration_us"] = 842083
+        self.review["evidence_intervals_us"] = [{"start": 1363687, "end": 2300917}]
+        plan = self.plan()
+        plan["rows"][0]["parts"][0].update(audio_duration_us=842083, source_start_us=1363687)
+        result = self.result(plan)
+        self.assertTrue(result["ok"], result)
+        window = result["segments"][0]["ai_selection"]["window_us"]
+        self.assertLessEqual(window["start"], 1363687)
+        self.assertGreaterEqual(window["end"], 2300917)
+        legacy = {"selection_mode": "legacy", "evidence_intervals": [{"start": 1.363687, "end": 2.300917}]}
+        self.assertEqual(shot_analyzer.candidate_evidence_interval(legacy)[:2], (1.364, 2.301))
+
     def test_natural_speed_and_complete_start_evidence_remain_eligible(self):
         self.review["evidence_intervals_us"] = [{"start": 0, "end": 1_000_000}]
         segment = self.result()["segments"][0]
