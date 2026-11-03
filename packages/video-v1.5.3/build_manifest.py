@@ -8,11 +8,21 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 EXCLUDED_NAMES = {"build_manifest.py", "release-manifest.json", "PACKAGE_CONTENTS.sha256"}
 EXCLUDED_PARTS = {"__pycache__", ".pytest_cache", ".venv", ".uv-cache", ".git",
-                  "media", "config", "backups", "validation_runs", "report", "work"}
+                  "media", "config", "backups", "validation_runs", "report", "reports", "work",
+                  ".cache", "logs", ".jy_run"}
 EXCLUDED_SUFFIXES = {".pyc", ".pyo", ".mp4", ".mov", ".m4v", ".wav", ".mp3",
                      ".ogg", ".m4a", ".aac", ".flac", ".zip"}
-EXCLUDED_PREFIXES = {("jianying-editor", "data")}  # 本机同步的音色、云音乐缓存。
+EXCLUDED_PREFIXES = {("jianying-editor", "data"),  # 私有同步数据和临时链接。
+                     ("doubao-jianying-orchestrator", "bin")}  # 本机下载的媒体工具。
 SOURCE_MEDIA_PREFIX = ("doubao-jianying-orchestrator", "orchestrator", "media")
+REQUIRED_RUNTIME_RESOURCES = tuple("jianying-editor/resources/catalogs/" + name for name in (
+    "jianying_voice_catalog.csv", "tts_speakers.csv", "cloud_music_library.csv"))
+
+
+def require_runtime_resources(root: Path) -> None:
+    for relative in REQUIRED_RUNTIME_RESOURCES:
+        if not (root / relative).is_file():
+            raise ValueError("PACKAGE_RUNTIME_RESOURCE_MISSING: " + relative)
 
 
 def files() -> list[Path]:
@@ -40,6 +50,7 @@ def files() -> list[Path]:
 
 
 def main() -> int:
+    require_runtime_resources(ROOT)
     version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
     if not version:
         raise ValueError("PACKAGE_VERSION_MISSING")
