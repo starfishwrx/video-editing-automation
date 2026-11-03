@@ -148,7 +148,11 @@ def finalize_closed_loop(task_dir: pathlib.Path, task: dict, drafts: list[str],
     delivery_env = dict(os.environ, JY_EVAL_RUNTIME_ROOT=str(context.runtime_root),
                         JY_DRAFT_ROOT=str(context.draft_root))
     delivery_started = True
-    archive = run(common[:2] + ["archive-parent"] + common[2:], cwd=str(context.workflow_root), env=delivery_env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
+    # archive-parent re-reads every shipped byte over the NAS share (audit readback,
+    # package check, tree identity). Headless drafts with upright-normalized media are
+    # several GB, so a fixed 300 s budget cannot cover the verification it must perform.
+    archive_timeout = float(os.environ.get("JY_ARCHIVE_PARENT_TIMEOUT_S", "1200"))
+    archive = run(common[:2] + ["archive-parent"] + common[2:], cwd=str(context.workflow_root), env=delivery_env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=archive_timeout)
     if archive.returncode != 0:
         return {"delivery_started": delivery_started, "ok": False, "status": "BLOCKED", "reason": "ARCHIVE_PARENT_FAILED", "output": (archive.stdout or archive.stderr)[-2000:]}
     update = run(common[:2] + ["table-update"] + common[2:], cwd=str(context.workflow_root), env=delivery_env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
