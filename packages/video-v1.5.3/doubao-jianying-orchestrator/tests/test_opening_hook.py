@@ -22,6 +22,7 @@ def packaging(**changes):
 class OpeningHookTests(unittest.TestCase):
     def test_packaging_recall_priority_is_only_a_multilingual_description_hint(self):
         primary=['手持包装正面展示','粉色洗脸巾盒展示','Front-facing retail packaging', 'A carton presentation',
+                 'Several packages presented front-facing','Several cartons presented front-facing',
                  '白色背景前的整提包装正面居中展示','Centered retail packaging against a white background']
         incidental=['揉搓动作，包装只在背景角落','Packaging is in the background']
         negative=['揉搓纸巾，未见包装','Only rubbing, no packaging visible']

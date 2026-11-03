@@ -8,7 +8,7 @@ RULE = 'first_three_no_product_selling_point_packaging_v1'
 
 def packaging_recall_priority(description):
     """Rank cache hints only; a high rank never certifies a packaging picture."""
-    packaging = r'(?:包装|外盒|外袋|纸巾盒|洗脸巾盒|纸盒|纸箱|整箱|整提|整包|盒装|袋装|\bpackag(?:e|ing)\b|\bcarton\b)'
+    packaging = r'(?:包装|外盒|外袋|纸巾盒|洗脸巾盒|纸盒|纸箱|整箱|整提|整包|盒装|袋装|\bpackag(?:es?|ing)\b|\bcartons?\b)'
     clauses = re.split(r'[，,。；;！!？?\n]', description.lower())
     incidental = False
     for clause in clauses:
