@@ -16,6 +16,29 @@ against the system interpreter for this package or its deployment host.
 
 Python must be **>=3.11,<3.13**, as declared in `pyproject.toml`.
 
+## Shipped audio lookup resources
+
+`jianying-editor/resources/catalogs/` is versioned and included in source ZIPs:
+official voice display names/IDs/tags, historical voice aliases, and BGM
+IDs/titles/durations/categories. A clean clone needs no manually copied `data/`
+directory. Voice and BGM lookup use these package-local files, never an installed
+skill's private cache. See that directory's `README.md` for the field whitelist.
+
+Default `env`, `build` and `recover --stage preflight` check required tables
+before paid stages. `runtime_catalogs` reports paths and entry counts; missing,
+unreadable or invalid tables return `ENV_ERROR` with `RUNTIME_CATALOG_*` reasons.
+Existence/version is rechecked after a cached lookup, so repairing or removing a
+table takes effect without restarting. An explicit local `bgm.path` does not
+require the cloud music index; automatic BGM and ID/title selection do.
+
+These tables contain no signed URLs, audio, credentials or machine paths.
+The packaged CloudManager indexes the same BGM table, reuses complete local
+audio caches before contacting a service, and resolves a fresh URL by ID on a
+cache miss or explicit forced refresh. Private `data/`, `.cache/`, logs, task reports and downloaded media
+tools stay outside source packages. TTS login/authentication, service availability,
+authorized native backend and fonts remain external prerequisites; successful
+offline lookup does not establish cloud-service availability.
+
 ## Default native draft production
 
 `draft_backend` / `JY_DRAFT_BACKEND` defaults to `headless`. Install the separately
@@ -25,6 +48,10 @@ selects the locally installed, fingerprint-matched Windows native runtime;
 `JY_HEADLESS_FONT` selects a static TTF/OTF. `fonttools==4.60.2` is locked in uv.
 `ffmpeg` and `ffprobe` must be on PATH (the runner adds configured media-tool
 directories). Run `python -m tools.headless_runtime check` before activation.
+The CLI `run.py env` combines base toolchain facts with this same writer check
+and returns a nonzero exit code when not ready. Use `env --input manifest.json`
+for task-specific backend/font settings, or explicit `env --profile base` for
+the base toolchain only; these checks do not authenticate cloud credentials.
 The backend is a separate licensed dependency and is not redistributed in this
 package. Use an authorized backend build providing `headless-production-library/v1`
 and its source-pinned entrypoint; an unextended checkout is rejected before paid work.

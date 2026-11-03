@@ -53,7 +53,10 @@ uv run --frozen python -X utf8 -m tools.check_architecture
 |---|---|
 | BGM选曲／准备 | `test_*bgm.py` + `test_default_headless.py` |
 | 无头建稿／字幕 | `test_default_headless.py`、`test_meeting_caption_integration.py`、`test_timeline_export.py` |
-| AI选镜 | `test_ai_editor*.py`；涉及卖点证据时加 `test_visual_qc_response_contract.py` |
+| 阶段恢复／环境检查 | `test_task_control.py`、`test_default_headless.py`；覆盖成功阶段串接、匹配提前失败、旧任务/文案/来源拒绝和env退出码 |
+| 音频运行资源／干净拉取 | 编排器 `test_runtime_catalogs.py`、包级 `test_runtime_resources.py` 和 `test_release_version.py`；真实名称／倍速、缺表坏表阻断、Git 已跟踪文件或解压库存冷启动、私有缓存排除 |
+| AI选镜 | `test_ai_editor*.py`、`test_selection_recovery.py`；至少一个具体卖点/未覆盖项、小窗重新观察、只改失败句；涉及卖点证据时加 `test_visual_qc_response_contract.py` |
+| 选镜阶段续跑 | 包级 `test_selection_stage_resume.py`、`test_queue_contracts.py`；原配音/句长不变，输入变化、过程打断和预算耗尽不回到完整build，选镜后超时保留匹配 |
 | 时间窗求解 | `test_timing_contract.py`；纸品动作另加 `test_paper_action_windows.py` |
 | 草稿交付 / 媒体路径 | `test_draft_delivery.py` |
 | NAS 往返 | `test_nas_portable.py` |
@@ -79,6 +82,8 @@ uv run --frozen python -X utf8 -m tools.release_package build --output $releaseO
 - `--checks delivery`：只跑交付相关，适合本机迭代。
 - `--checks full`：异目录解压后跑完整两套测试，产出发布收据。
 - 输出目录必须是**包外且尚不存在**的新路径；失败后换新目录，不要覆盖。
+
+合包与库存校验均拒绝缺少必需音频表，即使重新生成库存也不能放行。冷启动测试不读取安装过的 Skill 或用户配置、不联网、不合成配音；它证明运行资源齐全及查询链可用，云端服务和真实素材质量仍需单独验证。
 
 合包成功只证明源码包可重建；**不**等于渲染机已部署或生产验收通过。
 

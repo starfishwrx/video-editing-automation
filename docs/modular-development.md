@@ -44,6 +44,8 @@
 
 在活包根运行 `uv run --frozen python -X utf8 -m tools.check_architecture`。Windows CI 和默认包级测试都会执行相关边界检查：旧入口不得承载业务实现；实现模块不得反向引用旧导入路径；下层不得依赖 application；runtime/media 不得依赖选镜、视觉、音频、规则、质检或分发；domain 不得依赖其他功能包。函数内部的延迟 import 也会检查。新增功能模块可以直接放进功能包，无需增加旧入口；只有为既有调用路径迁移时才维护 module_map。
 
+根级公共合同也检查导入，不能反向加载application或worker/交付工具；原位分发适配器保留其tools依赖。`tools/queueing` 不加载worker、其他tools层或编排业务；`tools/acceptance` 不反向依赖worker、workflow或dispatcher；tools三层都拒绝应用层及旧兼容导入。规则覆盖静态Python导入语句（含函数内部）；按文件动态加载继续由独立合同测试验证。
+
 本轮保留了原来选镜、场景规则与视觉观测之间的延迟双向调用，以及 runtime/media 的环境适配关联。引擎和 CLI 仍有较大的应用编排函数；本轮没有把这些共享状态隐蔽地拆成 mixin，也不声称已经得到完全无环依赖图。后续可用显式的分析结果/任务上下文进一步分离准备、规划和写稿服务，逐条增加依赖约束。
 
 验证命令和本轮结果见 `test.md`、`working.md`。本次是源码重构，不升级 VERSION，不重写已有发布清单，不安装生产。新布局的合包验证在包外副本执行，避免把开发验证当作正式发布。

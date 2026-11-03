@@ -1,4 +1,6 @@
 """Default routing, fixed cuts and failure boundaries; no model or UI calls."""
+import contextlib
+import io
 import json
 import os
 from pathlib import Path
@@ -16,6 +18,59 @@ from orchestrator.application import headless_production
 from orchestrator.audio import final_bgm
 from orchestrator.audio.bgm_request import normalize
 from orchestrator.domain.clips import Clip
+
+
+class EnvironmentCommandTests(unittest.TestCase):
+    def test_default_env_rejects_a_missing_headless_backend(self):
+        from orchestrator.application import cli
+        with patch.dict(os.environ, {}, clear=True), \
+                patch.object(cli, 'environment_report', return_value={'ready': True}), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(cli.main(['env']), 1)
+        report = json.loads(output.getvalue())
+        self.assertFalse(report['ready'])
+        self.assertTrue(report['base_ready'])
+        self.assertEqual(report['draft_backend_check']['reason'], 'HEADLESS_ROOT_REQUIRED')
+        self.assertIn('HEADLESS_ROOT_REQUIRED', report['hints'])
+
+    def test_base_profile_is_explicit_and_retains_failure_exit_codes(self):
+        from orchestrator.application import cli
+        from orchestrator.runtime import headless
+        for ready in (True, False):
+            with self.subTest(ready=ready), \
+                    patch.object(cli, 'environment_report', return_value={'ready': ready}), \
+                    patch.object(headless, 'preflight') as native, \
+                    contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(cli.main(['env', '--profile', 'base']), 0 if ready else 1)
+            self.assertEqual(json.loads(output.getvalue())['profile'], 'base')
+            native.assert_not_called()
+
+    def test_manifest_backend_override_and_new_configuration_are_rechecked(self):
+        from orchestrator.application import cli
+        with tempfile.TemporaryDirectory() as raw, patch.dict(os.environ, {}, clear=True), \
+                patch.object(cli, 'environment_report', return_value={'ready': True}):
+            manifest = Path(raw) / 'manifest.json'
+            manifest.write_text(json.dumps({'draft_backend': 'legacy'}), encoding='utf-8')
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(cli.main(['env', '--input', str(manifest)]), 0)
+            self.assertEqual(json.loads(output.getvalue())['draft_backend_check']['backend'], 'legacy')
+            manifest.write_text(json.dumps({'draft_backend': 'headless'}), encoding='utf-8')
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(cli.main(['env', '--input', str(manifest)]), 1)
+            self.assertFalse(json.loads(output.getvalue())['ready'])
+
+    def test_font_failure_and_repair_do_not_pollute_or_cache_the_base_report(self):
+        from orchestrator.application import cli
+        from orchestrator.runtime import headless
+        base = {'ready': True, 'hints': ['base hint']}
+        with patch.object(cli, 'environment_report', return_value=base), \
+                patch.object(headless, 'preflight', side_effect=[
+                    ValueError('HEADLESS_SUBTITLE_FONT_REQUIRED'), {'status': 'READY', 'backend': 'headless'}]):
+            for expected in (False, True):
+                with contextlib.redirect_stdout(io.StringIO()) as output:
+                    self.assertEqual(cli.main(['env']), 0 if expected else 1)
+                self.assertEqual(json.loads(output.getvalue())['ready'], expected)
+        self.assertEqual(base, {'ready': True, 'hints': ['base hint']})
 from orchestrator.runtime import draft_documents
 
 
