@@ -227,17 +227,11 @@ class MeetingVoiceRequestTests(unittest.TestCase):
                 self.assertEqual(req.tempo, tempo)
 
     def test_missing_catalog_does_not_offer_the_preset_list(self):
-        from orchestrator.audio import voice_library
+        from orchestrator.audio import library_resources
         from orchestrator.voice_catalog import resolve_voice
-        voice_library.load_library.cache_clear()
-        try:
-            with patch.object(voice_library, "catalog_path", return_value=None):
-                with self.assertRaises(VoiceResolutionError) as caught:
-                    resolve_voice("真人播客女")
-            self.assertIn("VOICE_CATALOG_MISSING", str(caught.exception))
-            self.assertFalse(caught.exception.voice_detail["candidates"])
-        finally:
-            voice_library.load_library.cache_clear()
+        with tempfile.TemporaryDirectory() as tmp, patch.object(library_resources, "CATALOGS_ROOT", Path(tmp)):
+            with self.assertRaisesRegex(library_resources.RuntimeCatalogError, "RUNTIME_CATALOG_MISSING"):
+                resolve_voice("真人播客女")
 
 
 if __name__ == "__main__":

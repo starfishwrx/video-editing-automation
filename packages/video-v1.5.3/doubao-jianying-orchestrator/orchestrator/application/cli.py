@@ -24,6 +24,7 @@ from ..selection import timing_contract
 from ..selection import usage_ledger
 from ..audio import voice_catalog
 from ..audio import voice_tts
+from ..audio.library_resources import RuntimeCatalogError
 from .engine import OrchestrationEngine
 from ..runtime.platform_env import clear_environment_cache, environment_report
 from ..runtime.task_log import TaskAlreadyRunningError, TaskLogger
@@ -122,8 +123,22 @@ def _compact_control_result(result: dict) -> dict:
     return {key: result[key] for key in keys if key in result}
 
 
+def _run_command(command, args) -> int:
+    try:
+        return command(args)
+    except RuntimeCatalogError as exc:
+        return _emit({"status": "ENV_ERROR", "failure_class": "environment", "reason": str(exc)}, 1)
+
+
 def cmd_env(_args) -> int:
-    return _emit(environment_report())
+    from ..audio.library_resources import catalog_report
+    report = dict(environment_report())
+    catalogs = catalog_report()
+    report["runtime_catalogs"] = catalogs
+    report["ready"] = bool(report.get("ready")) and catalogs["ready"]
+    if not catalogs["ready"]:
+        report.update(status="ENV_ERROR", reason=catalogs["errors"][0])
+    return _emit(report, 0 if report["ready"] else 1)
 
 
 def cmd_setup_ffmpeg(args) -> int:
@@ -344,6 +359,8 @@ def _lock_voice_once(manifest: dict) -> tuple[object | None, dict | None]:
     try:
         preset = voice_catalog.resolve_voice_once(
             None, script=script, manifest=manifest, persist=True)
+    except RuntimeCatalogError as exc:
+        return None, {"status": "ENV_ERROR", "failure_class": "environment", "reason": str(exc)}
     except voice_catalog.VoiceResolutionError as exc:
         detail = getattr(exc, "voice_detail", None)
         detail = detail if isinstance(detail, dict) else {}
@@ -777,6 +794,11 @@ def cmd_build(args) -> int:
 
     from ..runtime.headless import preflight as draft_preflight
     try:
+        from ..audio.bgm_request import normalize as normalize_bgm
+        from ..audio.library_resources import catalog_report
+        catalogs = catalog_report(require_music=not normalize_bgm(manifest.get("bgm")).get("path"))
+        if not catalogs["ready"]:
+            raise RuntimeCatalogError(catalogs["errors"][0])
         draft_preflight(manifest)
     except (OSError, ValueError, RuntimeError, ImportError) as exc:
         return _emit(_compact_build_result(finalize({'status': 'ENV_ERROR', 'failure_class': 'environment',
@@ -1487,7 +1509,7 @@ def main(argv=None) -> int:
         "review-script", "scan", "analyze-shots", "match-shots", "build", "diagnose-timeline", "recover", "migrate-encrypted",
         "calibrate-capacity"):
         args = parser.parse_args(argv)
-        return args.func(args)
+        return _run_command(args.func, args)
 
     # 旧式：--input x [--scan-only]
     legacy = argparse.ArgumentParser(add_help=False)
@@ -1500,7 +1522,7 @@ def main(argv=None) -> int:
         if known.scan_only:
             return cmd_scan(argparse.Namespace(input=known.input,
                                                report_dir=known.report_dir))
-        return cmd_build(argparse.Namespace(input=known.input,
+        return _run_command(cmd_build, argparse.Namespace(input=known.input,
                                             report_dir=known.report_dir,
                                             strict_script=False))
     parser.print_help()

@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from tools import selection_preview as preview
 
@@ -92,6 +93,19 @@ class SelectionPreviewTests(unittest.TestCase):
         self.assertEqual(preview.resolve_media("Z:/old/video.mp4", self.root), self.video.resolve())
         with self.assertRaisesRegex(ValueError, "MEDIA_MISSING"):
             preview.resolve_media("missing.mov", self.root)
+
+    def test_inaccessible_old_drive_uses_packaged_media_or_blocks(self):
+        original_is_file = Path.is_file
+        old_source = self.root / "inaccessible" / "video.mp4"
+        def probe(path):
+            if path == old_source:
+                raise PermissionError("injected inaccessible previous drive")
+            return original_is_file(path)
+        with patch.object(Path, "is_file", probe):
+            self.assertEqual(preview.resolve_media(str(old_source), self.root), self.video.resolve())
+            self.video.unlink()
+            with self.assertRaisesRegex(ValueError, "MEDIA_MISSING"):
+                preview.resolve_media(str(old_source), self.root)
 
     def test_atempo_handles_native_reference_high_speeds(self):
         self.assertEqual(preview.atempo(8), "atempo=2,atempo=2,atempo=2")

@@ -14,14 +14,13 @@
 """
 from __future__ import annotations
 
-import csv
 import functools
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from ..runtime.platform_env import find_jianying_editor_root
+from . import library_resources
 
 # 已逐个真实合成验证可用的音色（sami id），同等相关度下优先、并作为可靠保底。
 # 同时给出比官方 name_hint 更准确、可直接用于相关性匹配的中文名（官方名有“熊二/小孩”等歧义）。
@@ -120,18 +119,14 @@ class LibraryVoice:
 
 
 def _csv_path() -> Optional[Path]:
-    p = find_jianying_editor_root() / "data" / "tts_speakers.csv"
-    return p if p.exists() else None
-
-
-def catalog_path() -> Optional[Path]:
-    """剪映官方音色表（界面显示名 -> sami speaker_id）。"""
-    p = find_jianying_editor_root() / "data" / "jianying_voice_catalog.csv"
+    p = library_resources.CATALOGS_ROOT / "tts_speakers.csv"
     return p if p.exists() else None
 
 
 def _catalog_path() -> Optional[Path]:
-    return catalog_path()
+    """剪映官方音色表（界面显示名 -> sami speaker_id）。"""
+    p = library_resources.CATALOGS_ROOT / "jianying_voice_catalog.csv"
+    return p if p.exists() else None
 
 
 def _infer_gender(name: str, sid: str) -> str:
@@ -177,8 +172,14 @@ def _excluded(name: str, intents: set[str]) -> bool:
     return False
 
 
-@functools.lru_cache(maxsize=1)
 def load_library() -> list[LibraryVoice]:
+    signatures = tuple(library_resources.catalog_signature(name) for name in
+                       ("jianying_voice_catalog.csv", "tts_speakers.csv"))
+    return _load_library(signatures)
+
+
+@functools.lru_cache(maxsize=2)
+def _load_library(signatures: tuple) -> list[LibraryVoice]:
     """读取并画像全量音色（进程内缓存）。
 
     三层按 speaker_id 合并，第一个见到的名字当主名（推荐展示用），后面见到的
@@ -210,27 +211,15 @@ def load_library() -> list[LibraryVoice]:
     for sid, (name, gender) in VALIDATED_META.items():
         add(sid, name, gender, True, False)
     # 2) 剪映官方音色表（权威界面显示名 -> sami id）
-    path = _catalog_path()
-    if path:
-        with path.open("r", encoding="utf-8", errors="ignore") as f:
-            for row in csv.reader(f):
-                if not row or row[0].startswith("#") or row[0] == "title":
-                    continue
-                title = row[0].strip()
-                sid = row[1].strip() if len(row) > 1 else ""
-                tags = tuple(t for t in (row[4].split("/") if len(row) > 4 else []) if t)
-                add(sid, title, _gender_from_tags(tags), sid in VALIDATED_SAMI,
-                    True, tags=tags or (title,))
+    for row in library_resources.read_catalog("jianying_voice_catalog.csv"):
+        title, sid = row["title"], row["voice_type"]
+        tags = tuple(t for t in row["tags"].split("/") if t)
+        add(sid, title, _gender_from_tags(tags), sid in VALIDATED_SAMI,
+            True, tags=tags or (title,))
     # 3) 历史 name_hint（保留兼容）
-    path = _csv_path()
-    if path:
-        with path.open("r", encoding="utf-8", errors="ignore") as f:
-            for row in csv.reader(f):
-                if not row or row[0].startswith("#") or row[0] == "speaker_id":
-                    continue
-                sid = row[0].strip()
-                name = row[1].strip() if len(row) > 1 else sid
-                add(sid, name, None, sid in VALIDATED_SAMI, False)
+    for row in library_resources.read_catalog("tts_speakers.csv"):
+        sid, name = row["speaker_id"], row["name_hint"]
+        add(sid, name, None, sid in VALIDATED_SAMI, False)
     return voices
 
 

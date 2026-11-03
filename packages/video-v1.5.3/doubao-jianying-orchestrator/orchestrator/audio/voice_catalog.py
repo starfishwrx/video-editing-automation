@@ -264,11 +264,6 @@ def resolve_voice(spec=None) -> VoicePreset:
         libv = vl.find_by_id_or_name(s)
         if libv is not None:
             return _preset_from_library(libv)
-        if vl.catalog_path() is None:
-            raise VoiceResolutionError(
-                "VOICE_CATALOG_MISSING: jianying-editor/data/jianying_voice_catalog.csv 不存在，"
-                "运营音色名无法解析",
-                voice_input=s)
         if s in _GENDER_ALIAS:
             candidates = vl.find_candidates(s)
             raise VoiceResolutionError(

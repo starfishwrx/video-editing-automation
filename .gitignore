@@ -1,8 +1,6 @@
 __pycache__/
 *.pyc
-packages/video-v1.5.3/jianying-editor/data/*
-!packages/video-v1.5.3/jianying-editor/data/jianying_voice_catalog.csv
-!packages/video-v1.5.3/jianying-editor/data/tts_speakers.csv
+packages/video-v1.5.3/jianying-editor/data/
 
 # Local credentials and overrides. Public templates contain no credentials.
 .env

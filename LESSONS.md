@@ -7,6 +7,14 @@
 
 ## 新增条目
 
+### L-20261103-05 前置预检必须覆盖真实输入合同、异常与干净交付面
+- status: OPEN
+- hits: 1
+- 模块: tools/batch_dispatch、audio/library_resources、build_manifest
+- 现象: 仅捕获 VoiceResolutionError 漏掉倍速 ValueError，一个坏任务终止整批；只提交被发布库存排除的 CSV，开发目录查得到却无法交付，音乐表说明与提交不符。
+- 以后怎么做: 与下游共用字段规范化和倍速验证，测试坏／好任务混批、修正恢复、原文回填、独立字段及 QC 恢复；预期输入和资源错误在本任务内记录。公开检索元数据与私有缓存分目录，打包缺表必须失败；新解释器只取跟踪／发布库存、空用户目录、禁联网验证真实名称与下游 ID，而非依靠宿主已有文件或源码存在性。
+- 证据: `tests/test_batch_dispatch.py`、`tests/test_runtime_resources.py`、`tests/test_release_version.py`、`test_audio_catalog_admission.py`；PR #38 原 head `66c1e77` 与本轮修复。
+
 ### L-20261103-04 具体卖点的召回排序不能被通用展示池覆盖
 - status: OPEN
 - hits: 1

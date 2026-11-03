@@ -15,6 +15,8 @@
   - 再不命中：退回默认音色 `male_energetic`
 - 解析失败抛 `VoiceResolutionError` 并返回候选清单给运营选择（不自动猜测）
 - “全库”来源：`voice_library.load_library()`（官方显示名 CSV + 历史别名），并做中文性别/风格画像与“排除方言/外语/角色/特效音”（除非剧情明确需要）
+- 音色与音乐检索表随包放在 `jianying-editor/resources/catalogs/`，只读当前包，`data/` 与下载缓存仍不随包交付。`env` 报告各表的路径、条数和 `RUNTIME_CATALOG_MISSING/UNREADABLE/INVALID`；缓存后删表、坏表或修复即时生效。
+- dispatcher 按 worker 相同的会议字段规范化预检音色、原文回填及独立倍速；无效输入只阻断本任务，其他任务继续，QC 恢复不重做音频准入。空音色保留自动选择合同，但仍要求资源就绪；显式本地 BGM 不要求音乐表。直接 `build` 也在配音／分析前检查所需表。
 
 ## 3. TTS 并发与缓存
 - 缓存键仅看“文本+音色+后端+后处理版本”（`AUDIO_PIPELINE_VERSION`），与 `video_speed/窗口` 无关；命中即完全复用字节
