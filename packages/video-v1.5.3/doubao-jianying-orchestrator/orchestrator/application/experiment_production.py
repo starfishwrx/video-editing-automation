@@ -51,11 +51,12 @@ def _prior_origins(timeline, prior_origins, allowed, lo, hi):
     return origins
 
 
-def apply(manifest, timeline, sentence_ids, roles, evidence, *, group_id, prior_origins=(), ffprobe="ffprobe", motion=None):
+def apply(manifest, timeline, sentence_ids, roles, evidence, *, group_id, prior_origins=(), ffprobe="ffprobe", motion=None, align_phases=False):
     from ..vision.experiment_pair_review import PROTOCOL as PAIR_PROTOCOL
     if evidence.get("protocol")==PAIR_PROTOCOL:
         return apply_pair(manifest,timeline,sentence_ids,roles,evidence,group_id=group_id,
-                          prior_origins=prior_origins,ffprobe=ffprobe,motion=motion)
+                          prior_origins=prior_origins,ffprobe=ffprobe,motion=motion,align_phases=align_phases)
+    if align_phases:raise ValueError('EXPERIMENT_PHASE_ALIGNMENT_REQUIRES_PAIR_MOTION')
     if motion is not None:raise ValueError('EXPERIMENT_MOTION_REQUIRES_PAIR_EVIDENCE')
     from ..selection.timing_contract import split_sentences
     if [s.text for s in timeline.sentences] != [r["text"] for r in split_sentences(manifest)]:
@@ -118,7 +119,7 @@ def apply(manifest, timeline, sentence_ids, roles, evidence, *, group_id, prior_
     return replace_group(timeline, sentence_ids, [clip], group_id=group_id, assets=(asset,), original_paths=origins)
 
 
-def apply_pair(manifest,timeline,sentence_ids,roles,evidence,*,group_id,prior_origins=(),ffprobe="ffprobe",motion=None):
+def apply_pair(manifest,timeline,sentence_ids,roles,evidence,*,group_id,prior_origins=(),ffprobe="ffprobe",motion=None,align_phases=False):
     from ..selection.timing_contract import split_sentences
     from ..selection.experiment_contract import validate_pair
     from ..vision.experiment_pair_review import PROTOCOL as PAIR_PROTOCOL
@@ -182,11 +183,20 @@ def apply_pair(manifest,timeline,sentence_ids,roles,evidence,*,group_id,prior_or
     planned=[]
     if motion is not None:
         from ..vision.experiment_motion_review import validate as validate_motion
-        from ..selection.experiment_retiming import windows,fit_group
         observed=validate_motion(manifest,evidence,motion)
-        planned=fit_group(windows(members,observed,rules['minimum_result_frames'],fps=timeline.canvas.fps_num/timeline.canvas.fps_den),duration,
+        from ..selection.experiment_events import validate_focus,fit_phase_windows
+        validate_focus(selected,roles,observed)
+        phase_boundary=None
+        if align_phases:
+            role_map={r['sentence_id']:r['role'] for r in roles}
+            rewet=next((s for s in selected if role_map[s.sentence_id]=='rewet'),None)
+            if rewet is None:
+                raise ValueError('EXPERIMENT_PHASE_PRESS_ANCHOR_REQUIRED')
+            phase_boundary=rewet.start_us-lo
+        planned=fit_phase_windows(members,observed,rules['minimum_result_frames'],duration,phase_boundary,
             fps=timeline.canvas.fps_num/timeline.canvas.fps_den)
     else:
+        if align_phases:raise ValueError('EXPERIMENT_PHASE_ALIGNMENT_REQUIRES_PAIR_MOTION')
         if duration<required:raise ValueError("EXPERIMENT_DURATION_CONFLICT_WITH_COMPATIBLE_SENTENCES")
         if duration>maximum:raise ValueError("EXPERIMENT_SOURCE_TOO_SHORT_NO_FREEZE_ALLOWED")
         extra=duration-required
@@ -210,7 +220,7 @@ def apply_pair(manifest,timeline,sentence_ids,roles,evidence,*,group_id,prior_or
                 'target_duration_us':part['segment_us']if motion is not None else part['target_duration_us'],
                 'protected_intervals':protected,
                 "evidence":[{"protocol":PAIR_PROTOCOL,"original":samples["original"],"pair_observation":row,
-                    "motion_observation":motion,"status":"OUTPUT_REVIEW_PENDING"}]
+                    "motion_observation":motion,"source_selection":plan.get('source_selection'),"status":"OUTPUT_REVIEW_PENDING"}]
                     +([{'bounded_process_speed_cap':3}]if motion is not None and not part['locked']else [])})
     transition=(members[0]["samples"]["original"]["path"],members[1]["samples"]["original"]["path"])
     return replace_group(timeline,sentence_ids,clips,group_id=group_id,assets=added,original_paths=origins,matched_pairs=(transition,))

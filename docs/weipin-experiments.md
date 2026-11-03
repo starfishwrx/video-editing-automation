@@ -6,6 +6,23 @@
 
 当前仍为显式预览入口，未切换默认生产。素材关系、固定句长可行性、最终观看质量分别验收。
 
+## 事件边界与逐句相位优化
+
+`events`先用实际编号视频观察事实，再用边界附近的密集原帧校正。短窗口逐个检查10fps编号帧；B另给首次纸巾接触、开始提起、结果可读三个编号，准备不能算成按压。模型只报事实，程序保护首尾、提起和结果，中间倒液、吸收及按压过程允许先≤2倍、必要时≤3倍。吸收末态至少保留300ms原速；纸巾结果至少15个实际输出帧。10fps观察仍有约100ms采样边界，不能宣称源帧级识别已经稳定。
+
+```powershell
+uv run --frozen python -X utf8 -m tools.weipin_experiment events --manifest work/task.json --evidence work/pair.pair.json --focus absorption_focus --font C:/Windows/Fonts/arial.ttf --output work/events.json
+uv run --frozen python -X utf8 -m tools.weipin_experiment optimize --manifest work/task.json --timeline work/fixed/timeline.json --roles work/roles.json --evidence work/pair.pair.json --motion work/events.motion.json --prior-origins work/origin-bindings.json --align-phases --report-dir work/aligned-new
+```
+
+`--align-phases`从反渗句起点分开求解两份源窗预算，按压准备自动去掉，纸巾实际接触对上该句；放不下明确报`EXPERIMENT_PHASE_DURATION_CONFLICT`，不再仅凭实验组总长宣称逐句已对齐。未启用时保留旧的整组连续分配行为，仍输出相位偏移。
+
+`--focus complete_pour`为观察默认值，保留完整倒液。显式`absorption_focus`只用于定性吸收卖点：允许从已观察到的倒液尾段取连续窗口，至少保留400ms液体流入，后续吸收和可读末态均保留；优先选择2倍以内能放下的最早源起点，再尝试3倍。省略的倒液前段写入`source_selection`和`changes.json`，没有内部切过程或补静帧，也不冒称展示完整倒液。含倒液完整性、毫升数或计时主张时不能用该覆盖；含计时/瞬吸主张时两种模式都禁止加速倒液和吸收过程。
+
+卫品42本轮只复查041/042，原13句及直率英子1.2配音保留。吸收选窗5.600–7.816667秒，实际两个过程段均2倍，接触/完成/末态原速；按压验证0.900–3.816667秒，中间过程实际约1.161倍。时间线按压起点偏移0，30fps实际首帧早29.751ms，边界识别仍受上述采样误差限制。纸巾结果37帧，仍延续到体验总结句，不能称整条反渗证据已全部放进0.998027秒的单句。
+
+A使用此前用户看过的完整倒液局部加速预览，B为本轮吸收卖点取段；不是与诊断黑场比较。固定18份音频/字幕文件字节一致，组外源帧/PTS映射一致；最终H264重编码令部分组外重建像素不同，不宣称整片逐像素相同。冷读实际帧对照支持B在反渗口播期已有纸巾接触，结果也较早可读；独立MP4模型复核却误称两侧相同及B为完整倒液，该答复保留但未作验收依据。局部对应改善不代表已证明整体达到人工示例质量，播放节奏与正式交付仍待验收。未部署、未回写。
+
 ## 用正常命令复现已复核方案
 
 已确认的配对、句子用途、源关系和阶段数据可直接交给程序，不再编写任务专属Python脚本。已有绑定motion时运行：

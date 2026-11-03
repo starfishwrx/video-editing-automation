@@ -9,7 +9,7 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1] / "doubao-jianying-orc
 
 def main(argv=None):
     p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument("stage",choices=("roles","observe","pair","motion","phase-template","apply","optimize","detail"))
+    p.add_argument("stage",choices=("roles","observe","pair","motion","events","phase-template","apply","optimize","detail"))
     p.add_argument("--manifest",type=Path,required=True)
     for name in ("timeline","source","report-dir","output","roles","evidence","motion","phase-spec","first-evidence","second-evidence","prior-origins","render-dir","font"):
         p.add_argument("--"+name,type=Path)
@@ -17,11 +17,14 @@ def main(argv=None):
     p.add_argument("--ffmpeg",default="ffmpeg");p.add_argument("--ffprobe",default="ffprobe")
     p.add_argument('--sentence-id',action='append');p.add_argument('--width',type=int,default=540)
     p.add_argument('--no-render',action='store_true')
+    p.add_argument('--align-phases',action='store_true')
+    p.add_argument('--focus',choices=('complete_pour','absorption_focus'),default='complete_pour')
     a=p.parse_args(argv)
     required={"roles":("timeline","output"),"observe":("source","report_dir","font"),
               "apply":("timeline","roles","evidence","prior_origins","output"),
               "pair":("first_evidence","second_evidence","first_window","second_window","output","font"),
               "motion":("evidence","output"),
+              "events":("evidence","output","font"),
               "optimize":("timeline","roles","evidence","prior_origins","report_dir"),
               "phase-template":("evidence","output"),
               "detail":("evidence","output","font")}[a.stage]
@@ -39,10 +42,13 @@ def main(argv=None):
     inputs=[v for k,v in vars(a).items() if isinstance(v,Path)and k in {"manifest","timeline","source","roles","evidence","motion","phase_spec","first_evidence","second_evidence","prior_origins","font"}]
     if a.output:
         guard_paths(inputs,a.output,(".prompt.txt",".request.json",".evidence.json",".detail.json",".pair.json",".jpg",".binding.json",".motion.json"))
-        if a.stage=='motion':
+        if a.stage in {'motion','events'}:
             for part in ('A','B'):
                 guard_paths(inputs,a.output.with_name(a.output.stem+'-'+part+'.json'),
                     ('.input.json','.call.json','.video','.window.mp4','.candidate.json'))
+                if a.stage=='events':
+                    guard_paths(inputs,a.output.with_name(a.output.stem+'-'+part+'-detail.json'),
+                        ('.jpg','.prompt.txt','.request.json','.facts.json','.candidate.json'))
         if a.output.exists():raise ValueError("EXPERIMENT_OUTPUT_ALREADY_EXISTS")
     if a.stage=='phase-template':
         from orchestrator.application.experiment_optimization import phase_spec_template
@@ -53,7 +59,7 @@ def main(argv=None):
         result=optimize(manifest,EditTimeline.load(a.timeline),read(a.roles),read(a.evidence),
             read(a.prior_origins),a.report_dir,phase_spec=read(a.phase_spec)if a.phase_spec else None,
             motion=read(a.motion)if a.motion else None,sentence_ids=a.sentence_id,
-            render=not a.no_render,ffmpeg=a.ffmpeg,ffprobe=a.ffprobe,width=a.width)
+            render=not a.no_render,ffmpeg=a.ffmpeg,ffprobe=a.ffprobe,width=a.width,align_phases=a.align_phases)
     elif a.stage=="roles":
         timeline=EditTimeline.load(a.timeline)
         if timeline.task_id!=manifest["task_id"]:raise ValueError("EXPERIMENT_TASK_MISMATCH")
@@ -82,6 +88,10 @@ def main(argv=None):
         from orchestrator.vision.experiment_motion_review import review
         result={"status":"EXPERIMENT_PROCESS_OBSERVED","protocol":review(manifest,read(a.evidence),a.output,
             ffmpeg=a.ffmpeg,ffprobe=a.ffprobe)['protocol']}
+    elif a.stage=="events":
+        from orchestrator.vision.experiment_event_review import review
+        result={'status':'EXPERIMENT_EVENTS_OBSERVED','protocol':review(manifest,read(a.evidence),a.output,
+            focus=a.focus,ffmpeg=a.ffmpeg,ffprobe=a.ffprobe,font_path=a.font)['protocol']}
     elif a.stage=="detail":
         from orchestrator.vision.experiment_detail import review
         evidence=read(a.evidence)
@@ -96,7 +106,8 @@ def main(argv=None):
         timeline=EditTimeline.load(a.timeline);groups=candidate_groups(timeline,roles["sentences"],contract_for(manifest))
         if len(groups)!=1:raise ValueError("EXPERIMENT_REQUIRES_ONE_UNAMBIGUOUS_GROUP")
         updated=apply(manifest,timeline,groups[0],roles["sentences"],read(a.evidence),group_id="same-experiment",
-                      prior_origins=read(a.prior_origins),ffprobe=a.ffprobe,motion=read(a.motion)if a.motion else None)
+                      prior_origins=read(a.prior_origins),ffprobe=a.ffprobe,motion=read(a.motion)if a.motion else None,
+                      align_phases=a.align_phases)
         updated.save(a.output)
         if a.render_dir:
             from orchestrator.media.timeline_render import render_timeline

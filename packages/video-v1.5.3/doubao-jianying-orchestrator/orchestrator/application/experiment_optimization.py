@@ -63,6 +63,8 @@ def _change_rows(before, after, sentence_ids):
             'source_end_us': v.source_start_us + v.source_duration_us,
             'target_start_us': v.target_start_us, 'duration_us': v.duration_us,
             'speed': v.speed_num / v.speed_den, 'source': assets[v.asset_id].path,
+            'source_selection':next((e['source_selection'] for e in v.evidence
+                if isinstance(e,dict) and e.get('source_selection')),None),
             'original_source': next((e['original']['path'] for e in v.evidence
                 if isinstance(e, dict) and isinstance(e.get('original'), dict)
                 and isinstance(e['original'].get('path'), str)), assets[v.asset_id].path)}
@@ -84,8 +86,9 @@ def _phase_lags(timeline, roles, pair, motion, group_id):
     selected = {sid for v in timeline.videos if v.asset_id in {group_id + '-0', group_id + '-1'}
         for sid in v.sentence_ids}
     return [{'sentence_id': s.sentence_id, 'sentence_start_us': s.start_us, 'press_start_us': press_us,
-        'lag_us': press_us - s.start_us, 'status': 'PHASE_ALIGNMENT_REVIEW_REQUIRED'}
-        for s in timeline.sentences if role_map[s.sentence_id] == 'rewet' and s.start_us < press_us
+        'lag_us': press_us - s.start_us,
+        'status': 'ALIGNED_WITHIN_ONE_OUTPUT_FRAME' if abs(press_us-s.start_us)*timeline.canvas.fps_num<=1_000_000*timeline.canvas.fps_den else 'PHASE_ALIGNMENT_REVIEW_REQUIRED'}
+        for s in timeline.sentences if role_map[s.sentence_id] == 'rewet'
         and s.sentence_id in selected]
 
 
@@ -110,7 +113,7 @@ def _frame_execution(timeline, receipt, group_id):
 
 
 def optimize(manifest, timeline, roles, pair, prior_origins, directory, *, phase_spec=None,
-             motion=None, sentence_ids=None, render=True, ffmpeg='ffmpeg', ffprobe='ffprobe', width=540):
+             motion=None, sentence_ids=None, render=True, ffmpeg='ffmpeg', ffprobe='ffprobe', width=540,align_phases=False):
     """Use fixed audio and cached evidence; never analyze a library or publish a draft."""
     if (phase_spec is None) == (motion is None):
         raise ValueError('EXPERIMENT_REQUIRES_ONE_MOTION_OR_PHASE_SPEC')
@@ -131,8 +134,11 @@ def optimize(manifest, timeline, roles, pair, prior_origins, directory, *, phase
                 fps=timeline.canvas.fps_num / timeline.canvas.fps_den)
         validate_motion(manifest, pair, motion)
         group_id = 'experiment-optimization'
+        revision=timeline.revision+1
+        while any(a.asset_id.startswith(group_id+'-') for a in timeline.assets):
+            group_id=f'experiment-optimization-r{revision}';revision+=1
         updated = apply(manifest, timeline, sentence_ids, roles['sentences'], pair, group_id=group_id,
-            prior_origins=prior_origins, motion=motion, ffprobe=ffprobe)
+            prior_origins=prior_origins, motion=motion, ffprobe=ffprobe,align_phases=align_phases)
         selected = [s for s in timeline.sentences if s.sentence_id in sentence_ids]
         lo, hi = selected[0].start_us, selected[-1].start_us + selected[-1].duration_us
         outside = lambda t: tuple(v for v in t.videos if v.target_start_us >= hi or v.target_start_us + v.duration_us <= lo)
@@ -148,8 +154,10 @@ def optimize(manifest, timeline, roles, pair, prior_origins, directory, *, phase
         result = {'status': 'PLANNED_OUTPUT_REVIEW_PENDING', 'formal_delivery_allowed': False,
             'task_id': manifest['task_id'], 'sentence_ids': sentence_ids, 'duration_us': hi - lo,
             'method': motion.get('method', 'unclassified_motion_artifact'), 'preserved': preserved,
+            'phase_alignment_enforced':align_phases,
+            'coverage':[o.get('coverage','complete_pour' if i==0 else 'complete_verification') for i,o in enumerate(motion['observations'])],
             'phase_alignment': lags, 'timeline': str(root / 'timeline.json'),
-            'limitations': ['自动阶段观察仍可能需要定向复核；连续实验组不保证每句卖点相位都已对齐。',
+            'limitations': ['自动阶段观察仍需实际输出复核；相位时间对齐不代替卖点画面验收。',
                 '这是预览；整片观看和正式交付未认证。']}
         if render:
             receipt = render_timeline(updated, root / 'render', ffmpeg=ffmpeg, ffprobe=ffprobe,
@@ -166,7 +174,9 @@ def optimize(manifest, timeline, roles, pair, prior_origins, directory, *, phase
             cuts = '; '.join(f"{Path(c['original_source']).name} {c['source_start_us']/1e6:.3f}–{c['source_end_us']/1e6:.3f}s @{c['speed']:.3f}x" for c in row['after'])
             report.append(f"| {row['sentence_id']} | {row['text'].replace('|', '/')} | {row['duration_us']/1e6:.6f} | {len(row['before'])} | {cuts.replace('|', '/')} |")
         report += ['', '## 仍需复核', '', *['- ' + s for s in result['limitations']]]
-        report += [f"- {r['sentence_id']}：按压开始晚于本句起点 {r['lag_us']/1e6:.3f} 秒，需复核逐句画面对应。" for r in lags]
+        if 'absorption_focus' in result['coverage']:
+            report += ['- 吸收卖点取段从实际倒液尾段开始，未展示完整倒液；保留选定源窗的连续过程，吸收过程可能加速，不能据此读出真实吸收耗时。']
+        report += [f"- {r['sentence_id']}：按压起点相对本句偏移 {r['lag_us']/1e6:.3f} 秒（{r['status']}）。" for r in lags]
         report += ['', '计划倍速与整数帧实际执行分别记录，实际帧/倍速及检查结果见[result.json](result.json)。',
             '完整旧新源窗口见[changes.json](changes.json)。']
         (root / 'REPORT.md').write_text('\n'.join(report) + '\n', encoding='utf-8')
