@@ -9,8 +9,22 @@ from .. import ai_editor_contract as contract
 from ..selection import ai_editor
 from ..selection.paper_selection import validate_observation
 
-PROTOCOL = "purpose-observation-v3-experiment-pairs"
-OUTPUT_PROTOCOL = "purpose-output-review-v5-experiment-pairs"
+PROTOCOL = "purpose-observation-v5-blind-shot-usability"
+OUTPUT_PROTOCOL = "purpose-output-review-v7-blind-shot-usability"
+
+USABILITY_PROMPT='''
+在输出JSON顶层另加shot_usability对象报告镜头可用性，不从同商品、口播或高置信度推断画面有效。
+先描述具体看清的信息点。整理护翼、翻折收拢、准备姿态、手遮住主体，不等于柔软/轻薄展示。
+柔软演示应能看清受力变形与完成/恢复形态；薄度须有看清边缘/层厚的视角；
+仅把产品折成一团不能证明薄软，更不能推断透气或不粘腻。体验句可用贴切物性展示，不强制人体实验。
+稳定、清楚的本体或包装展示可用于普通介绍/促销；具体体验目标要能实际看见对应特点。
+clear_intervals_us只记录主体和所需信息点确实可读的时间区间，手遮挡或仅整理阶段不计。
+shot_usability字段：{"view_kind":"stable_display|complete_demonstration|handling_or_setup|uncertain",
+"subject_visibility":"clear|partial|blocked|uncertain","relation":"visible_feature|general_product|inferred_only|unrelated|uncertain",
+"demonstration_complete":false,"information_point":"实际可见信息及限制",
+"clear_intervals_us":[{"start":0,"end":1000000,"observed":"这段具体看清什么"}],"limitations":"采样和看不清部分"}。
+这与语义相关性分别判断，语义贴切但镜头没有展示清楚时仍记录不可用事实。
+'''
 
 
 def policy(manifest):
@@ -49,7 +63,9 @@ def requirements(manifest, narration, directory):
 吸收/反渗等需真实动作和可见结果，透气体验可用结构/薄软等贴切展示但不能声称已物理证明，
 一整天效果不能由短实验外推。修辞衔接/囤货号召/普通促销只需display，不能标为unverifiable。
 不增加原文没有的物理证明要求，也不删除难以证明的内容。需要动作/结果时对应布尔值为true。
-只输出JSON {"sentences":[{"index":1,"text":"原文","require_action":false,"require_result":false,
+展示句另带display_goal：普通介绍/促销为general_product，薄软/舒适等具体特点为visible_feature。
+允许展示不等于只要同商品就合格，检查项写清观众实际需看清的形态、结构或动作结果。
+只输出JSON {"sentences":[{"index":1,"text":"原文","require_action":false,"require_result":false,"display_goal":"general_product|visible_feature",
 "checks":[{"id":"c1","question":"逐项检查什么","type":"display|label|action_result|unverifiable"}]}]}。
 """ + json.dumps({"product": manifest["product"], "sentences": [
         {"index": i, "text": r["text"]} for i, r in enumerate(rows, 1)]}, ensure_ascii=False),
@@ -66,6 +82,8 @@ def requirements(manifest, narration, directory):
                 "absorption","rewet","followup","bridge","breathability","fluorescence",
                 "sku_change","promotion","other","uncertain"}:
             raise ValueError("PURPOSE_REQUIREMENT_TOPIC_REQUIRED")
+        if row.get('display_goal','visible_feature') not in {'general_product','visible_feature'}:
+            raise ValueError('PURPOSE_DISPLAY_GOAL_INVALID')
         checks = row.get("checks")
         if (not isinstance(checks, list) or not checks or any(
                 not isinstance(c, dict) or not isinstance(c.get("id"), str) or not c["id"].strip()
@@ -121,12 +139,24 @@ def scan(manifest, requests, shot, media, directory):
 
 
 def review(manifest, request, shot, media, directory):
+    from ..selection.shot_usability import is_display,assess
+    quality=None
+    if is_display(request):
+        from .shot_quality_review import observe
+        quality=observe(shot,media,directory)
+        gate=assess(quality,request,{'start':round(media['start']*1e6),'end':round(media['end']*1e6)},check_relation=False)
+        if gate['status']=='REJECTED':
+            return {'verdict':'mismatch','reason':'SHOT_NOT_USABLE_BEFORE_SEMANTIC_MATCH',
+                'observation':quality['information_point'],'shot_usability':{**quality,'relation':'uncertain'},
+                'usability':gate,'supported_ids':[],'source_identity':media['before'],
+                'reviewed_window_us':{'start':round(media['start']*1e6),'end':round(media['end']*1e6)},'sheet':str(media['sheet'])}
     # The observer never sees target narration duration or a proposed speed.
     context = {"product": manifest["product"], "sentence": request["text"], "checks": request["checks"],
+        'display_goal':request.get('display_goal','visible_feature'),
         "require_action": request["require_action"], "require_result": request["require_result"],
         "sample_times_us": [round(t*1e6) for t in media["times"]],
         "source_window_us": {"start": round(media["start"] * 1e6), "end": round(media["end"] * 1e6)}}
-    prompt = policy(manifest) + """只看附图，独立检查这句实际需要的事实。口播不是答案，不能确认就uncertain。
+    prompt = policy(manifest) + USABILITY_PROMPT + """只看附图，独立检查这句实际需要的事实。口播不是答案，不能确认就uncertain。
 逐项记录supported/unsupported/uncertain及观察；短实验不能证明一整天或绝对功效。
 只定位一次紧凑完整的真实演示，去掉重复演示。动作开端、关键接触、完成与可见结果不能省略；
 关键动作、结果保持原速，只有明确无关紧要的过程允许加速。结果需有可看清的停留，不按目标句长裁证据。
@@ -140,8 +170,13 @@ def review(manifest, request, shot, media, directory):
 window是足以表达这次演示的连续源窗，phases按顺序无缝覆盖；key_action/result的can_speed必须false。
 至少一项实际支持才可matched，其他缺失仍逐项保留；没有任何支持就uncertain或mismatch。
 """ + json.dumps(context, ensure_ascii=False)
+    if is_display(request) and round((media['end']-media['start'])*1e6)==request.get('segment_us'):
+        prompt+='\n本次展示输入已经是拟剪出的完整窗口，window_us必须等于source_window_us，phases无缝覆盖全部输入。若只有一小段可用，在shot_usability明确记录，不通过缩小window隐去问题。'
     key = contract.digest([PROTOCOL, "review", context, media["before"]])[:24]
     row = ai_editor._call(prompt, Path(directory) / "review_calls" / f"{key}.json", Path(media["sheet"]))
+    if quality is not None and row.get('verdict')=='matched':
+        from ..selection.shot_usability import intersect_observations
+        row['shot_usability']=intersect_observations(quality,row.get('shot_usability'),request,context['source_window_us'])
     supported = check_results(row.get("checks"), request["checks"])
     row = validate_observation(row, shot, request)
     if row["verdict"] == "matched" and not supported:
@@ -153,9 +188,14 @@ window是足以表达这次演示的连续源窗，phases按顺序无缝覆盖�
 
 
 def review_output(manifest, request, shot, media, directory):
+    from ..selection.shot_usability import is_display
+    quality=None
+    if is_display(request):
+        from .shot_quality_review import observe
+        quality=observe(shot,media,directory)
     context = {"product": manifest["product"], "sentence": request["text"],
         "check_ids": [c["id"] for c in request["checks"]]}
-    prompt = policy(manifest) + """独立检查实际剪出的片段。你不知道选镜器的结论。只按图片中的可见事实逐项判断，
+    prompt = policy(manifest) + USABILITY_PROMPT + """独立检查实际剪出的片段。你不知道选镜器的结论。只按图片中的可见事实逐项判断，
 不能从口播/字幕推导画面已经证实，也不能把场景联想当成功效。标称仅支持标称，短实验不支持一整天。
 检查动作是否完整，结果是否看清，明显超速是否损害理解。采样没拍到的动作不能猜测发生过。
 输出JSON {"checks":[{"id":"c1","status":"supported|unsupported|uncertain","observed":"事实"}],
@@ -167,6 +207,10 @@ check_ids只提供编号，没有选镜器的解释或分类。按文案卖点�
 """ + json.dumps(context, ensure_ascii=False)
     key = contract.digest([PROTOCOL, "output", context, media["before"], media["start"], media["end"]])[:24]
     data = ai_editor._call(prompt, Path(directory) / "output_calls" / f"{key}.json", Path(media["sheet"]))
+    if quality is not None:
+        from ..selection.shot_usability import intersect_observations
+        data['shot_usability']=intersect_observations(quality,data.get('shot_usability'),request,
+            {'start':round(media['start']*1e6),'end':round(media['end']*1e6)})
     supported = check_results(data.get("checks"), request["checks"])
     if (any(type(data.get(k)) is not bool for k in ("action_complete", "result_visible", "rhythm_ok"))
             or type(data.get("all_script_claims_checked")) is not bool
@@ -176,10 +220,13 @@ check_ids只提供编号，没有选镜器的解释或分类。按文案卖点�
         raise ValueError("PURPOSE_OUTPUT_REVIEW_INVALID")
     if media["before"] != contract.source_identity(shot["video"]):
         raise ValueError("PURPOSE_OUTPUT_CHANGED")
-    ok = (len(supported) == len(request["checks"]) and data["rhythm_ok"]
+    from ..selection.shot_usability import is_display,assess
+    usability=assess(data.get('shot_usability'),request,{'start':round(media['start']*1e6),'end':round(media['end']*1e6)}) if is_display(request) else None
+    ok = ((usability is None or usability['status']=='USABLE_FOR_COMPARISON')
+        and len(supported) == len(request["checks"]) and data["rhythm_ok"]
         and data["all_script_claims_checked"] and not data["uncovered_claims"]
         and (not request["require_action"] or data["action_complete"])
         and (not request["require_result"] or data["result_visible"]))
-    return {**data, "status": "SAMPLED_SUPPORT" if ok else "EVIDENCE_PENDING", "index": request["index"],
+    return {**data, 'usability':usability,"status": "SAMPLED_SUPPORT" if ok else "EVIDENCE_PENDING", "index": request["index"],
         "output_identity": media["before"], "window_us": {"start": round(media["start"] * 1e6), "end": round(media["end"] * 1e6)},
         "formal_delivery_allowed": False, "review_method": "16 timestamped output samples; full playback not certified"}

@@ -2,7 +2,7 @@
 import re
 from copy import deepcopy
 
-from .experiment_retiming import validate_motion,windows,fit_group
+from .experiment_retiming import validate_motion,windows,fit_group,boundary
 
 
 def validate_focus(sentences,roles,observations):
@@ -52,11 +52,16 @@ def compile_events(row,member):
         if (type(a)is not int or type(b)is not int or a!=cursor or b<a or b>window[1]
                 or not isinstance(fact,str) or not fact.strip()):
             raise ValueError('EXPERIMENT_EVENTS_COVERAGE_INVALID')
-        # Boundaries always retain actual source time. Absorption's changing
-        # middle may accelerate too; the final visible state retains 300 ms.
-        # The final 10 Hz sample ends only one native 60 Hz frame later;
-        # four samples therefore protect >=300 ms, rather than assuming 3 do.
-        tail=4 if kind=='absorb' else 2 if kind=='press' else 1
+        # Use source PTS: original speed alone does not make a one-frame
+        # absorption result readable. Reject a short state, never pad/freeze it.
+        tail=2 if kind=='press' else 1
+        if kind=='absorb':
+            end=boundary(member['samples'],b+1,window[1])
+            if end-boundary(member['samples'],a,window[1])<300_000:
+                raise ValueError('EXPERIMENT_ABSORPTION_STATE_TOO_SHORT')
+            first=b
+            while end-boundary(member['samples'],first,window[1])<300_000:first-=1
+            tail=b-first+1
         if kind=='context':spans=[(a,b,True)]
         elif kind in {'lift','result'} or b-a+1<=tail+1:
             spans=[(a,b,False)]
@@ -67,6 +72,7 @@ def compile_events(row,member):
     if cursor!=window[1]+1:raise ValueError('EXPERIMENT_EVENTS_COVERAGE_INVALID')
     observation={'verdict':'observed','coverage':row.get('coverage'),
         'effective_window_frame_ids':window,'segments':segments,'limitations':row.get('limitations','')}
+    if member['part']=='A':observation['minimum_absorb_state_us']=300_000
     return validate_motion(observation,member)
 
 

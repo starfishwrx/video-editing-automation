@@ -47,7 +47,7 @@ def _binding(manifest, narration, artifact, *, rules_required=False):
             or [s["text"] for s in split_sentences(manifest)] != [r["text"] for r in narration["rows"]]):
         raise ValueError("PURPOSE_ARTIFACT_INPUT_CHANGED")
     _request_coverage(artifact.get("requests"),narration["rows"])
-    if rules_required and contract.editorial_context(manifest)["category"] == "weipin":
+    if rules_required:
         if artifact.get("rules") != contract.rules_identity(manifest) or artifact.get("protocol") != vision.PROTOCOL:
             raise ValueError("PURPOSE_WEIPIN_RULE_IDENTITY_CHANGED")
 
@@ -205,6 +205,14 @@ def select(manifest, analysis, narration, index, directory, *, workers=6, candid
             or any(c["type"] != "display" for c in r["checks"])),
             sum(bool(c.get("plan",{}).get("ok")) for c in rows[r["index"]]["candidates"]),r["index"])):
         row = rows[request["index"]]
+        from ..selection.shot_usability import is_display
+        feasible=purpose_selection.eligible(row['candidates'],used)
+        if is_display(request) and len(feasible)>=2:
+            from ..vision.display_compare import compare
+            try:row['comparison']=compare(manifest,request,feasible,root/f"display-comparison-{request['index']:02d}")
+            except (ValueError,OSError,RuntimeError) as error:
+                row['comparison_error']=str(error)
+                for c in feasible:c['plan']={'ok':False,'reason':'DISPLAY_COMPARISON_UNKNOWN'}
         winner = purpose_selection.choose(row["candidates"],used)
         row["selected"] = winner
         row["status"] = "SELECTED_FOR_PREVIEW" if winner else "EVIDENCE_OR_TIMING_PENDING"

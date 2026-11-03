@@ -29,6 +29,18 @@ class ExperimentEventsTests(unittest.TestCase):
         self.assertEqual([s['can_speed'] for s in absorb],[False,True,False])
         self.assertEqual((absorb[-1]['first_frame'],absorb[-1]['last_frame']),(37,40))
 
+    def test_short_absorption_state_is_rejected_using_actual_source_pts(self):
+        for start in (38,39,40):
+            row=facts('A');row['events'][0]['last_frame']=start-1;row['events'][1]['first_frame']=start
+            with self.assertRaisesRegex(ValueError,'ABSORPTION_STATE_TOO_SHORT'):
+                compile_events(row,self.pair['members'][0])
+        compiled=compile_events(facts('A'),self.pair['members'][0])
+        clips=windows(self.pair['members'],[compiled,compile_events(facts('B'),self.pair['members'][1])],15)
+        self.assertEqual(clips[0]['protected_intervals'][-1]['min_output_frames'],9)
+        compiled['segments'][-1]['first_frame']=39;compiled['segments'][-2]['last_frame']=38
+        with self.assertRaisesRegex(ValueError,'ABSORPTION_STATE_TOO_SHORT'):
+            windows(self.pair['members'],[compiled,compile_events(facts('B'),self.pair['members'][1])],15)
+
     def test_press_contact_completion_lift_and_result_remain_protected(self):
         row=compile_events(facts('B'),self.pair['members'][1])
         locked=[s for s in row['segments'] if not s['can_speed']]

@@ -105,6 +105,15 @@ class PurposeEvidenceTests(unittest.TestCase):
                 with self.subTest(key=key),self.assertRaisesRegex(ValueError,"INPUT_CHANGED"):
                     app._binding({**manifest,key:"changed"},narration,artifact)
 
+    def test_pre_blind_observation_protocol_cannot_reuse_completed_selection(self):
+        with tempfile.TemporaryDirectory() as raw:
+            manifest,narration,artifact,_=self.binding_fixture(raw)
+            artifact.update(rules=vision.contract.rules_identity(manifest),protocol='purpose-observation-v4-shot-usability')
+            with self.assertRaisesRegex(ValueError,'RULE_IDENTITY_CHANGED'):
+                app._binding(manifest,narration,artifact,rules_required=True)
+            artifact['protocol']=vision.PROTOCOL
+            app._binding(manifest,narration,artifact,rules_required=True)
+
     def test_missing_output_sentence_stops_before_media_or_api(self):
         from test_timeline_export import example
         with patch.object(app,"check_production") as check:
@@ -211,8 +220,12 @@ class PurposeEvidenceTests(unittest.TestCase):
         data={"checks":[{"id":"c1","status":"supported","observed":"thin"}],"action_complete":True,
             "result_visible":True,"rhythm_ok":True,"all_script_claims_checked":True,
             "uncovered_claims":["all-day dryness not shown"],"reason":"thin only"}
+        data['shot_usability']={'view_kind':'stable_display','subject_visibility':'clear','relation':'visible_feature',
+            'demonstration_complete':False,'information_point':'thin edge','limitations':'sampled',
+            'clear_intervals_us':[{'start':0,'end':1_000_000,'observed':'thin edge visible'}]}
         media={"start":0,"end":1,"before":{"size":1},"sheet":"sheet.jpg"}
-        with patch.object(vision.ai_editor,"_call",return_value=data),patch.object(vision.contract,"source_identity",return_value=media["before"]):
+        with patch.object(vision.ai_editor,"_call",return_value=data),patch.object(vision.contract,"source_identity",return_value=media["before"]),\
+                patch('orchestrator.vision.shot_quality_review.observe',return_value=data['shot_usability']):
             result=vision.review_output({"product":"fixture"},request,{"video":"preview.mp4"},media,Path("unused"))
         self.assertEqual(result["status"],"EVIDENCE_PENDING")
 

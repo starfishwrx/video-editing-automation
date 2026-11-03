@@ -1,5 +1,6 @@
 """Fit verified experiment phases, keeping contact, completion and results real-time."""
 from fractions import Fraction
+import math
 
 from .paper_retiming import _allocate, _protected, plan_retiming
 
@@ -54,12 +55,19 @@ def windows(members,observations,result_frames,*,fps=30):
     for member,row in zip(members,observations):
         validate_motion(row,member);samples=member['samples'];a,b=row['effective_window_frame_ids']
         protected=[]
+        state_min=row.get('minimum_absorb_state_us',300_000 if member['part']=='A' and row.get('coverage') else None)
+        if state_min is not None and (member['part']!='A' or type(state_min)is not int or state_min!=300_000):
+            raise ValueError('EXPERIMENT_ABSORPTION_STATE_MINIMUM_INVALID')
+        state=next((s for s in reversed(row['segments']) if s['kind']=='absorb'),None)
         for segment in row['segments']:
             if not segment['can_speed']:
-                protected.append({'start':boundary(samples,segment['first_frame'],b),
-                    'end':boundary(samples,segment['last_frame']+1,b),
+                start=boundary(samples,segment['first_frame'],b);end=boundary(samples,segment['last_frame']+1,b)
+                required=math.ceil(state_min*fps/1_000_000) if state_min and segment is state else 1
+                if state_min and segment is state and end-start<state_min:
+                    raise ValueError('EXPERIMENT_ABSORPTION_STATE_TOO_SHORT')
+                protected.append({'start':start,'end':end,
                     'kind':'result'if segment['kind']=='result'else'action',
-                    'min_output_frames':result_frames if segment['kind']=='result'else 1})
+                    'min_output_frames':result_frames if segment['kind']=='result'else required})
         if any(p['kind']=='result'and (p['end']-p['start'])*fps<result_frames*1_000_000 for p in protected):
             raise ValueError('EXPERIMENT_RESULT_WINDOW_TOO_SHORT')
         result.append({'source_start_us':boundary(samples,a,b),'source_end_us':boundary(samples,b+1,b),
