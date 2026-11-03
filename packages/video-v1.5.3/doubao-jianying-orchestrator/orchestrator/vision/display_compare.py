@@ -35,6 +35,9 @@ def compare(manifest,request,candidates,directory):
 输出JSON {"candidates":[{"id":"C0","usable":true,"rank":0,"reason":"实际可见优劣"}]}。
 '''+json.dumps({'sentence':request['text'],'checks':request['checks'],
         'display_goal':request.get('display_goal','visible_feature'),'candidate_ids':[f'C{i}' for i in range(len(candidates))]},ensure_ascii=False)
+    from ..selection.opening_hook import is_packaging_hook
+    if is_packaging_hook(request):
+        prompt+='\n本次是opening_hook_packaging：仅比较本品包装身份可辨、画面完整和自然展示。不要求证明原句痛点，不因没有泛红/竞品/功效实验拒绝包装承接。'
     row=ai_editor._call(prompt,root/(key+'.json'),sheet);items=row.get('candidates')
     if (not isinstance(items,list) or len(items)!=len(candidates) or any(not isinstance(i,dict) for i in items)
             or {i.get('id') for i in items}!={f'C{i}' for i in range(len(candidates))}):

@@ -8,6 +8,9 @@ def assess(value,request,bounds):
     if not expected:raise ValueError('SHOT_VALUE_CLAIMS_REQUIRED')
     if any(not isinstance(text,str) or not text.strip() or text not in request['text'] for text in expected.values()):
         raise ValueError('SHOT_VALUE_REQUEST_CLAIM_SUBSTITUTED')
+    from .opening_hook import is_packaging_hook, assess_packaging
+    if is_packaging_hook(request):
+        return assess_packaging(value, request, bounds)
     omitted=value.get('uncovered_spoken_claims',[])
     if (value.get('all_spoken_claims_checked') is not None and type(value['all_spoken_claims_checked'])is not bool
             or not isinstance(omitted,list)

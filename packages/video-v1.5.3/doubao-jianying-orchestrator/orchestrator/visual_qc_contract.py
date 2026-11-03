@@ -84,7 +84,7 @@ def draft_metadata_fingerprint(draft: Path) -> str:
     if not root.is_dir():
         raise ValueError("DRAFT_DIRECTORY_REQUIRED")
     rows = []
-    names = ['draft_info.json', 'draft_content.json', 'ai_selection_identity.json']
+    names = ['draft_info.json', 'draft_content.json', 'ai_selection_identity.json', 'prepared_sources.json']
     if _draft_documents().is_native(root):
         names += ['headless-production.json', 'draft_meta_info.json', 'template-2.tmp',
                   'draft_content.json.bak', 'timeline_layout.json', 'Timelines/project.json', 'Timelines/project.json.bak',

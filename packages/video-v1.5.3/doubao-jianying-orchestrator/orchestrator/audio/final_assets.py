@@ -1,10 +1,8 @@
 """Finish cached narration before layout. Never synthesize or change its tempo."""
-import hashlib
-import json
 import math
 from pathlib import Path
 
-from .audio_loudness import normalize_narration, TARGET_LUFS
+from .audio_loudness import normalize_narration, normalized_path, TARGET_LUFS
 from ..media.probe import probe_media
 
 
@@ -24,9 +22,7 @@ def prepare_narration(path, directory, *, mode="file", loudness=None,
     final, processing = source, {"mode": "operator_file_unchanged"}
     if mode == "tts" and spec.get("enabled") is not False:
         # Existing normalizer caches by output name; bind that name to source + settings.
-        key = json.dumps([before["path"], before["size"], before["mtime_ns"], target])
-        digest = hashlib.sha256(key.encode()).hexdigest()[:20]
-        final = Path(directory) / ("narration-" + digest + ".m4a")
+        final = normalized_path(source, Path(directory), target_lufs=target)
         processing = normalize_narration(source, final, ffmpeg=str(ffmpeg), ffprobe=str(ffprobe),
                                          target_lufs=target)
         if processing.get("skipped") or not final.is_file():

@@ -9,8 +9,8 @@ from .. import ai_editor_contract as contract
 from ..selection import ai_editor
 from ..selection.paper_selection import validate_observation
 
-PROTOCOL = "purpose-observation-v6-selling-point-information"
-OUTPUT_PROTOCOL = "purpose-output-review-v8-selling-point-information"
+PROTOCOL = "purpose-observation-v7-opening-hook-packaging"
+OUTPUT_PROTOCOL = "purpose-output-review-v9-opening-hook-packaging"
 
 USABILITY_PROMPT='''
 在输出JSON顶层另加shot_usability对象报告镜头可用性，不从同商品、口播或高置信度推断画面有效。
@@ -41,6 +41,14 @@ def policy(manifest):
 仅吸收或仅按压先记录部分事实，再对通常相邻的素材做实验配对复核。禁止换另一轮实验的按压结果，
 不能把跨文件本身判为不合格。必要的结果停留不当作无意义空镜。
 """
+    if contract.editorial_context(manifest)['category']=='zhipin':
+        text+='''纸品动作事实：不掉絮须真实揉压/揉搓后展开或抖松查看，单纯拉伸不能替代揉搓。
+只取一次完整演示和首次可读结果，不把之后的重复揉搓、长时间拉伸全算作必须保留的结果。
+定性吸水的可读结果是挤压时清水明显涌出，不必等巾体拧到全干或最后一滴水停止。
+首次关键接触、动作完成及可读结果须保护；持续重复揉搓、继续展开或挤压的中间过程可记process。
+关键瞬间和结果仍标key_action/result且can_speed=false；不可把整段重复过程一概锁成关键动作。
+涉及瞬吸、吸得快或具体时长的主张仍按time_sensitive保留相关过程原速。
+'''
     return text
 
 
@@ -65,10 +73,14 @@ def requirements(manifest, narration, directory):
 一整天效果不能由短实验外推。修辞衔接/囤货号召/普通促销只需display，不能标为unverifiable。
 不增加原文没有的物理证明要求，也不删除难以证明的内容。需要动作/结果时对应布尔值为true。
 展示句另带display_goal：普通介绍/促销为general_product，薄软/舒适等具体特点为visible_feature。
+每句另给has_product_selling_point布尔值：是否对本品提出具体特点/标称/性能。开头第1—3句无具体卖点时，
+作为钩子用本品包装承接，display_goal=general_product、require_action/result=false、checks只用display。
+“谁还在用擦脸泛红的杂牌”是痛点钩子，has_product_selling_point=false，不要求泛红或竞品实验。
+“本品擦脸不泛红/不掉絮”“200抽”“联名”“悬挂式设计”均有具体卖点，必须true，保留原有检查要求。
 允许展示不等于只要同商品就合格，检查项写清观众实际需看清的形态、结构或动作结果。
 每项另带claim_text，必须保留该卖点的原文片段。“不闷热、不粘腻”等不同卖点分项，
 不能把原句改写成“展示本体/薄软”后按新的容易条件宣布支持；薄软或结构只作为候选表达方式。
-只输出JSON {"sentences":[{"index":1,"text":"原文","require_action":false,"require_result":false,"display_goal":"general_product|visible_feature",
+只输出JSON {"sentences":[{"index":1,"text":"原文","has_product_selling_point":false,"require_action":false,"require_result":false,"display_goal":"general_product|visible_feature",
 "checks":[{"id":"c1","claim_text":"对应卖点原文片段","question":"逐项检查什么","type":"display|label|action_result|unverifiable"}]}]}。
 """ + json.dumps({"product": manifest["product"], "sentences": [
         {"index": i, "text": r["text"]} for i, r in enumerate(rows, 1)]}, ensure_ascii=False),
@@ -97,6 +109,9 @@ def requirements(manifest, narration, directory):
         if any('claim_text' in c and (not isinstance(c['claim_text'],str) or not c['claim_text'].strip()
                 or c['claim_text'] not in row['text']) for c in checks):
             raise ValueError('PURPOSE_REQUIREMENT_CLAIM_SUBSTITUTED')
+    from ..selection.opening_hook import normalize,RULE
+    result=normalize(result)
+    data={**data,'sentences':result,'opening_hook_rule':RULE}
     save(Path(directory) / "requirements.json", data)
     return result
 
@@ -144,6 +159,25 @@ def scan(manifest, requests, shot, media, directory):
     return {**data, "shot_id": shot["shot_id"], "source_identity": media["before"]}
 
 
+def _phase_observation(prompt, path, sheet, shot, request):
+    row = ai_editor._call(prompt, path, sheet)
+    try:
+        return validate_observation(row, shot, request)
+    except ValueError as error:
+        if str(error) != 'PAPER_REVIEW_PROTECTED_PHASE_ACCELERATED':
+            raise
+    # A contradictory permission is a malformed response, not a bad picture.
+    # Re-observe once; never silently flip permissions or promote an old result.
+    retry = Path(path).with_name(Path(path).stem + '-phase-schema-retry.json')
+    correction = ('\n上次响应有格式矛盾：key_action/result 的 can_speed 被标为true。'
+        'can_speed表示是否允许后续加速，不是对画面当前速度的描述。请重新看同一附图，'
+        '重新输出完整观察；关键动作和结果必须false，不能为通过格式而把它们改成process。'
+        '可以重新判uncertain/mismatch，不得为了通过而补出未见的事实。')
+    row = validate_observation(ai_editor._call(prompt + correction, retry, sheet), shot, request)
+    return {**row, 'schema_recovery': {'attempts': 1,
+        'first_error': 'PAPER_REVIEW_PROTECTED_PHASE_ACCELERATED', 'retry_call': str(retry)}}
+
+
 def review(manifest, request, shot, media, directory):
     from ..selection.shot_usability import is_display,assess
     value=None
@@ -170,6 +204,8 @@ def review(manifest, request, shot, media, directory):
         "require_action": request["require_action"], "require_result": request["require_result"],
         "sample_times_us": [round(t*1e6) for t in media["times"]],
         "source_window_us": {"start": round(media["start"] * 1e6), "end": round(media["end"] * 1e6)}}
+    if request.get('visual_purpose')=='opening_hook_packaging':
+        context['visual_purpose']='opening_hook_packaging'
     prompt = policy(manifest) + USABILITY_PROMPT + """只看附图，独立检查这句实际需要的事实。口播不是答案，不能确认就uncertain。
 逐项记录supported/unsupported/uncertain及观察；短实验不能证明一整天或绝对功效。
 只定位一次紧凑完整的真实演示，去掉重复演示。动作开端、关键接触、完成与可见结果不能省略；
@@ -187,7 +223,8 @@ window是足以表达这次演示的连续源窗，phases按顺序无缝覆盖�
     if is_display(request) and round((media['end']-media['start'])*1e6)==request.get('segment_us'):
         prompt+='\n本次展示输入已经是拟剪出的完整窗口，window_us必须等于source_window_us，phases无缝覆盖全部输入。输入将原速播放，本次所有phases的can_speed均须false，key_action/result更不能标true。若只有一小段可用，在shot_usability明确记录，不通过缩小window隐去问题。'
     key = contract.digest([PROTOCOL, "review", context, media["before"]])[:24]
-    row = ai_editor._call(prompt, Path(directory) / "review_calls" / f"{key}.json", Path(media["sheet"]))
+    row = _phase_observation(prompt, Path(directory) / "review_calls" / f"{key}.json",
+                             Path(media["sheet"]), shot, request)
     if quality is not None and row.get('verdict')=='matched':
         from ..selection.shot_usability import intersect_observations
         row['shot_usability']=intersect_observations(quality,row.get('shot_usability'),request,context['source_window_us'])
@@ -214,6 +251,10 @@ def review_output(manifest, request, shot, media, directory):
         quality=observe(shot,media,directory)
     context = {"product": manifest["product"], "sentence": request["text"],
         "check_ids": [c["id"] for c in request["checks"]]}
+    from ..selection.opening_hook import is_packaging_hook
+    if is_packaging_hook(request):
+        context['visual_purpose']='opening_hook_packaging'
+        context['visual_task']='只核对本品包装可辨并自然承接开头钩子；不要求痛点/竞品/功效画面，原文断言不获验证。'
     prompt = policy(manifest) + USABILITY_PROMPT + """独立检查实际剪出的片段。你不知道选镜器的结论。只按图片中的可见事实逐项判断，
 不能从口播/字幕推导画面已经证实，也不能把场景联想当成功效。标称仅支持标称，短实验不支持一整天。
 检查动作是否完整，结果是否看清，明显超速是否损害理解。采样没拍到的动作不能猜测发生过。
@@ -249,7 +290,9 @@ check_ids只提供编号，没有选镜器的解释或分类。按文案卖点�
         and (not request["require_result"] or data["result_visible"]))
     return {**data, 'selling_point_value':value,
         'selling_point_coverage':value['assessment']['status'] if value is not None else None,
-        'selection_policy':'at_least_one_concrete_selling_point' if value is not None else 'required_checks',
+        'selection_policy':value['assessment'].get('selection_policy','at_least_one_concrete_selling_point') if value is not None else 'required_checks',
+        'visual_requirement_supported_ids':value['assessment'].get('visual_requirement_supported_ids',value['assessment'].get('supported_ids',[])) if value is not None else supported,
+        'claim_truth_supported_ids':value['assessment'].get('claim_truth_supported_ids') if value is not None else None,
         'usability':usability,"status": "SAMPLED_SUPPORT" if ok else "EVIDENCE_PENDING", "index": request["index"],
         "output_identity": media["before"], "window_us": {"start": round(media["start"] * 1e6), "end": round(media["end"] * 1e6)},
         "formal_delivery_allowed": False, "review_method": "16 timestamped output samples; full playback not certified"}
