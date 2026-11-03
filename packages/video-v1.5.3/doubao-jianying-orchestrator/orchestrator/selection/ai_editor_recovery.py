@@ -14,7 +14,7 @@ def failure_fields(message: str, *, stage: str = "semantic_match") -> dict:
     """A request outage is not evidence of a material/semantic gap."""
     text = message.upper()
     transient = any(code in text for code in (
-        "DEADLINE_EXCEEDED", "REQUEST_TIMEOUT", "CONNECT_TIMEOUT", "TIMED OUT", "TIMEOUT",
+        "DEADLINE_EXCEEDED", "REQUEST_TIMEOUT", "CONNECT_TIMEOUT", "TIMED OUT", "TIMEOUT", "EMPTY_CONTENT",
         "CONNECTION RESET", "CONNECTION REFUSED", "429", "502", "503", "TEMPORARILY UNAVAILABLE"))
     blocked = any(code in text for code in (
         "UNAUTHORIZED", "FORBIDDEN", "INVALID_API_KEY", "INVALID API KEY", "CREDENTIAL",
@@ -30,6 +30,9 @@ def failure_fields(message: str, *, stage: str = "semantic_match") -> dict:
 def failed_index(error: Exception) -> int | None:
     if isinstance(error, WindowFailure):
         return error.index
+    repeat = re.fullmatch(r"AI_EDITOR_REPEATED_SOURCE_WINDOW:\d+:(\d+)", str(error))
+    if repeat:
+        return int(repeat[1])
     match = re.match(r"AI_EDITOR_(?:NO_SELECTION|AUDIO_ALLOCATION_INVALID|UNREVIEWED_SELECTION|POINTS_UNCOVERED):(\d+)", str(error))
     return int(match[1]) if match else None
 

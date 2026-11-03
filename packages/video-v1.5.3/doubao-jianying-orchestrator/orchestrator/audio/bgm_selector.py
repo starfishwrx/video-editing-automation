@@ -72,7 +72,8 @@ def _atomic_json(path: Path, value: object) -> None:
 
 def select_bgm_for_task(candidates: list[dict], *, task_identity: object,
                         batch_identity: object, state_dir: Path,
-                        explicit_path: str = "", explicit_music_id: str = "") -> dict:
+                        explicit_path: str = "", explicit_music_id: str = "",
+                        excluded_candidate_hashes: set[str] | None = None) -> dict:
     """Choose and receipt one adapted candidate for a task.
 
     `task_identity` must be stable across retries (e.g. record_id/task_id plus
@@ -94,7 +95,10 @@ def select_bgm_for_task(candidates: list[dict], *, task_identity: object,
     state_dir.mkdir(parents=True, exist_ok=True)
     task_key = hashlib.sha256(_stable_json(task_identity).encode("utf-8")).hexdigest()
     batch_key = hashlib.sha256(_stable_json(batch_identity).encode("utf-8")).hexdigest()
-    pool = {_candidate_identity(c): dict(c) for c in candidates}
+    excluded = set(excluded_candidate_hashes or ())
+    pool = {_candidate_identity(c): dict(c) for c in candidates if _candidate_identity(c) not in excluded}
+    if not pool:
+        return {"available": False, "selection_mode": "random_pool"}
     receipt_path = state_dir / ("task-" + task_key + ".json")
     batch_path = state_dir / ("batch-" + batch_key + ".json")
     with file_lock(state_dir / ".selection", timeout=15):
@@ -103,8 +107,9 @@ def select_bgm_for_task(candidates: list[dict], *, task_identity: object,
                 old = json.loads(receipt_path.read_text(encoding="utf-8"))
                 if old.get("task_identity_sha256") == task_key:
                     selected = old.get("selected")
-                    if isinstance(selected, dict):
-                        return dict(selected, selection_receipt=str(receipt_path), reused=True)
+                    if isinstance(selected, dict) and (old.get("confirmed") is True or _candidate_identity(selected) not in excluded):
+                        return dict(selected, selection_receipt=str(receipt_path), reused=True,
+                                    confirmed=old.get("confirmed") is True)
             except (OSError, ValueError, TypeError):
                 pass
         try:
@@ -129,6 +134,22 @@ def select_bgm_for_task(candidates: list[dict], *, task_identity: object,
             "batch_identity_sha256": batch_key,
             "used_candidate_hashes": [*used, picked_key]})
         return dict(selected, selection_receipt=str(receipt_path), reused=False)
+
+
+def confirm_bgm_for_task(task_identity: object, state_dir: Path, selected: dict) -> None:
+    """Freeze a validated task choice under the same lock used by the selector."""
+    task_key = hashlib.sha256(_stable_json(task_identity).encode("utf-8")).hexdigest()
+    receipt = Path(state_dir) / ("task-" + task_key + ".json")
+    with file_lock(Path(state_dir) / ".selection", timeout=15):
+        try:
+            value = json.loads(receipt.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise ValueError("BGM_SELECTION_RECEIPT_MISSING") from exc
+        if (value.get("task_identity_sha256") != task_key
+                or value.get("selected_candidate_sha256") != _candidate_identity(selected)):
+            raise ValueError("BGM_SELECTION_RECEIPT_CHANGED")
+        value["confirmed"] = True
+        _atomic_json(receipt, value)
 
 
 # 情绪/风格关键词 → 曲库分类/标题匹配词
@@ -417,6 +438,57 @@ def prepare_preview_tracks(tracks: list[dict], out_dir: Path, *, ffmpeg: str = "
     return prepared
 
 
+class BgmSourceDecodeError(ValueError):
+    """The current input is malformed or cannot be decoded."""
+
+
+class BgmToolError(RuntimeError):
+    """FFmpeg/ffprobe failed for an unclassified or environmental reason."""
+
+
+def _diagnostic_text(stderr) -> str:
+    """Exclude quoted input/output names before matching FFmpeg diagnostics."""
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode("utf-8", errors="replace")
+    lines = []
+    for line in str(stderr or "").splitlines():
+        if re.match(r"^\s*(?:Input|Output) #\d+", line, re.IGNORECASE):
+            continue
+        # FFmpeg prints user-controlled metadata as indented key/value rows.
+        if re.match(r"^\s{4,}(?:title|artist|album|comment|description|encoder|copyright|genre|date|track)\s*:", line, re.IGNORECASE):
+            continue
+        # FFprobe may prefix an error with an unquoted absolute input path.
+        line = re.sub(r"^\s*(?:(?:[A-Za-z]:[\\/]|/|\\\\).*?|pipe:\d+):\s+", "", line)
+        lines.append(re.sub(r"'[^']*'|\"[^\"]*\"", "<quoted>", line))
+    return "\n".join(lines).lower()
+
+
+def _source_decode_error(stderr) -> bool:
+    text = _diagnostic_text(stderr)
+    return any(marker in text for marker in (
+        "invalid data found when processing input", "moov atom not found",
+        "invalid pcm packet", "corrupt input packet", "packet corrupt"))
+
+
+def _tool_environment_error(stderr) -> bool:
+    text = _diagnostic_text(stderr)
+    return any(marker in text for marker in ("cannot allocate memory", "no such filter", "unknown encoder",
+        "decoder not found", "no space left", "permission denied", "read-only file system",
+        "error opening output", "error writing", "input/output error", "i/o error", "disk quota exceeded",
+        "operation not permitted"))
+
+
+def _check_ffmpeg_result(proc) -> None:
+    code = getattr(proc, "returncode", 0)
+    stderr = getattr(proc, "stderr", "")
+    if _tool_environment_error(stderr):
+        raise BgmToolError("BGM_FFMPEG_PROCESS_FAILED")
+    if _source_decode_error(stderr):
+        raise BgmSourceDecodeError("BGM_SOURCE_DECODE_INVALID")
+    if isinstance(code, int) and code != 0:
+        raise BgmToolError("BGM_FFMPEG_PROCESS_FAILED")
+
+
 def _mean_volume(ffmpeg: str, src: Path, *, start: float = 0.0,
                  duration: float | None = None) -> Optional[float]:
     cmd = [ffmpeg]
@@ -424,6 +496,7 @@ def _mean_volume(ffmpeg: str, src: Path, *, start: float = 0.0,
         cmd += ["-ss", str(start), "-t", str(duration)]
     cmd += ["-i", str(src), "-vn", "-af", "volumedetect", "-f", "null", "-"]
     proc = subprocess.run(cmd, capture_output=True, text=True)
+    _check_ffmpeg_result(proc)
     m = re.search(r"mean_volume:\s*(-?[\d.]+)\s*dB", proc.stderr)
     return float(m.group(1)) if m else None
 
@@ -442,6 +515,7 @@ def _integrated_lufs(ffmpeg: str, src: Path, *, start: float = 0.0,
         cmd += ["-ss", str(start), "-t", str(duration)]
     cmd += ["-i", str(src), "-vn", "-af", "loudnorm=print_format=json", "-f", "null", "-"]
     proc = subprocess.run(cmd, capture_output=True, text=True)
+    _check_ffmpeg_result(proc)
     m = re.search(r"\{[^{}]*\"input_i\"[^{}]*\}", proc.stderr, re.S)
     if not m:
         return None
@@ -480,6 +554,7 @@ def prepare_bgm_track(src: Path, out_path: Path, total_duration: float, *,
     detect = subprocess.run([ffmpeg, "-i", str(src), "-vn", "-af",
         "silencedetect=noise=-45dB:d=0.08", "-f", "null", "-"],
         capture_output=True, text=True)
+    _check_ffmpeg_result(detect)
     leading_silence_end = _leading_silence_end(detect.stderr or "")
     if leading_silence_end is not None and "silence_start: invalid param" in (detect.stderr or ""):
         # Some bundled FFmpeg builds print this instead of a near-zero start
@@ -520,7 +595,13 @@ def prepare_bgm_track(src: Path, out_path: Path, total_duration: float, *,
               f"apad=whole_dur={total_duration},atrim=duration={total_duration}")
         cmd = [ffmpeg, "-y", "-i", str(src), "-af", af,
                "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2", str(dst)]
-        subprocess.run(cmd, check=True, capture_output=True, text=True)
+        try:
+            rendered = subprocess.run(cmd, check=True, capture_output=True, text=True)
+            _check_ffmpeg_result(rendered)
+        except subprocess.CalledProcessError as exc:
+            if not _tool_environment_error(exc.stderr) and _source_decode_error(exc.stderr):
+                raise BgmSourceDecodeError("BGM_SOURCE_DECODE_INVALID") from exc
+            raise BgmToolError("BGM_FFMPEG_PROCESS_FAILED") from exc
 
     _render(gain_db, out_path)
     rendered_mean = _mean_volume(ffmpeg, out_path)

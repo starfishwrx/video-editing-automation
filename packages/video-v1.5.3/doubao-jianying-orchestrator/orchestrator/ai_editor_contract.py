@@ -99,29 +99,40 @@ def is_ai_segment(item: dict) -> bool:
     return item.get("selection_mode") == "ai_editor" or "ai_selection" in item
 
 
-def sequence_errors(segments: list[dict]) -> list[str]:
-    """A repeated source range is not a continuation of an experiment."""
-    used: dict[str, list[tuple[int, int, int, bool]]] = {}
+def sequence_conflict_details(segments: list[dict]) -> list[tuple]:
+    """Identify exact conflicting parts/windows so a repair cannot swap one conflict for another."""
+    errors: list[tuple] = []
+    used: dict[str, list[tuple[int, int, int, int, bool]]] = {}
     for index, segment in enumerate(segments, 1):
-        for part in segment.get("span_parts") or [segment]:
+        for part_index, part in enumerate(segment.get("span_parts") or [segment], 1):
             receipt = part.get("ai_selection") or {}
             source = str(receipt.get("video") or part.get("video") or "")
             window = receipt.get("window_us") or {}
             try:
                 start, end = int(window["start"]), int(window["end"])
             except (KeyError, TypeError, ValueError):
-                return ["AI_EDITOR_SEQUENCE_RECEIPT_INVALID"]
+                return [("AI_EDITOR_SEQUENCE_RECEIPT_INVALID",)]
             sensitive = receipt.get("time_sensitive") is True
-            for previous, a, b, was_sensitive in used.get(source, []):
+            for previous, previous_part, a, b, was_sensitive in used.get(source, []):
                 scarce_reuse = (receipt.get("sentence_kind") == "selling_point"
                                 and bool(receipt.get("scarce_reuse_reason"))
                                 and not (sensitive and was_sensitive and index <= previous + 1))
+                detail = (source, previous_part, part_index, a, b, start, end)
                 if min(end, b) - max(start, a) > 40000 and not scarce_reuse:
-                    return [f"AI_EDITOR_REPEATED_SOURCE_WINDOW:{previous}:{index}"]
+                    errors.append((f"AI_EDITOR_REPEATED_SOURCE_WINDOW:{previous}:{index}", *detail))
                 if sensitive and was_sensitive and index <= previous + 1 and start < a - 40000:
-                    return [f"AI_EDITOR_EXPERIMENT_TIME_REVERSED:{previous}:{index}"]
-            used.setdefault(source, []).append((index, start, end, sensitive))
-    return []
+                    errors.append((f"AI_EDITOR_EXPERIMENT_TIME_REVERSED:{previous}:{index}", *detail))
+            used.setdefault(source, []).append((index, part_index, start, end, sensitive))
+    return errors
+
+
+def sequence_errors_all(segments: list[dict]) -> list[str]:
+    return [detail[0] for detail in sequence_conflict_details(segments)]
+
+
+def sequence_errors(segments: list[dict]) -> list[str]:
+    """Preserve the public first-error contract."""
+    return sequence_errors_all(segments)[:1]
 
 
 def _window(item: dict) -> dict[str, int]:
