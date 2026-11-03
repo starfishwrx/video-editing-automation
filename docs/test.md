@@ -97,6 +97,8 @@ uv run --frozen python -X utf8 -m tools.release_package build --output $releaseO
 
 定时入口的离线回归覆盖防重入、重复触发、预览跳过、有限重试与任务间故障隔离；不会注册真实计划任务或调用真实视觉 API。
 
+音频资源修复必须验证交付面：`tests.test_runtime_resources` 仅复制 Git 跟踪文件或解压包库存，在新解释器和空用户目录禁联网检查真实音色／倍速、自动选曲及下载 ID 调用链。`test_batch_dispatch` 用坏任务与好任务混批验证前置阻断、后续继续、运行记录完成及修正后恢复；覆盖名称后缀、独立倍速和 `voice_tempo_status`，不能只测未知音色字符串。`test_audio_catalog_admission` 覆盖暖缓存后的删表、坏表和修复，以及直接 build 在付费阶段前阻断。
+
 ## 5. 真机观察看什么 artifact
 
 - `report/` 下选镜、场景规则、视觉 QC JSON。

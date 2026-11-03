@@ -116,6 +116,39 @@ def _child_env(policy_file: Path, policy: RuntimePolicy, task: dict | None = Non
     return env
 
 
+def _voice_error(task: dict) -> str | None:
+    """Validate the worker's normalized voice/tempo before paid analysis."""
+    from orchestrator.audio import library_resources
+    from orchestrator.task_inputs import normalize_meeting_task
+    from orchestrator.voice_catalog import resolve_voice
+    from orchestrator.voice_request import select_voice_tempo
+    try:
+        task = normalize_meeting_task(task)
+        if str(task.get("voice_tempo_status") or "").lower() == "invalid":
+            return "VOICE_TEMPO_INVALID: refusing category-default fallback"
+        # Match batch_worker's string contract, including voice_original fallback.
+        # Empty/default voices keep the existing automatic/default choice later.
+        voice = str(task.get("voice") or "").strip() or os.environ.get("JY_OPERATOR_VOICE", "").strip()
+        select_voice_tempo(voice, voice_tempo=task.get("voice_tempo"))
+        for name in ("jianying_voice_catalog.csv", "tts_speakers.csv"):
+            library_resources.read_catalog(name)
+        if voice and voice.lower() not in {"default", "默认"}:
+            resolve_voice(voice)
+    except (ValueError, TypeError, library_resources.RuntimeCatalogError) as exc:
+        return str(exc)
+    return None
+
+
+def _bgm_error(task: dict) -> str | None:
+    from orchestrator.audio import bgm_request, library_resources
+    try:
+        if not bgm_request.normalize(task.get("bgm")).get("path"):
+            library_resources.read_catalog("cloud_music_library.csv")
+    except (ValueError, TypeError, library_resources.RuntimeCatalogError) as exc:
+        return str(exc)
+    return None
+
+
 def prepare_product(task: dict, product_dir: Path, env: dict) -> str:
     """Validate hot caches or prepare a cold product through the canonical CLI."""
     import batch_worker
@@ -329,6 +362,14 @@ def dispatch(tasks: list[dict], *, work: Path, policy: RuntimePolicy | None = No
                             pending.remove((task, stage))
                             record({"record_id": task["record_id"], "status": "ALREADY_DELIVERED",
                                     "stage": "complete", "formal_deliveries": 0})
+                            continue
+                    if stage != "qc":
+                        voice_error = _voice_error(task)
+                        audio_error = voice_error or _bgm_error(task)
+                        if audio_error:
+                            pending.remove((task, stage))
+                            record({"record_id": task["record_id"], "stage": "voice" if voice_error else "bgm",
+                                    "status": "BLOCKED", "error": audio_error, "formal_deliveries": 0})
                             continue
                     if stage == "qc":
                         if sum(kind == "task" for kind, *_ in futures.values()) >= policy.task_workers:

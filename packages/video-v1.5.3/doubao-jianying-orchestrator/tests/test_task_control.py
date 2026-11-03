@@ -423,6 +423,34 @@ class RecoveryStageTests(unittest.TestCase):
             self.assertEqual(saved["status"], "SUCCESS")
             self.assertTrue(saved["matched_manifest_sha256"])
 
+    def test_explicit_segment_recovery_passes_original_timing_and_rejects_changed_text(self):
+        from orchestrator.selection import timing_contract
+        with tempfile.TemporaryDirectory() as raw, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(raw)
+            report = root / "report"
+            report.mkdir()
+            segment = {"text": "轻薄的表层"}
+            timing = {"rows": [{"key": timing_contract.sentence_key(segment, 1),
+                "text": segment["text"], "audio_duration_us": 1_234_567, "timing_certainty": "audio"}]}
+            timing_path = report / "narration_timing.json"
+            timing_path.write_text(json.dumps(timing), encoding="utf-8")
+            (report / "shot_candidates.json").write_text('{"shots": []}', encoding="utf-8")
+            source = self._manifest(root, segments=[segment], narration_timing_file=str(timing_path),
+                                    selection_mode="ai_editor")
+            args = argparse.Namespace(input=str(source), report_dir=str(report), stage="semantic_match")
+            with mock.patch.object(cli, "environment_report", return_value={"ready": True}), \
+                    mock.patch.object(cli, "_temporary_match", return_value=({"segments": [segment]}, None)) as match, \
+                    mock.patch.object(cli, "_pre_synthesize_narration") as tts:
+                self.assertEqual(cli.cmd_recover(args), 0)
+                self.assertEqual(match.call_args.kwargs["narration_timing"], timing)
+                timing["rows"][0]["text"] = "变化后的文案"
+                timing_path.write_text(json.dumps(timing), encoding="utf-8")
+                self.assertEqual(cli.cmd_recover(args), 1)
+            match.assert_called_once()
+            tts.assert_not_called()
+            self.assertEqual(json.loads((report / "last_result.json").read_text(encoding="utf-8"))["status"],
+                             "RECOVERY_SENTENCE_TIMING_REQUIRED")
+
     def test_invalid_current_match_cannot_fall_back_to_an_older_success(self):
         with tempfile.TemporaryDirectory() as raw, contextlib.redirect_stdout(io.StringIO()):
             root = Path(raw)

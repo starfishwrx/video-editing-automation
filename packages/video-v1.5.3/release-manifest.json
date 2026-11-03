@@ -6,7 +6,7 @@
     "machine-specific paths",
     "knowledge-base bodies"
   ],
-  "file_count": 433,
+  "file_count": 434,
   "files": [
     {
       "path": ".gitignore"
@@ -622,6 +622,9 @@
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_audio_captions.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/tests/test_audio_catalog_admission.py"
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_bounded_frame_batch.py"

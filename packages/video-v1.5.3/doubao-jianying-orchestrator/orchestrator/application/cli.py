@@ -137,8 +137,8 @@ def _production_environment_report(base_report: dict, manifest: dict | None = No
     report["ready"] = report["ready"] and catalogs["ready"]
     report["status"] = "READY" if report["ready"] else "ENV_ERROR"
     if not report["ready"]:
-        report["reason"] = (report["draft_backend_check"].get("reason") or
-                            next(iter(catalogs["errors"]), "BASE_ENVIRONMENT_NOT_READY"))
+        report["reason"] = (next(iter(catalogs["errors"]), None) or
+                            report["draft_backend_check"].get("reason") or "BASE_ENVIRONMENT_NOT_READY")
     return report
 
 
@@ -895,8 +895,8 @@ def cmd_build(args) -> int:
             # 装不下的镜头在**规划阶段**就被判 SHOT_TIMING_INFEASIBLE，
             # 而不是拖到 write_draft 才 AUDIO_VIDEO_MISMATCH。
             narration_timing = _pre_synthesize_narration(manifest, report_dir, locked_voice)
+            manifest["narration_timing_file"] = str(report_dir / "narration_timing.json")
             if manifest.get("sentence_plan_version") == "semantic-v1":
-                manifest["narration_timing_file"] = str(report_dir / "narration_timing.json")
                 # A frozen input skips the planner, including its directory setup.
                 (report_dir / "sentence_planning").mkdir(parents=True, exist_ok=True)
                 (report_dir / "sentence_planning" / "planned_manifest.json").write_text(
@@ -1143,7 +1143,7 @@ def cmd_recover(args) -> int:
     if stage == "semantic_match":
         from .. import ai_editor_contract
         timing = None
-        if manifest.get("sentence_plan_version") == "semantic-v1":
+        if manifest.get("narration_timing_file") or manifest.get("sentence_plan_version") == "semantic-v1":
             timing_path = Path(str(manifest.get("narration_timing_file") or ""))
             try:
                 if not timing_path.is_file():
