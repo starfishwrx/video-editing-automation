@@ -191,9 +191,10 @@ class LegacyPurposeGateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory()as d,patch.object(purpose_production,'_binding'), \
              patch.object(purpose_production,'_audio_binding',return_value=[]), \
              patch.object(purpose_review,'requirements',return_value=[request])as compile_, \
-             patch.object(purpose_production.ai_editor,'_inventory',return_value=[{'index':1,'kind':'selling_point','candidate_ids':[]}]):
+             patch.object(purpose_production.purpose_inventory,'recall',return_value={1:[]})as recall:
             result=purpose_production.select(manifest,{'shots':[]},narration,index,Path(d))
         compile_.assert_called_once()
+        self.assertEqual(recall.call_args.args[1][0]['checks'],request['checks'])
         self.assertEqual(result['requests'][0]['topic'],'absorption')
         self.assertIsNone(result['rows'][0]['selected'])
         self.assertEqual(result['rows'][0]['reason'],'SAME_EXPERIMENT_GROUP_REQUIRED')

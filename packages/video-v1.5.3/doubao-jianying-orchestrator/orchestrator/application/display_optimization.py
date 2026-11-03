@@ -1,4 +1,4 @@
-"""Re-select one fixed display clause from at most three explicit source windows."""
+"""Bounded re-selection of one fixed display clause using actual-window evidence."""
 from pathlib import Path
 
 from .. import ai_editor_contract as identity
@@ -7,7 +7,7 @@ from ..media.probe import probe_media
 from ..media.video_encode import run_h264_encode
 from ..media.timeline_render import render_timeline
 from ..quality.production_qc import check_production
-from ..selection import ai_editor,purpose_selection
+from ..selection import ai_editor,purpose_selection,purpose_retrieval
 from ..selection.shot_usability import is_display
 from ..selection.temporal_groups import replace_group
 from ..selection.timing_contract import split_sentences
@@ -16,8 +16,7 @@ from ..vision.display_compare import compare
 from .experiment_production import _prior_origins
 
 
-def refine(manifest,timeline,sentence_id,request,candidates,prior_origins,directory,*,
-           render=True,ffmpeg='ffmpeg',ffprobe='ffprobe',width=540):
+def _fixed_request(manifest,timeline,sentence_id,request):
     timeline.validate()
     if (timeline.delivery_mode!='preview' or timeline.task_id!=manifest['task_id']
             or [s.text for s in timeline.sentences]!=[s['text'] for s in split_sentences(manifest)]):
@@ -27,9 +26,38 @@ def refine(manifest,timeline,sentence_id,request,candidates,prior_origins,direct
     index,sentence=selected[0]
     if request.get('index')!=index or request.get('text')!=sentence.text or not is_display(request):
         raise ValueError('DISPLAY_REQUEST_IDENTITY_OR_TYPE')
-    request={**request,'segment_us':sentence.duration_us}
+    return sentence,{**request,'segment_us':sentence.duration_us}
+
+
+def refine_from_index(manifest,timeline,sentence_id,request,analysis,index,prior_origins,directory,**options):
+    """Find the candidates without a hand-authored shortlist; preserve fixed audio."""
+    from ..vision.purpose_inventory import recall
+    sentence,request=_fixed_request(manifest,timeline,sentence_id,request)
     allowed={str(Path(p).resolve()) for p in manifest['material_sources']}
-    if (not isinstance(candidates,list) or not 1<=len(candidates)<=3
+    _prior_origins(timeline,prior_origins,allowed,sentence.start_us,sentence.start_us+sentence.duration_us)
+    root=Path(directory).resolve();root.mkdir(parents=True,exist_ok=False)
+    try:
+        rankings=recall(manifest,[request],analysis['shots'],index,root/'retrieval')
+        ranking=purpose_retrieval.allocate([request],rankings,
+            purpose_retrieval.catalog(analysis['shots'],index['scans']))[request['index']]
+        candidates=purpose_retrieval.windows(ranking,analysis['shots'])
+        if not candidates:
+            result={'status':'BLOCKED','reason':'NO_PURPOSE_RETRIEVAL_HINT',
+                'formal_delivery_allowed':False,'not_found_means':'bounded recall; not a library-wide gap'}
+            vision.save(root/'result.json',result);return result
+        result=refine(manifest,timeline,sentence_id,request,candidates,prior_origins,root/'selection',refill=True,**options)
+    except (ValueError,TypeError,KeyError,OSError,RuntimeError) as error:
+        vision.save(root/'result.json',{'status':'BLOCKED','error':str(error),'formal_delivery_allowed':False})
+        raise
+    vision.save(root/'result.json',result)
+    return result
+
+
+def refine(manifest,timeline,sentence_id,request,candidates,prior_origins,directory,*,
+           render=True,ffmpeg='ffmpeg',ffprobe='ffprobe',width=540,refill=False):
+    sentence,request=_fixed_request(manifest,timeline,sentence_id,request)
+    allowed={str(Path(p).resolve()) for p in manifest['material_sources']}
+    if (not isinstance(candidates,list) or not 1<=len(candidates)<=(6 if refill else 3)
             or len({c['shot_id'] for c in candidates})!=len(candidates)
             or any(str(Path(c['video']).resolve()) not in allowed for c in candidates)):
         raise ValueError('DISPLAY_CANDIDATE_SCOPE')
@@ -41,8 +69,12 @@ def refine(manifest,timeline,sentence_id,request,candidates,prior_origins,direct
     result={'status':'BLOCKED','formal_delivery_allowed':False,'task_id':manifest['task_id'],'sentence_id':sentence_id}
     try:
         rows=[]
-        for shot in candidates:
-            item={'shot_id':shot['shot_id'],'source':str(Path(shot['video']).resolve())}
+        for number,shot in enumerate(candidates):
+            if number==3:
+                if purpose_selection.eligible(rows,used):break
+                result['refill_reason']='NO_USABLE_UNREPEATED_FIRST_WAVE'
+            item={'shot_id':shot['shot_id'],'source':str(Path(shot['video']).resolve()),
+                'retrieval_hint':shot.get('retrieval_hint')}
             start,end=round(shot['source_start']*1e6),round(shot['source_end']*1e6)
             if end-start<=sentence.duration_us and any(item['source']==u['source']
                     and max(start,u['start'])<min(end,u['end']) for u in used):
@@ -87,12 +119,14 @@ def refine(manifest,timeline,sentence_id,request,candidates,prior_origins,direct
                     +([] if part['locked'] else [{'bounded_process_speed_cap':3}])})
         updated=replace_group(timeline,(sentence_id,),clips,group_id=group_id,assets=(asset,),
             original_paths=origins,group_kind='montage')
+        value=winner['plan'].get('selling_point_value') or {}
         outside=lambda t:tuple(v for v in t.videos if v.target_start_us>=hi or v.target_start_us+v.duration_us<=lo)
         preserved={'sentences':updated.sentences==timeline.sentences,'audio':updated.audios==timeline.audios,
             'subtitles':updated.subtitles==timeline.subtitles,'outside_sentence_video':outside(updated)==outside(timeline)}
         if not all(preserved.values()):raise ValueError('DISPLAY_FIXED_INPUT_CHANGED')
         updated.save(root/'timeline.json')
         result.update(status='PLANNED_OUTPUT_REVIEW_PENDING',request=request,selected=winner,preserved=preserved,
+            selling_point_value=value,
             timeline=str(root/'timeline.json'),candidates=rows)
         if render:
             receipt=render_timeline(updated,root/'render',ffmpeg=ffmpeg,ffprobe=ffprobe,width=width,allow_real_tail=True)

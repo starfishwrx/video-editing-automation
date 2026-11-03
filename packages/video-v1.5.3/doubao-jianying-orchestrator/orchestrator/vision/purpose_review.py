@@ -9,8 +9,8 @@ from .. import ai_editor_contract as contract
 from ..selection import ai_editor
 from ..selection.paper_selection import validate_observation
 
-PROTOCOL = "purpose-observation-v5-blind-shot-usability"
-OUTPUT_PROTOCOL = "purpose-output-review-v7-blind-shot-usability"
+PROTOCOL = "purpose-observation-v6-selling-point-information"
+OUTPUT_PROTOCOL = "purpose-output-review-v8-selling-point-information"
 
 USABILITY_PROMPT='''
 在输出JSON顶层另加shot_usability对象报告镜头可用性，不从同商品、口播或高置信度推断画面有效。
@@ -30,8 +30,9 @@ shot_usability字段：{"view_kind":"stable_display|complete_demonstration|handl
 def policy(manifest):
     text = contract.policy_prompt(manifest) + """
 用途边界：普通介绍、个人使用/回购经历、修辞衔接、泛促销和囤货号召，用贴切同商品展示即可；
-不要要求购买记录、多品牌对比、促销价格牌或证明一句修辞。薄软、舒适、不闷热不粘腻等体验表达
-允许贴切真实产品展示，不要求模拟高温穿戴、皮肤检测或人体实验。明确成分须可读标称，
+不要要求购买记录、多品牌对比、促销价格牌或证明一句修辞。具体体验表达需要有相应卖点信息的特点展示，
+不要求模拟高温穿戴、皮肤检测或人体实验，但普通抚摸/折拢不自动表达薄软、不闷热或不粘腻。
+不能把原句目标替换成另一个容易展示的特点；通用同商品配图与卖点表达分开记录。明确成分须可读标称，
 吸收/反渗等性能须真实演示和结果；明确持续时间、数值、比较不能由氛围、透光或短实验外推。
 """
     if contract.editorial_context(manifest)["category"] == "weipin":
@@ -65,8 +66,10 @@ def requirements(manifest, narration, directory):
 不增加原文没有的物理证明要求，也不删除难以证明的内容。需要动作/结果时对应布尔值为true。
 展示句另带display_goal：普通介绍/促销为general_product，薄软/舒适等具体特点为visible_feature。
 允许展示不等于只要同商品就合格，检查项写清观众实际需看清的形态、结构或动作结果。
+每项另带claim_text，必须保留该卖点的原文片段。“不闷热、不粘腻”等不同卖点分项，
+不能把原句改写成“展示本体/薄软”后按新的容易条件宣布支持；薄软或结构只作为候选表达方式。
 只输出JSON {"sentences":[{"index":1,"text":"原文","require_action":false,"require_result":false,"display_goal":"general_product|visible_feature",
-"checks":[{"id":"c1","question":"逐项检查什么","type":"display|label|action_result|unverifiable"}]}]}。
+"checks":[{"id":"c1","claim_text":"对应卖点原文片段","question":"逐项检查什么","type":"display|label|action_result|unverifiable"}]}]}。
 """ + json.dumps({"product": manifest["product"], "sentences": [
         {"index": i, "text": r["text"]} for i, r in enumerate(rows, 1)]}, ensure_ascii=False),
         Path(directory) / "requirements_call.json")
@@ -91,6 +94,9 @@ def requirements(manifest, narration, directory):
                 or c.get("type") not in {"display", "label", "action_result", "unverifiable"} for c in checks)
                 or len({c["id"] for c in checks}) != len(checks)):
             raise ValueError("PURPOSE_REQUIREMENT_CHECKS")
+        if any('claim_text' in c and (not isinstance(c['claim_text'],str) or not c['claim_text'].strip()
+                or c['claim_text'] not in row['text']) for c in checks):
+            raise ValueError('PURPOSE_REQUIREMENT_CLAIM_SUBSTITUTED')
     save(Path(directory) / "requirements.json", data)
     return result
 
@@ -140,6 +146,14 @@ def scan(manifest, requests, shot, media, directory):
 
 def review(manifest, request, shot, media, directory):
     from ..selection.shot_usability import is_display,assess
+    value=None
+    if is_display(request):
+        from .shot_value_review import review as review_value
+        value=review_value(manifest,request,shot,media,directory)
+        if value['assessment']['status']=='NO_SELLING_POINT_INFORMATION':
+            return {'verdict':'mismatch','reason':'NO_SELLING_POINT_INFORMATION','selling_point_value':value,
+                'observation':'The action does not convey the requested selling point.','supported_ids':[],
+                'source_identity':media['before'],'reviewed_window_us':value['reviewed_window_us'],'sheet':str(media['sheet'])}
     quality=None
     if is_display(request):
         from .shot_quality_review import observe
@@ -171,24 +185,29 @@ window是足以表达这次演示的连续源窗，phases按顺序无缝覆盖�
 至少一项实际支持才可matched，其他缺失仍逐项保留；没有任何支持就uncertain或mismatch。
 """ + json.dumps(context, ensure_ascii=False)
     if is_display(request) and round((media['end']-media['start'])*1e6)==request.get('segment_us'):
-        prompt+='\n本次展示输入已经是拟剪出的完整窗口，window_us必须等于source_window_us，phases无缝覆盖全部输入。若只有一小段可用，在shot_usability明确记录，不通过缩小window隐去问题。'
+        prompt+='\n本次展示输入已经是拟剪出的完整窗口，window_us必须等于source_window_us，phases无缝覆盖全部输入。输入将原速播放，本次所有phases的can_speed均须false，key_action/result更不能标true。若只有一小段可用，在shot_usability明确记录，不通过缩小window隐去问题。'
     key = contract.digest([PROTOCOL, "review", context, media["before"]])[:24]
     row = ai_editor._call(prompt, Path(directory) / "review_calls" / f"{key}.json", Path(media["sheet"]))
     if quality is not None and row.get('verdict')=='matched':
         from ..selection.shot_usability import intersect_observations
         row['shot_usability']=intersect_observations(quality,row.get('shot_usability'),request,context['source_window_us'])
     supported = check_results(row.get("checks"), request["checks"])
+    if value is not None:supported=[i for i in supported if i in value['assessment']['supported_ids']]
     row = validate_observation(row, shot, request)
     if row["verdict"] == "matched" and not supported:
         raise ValueError("PURPOSE_MATCH_WITHOUT_SUPPORT")
     if media["before"] != contract.source_identity(shot["video"]):
         raise ValueError("PURPOSE_SOURCE_CHANGED")
-    return {**row, "supported_ids": supported, "source_identity": media["before"],
+    return {**row, 'selling_point_value':value,"supported_ids": supported, "source_identity": media["before"],
         "reviewed_window_us": context["source_window_us"], "sheet": str(media["sheet"])}
 
 
 def review_output(manifest, request, shot, media, directory):
     from ..selection.shot_usability import is_display
+    value=None
+    if is_display(request):
+        from .shot_value_review import review as review_value
+        value=review_value(manifest,request,shot,media,directory)
     quality=None
     if is_display(request):
         from .shot_quality_review import observe
@@ -222,11 +241,15 @@ check_ids只提供编号，没有选镜器的解释或分类。按文案卖点�
         raise ValueError("PURPOSE_OUTPUT_CHANGED")
     from ..selection.shot_usability import is_display,assess
     usability=assess(data.get('shot_usability'),request,{'start':round(media['start']*1e6),'end':round(media['end']*1e6)}) if is_display(request) else None
-    ok = ((usability is None or usability['status']=='USABLE_FOR_COMPARISON')
-        and len(supported) == len(request["checks"]) and data["rhythm_ok"]
-        and data["all_script_claims_checked"] and not data["uncovered_claims"]
+    coverage_ok=(bool(set(supported)&set(value['assessment']['supported_ids'])) if value is not None else
+        len(supported)==len(request['checks']) and data['all_script_claims_checked'] and not data['uncovered_claims'])
+    ok = (coverage_ok and (usability is None or usability['status']=='USABLE_FOR_COMPARISON')
+        and data["rhythm_ok"]
         and (not request["require_action"] or data["action_complete"])
         and (not request["require_result"] or data["result_visible"]))
-    return {**data, 'usability':usability,"status": "SAMPLED_SUPPORT" if ok else "EVIDENCE_PENDING", "index": request["index"],
+    return {**data, 'selling_point_value':value,
+        'selling_point_coverage':value['assessment']['status'] if value is not None else None,
+        'selection_policy':'at_least_one_concrete_selling_point' if value is not None else 'required_checks',
+        'usability':usability,"status": "SAMPLED_SUPPORT" if ok else "EVIDENCE_PENDING", "index": request["index"],
         "output_identity": media["before"], "window_us": {"start": round(media["start"] * 1e6), "end": round(media["end"] * 1e6)},
         "formal_delivery_allowed": False, "review_method": "16 timestamped output samples; full playback not certified"}

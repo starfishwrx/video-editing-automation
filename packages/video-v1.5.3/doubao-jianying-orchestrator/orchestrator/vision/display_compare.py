@@ -5,6 +5,7 @@ from pathlib import Path
 from .. import ai_editor_contract as identity
 from ..selection import ai_editor
 from .purpose_review import policy,USABILITY_PROMPT,save
+from .shot_value_review import PROMPT as VALUE_PROMPT
 
 
 def compare(manifest,request,candidates,directory):
@@ -26,9 +27,9 @@ def compare(manifest,request,candidates,directory):
         draw.text((index*720+12,8),f'C{index}',font=font,fill='white')
     key=identity.digest([request,inputs])
     sheet=root/(key+'.jpg');canvas.save(sheet,quality=95)
-    prompt=policy(manifest)+USABILITY_PROMPT+'''比较图中C0/C1/C2窗口，按剪辑可用性排序。
+    prompt=VALUE_PROMPT+policy(manifest)+USABILITY_PROMPT+'''比较图中C0/C1/C2窗口，首先按本句卖点信息价值排序。
 不接收旧模型结论、置信度、文件名或应当选谁；只看实际画面与本句目标。
-优先选主体清楚、能看清对应特点、动作有完成结果的片段；手遮挡/准备/反复整理即使同商品也可拒绝。
+优先选动作或展示确有揭示本句特点/结果的片段，清楚但没卖点信息的手部动作不胜过有信息的片段。
 稳定真实展示不要求刻意拿起放下；不能把普通展示提升为功能实验。必要时全部拒绝。
 每个候选给usable；可用者rank从0开始连续且不重复，不可用者rank=null，所有C编号恰好一次。
 输出JSON {"candidates":[{"id":"C0","usable":true,"rank":0,"reason":"实际可见优劣"}]}。
