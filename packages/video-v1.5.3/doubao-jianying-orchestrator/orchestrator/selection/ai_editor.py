@@ -961,7 +961,6 @@ def _repair_display_duplicate_window(manifest, analysis, plan, directory, narrat
         source_key = os.path.normcase(source["path"])
         if source_key in seen_sources or review.get("source_identity") != source:
             continue
-        seen_sources.add(source_key)
         lo = round(shot["source_start"] * 1e6) + timing_contract.us_of(
             manifest.get("head_trim_s"), round(shot_analyzer.DEFAULT_HEAD_TRIM_S * 1e6))
         hi = round(shot["source_end"] * 1e6) - timing_contract.us_of(
@@ -978,6 +977,8 @@ def _repair_display_duplicate_window(manifest, analysis, plan, directory, narrat
                 continue
             checked_before = len(attempts)
             key = _review_proposed_window(manifest, plan, directory, sentence, shot, window)
+            if len(attempts) > checked_before:
+                seen_sources.add(source_key)
             if key is None:
                 if len(attempts) > checked_before:
                     break  # Diversify sources after a real negative observation.
@@ -1368,7 +1369,7 @@ def prepare(manifest: dict, analysis: dict, report_dir: Path, *, narration_timin
             previous = {}
         if previous.get("resume_identity") == plan["resume_identity"]:
             for key in ("sentences", "reviews", "display_reviews", "coverage", "rows", "window_reviews",
-                        "window_repair_attempts", "repair_history", "continuity_reviews", "continuity_attempts", "continuity_repairs"):
+                        "window_repair_attempts", "repair_history", "duplicate_repair_reviews", "continuity_reviews", "continuity_attempts", "continuity_repairs"):
                 if key in previous:
                     plan[key] = copy.deepcopy(previous[key])
             plan["_resume_rows"] = bool(plan.get("rows"))

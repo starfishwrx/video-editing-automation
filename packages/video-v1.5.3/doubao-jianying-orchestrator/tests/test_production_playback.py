@@ -172,6 +172,24 @@ class ProductionPlaybackTests(unittest.TestCase):
                 self.plan, self.root, None, 2, baseline, conflicts))
         self.assertEqual(self.plan['rows'], before)
 
+    def test_unusable_short_shot_does_not_hide_longer_shot_of_same_source(self):
+        baseline, conflicts = self.display_duplicate_fixture()
+        self.manifest['qc_rejected_shots'] = {'2': ['long']}
+        self.analysis['shots'].insert(1, {**self.shots[2], 'shot_id': 'short_alias', 'source_end': 1})
+        self.plan['display_reviews'].insert(1, {**self.reviews[2], 'shot_id': 'short_alias',
+            'basis': 'product_display', 'supported_point_ids': [],
+            'evidence_intervals_us': [{'start': 0, 'end': 500_000}]})
+        def observe(_manifest, sentence, shot, directory, *, dense=False):
+            lo, hi = round(shot['source_start'] * 1e6), round(shot['source_end'] * 1e6)
+            return {**self.reviews[2], 'supported_point_ids': [],
+                'review_window_us': {'start': lo, 'end': hi},
+                'evidence_intervals_us': [{'start': lo + 100_000, 'end': hi - 100_000}]}
+        with patch.object(editor, '_review', side_effect=observe) as review:
+            self.assertTrue(editor._repair_display_duplicate_window(self.manifest, self.analysis,
+                self.plan, self.root, None, 2, baseline, conflicts))
+        self.assertEqual(review.call_count, 1)
+        self.assertEqual(self.plan['rows'][1]['parts'][0]['shot_id'], 'other')
+
     def test_analysis_identity_retains_semantics_and_rejects_unmigrated_legacy_hash(self):
         self.analysis['vision_analysis'] = {'model': 'fixture', 'cache_wait_s': 0.1, 'partial': False}
         stable = editor._analysis_digest(self.analysis)
@@ -190,6 +208,7 @@ class ProductionPlaybackTests(unittest.TestCase):
     def test_prepare_rechecks_old_feasible_flag_and_reuses_observations(self):
         folder = self.root / 'ai_editor'
         folder.mkdir()
+        self.plan['duplicate_repair_reviews'] = [{'index': 1, 'reviewed_candidates': ['long']}]
         (folder / 'plan.json').write_text(json.dumps(self.plan), encoding='utf-8')
         before = copy.deepcopy(self.plan['reviews'])
         with patch.object(editor, '_editor_model', return_value='fixture'), \
@@ -199,6 +218,7 @@ class ProductionPlaybackTests(unittest.TestCase):
         plan = result['ai_editor_plan']
         self.assertTrue(plan['ok'], plan)
         self.assertEqual(plan['reviews'], before)
+        self.assertEqual(plan['duplicate_repair_reviews'], self.plan['duplicate_repair_reviews'])
         self.assertEqual(plan['rows'][0]['parts'][0]['shot_id'], 'short')
         self.assertEqual(plan['rows'][1], self.plan['rows'][1])
         self.assertEqual(plan['playback_policy_version'], playback.VERSION)
