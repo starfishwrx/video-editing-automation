@@ -1,18 +1,17 @@
 """Read-only readiness check for the default script production backend."""
 import argparse
-import importlib.util
 import json
 from pathlib import Path
+import sys
 
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('command', choices=['check'])
     parser.parse_args()
-    path=Path(__file__).resolve().parents[1]/'doubao-jianying-orchestrator/orchestrator/runtime/headless.py'
-    spec=importlib.util.spec_from_file_location('_headless_preflight',path)
-    module=importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    root = Path(__file__).resolve().parents[1] / 'doubao-jianying-orchestrator'
+    sys.path.insert(0, str(root))
+    from orchestrator.runtime import headless as module
     try:
         result=module.preflight()
     except (ValueError, RuntimeError, OSError, ImportError) as exc:

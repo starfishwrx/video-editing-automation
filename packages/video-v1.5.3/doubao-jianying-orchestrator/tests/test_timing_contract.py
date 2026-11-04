@@ -1171,13 +1171,13 @@ class PreviewDeliveryTests(unittest.TestCase):
         self.assertEqual(rep["uncertified_reasons"], ["RULEPACK_MISSING"])
 
     # ---- 成功合约的可见性（定案第 9 条：正式交付不得静默通过）----
-    def test_compact_success_hides_everything_when_certified(self):
+    def test_compact_success_reports_runtime_when_certified(self):
         from orchestrator import cli
         out = cli._compact_build_result({
             "status": "SUCCESS", "draft_name": "d", "draft_path": "",
             "delivery_mode": "formal", "coverage": self.CERTIFIED})
         self.assertEqual(sorted(out), sorted(
-            ["草稿名称", "草稿路径", "草稿文件", "生成日志"]))
+            ["草稿名称", "草稿路径", "草稿文件", "生成日志", "运行信息"]))
 
     def test_compact_success_flags_preview_and_uncertified(self):
         from orchestrator import cli
@@ -1198,13 +1198,13 @@ class PreviewDeliveryTests(unittest.TestCase):
         self.assertNotIn("交付模式", out)          # formal 稿不该自称预览
         self.assertEqual(out["认证状态"], "UNCERTIFIED")
 
-    def test_compact_success_unchanged_without_coverage(self):
+    def test_compact_success_marks_preview_even_without_coverage(self):
         from orchestrator import cli
         out = cli._compact_build_result({
             "status": "SUCCESS", "draft_name": "d", "draft_path": "",
             "delivery_mode": "preview"})
         self.assertEqual(sorted(out), sorted(
-            ["草稿名称", "草稿路径", "草稿文件", "生成日志"]))
+            ["草稿名称", "草稿路径", "草稿文件", "生成日志", "运行信息", "交付模式"]))
 
     # ---- 预览放宽只记理由，不改交付语义 ----
     def test_preview_tolerated_only_records_reason(self):

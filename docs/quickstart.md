@@ -94,7 +94,7 @@ uv run --frozen python -X utf8 doubao-jianying-orchestrator/run.py env --input w
 if ($LASTEXITCODE -ne 0) { throw '请先处理生产环境报告中的阻断项。' }
 ```
 
-`env` 默认检查基础工具链与实际所选写稿后端，未就绪返回非零退出码；基础环境和原生后端检查分别列出。它不认证云端密钥，正式build也会在配音/视觉开销前复验。
+`env` 默认检查基础工具链、实际所选写稿后端及视觉服务配置是否齐全，未就绪返回非零退出码；它只检查密钥是否存在，不连接云端验证有效性。正式 build 也会在配音/视觉开销前复验。
 
 ```powershell
 uv run --frozen python -X utf8 doubao-jianying-orchestrator/run.py build `
@@ -102,7 +102,7 @@ uv run --frozen python -X utf8 doubao-jianying-orchestrator/run.py build `
   --delivery-mode preview
 ```
 
-`build` 的 `--delivery-mode` 决定该次模式，默认是 formal；仅在 manifest 写 preview 不足以替代这个参数。根据输出的 `status` / `next_action` 处理音色确认、环境、模型或素材阻断。成功时按返回路径打开草稿，并查看 `shot_match_report.json`、`ai_editor/plan.json` 和任务结果。每次尝试使用新 report 目录。
+`build` 先使用显式 `--delivery-mode`，否则使用 manifest 的 `delivery_mode`；两者均未指定时是 preview。正式任务须明确声明 formal。根据输出的 `status` / `next_action` 处理音色确认、环境、模型或素材阻断。成功时按返回路径打开草稿，并查看 `shot_match_report.json`、`ai_editor/plan.json` 和任务结果。每次尝试使用新 report 目录。
 
 独立视觉 QC、真实剪映打开与人工审阅分别执行，见[视觉子系统](subsystems/visual-matching.md)和[运行时合同](../packages/video-v1.5.3/doubao-jianying-orchestrator/references/runtime_contract.md)。预览保持未认证，不会因为生成了草稿就成为正式交付。
 

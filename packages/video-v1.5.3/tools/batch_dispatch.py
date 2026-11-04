@@ -26,6 +26,7 @@ from orchestrator.file_safety import atomic_write_text, file_lock
 from orchestrator.runtime_policy import RuntimePolicy, load_policy
 from orchestrator.proc_slots import slot
 from orchestrator.visual_qc_contract import report_status, report_matches_draft
+from tools.queueing.contracts import task_runtime_overrides
 
 
 def _string_seconds(value) -> str:
@@ -149,6 +150,33 @@ def _bgm_error(task: dict) -> str | None:
     return None
 
 
+def _production_preflight(task: dict, *, environment_cache: dict | None = None) -> dict:
+    """Check the actual task's writer and configuration before material AI."""
+    from orchestrator.application.cli import _production_environment_report
+    from orchestrator.runtime.platform_env import environment_report
+    from orchestrator.runtime.task_log import runtime_facts
+    from tools.acceptance.delivery_gate import requested_mode
+
+    manifest = task_runtime_overrides(task)
+    manifest["delivery_mode"] = requested_mode(task)
+    manifest["bgm"] = task.get("bgm")
+    facts = runtime_facts(manifest)
+    error = facts.get("selection_configuration_error") or facts.get("vision_configuration_error")
+    if error:
+        return {"ready": False, "reason": error, "runtime": facts}
+    if environment_cache is None:
+        base = environment_report(refresh=True)
+    else:
+        if "base" not in environment_cache:
+            environment_cache["base"] = environment_report(refresh=True)
+        base = environment_cache["base"]
+    report = _production_environment_report(base, manifest, require_vision=True)
+    selected_media = (report.get("draft_backend_check") or {}).get("media_tools") or base
+    for name in ("ffmpeg", "ffprobe"):
+        facts[name] = selected_media.get(name)
+    return {"ready": bool(report.get("ready")), "reason": report.get("reason"), "runtime": facts}
+
+
 def prepare_product(task: dict, product_dir: Path, env: dict) -> str:
     """Validate hot caches or prepare a cold product through the canonical CLI."""
     import batch_worker
@@ -195,21 +223,26 @@ def run_task(task: dict, stage: str, env: dict, work: Path) -> dict:
     atomic_write_text(task_dir / "dispatch_worker.log", (proc.stdout or "") + "\n" + (proc.stderr or ""))
     receipt = _read(task_dir / "done.json")
     deliveries = max(0, formal_delivery_count(receipt) - prior_deliveries) if proc.returncode == 0 else 0
+    preflight_only = (receipt.get("status") == "ERROR" and any(
+        isinstance(row, dict) and row.get("preflight_only") is True for row in receipt.get("failures") or []))
     return {"record_id": task["record_id"], "stage": stage, "rc": proc.returncode,
             "formal_deliveries": deliveries, "verified_draft_deliveries": deliveries,
             "delivery_metric": "verified_draft_deliveries", "final_mp4_deliveries": None,
+            "preflight_only": preflight_only, "retryable": receipt.get("retryable"),
+            "resume_stage": receipt.get("resume_stage"),
             "status": receipt.get("status", "ERROR" if proc.returncode else "UNCERTIFIED")}
 
 
 def submit(tasks: list[dict], *, work: Path, policy: RuntimePolicy,
            resume_stage: str | None = None) -> Path:
-    """Durable local submission; the current supervisor absorbs this spool."""
+    """Preserve a legacy submission for manual recovery; do not auto-execute it."""
     spool = Path(policy.slot_dir) / "batch_submissions"
     spool.mkdir(parents=True, exist_ok=True)
     path = spool / (str(time.time_ns()) + "-" + uuid.uuid4().hex + ".json")
     with file_lock(Path(policy.slot_dir) / "batch_dispatch_lifecycle"):
         atomic_write_text(path, json.dumps({"tasks": tasks, "work_root": str(work.resolve()),
-                          "resume_stage": resume_stage, "submitted_at": time.time()}, ensure_ascii=False, indent=2))
+                          "resume_stage": resume_stage, "submitted_at": time.time()},
+                          ensure_ascii=False, indent=2))
     return path
 
 
@@ -229,8 +262,7 @@ def _supervisor(policy: RuntimePolicy):
 
 def dispatch(tasks: list[dict], *, work: Path, policy: RuntimePolicy | None = None,
              preparer: Callable = prepare_product, runner: Callable = run_task,
-             dry_run: bool = False, resume_stage: str | None = None,
-             _pending_submission: tuple | None = None) -> list[dict]:
+             dry_run: bool = False, resume_stage: str | None = None) -> list[dict]:
     policy = policy or load_policy()
     started_at = time.time()
     started_clock = time.monotonic()
@@ -258,23 +290,20 @@ def dispatch(tasks: list[dict], *, work: Path, policy: RuntimePolicy | None = No
     # queue file. A second entry fails rather than creating another 4 workers.
     with _supervisor(policy) as owner:
         if not owner:
-            if _pending_submission is None:
-                submission = submit(unique, work=work, policy=policy, resume_stage=resume_stage)
-                # The previous owner may have stopped while we wrote the
-                # submission. Reacquire once, or leave it with that live owner.
-                return dispatch([], work=work, policy=policy, preparer=preparer, runner=runner,
-                    resume_stage=resume_stage, _pending_submission=(submission, unique))
-            submission, submitted_tasks = _pending_submission
-            return [{"record_id": task["record_id"], "status": "SUBMITTED",
-                     "submission": str(submission), "formal_deliveries": 0,
-                     "verified_draft_deliveries": 0, "delivery_metric": "verified_draft_deliveries",
-                     "final_mp4_deliveries": None} for task in submitted_tasks]
+            # A fire-and-forget handoff cannot update the submitting scheduler's
+            # attempt state after a later preflight failure. Refuse it here so
+            # the same normal entry can retry safely after the current run.
+            return [{"record_id": task["record_id"], "status": "BLOCKED", "stage": "preflight",
+                     "error": "DISPATCH_SUPERVISOR_BUSY_RETRY", "retryable": True, "formal_deliveries": 0}
+                    for task in unique]
         atomic_write_text(policy_file, json.dumps(policy.to_dict(), indent=2))
         progress = work / "batch_dispatch_progress.jsonl"
         atomic_write_text(progress, "")
         results, ready, preparing, failed = [], {}, set(), set()
+        preflight_results, preflight_environment = {}, {}
         material_ready_clock = {}
         submitted_files = set()
+        spool_blocked = False
         run_file = work / "dispatch_runs" / (str(time.time_ns()) + "-" + uuid.uuid4().hex[:8] + ".json")
         atomic_write_text(run_file, json.dumps({"policy": policy.to_dict(),
             "started_at": started_at, "finished_at": None, "results": []}, indent=2))
@@ -309,6 +338,9 @@ def dispatch(tasks: list[dict], *, work: Path, policy: RuntimePolicy | None = No
             row.setdefault("verified_draft_deliveries", row.get("formal_deliveries", 0))
             row["delivery_metric"] = "verified_draft_deliveries"
             row["final_mp4_deliveries"] = None
+            checked = preflight_results.get(row.get("record_id"))
+            if checked:
+                row.setdefault("runtime", checked.get("runtime"))
             results.append(row)
             with progress.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(dict(row, at=time.time()), ensure_ascii=False) + "\n")
@@ -321,24 +353,21 @@ def dispatch(tasks: list[dict], *, work: Path, policy: RuntimePolicy | None = No
                     if path in submitted_files:
                         continue
                     submission = _read(path)
-                    for task in submission.get("tasks", []):
-                        rid = str(task.get("record_id") or "")
-                        if not rid or Path(rid).name != rid or rid in seen:
-                            continue
-                        task = dict(task, _dispatch_work_root=submission["work_root"],
-                                    _dispatch_resume_stage=submission.get("resume_stage"))
-                        admitted = time.monotonic()
-                        submitted_at = submission.get("submitted_at")
-                        origin = "supervisor_admission"
-                        if isinstance(submitted_at, (int, float)) and 0 < submitted_at <= time.time():
-                            admitted -= time.time() - submitted_at
-                            origin = "submission"
-                        task["_dispatch_admitted_clock"] = admitted
-                        task["_dispatch_wait_origin"] = origin
-                        seen.add(rid)
-                        stage = "qc" if submission.get("resume_stage") == "qc" or _qc_pending(task, Path(submission["work_root"])) else "build"
-                        pending.append((task, stage))
+                    spool_blocked = True
+                    rows = submission.get("tasks") if isinstance(submission.get("tasks"), list) else []
+                    ids = [str(row.get("record_id") or "") for row in rows if isinstance(row, dict)]
+                    for rid in (ids or [None]):
+                        record({"record_id": rid or None, "stage": "preflight", "status": "BLOCKED",
+                                "error": "LEGACY_SUBMISSION_REQUIRES_RECOVERY", "retryable": False,
+                                "submission": str(path), "next_action": "manual_review",
+                                "formal_deliveries": 0})
                     submitted_files.add(path)
+                if spool_blocked and pending:
+                    for task, _ in pending:
+                        record({"record_id": task["record_id"], "stage": "preflight", "status": "BLOCKED",
+                                "error": "LEGACY_SUBMISSION_REQUIRES_RECOVERY", "retryable": True,
+                                "next_action": "manual_review", "formal_deliveries": 0})
+                    pending.clear()
                 pending.sort(key=lambda job: 0 if job[1] == "qc" else 1)
                 if not pending and not futures:
                     # Submission writes and shutdown share this short lock.
@@ -348,8 +377,6 @@ def dispatch(tasks: list[dict], *, work: Path, policy: RuntimePolicy | None = No
                         if any(path not in submitted_files for path in
                                (Path(policy.slot_dir) / "batch_submissions").glob("*.json")):
                             continue
-                        for path in submitted_files:
-                            path.unlink(missing_ok=True)
                         owner.close()
                     break
                 for task, stage in list(pending):
@@ -371,6 +398,25 @@ def dispatch(tasks: list[dict], *, work: Path, policy: RuntimePolicy | None = No
                             record({"record_id": task["record_id"], "stage": "voice" if voice_error else "bgm",
                                     "status": "BLOCKED", "error": audio_error, "formal_deliveries": 0})
                             continue
+                    rid = task["record_id"]
+                    if rid not in preflight_results:
+                        # QC resumes the persisted task, not the current queue
+                        # row; check the same settings the worker will read.
+                        frozen = _read(task_work / rid / "task.json") if stage == "qc" else {}
+                        actual_task = frozen if frozen.get("record_id") == rid else task
+                        try:
+                            preflight_results[rid] = _production_preflight(actual_task, environment_cache=preflight_environment)
+                        except (OSError, ValueError, TypeError, RuntimeError, ImportError) as exc:
+                            preflight_results[rid] = {"ready": False, "reason": str(exc)}
+                        for warning in (preflight_results[rid].get("runtime") or {}).get("configuration_warnings", []):
+                            print("WARNING: " + warning, file=sys.stderr)
+                    checked = preflight_results[rid]
+                    if not checked.get("ready"):
+                        pending.remove((task, stage))
+                        record({"record_id": rid, "stage": "preflight", "status": "BLOCKED",
+                                "error": "ENVIRONMENT_PRECHECK_FAILED: " + str(checked.get("reason") or "NOT_READY"),
+                                "retryable": True, "formal_deliveries": 0})
+                        continue
                     if stage == "qc":
                         if sum(kind == "task" for kind, *_ in futures.values()) >= policy.task_workers:
                             continue
@@ -471,9 +517,16 @@ def main(argv=None) -> int:
         return 0
     queue_path = args.queue or Path(os.environ.get("JY_WORK_ROOT", str(ROOT / "work"))) / "batch_queue.json"
     work = (args.work_root or queue_path.parent).resolve()
-    tasks = json.loads(queue_path.read_text(encoding="utf-8-sig")) if queue_path.is_file() else []
+    if not queue_path.is_file() and args.command != "resume":
+        parser.error("queue file not found: " + str(queue_path))
+    try:
+        tasks = json.loads(queue_path.read_text(encoding="utf-8-sig")) if queue_path.is_file() else []
+    except (OSError, ValueError) as exc:
+        parser.error("queue file cannot be read: " + str(exc))
     if isinstance(tasks, dict):
-        tasks = tasks.get("tasks", [])
+        tasks = tasks.get("tasks")
+    if not isinstance(tasks, list):
+        parser.error("queue must be a task list")
     if args.command == "resume":
         if Path(args.record_id).name != args.record_id or args.record_id in {".", ".."}:
             parser.error("record_id must be one directory name")

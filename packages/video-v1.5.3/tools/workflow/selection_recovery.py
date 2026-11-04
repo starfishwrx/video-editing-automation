@@ -86,13 +86,17 @@ def recover(manifest: dict, report_dir: Path, *, prefix: list[str], run, env: di
     report_dir = Path(report_dir)
     state_path = report_dir / "selection_recovery_state.json"
     outputs, errors = [], []
+    preflight_started = False
 
-    def result(code, reason, **extra):
+    def result(code, reason, *, preflight_only=False, **extra):
         payload = {"status": "SELECTION_RECOVERY_BLOCKED", "failure_class": "environment",
-                   "reason": reason, "retryable": False, **extra}
+                   "reason": reason, "retryable": bool(preflight_only), **extra}
+        if preflight_only:
+            payload.update(failure_code="ENVIRONMENT_PRECHECK_FAILED", failed_stage="preflight",
+                           resume_stage="semantic_match")
         return {"rc": code, "stdout": json.dumps(payload, ensure_ascii=False),
                 "stderr": "\n".join(errors), "combined": json.dumps(payload, ensure_ascii=False),
-                "stage_retry_exhausted": True}
+                "stage_retry_exhausted": not preflight_only, "preflight_only": bool(preflight_only)}
 
     try:
         frozen = _read(report_dir / "selection_resume.json")
@@ -129,21 +133,44 @@ def recover(manifest: dict, report_dir: Path, *, prefix: list[str], run, env: di
             return result(1, "SELECTION_RECOVERY_TIMING_CHANGED")
         input_path = report_dir / "selection_recovery_input.json"
         input_path.write_text(json.dumps(recovery_input, ensure_ascii=False, indent=2), encoding="utf-8")
-        state = {"attempts": 1, "stage": "preflight", "status": "RUNNING", "source_run_id": frozen["run_id"]}
+        state = {"attempts": 0, "stage": "preflight", "status": "RUNNING", "source_run_id": frozen["run_id"]}
         state_path.write_text(json.dumps(state), encoding="utf-8")
         for stage in ("preflight", "semantic_match", "draft_write"):
+            preflight_started = False
             state.update(stage=stage)
             state_path.write_text(json.dumps(state), encoding="utf-8")
             check_audio()
             remaining = deadline - time.time()
             if remaining <= 0:
-                return result(1, "SELECTION_STAGE_RETRY_EXHAUSTED:DEADLINE_EXCEEDED")
+                return result(1, "SELECTION_STAGE_DEADLINE_EXCEEDED", preflight_only=stage == "preflight")
+            if stage == "semantic_match":
+                # Persist consumption immediately before starting paid selection.
+                state["attempts"] = 1
+                state_path.write_text(json.dumps(state), encoding="utf-8")
             command = [*prefix, "recover", "--input", str(input_path), "--report-dir", str(report_dir), "--stage", stage]
+            preflight_started = stage == "preflight"
             process = run(command, cwd=cwd, env=env, capture_output=True, text=True,
                           encoding="utf-8", errors="replace", timeout=remaining + 30)
             outputs.append(process.stdout or "")
             errors.append(process.stderr or "")
             if process.returncode:
+                if stage == "preflight":
+                    state.update(status="PREFLIGHT_BLOCKED")
+                    state_path.write_text(json.dumps(state), encoding="utf-8")
+                    return result(process.returncode, "SELECTION_RECOVERY_PREFLIGHT_FAILED",
+                                  preflight_only=True, error=outputs[-1][-4000:])
+                if stage == "semantic_match":
+                    try:
+                        blocked = json.loads(process.stdout or "")
+                    except (ValueError, TypeError):
+                        blocked = {}
+                    if (isinstance(blocked, dict) and blocked.get("status") == "ENV_ERROR"
+                            and blocked.get("failure_class") == "environment"
+                            and blocked.get("failed_stage") == "preflight"):
+                        state.update(attempts=0, status="PREFLIGHT_BLOCKED", stage="preflight")
+                        state_path.write_text(json.dumps(state), encoding="utf-8")
+                        return result(process.returncode, "SELECTION_RECOVERY_PREFLIGHT_FAILED",
+                                      preflight_only=True, error=outputs[-1][-4000:])
                 return result(process.returncode, "SELECTION_STAGE_RETRY_EXHAUSTED", error=outputs[-1][-4000:])
         last = _read(report_dir / "last_result.json")
         draft = Path(str(last.get("draft_path") or ""))
@@ -155,4 +182,5 @@ def recover(manifest: dict, report_dir: Path, *, prefix: list[str], run, env: di
                 "combined": "\n".join(outputs + errors), "manifest": str(input_path),
                 "draft_name": draft.name, "selection_recovered": True}
     except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError) as exc:
-        return result(1, str(exc))
+        is_preflight = preflight_started and isinstance(locals().get("state"), dict) and state.get("attempts") == 0
+        return result(1, str(exc), preflight_only=is_preflight)

@@ -10,7 +10,7 @@
 
 ## 2. 闸门与阶段顺序（任意一步返回 dict 即提前终止）
 1. `self_check()`：环境自检（最低支持 `MIN_SUPPORTED_PACKAGE_VERSION="v1.3.13"`，是“下限”，不是等值）
-2. `_resolve_delivery_mode()`：formal（默认）/preview 归一化并写回对象字段（preview 只影响“容忍未认证”，不放宽 formal 语义）
+2. `_resolve_delivery_mode()`：引擎读取 CLI 已明确写入的 formal/preview；正式入口未声明时 CLI 使用 preview，避免自动转正。绕过 CLI 直接构造引擎的旧调用仍按历史规则处理，不作为正式任务入口。
 3. `build_clips()` → `_script_segment_length_gate()`（超长口播阻断）
 4. 归一化 `delivery_mode` 写回 manifest（CLI 已在选镜前写入；引擎仅读取/归一化）
 5. `voiceover_gate()`（本批是否有旁白）→ `audio_selection_gate()`（需要运营确认音色/BGM 时暂停）

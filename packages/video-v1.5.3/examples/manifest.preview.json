@@ -2,11 +2,12 @@
   "draft_name": "quickstart-preview",
   "product": "演示素材",
   "category": "generic",
-  "mode": "intelligent",
+  "mode": "standard",
   "selection_mode": "ai_editor",
   "delivery_mode": "preview",
+  "temporary_material_analysis": true,
   "material_sources": ["media/sample.mp4"],
   "segments": [
-    {"narration": "看看这段演示画面。"}
+    {"text": "看看这段演示画面。"}
   ]
 }

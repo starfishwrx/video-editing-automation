@@ -165,11 +165,18 @@ def _default_dispatcher(tasks: list[dict], **kwargs) -> list[dict]:
     return dispatch(tasks, **kwargs)
 
 
-def _execute(queue_path: Path, work: Path, summary: dict, dispatcher) -> None:
+def _execute(queue_path: Path, work: Path, summary: dict, dispatcher, record_id: str | None = None) -> None:
     raw = json.loads(queue_path.read_text(encoding="utf-8-sig"))
     tasks = raw.get("tasks") if isinstance(raw, dict) else raw
     if not isinstance(tasks, list):
         raise ValueError("QUEUE_TASK_LIST_REQUIRED")
+    if record_id is not None:
+        if not _safe_name(record_id):
+            raise ValueError("INVALID_RECORD_ID")
+        tasks = [task for task in tasks if isinstance(task, dict) and
+                 str(task.get("record_id") or "").casefold() == record_id.casefold()]
+        if len(tasks) != 1:
+            raise ValueError("PIPELINE_RECORD_NOT_UNIQUE_OR_MISSING")
     state_path = work / "pipeline_state.json"
     state = _read(state_path) if state_path.exists() else {"schema_version": 1, "records": {}}
     if state.get("schema_version") != 1 or not isinstance(state.get("records"), dict):
@@ -235,13 +242,26 @@ def _execute(queue_path: Path, work: Path, summary: dict, dispatcher) -> None:
                 # A caught dispatcher exception must not invent retryability.
                 records[task["record_id"].casefold()]["retryable"] = any(
                     item.get("retryable") is True for item in outcomes)
+                control_outcomes = [item for item in outcomes if not (
+                    item.get("stage") == "material" and item.get("status") == "READY")]
+                if (control_outcomes and all((item.get("stage") == "preflight" and item.get("status") == "BLOCKED")
+                        or (item.get("preflight_only") is True and item.get("status") == "ERROR")
+                        for item in control_outcomes)):
+                    # No build or QC began. Any completed material preparation
+                    # remains cached; retry the blocked step through this entry.
+                    prior = records[task["record_id"].casefold()]
+                    attempt_key = stage + "_attempts"
+                    prior[attempt_key] = max(0, int(prior.get(attempt_key, 0)) - 1)
+                    prior["retryable"] = True
+                    row["preflight_only"] = True
         except Exception as exc:
             for _, row in selected:
                 row.update(status="ERROR", reason="DISPATCH_FAILED", error=str(exc))
         _write(state_path, state)
 
 
-def run_once(queue_path, work_root, *, dry_run: bool = False, dispatcher=None) -> dict:
+def run_once(queue_path, work_root, *, dry_run: bool = False, dispatcher=None,
+             record_id: str | None = None) -> dict:
     """Run an admitted local queue once; dry-run only writes its local summary.
 
     ``dispatcher`` accepts batch_dispatch.dispatch's ``tasks, work`` and optional
@@ -254,10 +274,10 @@ def run_once(queue_path, work_root, *, dry_run: bool = False, dispatcher=None) -
                "status": "OK", "tasks": [], "dispatch_results": []}
     try:
         if dry_run:
-            _execute(queue_path, work, summary, dispatcher)
+            _execute(queue_path, work, summary, dispatcher, record_id)
         else:
             with _pipeline_lock(work):
-                _execute(queue_path, work, summary, dispatcher)
+                _execute(queue_path, work, summary, dispatcher, record_id)
         if any(row["status"] in {"ERROR", "UNKNOWN"} for row in summary["tasks"]):
             summary["status"] = "ERROR"
         if any(isinstance(row, dict) and (row.get("rc", 0) != 0 or row.get("status") in {
@@ -279,8 +299,9 @@ def main(argv=None) -> int:
     parser.add_argument("--queue", type=Path, required=True)
     parser.add_argument("--work-root", type=Path, required=True)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--record-id")
     args = parser.parse_args(argv)
-    result = run_once(args.queue, args.work_root, dry_run=args.dry_run)
+    result = run_once(args.queue, args.work_root, dry_run=args.dry_run, record_id=args.record_id)
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return int(result["status"] == "ERROR")
 

@@ -68,18 +68,22 @@ def runtime_version() -> str:
     return value or "unknown"
 
 
-def runtime_facts() -> dict[str, Any]:
+def runtime_facts(manifest: dict | None = None) -> dict[str, Any]:
     """Return safe, reproducible runtime identity facts for every task receipt."""
-    ffmpeg = os.environ.get("FFMPEG_BIN", "").strip() or shutil.which("ffmpeg")
-    ffprobe = os.environ.get("FFPROBE_BIN", "").strip() or shutil.which("ffprobe")
+    from ..ai_editor_contract import selection_mode_facts
+    media = {"ffmpeg": os.environ.get("FFMPEG_BIN") or shutil.which("ffmpeg"),
+             "ffprobe": os.environ.get("FFPROBE_BIN") or shutil.which("ffprobe")}
     return {
         "pipeline_version": runtime_version(),
         "python": sys.executable,
         "python_version": sys.version.split()[0],
         "skill_root": str(_VERSION_FILE.parent),
         "orchestrator_path": str(Path(__file__).resolve()),
-        "ffmpeg": ffmpeg,
-        "ffprobe": ffprobe,
+        "ffmpeg": str(media["ffmpeg"]) if media["ffmpeg"] else None,
+        "ffprobe": str(media["ffprobe"]) if media["ffprobe"] else None,
+        "configuration_source": os.environ.get("JY_CONFIG_SOURCE", "").strip() or "process_environment",
+        "delivery_mode": (manifest or {}).get("delivery_mode"),
+        **selection_mode_facts(manifest),
         **vision_config.facts(),
     }
 
@@ -276,7 +280,7 @@ class TaskLogger:
         self.started = time.time()
         raw = json.dumps(manifest, ensure_ascii=False, sort_keys=True, default=str).encode()
         self.manifest_sha256 = hashlib.sha256(raw).hexdigest()
-        self.runtime = runtime_facts()
+        self.runtime = runtime_facts(manifest)
         self.input_chars = len(raw.decode("utf-8", errors="replace"))
         self.output_chars = 0
         self.llm_calls = 0

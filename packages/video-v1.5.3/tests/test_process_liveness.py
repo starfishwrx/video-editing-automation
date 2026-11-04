@@ -89,8 +89,9 @@ class ProcessLivenessTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             policy = RuntimePolicy(task_workers=2, prep_workers=1, slot_dir=str(root / "slots"))
-            result = dispatch([{"record_id": "empty-a"}, {"record_id": "empty-b"}],
-                work=root, policy=policy, preparer=lambda *args: "test-only-analysis.json", runner=run)
+            with patch("tools.batch_dispatch._production_preflight", return_value={"ready": True, "runtime": {}}):
+                result = dispatch([{"record_id": "empty-a"}, {"record_id": "empty-b"}],
+                    work=root, policy=policy, preparer=lambda *args: "test-only-analysis.json", runner=run)
             self.assertEqual(len([row for row in result if row.get("status") == "TEST_ONLY"]), 2)
 
     def test_status_snapshot_sees_other_live_worker_and_preserves_terminal_precedence(self):

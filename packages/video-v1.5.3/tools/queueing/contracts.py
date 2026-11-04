@@ -18,6 +18,23 @@ TRANSIENT_BUILD_MARKERS = (
 )
 
 
+def task_runtime_overrides(task: dict) -> dict:
+    """Apply the same explicit settings to queue preflight and generated builds."""
+    nested = task.get("manifest")
+    if nested is None:
+        nested = {}
+    if not isinstance(nested, dict):
+        raise ValueError("INVALID_TASK_MANIFEST")
+    result = {}
+    for key in ("selection_mode", "draft_backend", "subtitle_font_path"):
+        value = task.get(key)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            value = nested.get(key)
+        if value is not None and not (isinstance(value, str) and not value.strip()):
+            result[key] = value
+    return result
+
+
 def meeting_bgm_spec(value: object) -> dict:
     """Preserve an explicit worker BGM choice; strings never become random auto."""
     import importlib.util
@@ -78,7 +95,9 @@ def batch_result_contract(status: str, *, pipeline_version: str, run_id: str, fa
     lower = text.lower()
     first = rows[0] if rows else {}
     failure_type = str(first.get("type") or "").lower()
-    if "voice_selection_required" in lower:
+    if first.get("preflight_only") is True and first.get("failure_code") == "ENVIRONMENT_PRECHECK_FAILED":
+        failure_class, failure_code = "environment", "ENVIRONMENT_PRECHECK_FAILED"
+    elif "voice_selection_required" in lower:
         failure_class, failure_code = "environment", "VOICE_SELECTION_REQUIRED"
     elif "bgm_required" in lower:
         failure_class, failure_code = "environment", "BGM_REQUIRED"
@@ -118,6 +137,9 @@ def batch_result_contract(status: str, *, pipeline_version: str, run_id: str, fa
             "deadline_exceeded", "request_timeout", "connect_timeout",
         ))
     )
+    if (first.get("preflight_only") is True and first.get("retryable") is True
+            and first.get("resume_stage") == "semantic_match"):
+        retryable = True
     if any(row.get("stage_retry_exhausted") is True or row.get("retryable") is False for row in rows) or any(
             token in lower for token in ("unauthorized", "forbidden", "invalid api key", "insufficient balance", "http 401", "http 403")):
         retryable = False

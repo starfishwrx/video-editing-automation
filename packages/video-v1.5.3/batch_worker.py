@@ -88,19 +88,18 @@ def _pipeline_version() -> str:
         return "unknown"
 
 
-def _runtime_facts() -> dict:
+def _runtime_facts(task: dict | None = None) -> dict:
     """Capture the execution surface that produced a batch receipt."""
     if str(SKILL) not in sys.path:
         sys.path.insert(0, str(SKILL))
-    from orchestrator.runtime import vision_config
+    from orchestrator.runtime.task_log import runtime_facts
+    overrides = queue_contracts.task_runtime_overrides(task or {})
     return {
+        **runtime_facts(overrides),
         "python": str(PY),
         "skill_root": str(SKILL),
         "worker_path": str(pathlib.Path(__file__).resolve()),
         "pipeline_version": _pipeline_version(),
-        "ffmpeg": shutil.which("ffmpeg") or "",
-        "ffprobe": shutil.which("ffprobe") or "",
-        **vision_config.facts(),
     }
 
 
@@ -1182,7 +1181,8 @@ def process_task(task: dict, *, retry_partial: bool = False,
     force_rebuild = bool(task.get("force_rebuild"))
     task_id = str(task.get("task_id") or rid)
     manifest_sha256 = _payload_sha256(task)
-    runtime = _runtime_facts()
+    runtime = _runtime_facts(task)
+    runtime["delivery_mode"] = requested_mode(task)
     from orchestrator.runtime_policy import load_policy
     task_started = time.time()
     task_timeout = load_policy().task_timeout
@@ -1327,6 +1327,7 @@ def process_task(task: dict, *, retry_partial: bool = False,
             "head_trim_s": 0.3,
             "tail_trim_s": 0,
         }
+        manifest.update(queue_contracts.task_runtime_overrides(task))
         task_id = str(manifest["task_id"])
         manifest_sha256 = _payload_sha256(manifest)
         if not manifest["full_script"]:
@@ -1564,6 +1565,12 @@ def process_task(task: dict, *, retry_partial: bool = False,
                         if stage_result.get("resume_stage") == "semantic_match":
                             last_failure.update({k: stage_result[k] for k in (
                                 "retryable", "resume_stage", "failed_stage", "failure_class", "failure_code") if k in stage_result})
+                        if res.get("preflight_only"):
+                            last_failure.update(type="environment", phase="preflight", preflight_only=True,
+                                retryable=True, resume_stage="semantic_match", failed_stage="preflight",
+                                failure_class="environment", failure_code="ENVIRONMENT_PRECHECK_FAILED")
+                            log("selection recovery preflight blocked; retain audio and retry budget")
+                            break
                         if qc_result is not None:
                             last_failure["qc_report"] = qc_result.get("output")
                             last_failure["qc_status"] = qc_result.get("status")

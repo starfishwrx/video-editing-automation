@@ -604,13 +604,13 @@ class AudioSelectionGateTests(unittest.TestCase):
 
 
 class OutputContractTests(unittest.TestCase):
-    def test_success_output_is_exactly_four_fields(self):
+    def test_success_output_includes_runtime_without_unrelated_diagnostics(self):
         compact = cli._compact_build_result({
             "status": "SUCCESS", "draft_name": "demo",
             "draft_path": "/missing", "total_s": 9.9,
             "warnings": ["hidden"], "task_log": "/task",
         })
-        self.assertEqual(list(compact), ["草稿名称", "草稿路径", "草稿文件", "生成日志"])
+        self.assertEqual(list(compact), ["草稿名称", "草稿路径", "草稿文件", "生成日志", "运行信息"])
 
 
 class MigrationTests(unittest.TestCase):
