@@ -45,6 +45,13 @@ class SentenceContinuityTests(unittest.TestCase):
         self.manifest['qc_rejected_shots'] = {'3': ['long']}
         self.assertTrue(list(sharing.proposals(self.manifest, self.analysis, self.plan, 1, None)))
 
+    def test_joint_review_never_proposes_evidence_past_physical_end(self):
+        self.shot['source_end'] = 4.167
+        self.shot['material_duration_us'] = 4_166_667
+        for reviews in self.plan['reviews'].values():
+            reviews[0]['evidence_intervals_us'] = [{'start': 0, 'end': 4_167_000}]
+        self.assertEqual(list(sharing.proposals(self.manifest, self.analysis, self.plan, 1, None)), [])
+
     def unseen_neighbour_anchor(self):
         self.plan['reviews']['1'] = []
         self.plan['reviews']['2'][0]['evidence_intervals_us'] = [{'start': 0, 'end': 8_000_000}]
@@ -211,6 +218,34 @@ class SentenceContinuityTests(unittest.TestCase):
                                           {'issues': [{'message': 'CONTINUITY_INPUT_CHANGED'}]}, None)
         editor._clear_incomplete_groups(self.plan)
         self.assertEqual([r['parts'] for r in self.plan['rows']], [[], []])
+
+    def test_legacy_analysis_identity_migration_keeps_valid_continuous_group(self):
+        self.install()
+        self.analysis['vision_analysis'] = {'model': 'fixture', 'cache_wait_s': .1}
+        self.identity()
+        old_plan, old_analysis = copy.deepcopy(self.plan), copy.deepcopy(self.analysis)
+        folder = self.root / 'ai_editor'
+        folder.mkdir()
+        editor._save(folder / 'plan.json', old_plan)
+        editor.snapshot_previous_analysis(old_analysis, self.root)
+        current = copy.deepcopy(old_analysis)
+        current['vision_analysis']['cache_wait_s'] = .2
+        identity = {**old_plan['resume_identity'], 'analysis_sha256': editor._analysis_digest(current)}
+        self.assertTrue(editor._duration_resume_safe(old_plan, identity, current, folder))
+        bad = copy.deepcopy(old_plan)
+        key = bad['rows'][0]['continuity_key']
+        bad['continuity_reviews'][key]['input']['window_us']['end'] = 12_000_001
+        self.assertFalse(editor._duration_resume_safe(bad, identity, current, folder))
+        with patch.object(editor, '_editor_model', return_value='fixture'), \
+             patch.object(editor, '_inventory', side_effect=AssertionError('inventory rerun')), \
+             patch.object(editor, '_call', side_effect=AssertionError('model call')), \
+             patch.object(editor, '_review', side_effect=AssertionError('pixel review')):
+            result = editor.prepare(self.manifest, current, self.root)
+        resumed = result['ai_editor_plan']
+        self.assertTrue(resumed['ok'], resumed.get('issues'))
+        self.assertEqual(resumed['rows'], old_plan['rows'])
+        self.assertEqual(resumed['continuity_reviews'], old_plan['continuity_reviews'])
+        self.assertEqual(resumed['duration_migration']['kind'], 'analysis_identity')
 
     def group(self, context=None):
         context = context or next(sharing.proposals(self.manifest, self.analysis, self.plan, 1, None))

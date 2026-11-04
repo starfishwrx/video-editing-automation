@@ -187,6 +187,233 @@ class SelectionRecoveryTests(unittest.TestCase):
         self.assertEqual(review.call_count, 1)
         self.assertFalse(plan.get("window_reviews"))
 
+    def test_rounded_source_end_gets_fresh_review_before_inpoint_moves(self):
+        manifest = copy.deepcopy(self.manifest)
+        manifest["segments"][0]["audio_duration_us"] = 2_139_479
+        analysis, plan = copy.deepcopy(self.analysis), self.plan()
+        analysis["shots"][0].update(source_end=4.167, material_duration_us=4_166_667)
+        part = plan["rows"][0]["parts"][0]
+        part.update(source_start_us=2_027_521, audio_duration_us=2_139_479)
+        old_review = plan["reviews"]["1"][0]
+        old_review["evidence_intervals_us"] = [{"start": 2_358_000, "end": 4_167_000}]
+        saved_review, saved_other = copy.deepcopy(old_review), copy.deepcopy(plan["rows"][1])
+        reviewed = {**copy.deepcopy(old_review),
+                    "review_window_us": {"start": 2_027_188, "end": 4_166_667},
+                    "evidence_intervals_us": [{"start": 2_200_000, "end": 3_900_000}]}
+        failure = editor.WindowFailure(1, "shot1", "EVIDENCE_OUT_OF_RANGE")
+        with patch.object(editor, "_review", return_value=reviewed) as review:
+            self.assertTrue(editor._repair_selected_window(manifest, analysis, plan, self.root, failure))
+        self.assertTrue(review.call_args.kwargs["dense"])
+        self.assertEqual((review.call_args.args[2]["source_start"], review.call_args.args[2]["source_end"]),
+                         (2.027188, 4.166667))
+        self.assertEqual(plan["reviews"]["1"][0], saved_review)
+        self.assertEqual(plan["rows"][1], saved_other)
+        self.assertEqual(part["source_start_us"], 2_027_188)
+        self.assertEqual(plan["window_repair_attempts"][part["window_review_key"]]["original_source_start_us"], 2_027_521)
+        output = editor._assemble(manifest, analysis, plan, narration_timing=None, verify_sources=True)
+        self.assertLessEqual(round(output["segments"][0]["source_end"] * 1e6), 4_166_667)
+        self.assertEqual(output["segments"][0]["ai_selection"]["evidence_intervals_us"], reviewed["evidence_intervals_us"])
+
+    def test_rejected_boundary_review_does_not_move_inpoint_or_change_evidence(self):
+        analysis, plan = copy.deepcopy(self.analysis), self.plan()
+        analysis["shots"][0].update(source_end=4.167, material_duration_us=4_166_667)
+        part = plan["rows"][0]["parts"][0]
+        part.update(source_start_us=2_027_521, audio_duration_us=2_139_479)
+        plan["reviews"]["1"][0]["evidence_intervals_us"] = [{"start": 2_358_000, "end": 4_167_000}]
+        old_review = copy.deepcopy(plan["reviews"]["1"][0])
+        with patch.object(editor, "_review", return_value={"verdict": "mismatch", "reason": "result not visible"}):
+            self.assertFalse(editor._repair_selected_window(self.manifest, analysis, plan, self.root,
+                editor.WindowFailure(1, "shot1", "EVIDENCE_OUT_OF_RANGE")))
+        self.assertEqual(part["source_start_us"], 2_027_521)
+        self.assertEqual(plan["reviews"]["1"][0], old_review)
+        self.assertFalse(plan.get("window_reviews"))
+
+    def test_repair_targets_failing_part_when_one_shot_is_used_twice(self):
+        manifest = copy.deepcopy(self.manifest)
+        manifest["segments"][0]["audio_duration_us"] = 2_000_000
+        analysis, plan = copy.deepcopy(self.analysis), self.plan()
+        analysis["shots"][0].update(source_end=4.167, material_duration_us=4_166_667)
+        original = plan["reviews"]["1"][0]
+        original["evidence_intervals_us"] = [{"start": 2_358_000, "end": 4_167_000}]
+        first_review = {**copy.deepcopy(original), "sentence_index": 1,
+            "review_window_us": {"start": 0, "end": 1_500_000},
+            "evidence_intervals_us": [{"start": 200_000, "end": 800_000}]}
+        plan["window_reviews"] = {"first": first_review}
+        plan["rows"][0]["parts"] = [
+            {"shot_id": "shot1", "source_start_us": 0, "audio_duration_us": 1_000_000,
+             "window_review_key": "first"},
+            {"shot_id": "shot1", "source_start_us": 3_166_800, "audio_duration_us": 1_000_000}]
+        first_part = copy.deepcopy(plan["rows"][0]["parts"][0])
+        with self.assertRaises(editor.WindowFailure) as caught:
+            editor._assemble(manifest, analysis, plan, narration_timing=None, verify_sources=True)
+        self.assertEqual(caught.exception.part_index, 1)
+        reviewed = {**copy.deepcopy(original), "review_window_us": {"start": 3_166_667, "end": 4_166_667},
+                    "evidence_intervals_us": [{"start": 3_300_000, "end": 4_000_000}]}
+        with patch.object(editor, "_review", return_value=reviewed):
+            self.assertTrue(editor._repair_selected_window(manifest, analysis, plan, self.root, caught.exception))
+        self.assertEqual(plan["rows"][0]["parts"][0], first_part)
+        self.assertEqual(plan["window_reviews"]["first"], first_review)
+        self.assertEqual(plan["rows"][0]["parts"][1]["source_start_us"], 3_166_667)
+        self.assertFalse(editor._repair_selected_window(manifest, analysis, plan, self.root,
+                         editor.WindowFailure(1, "shot1", "EVIDENCE_OUT_OF_RANGE")))
+
+    def test_interrupted_window_review_reattaches_only_failing_part_without_model(self):
+        manifest = copy.deepcopy(self.manifest)
+        manifest["segments"][0]["audio_duration_us"] = 2_000_000
+        analysis, plan = copy.deepcopy(self.analysis), self.plan()
+        shot = analysis["shots"][0]
+        shot.update(source_end=4.167, material_duration_us=4_166_667)
+        original = plan["reviews"]["1"][0]
+        original["evidence_intervals_us"] = [{"start": 2_358_000, "end": 4_167_000}]
+        first_review = {**copy.deepcopy(original), "sentence_index": 1,
+            "review_window_us": {"start": 0, "end": 1_500_000},
+            "evidence_intervals_us": [{"start": 200_000, "end": 800_000}]}
+        plan["window_reviews"] = {"first": first_review}
+        plan["rows"][0]["parts"] = [
+            {"shot_id": "shot1", "source_start_us": 0, "audio_duration_us": 1_000_000,
+             "window_review_key": "first"},
+            {"shot_id": "shot1", "source_start_us": 3_166_800, "audio_duration_us": 1_000_000}]
+        first_part = copy.deepcopy(plan["rows"][0]["parts"][0])
+        window = (3_166_667, 4_166_667)
+        reviewed = {**copy.deepcopy(original), "review_window_us": {"start": window[0], "end": window[1]},
+                    "evidence_intervals_us": [{"start": 3_300_000, "end": 4_000_000}]}
+        with patch.object(editor, "_review", return_value=reviewed) as review:
+            key = editor._review_proposed_window(manifest, plan, self.root, plan["sentences"][0], shot, window,
+                                                  attempt_metadata={"original_source_start_us": 3_166_800})
+        review.assert_called_once()
+        interrupted = json.loads((self.root / "plan.json").read_text(encoding="utf-8"))
+        self.assertNotIn("window_review_key", interrupted["rows"][0]["parts"][1])
+        with patch.object(editor, "_review", side_effect=AssertionError("repeat model call")):
+            fixed = editor._repair_selected_window(manifest, analysis, interrupted, self.root,
+                editor.WindowFailure(1, "shot1", "EVIDENCE_OUT_OF_RANGE", part_index=1))
+        self.assertTrue(fixed)
+        self.assertEqual(interrupted["rows"][0]["parts"][0], first_part)
+        self.assertEqual(interrupted["rows"][0]["parts"][1]["window_review_key"], key)
+        self.assertEqual(interrupted["rows"][0]["parts"][1]["source_start_us"], window[0])
+        self.assertTrue(editor._assemble(manifest, analysis, interrupted, narration_timing=None, verify_sources=True)["ok"])
+        interrupted["window_reviews"][key]["evidence_intervals_us"][0]["end"] = window[1] + 1
+        with patch.object(editor, "_review") as review:
+            self.assertIsNone(editor._review_proposed_window(manifest, interrupted, self.root,
+                              interrupted["sentences"][0], shot, window))
+        review.assert_not_called()
+
+    def test_duration_only_migration_reuses_rows_and_original_observations(self):
+        old = copy.deepcopy(self.analysis)
+        old["shots"][0]["material_duration_us"] = 10_000_000
+        plan = self.plan()
+        plan["identity"].update(analysis_sha256=contract.digest(old), policy_version=contract.POLICY_VERSION)
+        plan["resume_identity"] = copy.deepcopy(plan["identity"])
+        folder = self.root / "ai_editor"
+        folder.mkdir()
+        editor._save(folder / "plan.json", plan)
+        editor.snapshot_previous_analysis(old, self.root)
+        new = copy.deepcopy(old)
+        new["shots"][0]["material_duration_us"] = 9_999_667
+        with patch.object(editor, "_editor_model", return_value="offline"), \
+                patch.object(editor, "_inventory", side_effect=AssertionError("inventory rerun")), \
+                patch.object(editor, "_call", side_effect=AssertionError("model call")), \
+                patch.object(editor, "_review_pool", side_effect=AssertionError("full review rerun")), \
+                patch.object(editor, "_restore_interrupted_groups", side_effect=AssertionError("stale group restored")):
+            result = editor.prepare(self.manifest, new, self.root)
+        resumed = result["ai_editor_plan"]
+        self.assertTrue(resumed["ok"], resumed.get("issues"))
+        self.assertEqual(resumed["reviews"], plan["reviews"])
+        self.assertEqual(resumed["rows"], plan["rows"])
+        self.assertEqual(resumed["duration_migration"]["previous_analysis_sha256"], contract.digest(old))
+        self.assertTrue(editor.match_manifest(self.manifest, result)["ok"])
+        first_snapshot = folder / resumed["duration_migration"]["snapshot"]
+        self.assertEqual(contract.digest(json.loads(first_snapshot.read_text(encoding="utf-8"))), contract.digest(old))
+        editor.snapshot_previous_analysis(new, self.root)
+        newest = copy.deepcopy(new)
+        newest["shots"][0]["material_duration_us"] = 9_999_334
+        with patch.object(editor, "_editor_model", return_value="offline"), \
+                patch.object(editor, "_inventory", side_effect=AssertionError("inventory rerun")), \
+                patch.object(editor, "_call", side_effect=AssertionError("model call")), \
+                patch.object(editor, "_review_pool", side_effect=AssertionError("full review rerun")):
+            second = editor.prepare(self.manifest, newest, self.root)["ai_editor_plan"]
+            third = editor.prepare(self.manifest, newest, self.root)["ai_editor_plan"]
+        self.assertTrue(second["ok"] and third["ok"])
+        self.assertEqual(len(second["duration_migrations"]), 2)
+        self.assertEqual(third["duration_migrations"], second["duration_migrations"])
+        self.assertEqual(contract.digest(json.loads(first_snapshot.read_text(encoding="utf-8"))), contract.digest(old))
+        self.assertNotEqual(second["duration_migrations"][0]["snapshot"], second["duration_migrations"][1]["snapshot"])
+
+    def test_duration_migration_rejects_changed_observation_or_snapshot(self):
+        old = copy.deepcopy(self.analysis)
+        old["shots"][0]["material_duration_us"] = 10_000_000
+        plan = self.plan()
+        plan["identity"].update(analysis_sha256=contract.digest(old), policy_version=contract.POLICY_VERSION)
+        plan["resume_identity"] = copy.deepcopy(plan["identity"])
+        folder = self.root / "ai_editor"
+        folder.mkdir()
+        editor._save(folder / "plan.json", plan)
+        editor.snapshot_previous_analysis(old, self.root)
+        new = copy.deepcopy(old)
+        new["shots"][0].update(material_duration_us=9_999_667, description="different observed action")
+        with patch.object(editor, "_editor_model", return_value="offline"), \
+                patch.object(editor, "_inventory", side_effect=ValueError("changed observation")) as inventory:
+            result = editor.prepare(self.manifest, new, self.root)
+        inventory.assert_called_once()
+        self.assertFalse(result["ai_editor_plan"]["ok"])
+        self.assertNotIn("duration_migration", result["ai_editor_plan"])
+
+    def test_migration_rejects_tampered_snapshot_and_out_of_bounds_review(self):
+        old = copy.deepcopy(self.analysis)
+        old["shots"][0]["material_duration_us"] = 10_000_000
+        plan = self.plan()
+        plan["identity"].update(analysis_sha256=contract.digest(old), policy_version=contract.POLICY_VERSION)
+        plan["resume_identity"] = copy.deepcopy(plan["identity"])
+        folder = self.root / "ai_editor"
+        folder.mkdir()
+        editor._save(folder / "plan.json", plan)
+        editor.snapshot_previous_analysis(old, self.root)
+        new = copy.deepcopy(old)
+        new["shots"][0]["material_duration_us"] = 9_999_667
+        identity = {**plan["resume_identity"], "analysis_sha256": contract.digest(new)}
+        plan["rows"][0]["parts"][0]["window_review_key"] = "wide"
+        plan["window_reviews"] = {"wide": {"review_window_us": {"start": 0, "end": 10_000_000}}}
+        self.assertFalse(editor._duration_resume_safe(plan, identity, new, folder))
+        plan["rows"][0]["parts"][0].pop("window_review_key")
+        path = folder / f"previous_analysis_{contract.digest(old)}.json"
+        path.write_text('{"tampered": true}', encoding="utf-8")
+        editor.snapshot_previous_analysis(old, self.root)
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8")), {"tampered": True})
+        self.assertFalse(editor._duration_resume_safe(plan, identity, new, folder))
+
+    def test_duration_migration_checks_legacy_and_current_analysis_digests(self):
+        old = copy.deepcopy(self.analysis)
+        old["shots"][0]["material_duration_us"] = 10_000_000
+        old["vision_analysis"] = {"model": "offline", "cache_wait_s": 0.1, "cache_hits": 2}
+        new = copy.deepcopy(old)
+        new["shots"][0]["material_duration_us"] = 9_999_667
+        new["vision_analysis"]["cache_wait_s"] = 3.2
+        for mode, old_digest in (("legacy", contract.digest(old)), ("current", editor._analysis_digest(old))):
+            with self.subTest(mode=mode):
+                root = self.root / mode
+                folder = root / "ai_editor"
+                folder.mkdir(parents=True)
+                plan = self.plan()
+                plan["identity"].update(analysis_sha256=old_digest, policy_version=contract.POLICY_VERSION)
+                plan["resume_identity"] = copy.deepcopy(plan["identity"])
+                editor._save(folder / "plan.json", plan)
+                editor.snapshot_previous_analysis(old, root)
+                identity = {**plan["resume_identity"], "analysis_sha256": editor._analysis_digest(new)}
+                self.assertTrue(editor._duration_resume_safe(plan, identity, new, folder))
+                changed = copy.deepcopy(new)
+                changed["vision_analysis"]["cache_hits"] += 1
+                self.assertFalse(editor._duration_resume_safe(plan, identity, changed, folder))
+                inconsistent = copy.deepcopy(plan)
+                inconsistent["identity"]["analysis_sha256"] = "0" * 64
+                self.assertFalse(editor._duration_resume_safe(inconsistent, identity, new, folder))
+
+    def test_proposed_window_never_reviews_past_physical_end(self):
+        shot = {**self.shots[0], "source_end": 4.167, "material_duration_us": 4_166_667}
+        with patch.object(editor, "_review") as review:
+            result = editor._review_proposed_window(self.manifest, self.plan(), self.root,
+                                                    self.sentences[0], shot, (2_027_521, 4_167_000))
+        self.assertIsNone(result)
+        review.assert_not_called()
+
     def test_inventory_length_failure_splits_once_and_preserves_indices(self):
         calls = []
         def call(prompt, path):

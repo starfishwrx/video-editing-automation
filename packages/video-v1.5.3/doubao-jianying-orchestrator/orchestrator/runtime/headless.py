@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 
 
@@ -51,11 +52,57 @@ def backend():
     return result
 
 
-def preflight(manifest=None):
+def _prepare_media_tools(media=None):
+    """Use the same discovery as the engine and make it visible to the backend."""
+    from . import platform_env
+
+    for key in ('FFMPEG_BIN', 'FFPROBE_BIN'):
+        configured = os.environ.get(key, '').strip()
+        if configured and not Path(configured).expanduser().is_file():
+            raise ValueError('HEADLESS_EXECUTABLE_CONFIG_INVALID:' + key)
+    found = media if media and media.get('ffmpeg') and media.get('ffprobe') else platform_env.find_ffmpeg_detailed()
+    paths = {}
+    for tool in ('ffmpeg', 'ffprobe'):
+        path = found.get(tool)
+        if not path or not Path(path).is_file():
+            raise ValueError('HEADLESS_EXECUTABLE_MISSING:' + tool)
+        path = Path(path).resolve()
+        try:
+            probe = subprocess.run([str(path), '-version'], stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL, timeout=10, check=False)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise ValueError('HEADLESS_EXECUTABLE_UNUSABLE:' + tool) from exc
+        if probe.returncode:
+            raise ValueError('HEADLESS_EXECUTABLE_UNUSABLE:' + tool)
+        paths[tool] = path
+
+    # Native backend invokes the command names; bind both to the binaries the
+    # engine actually selected. Refuse conflicting directories or renamed tools
+    # instead of claiming readiness for a different executable.
+    current = os.environ.get('PATH', '')
+    parents = list(dict.fromkeys(str(paths[name].parent) for name in ('ffmpeg', 'ffprobe')))
+    for order in (parents, list(reversed(parents))):
+        parts, seen = [], set()
+        for part in [*order, *current.split(os.pathsep)]:
+            key = os.path.normcase(os.path.normpath(part))
+            if key not in seen:
+                seen.add(key)
+                parts.append(part)
+        candidate = os.pathsep.join(parts)
+        if all((resolved := shutil.which(name, path=candidate)) and
+               Path(resolved).resolve() == paths[name] for name in paths):
+            os.environ['PATH'] = candidate
+            os.environ['FFMPEG_BIN'] = str(paths['ffmpeg'])
+            os.environ['FFPROBE_BIN'] = str(paths['ffprobe'])
+            return {name: str(path) for name, path in paths.items()}
+    raise ValueError('HEADLESS_EXECUTABLE_PATH_CONFLICT: ffmpeg/ffprobe must be discoverable by name')
+
+
+def preflight(manifest=None, *, media=None):
     manifest = manifest or {}
     mode = str(manifest.get('draft_backend') or os.environ.get('JY_DRAFT_BACKEND') or 'headless')
     if mode == 'legacy':
-        return {'status': 'READY', 'backend': 'legacy'}
+        return {'status': 'READY', 'backend': 'legacy', 'media_tools': _prepare_media_tools(media)}
     if mode != 'headless':
         raise ValueError('DRAFT_BACKEND_INVALID')
     native = backend()
@@ -69,9 +116,7 @@ def preflight(manifest=None):
     font = manifest.get('subtitle_font_path') or os.environ.get('JY_HEADLESS_FONT')
     if not font:
         raise ValueError('HEADLESS_SUBTITLE_FONT_REQUIRED')
-    for tool in ('ffmpeg', 'ffprobe'):
-        if not shutil.which(tool):
-            raise ValueError('HEADLESS_EXECUTABLE_MISSING:' + tool)
+    media_tools = _prepare_media_tools(media)
     native.j.fonts.collect_plan({'tracks': [{'type': 'text', 'segments': [{'font_path': font}]}]})
     try:
         runtime = native.j.nd.doctor()
@@ -85,7 +130,8 @@ def preflight(manifest=None):
         ) from exc
     return {'status': 'READY', 'backend': 'headless', 'runtime_profile': runtime['runtime_profile'],
             'install_dir': runtime.get('install_dir'), 'font': str(Path(font).resolve()),
-            'backend_root': str(Path(native.__file__).resolve().parent.parent)}
+            'backend_root': str(Path(native.__file__).resolve().parent.parent),
+            'media_tools': media_tools}
 
 
 def production_environment_report(base_report, manifest=None):
@@ -94,7 +140,7 @@ def production_environment_report(base_report, manifest=None):
               'base_ready': bool(base_report.get('ready')),
               'hints': list(base_report.get('hints') or [])}
     try:
-        check = preflight(manifest)
+        check = preflight(manifest, media=base_report)
     except (OSError, ValueError, RuntimeError, ImportError, SyntaxError) as exc:
         check = {'status': 'ENV_ERROR', 'reason': str(exc)}
     report['draft_backend_check'] = check

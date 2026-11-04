@@ -5,6 +5,7 @@ param(
     [string]$DraftRoot,
     [string]$QueuePath,
     [string]$ConfigPath,
+    [string]$RecordId,
     [switch]$DryRun
 )
 $ErrorActionPreference = 'Stop'
@@ -13,8 +14,11 @@ $initialWork = if ($WorkRoot) { $WorkRoot } elseif ($env:JY_WORK_ROOT) { $env:JY
 if (-not $ConfigPath) { $ConfigPath = Join-Path $initialWork 'config.local.ps1' }
 if (Test-Path -LiteralPath $ConfigPath -PathType Leaf) {
     . $ConfigPath
+    $env:JY_CONFIG_SOURCE = (Resolve-Path -LiteralPath $ConfigPath).Path
 } elseif ($PSBoundParameters.ContainsKey('ConfigPath')) {
     throw 'PIPELINE_CONFIG_NOT_FOUND'
+} else {
+    $env:JY_CONFIG_SOURCE = 'process_environment'
 }
 if (-not $PythonPath) { $PythonPath = Join-Path $packageRoot '.venv/Scripts/python.exe' }
 if (-not $WorkRoot) { $WorkRoot = if ($env:JY_WORK_ROOT) { $env:JY_WORK_ROOT } else { $initialWork } }
@@ -42,13 +46,10 @@ foreach ($mediaTool in @($env:FFMPEG_BIN, $env:FFPROBE_BIN)) {
     }
 }
 $arguments = @('-X', 'utf8', '-m', 'tools.workflow.scheduled', '--queue', $QueuePath, '--work-root', $WorkRoot)
+if ($RecordId) { $arguments += @('--record-id', $RecordId) }
 if ($DryRun) { $arguments += '--dry-run' }
 Push-Location -LiteralPath $packageRoot
 try {
-    if (-not $DryRun) {
-        & $PythonPath -X utf8 -m tools.headless_runtime check
-        if ($LASTEXITCODE -ne 0) { throw 'HEADLESS_PRODUCTION_PREFLIGHT_FAILED' }
-    }
     & $PythonPath @arguments
     $pipelineExit = $LASTEXITCODE
 } finally {

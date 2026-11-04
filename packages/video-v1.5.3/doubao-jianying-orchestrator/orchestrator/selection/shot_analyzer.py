@@ -222,7 +222,8 @@ def candidate_window(shot: dict[str, Any], *, audio_duration_us: int,
                           if shot.get("selection_mode") == "ai_editor" else None)
     return timing_contract.solve_window_waste_aware(timing_contract.WindowRequest(
         source_in_us=_us(shot.get("source_start")),
-        source_out_us=_us(shot.get("source_end"), _number(shot.get("source_start"))),
+        source_out_us=min(_us(shot.get("source_end"), _number(shot.get("source_start"))),
+                          int(material_us)),
         audio_duration_us=int(audio_duration_us or 0),
         tail_pad_us=_us(source.get("tail_pad_s"), NARRATION_TAIL_PAD),
         head_guard_us=_us(source.get("head_trim_s"), DEFAULT_HEAD_TRIM_S),
@@ -249,9 +250,13 @@ def span_segment_for(shot: dict[str, Any], *, manifest: dict[str, Any] | None = 
     speed_min, speed_max = _fit_speed_range(
         shot, manifest=manifest, time_sensitive=time_sensitive)
     frm = _number(source.get("fps"), 0) or 0
+    source_out = _us(shot.get("source_end"), _number(shot.get("source_start")))
+    material_us = _number(shot.get("material_duration_us"))
+    if material_us > 1000:
+        source_out = min(source_out, int(material_us))
     return timing_contract.SpanSegment(
         source_in_us=_us(shot.get("source_start")),
-        source_out_us=_us(shot.get("source_end"), _number(shot.get("source_start"))),
+        source_out_us=source_out,
         head_guard_us=_us(source.get("head_trim_s"), DEFAULT_HEAD_TRIM_S),
         tail_guard_us=_us(source.get("tail_trim_s"), DEFAULT_TAIL_TRIM_S),
         transition_in_handle_us=int(handles[0]), transition_out_handle_us=int(handles[1]),

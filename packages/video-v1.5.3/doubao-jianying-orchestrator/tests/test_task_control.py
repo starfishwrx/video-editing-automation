@@ -398,6 +398,8 @@ class RecoveryStageTests(unittest.TestCase):
                         "draft_name": "prior-draft", "force_overwrite": True,
                         "recovery_stage": "semantic_match"}
             with mock.patch.object(cli, "_run_shot_analysis", return_value=analysis) as analyze, \
+                    mock.patch.object(cli, "environment_report", return_value={"ready": True}), \
+                    mock.patch.object(cli, "_production_environment_report", return_value={"ready": True}), \
                     mock.patch.object(material_corrections, "apply", return_value=analysis), \
                     mock.patch.object(ai_editor, "prepare", return_value=analysis), \
                     mock.patch.object(cli.shot_analyzer, "match_manifest",
@@ -439,6 +441,7 @@ class RecoveryStageTests(unittest.TestCase):
                                     selection_mode="ai_editor")
             args = argparse.Namespace(input=str(source), report_dir=str(report), stage="semantic_match")
             with mock.patch.object(cli, "environment_report", return_value={"ready": True}), \
+                    mock.patch.object(cli, "_production_environment_report", return_value={"ready": True}), \
                     mock.patch.object(cli, "_temporary_match", return_value=({"segments": [segment]}, None)) as match, \
                     mock.patch.object(cli, "_pre_synthesize_narration") as tts:
                 self.assertEqual(cli.cmd_recover(args), 0)

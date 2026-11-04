@@ -62,6 +62,27 @@ class PreferredSpeedTests(unittest.TestCase):
         self.assertTrue(got.ok, got.to_dict())
         self.assertAlmostEqual(got.speed, tc.frame_speed(1.0), places=8)
 
+    def test_single_and_span_reject_evidence_beyond_physical_video_end(self):
+        shot = {"source_start": 0, "source_end": 4.167, "material_duration_us": 4_166_667,
+                "frame_time": 4.16, "duration": 4.167,
+                "evidence_intervals": [{"start": 2.358, "end": 4.167}]}
+        manifest = {"head_trim_s": 0, "tail_trim_s": 0, "tail_pad_s": 0}
+        single = shot_analyzer.candidate_window(shot, audio_duration_us=2_139_479, manifest=manifest)
+        self.assertFalse(single.ok)
+        self.assertEqual(single.reason, tc.REASON_EVIDENCE_OUT_OF_RANGE)
+        segment = shot_analyzer.span_segment_for(shot, manifest=manifest)
+        self.assertEqual(segment.source_out_us, 4_166_667)
+        span_part = tc.solve_window(segment.request(audio_duration_us=2_139_479, tail_pad_us=0))
+        self.assertFalse(span_part.ok)
+        self.assertEqual(span_part.reason, tc.REASON_EVIDENCE_OUT_OF_RANGE)
+        self.assertEqual(segment.evidence_end_us, 4_167_000)
+        direct = tc.solve_window(tc.WindowRequest(source_in_us=0, source_out_us=4_167_000,
+            video_duration_us=4_166_667, audio_duration_us=2_139_479,
+            head_guard_us=0, tail_guard_us=0, tail_pad_us=0,
+            evidence_start_us=2_358_000, evidence_end_us=4_167_000))
+        self.assertFalse(direct.ok)
+        self.assertEqual(direct.reason, tc.REASON_EVIDENCE_OUT_OF_RANGE)
+
     def test_invalid_preference_fails_bounded(self):
         for value in (0, -1, 20.01, float("inf"), "bad"):
             with self.subTest(value=value):

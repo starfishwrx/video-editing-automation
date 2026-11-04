@@ -58,7 +58,7 @@ class VisualQcDeliveryContractTests(unittest.TestCase):
         self.source = self.root / "source.mp4"
         self.source.write_bytes(b"synthetic media identity")
         self.task = {"task_id": "qc-task", "record_id": "qc-record", "category": "paper", "sku": "SKU-QC",
-                     "script": "合成测试脚本"}
+                     "script": "合成测试脚本", "delivery_mode": "formal"}
         self.runtime = {"tool_version": "1.5.6", "visual_policy_version": "test",
                         "package_sha256": "a" * 64, "visual_policy_sha256": "b" * 64}
         self.contract = pe.freeze(self.task, "qc-test-run", [self.source], self.runtime)
@@ -160,6 +160,35 @@ class VisualQcDeliveryContractTests(unittest.TestCase):
         self.assertNotEqual(first, worker.build_progress_inputs(manifest, None, [1]))
         self.source.write_bytes(b"changed source bytes")
         self.assertNotEqual(first, worker.build_progress_inputs(manifest, None, []))
+
+    def test_preview_qc_resume_keeps_passing_draft_local(self):
+        task_dir = self.root / self.task["record_id"]
+        report_dir = task_dir / "report" / "draft-a"
+        report_dir.mkdir(parents=True)
+        (report_dir / "qc_stage.json").write_text(json.dumps({"draft": str(self.draft)}))
+        with mock.patch.object(worker, "WORK", self.root), mock.patch.object(worker, "DRAFTS", self.drafts), \
+             mock.patch.object(worker, "SKIP_SHIP", False), \
+             mock.patch.object(worker, "run_post_draft_qc", return_value={"status": "PASS", "output": "qc.json"}), \
+             mock.patch.object(worker, "finalize_closed_loop") as delivery:
+            result = worker.resume_task_qc({**self.task, "delivery_mode": "preview"})
+        self.assertEqual((result["status"], result["distribution_status"], result["resume_stage"]),
+                         ("PREVIEW_READY", "LOCAL_ONLY", None))
+        delivery.assert_not_called()
+
+    def test_qc_resume_keeps_missing_requested_drafts_partial(self):
+        task_dir = self.root / self.task["record_id"]
+        report_dir = task_dir / "report" / "draft-a"
+        report_dir.mkdir(parents=True)
+        (report_dir / "qc_stage.json").write_text(json.dumps({"draft": str(self.draft)}))
+        for mode in ("preview", "formal"):
+            with self.subTest(mode=mode), mock.patch.object(worker, "WORK", self.root), \
+                 mock.patch.object(worker, "DRAFTS", self.drafts), mock.patch.object(worker, "SKIP_SHIP", False), \
+                 mock.patch.object(worker, "run_post_draft_qc", return_value={"status": "PASS", "output": "qc.json"}), \
+                 mock.patch.object(worker, "finalize_closed_loop") as delivery:
+                result = worker.resume_task_qc({**self.task, "delivery_mode": mode, "count": 3})
+            self.assertEqual((result["status"], result["resume_stage"], result["missing_draft_count"]),
+                             ("PARTIAL", "build", 2))
+            delivery.assert_not_called()
 
     def test_worker_preserves_fail_even_when_issue_also_mentions_timeout(self):
         result = self.run_worker({"status": "FAIL", "issues": ["MISMATCH after provider timeout"]}, returncode=2)

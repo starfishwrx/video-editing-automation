@@ -18,7 +18,7 @@ class TableReadbackTests(unittest.TestCase):
         self.task = self.root / 'task.json'
         self.done = self.root / 'done.json'
         self.policy = self.root / 'policy.json'
-        self.write(self.task, {'record_id': 'rec-test'})
+        self.write(self.task, {'record_id': 'rec-test', 'delivery_mode': 'formal'})
         self.write(self.done, {'drafts': ['fixture'], 'nas_parent_folder': r'\\server\share\draft'})
         self.write(self.policy, {'policy_id': 'fixture', 'table_write': {'initial_success_status': 'custom-first',
                                                'revision_status': 'custom-revised'}})

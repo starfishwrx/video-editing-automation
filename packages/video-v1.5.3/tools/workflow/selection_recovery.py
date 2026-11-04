@@ -86,13 +86,17 @@ def recover(manifest: dict, report_dir: Path, *, prefix: list[str], run, env: di
     report_dir = Path(report_dir)
     state_path = report_dir / "selection_recovery_state.json"
     outputs, errors = [], []
+    preflight_started = False
 
-    def result(code, reason, **extra):
+    def result(code, reason, *, preflight_only=False, **extra):
         payload = {"status": "SELECTION_RECOVERY_BLOCKED", "failure_class": "environment",
-                   "reason": reason, "retryable": False, **extra}
+                   "reason": reason, "retryable": bool(preflight_only), **extra}
+        if preflight_only:
+            payload.update(failure_code="ENVIRONMENT_PRECHECK_FAILED", failed_stage="preflight",
+                           resume_stage="semantic_match")
         return {"rc": code, "stdout": json.dumps(payload, ensure_ascii=False),
                 "stderr": "\n".join(errors), "combined": json.dumps(payload, ensure_ascii=False),
-                "stage_retry_exhausted": True}
+                "stage_retry_exhausted": not preflight_only, "preflight_only": bool(preflight_only)}
 
     try:
         frozen = _read(report_dir / "selection_resume.json")
@@ -108,8 +112,15 @@ def recover(manifest: dict, report_dir: Path, *, prefix: list[str], run, env: di
         if not rows or len(files) != len(rows) or any(
                 int(r.get("audio_duration_us") or 0) <= 0 or r.get("timing_certainty") != "audio" for r in rows):
             return result(1, "SELECTION_RECOVERY_AUDIO_REQUIRED")
+        from orchestrator.audio import bgm_request
+        bgm_path = bgm_request.normalize(frozen["manifest"].get("bgm")).get("path")
+        bgm_identity = frozen.get("bgm_file")
+        if bgm_path and (not isinstance(bgm_identity, dict) or
+                         str(Path(str(bgm_path)).resolve()) != str(bgm_identity.get("path") or "")):
+            return result(1, "SELECTION_RECOVERY_BGM_IDENTITY_REQUIRED")
 
         def check_audio():
+            from orchestrator.runtime.file_safety import content_identity
             for row in files:
                 try:
                     stat = Path(row["path"]).stat()
@@ -117,6 +128,20 @@ def recover(manifest: dict, report_dir: Path, *, prefix: list[str], run, env: di
                     raise ValueError("SELECTION_RECOVERY_AUDIO_REQUIRED") from exc
                 if stat.st_size != row["size"] or stat.st_mtime_ns != row["mtime_ns"]:
                     raise ValueError("SELECTION_RECOVERY_AUDIO_CHANGED")
+                if row.get("sha256"):
+                    try:
+                        same_audio = content_identity(row["path"]) == row
+                    except (OSError, ValueError):
+                        same_audio = False
+                    if not same_audio:
+                        raise ValueError("SELECTION_RECOVERY_AUDIO_CHANGED")
+            if bgm_identity:
+                try:
+                    same_bgm = content_identity(bgm_identity["path"]) == bgm_identity
+                except (OSError, ValueError, KeyError, TypeError):
+                    same_bgm = False
+                if not same_bgm:
+                    raise ValueError("SELECTION_RECOVERY_BGM_CHANGED")
         check_audio()
         if not (report_dir / "shot_candidates.json").is_file():
             return result(1, "SELECTION_RECOVERY_ANALYSIS_REQUIRED")
@@ -129,21 +154,47 @@ def recover(manifest: dict, report_dir: Path, *, prefix: list[str], run, env: di
             return result(1, "SELECTION_RECOVERY_TIMING_CHANGED")
         input_path = report_dir / "selection_recovery_input.json"
         input_path.write_text(json.dumps(recovery_input, ensure_ascii=False, indent=2), encoding="utf-8")
-        state = {"attempts": 1, "stage": "preflight", "status": "RUNNING", "source_run_id": frozen["run_id"]}
+        state = {"attempts": 0, "stage": "preflight", "status": "RUNNING", "source_run_id": frozen["run_id"]}
         state_path.write_text(json.dumps(state), encoding="utf-8")
         for stage in ("preflight", "semantic_match", "draft_write"):
+            preflight_started = False
             state.update(stage=stage)
             state_path.write_text(json.dumps(state), encoding="utf-8")
             check_audio()
             remaining = deadline - time.time()
             if remaining <= 0:
-                return result(1, "SELECTION_STAGE_RETRY_EXHAUSTED:DEADLINE_EXCEEDED")
+                return result(1, "SELECTION_STAGE_DEADLINE_EXCEEDED", preflight_only=stage == "preflight")
+            if stage == "semantic_match":
+                # Persist consumption immediately before starting paid selection.
+                state["attempts"] = 1
+                state_path.write_text(json.dumps(state), encoding="utf-8")
             command = [*prefix, "recover", "--input", str(input_path), "--report-dir", str(report_dir), "--stage", stage]
+            preflight_started = stage == "preflight"
             process = run(command, cwd=cwd, env=env, capture_output=True, text=True,
                           encoding="utf-8", errors="replace", timeout=remaining + 30)
             outputs.append(process.stdout or "")
             errors.append(process.stderr or "")
+            # Identity changes take precedence over a retryable preflight
+            # error, including when the child itself exited unsuccessfully.
+            check_audio()
             if process.returncode:
+                if stage == "preflight":
+                    state.update(status="PREFLIGHT_BLOCKED")
+                    state_path.write_text(json.dumps(state), encoding="utf-8")
+                    return result(process.returncode, "SELECTION_RECOVERY_PREFLIGHT_FAILED",
+                                  preflight_only=True, error=outputs[-1][-4000:])
+                if stage == "semantic_match":
+                    try:
+                        blocked = json.loads(process.stdout or "")
+                    except (ValueError, TypeError):
+                        blocked = {}
+                    if (isinstance(blocked, dict) and blocked.get("status") == "ENV_ERROR"
+                            and blocked.get("failure_class") == "environment"
+                            and blocked.get("failed_stage") == "preflight"):
+                        state.update(attempts=0, status="PREFLIGHT_BLOCKED", stage="preflight")
+                        state_path.write_text(json.dumps(state), encoding="utf-8")
+                        return result(process.returncode, "SELECTION_RECOVERY_PREFLIGHT_FAILED",
+                                      preflight_only=True, error=outputs[-1][-4000:])
                 return result(process.returncode, "SELECTION_STAGE_RETRY_EXHAUSTED", error=outputs[-1][-4000:])
         last = _read(report_dir / "last_result.json")
         draft = Path(str(last.get("draft_path") or ""))
@@ -155,4 +206,16 @@ def recover(manifest: dict, report_dir: Path, *, prefix: list[str], run, env: di
                 "combined": "\n".join(outputs + errors), "manifest": str(input_path),
                 "draft_name": draft.name, "selection_recovered": True}
     except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError) as exc:
-        return result(1, str(exc))
+        verify = locals().get("check_audio")
+        if callable(verify):
+            try:
+                verify()
+            except (OSError, ValueError, TypeError, KeyError) as identity_exc:
+                message = str(identity_exc)
+                exc = ValueError(message if message.startswith(("SELECTION_RECOVERY_AUDIO_", "SELECTION_RECOVERY_BGM_"))
+                                 else "SELECTION_RECOVERY_AUDIO_CHANGED")
+        identity_error = str(exc).startswith(("SELECTION_RECOVERY_AUDIO_", "SELECTION_RECOVERY_BGM_",
+                                              "FILE_CHANGED_DURING_HASH"))
+        is_preflight = (not identity_error and preflight_started and isinstance(locals().get("state"), dict)
+                        and state.get("attempts") == 0)
+        return result(1, str(exc), preflight_only=is_preflight)

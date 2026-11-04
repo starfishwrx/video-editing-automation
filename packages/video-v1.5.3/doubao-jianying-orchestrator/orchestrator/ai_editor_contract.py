@@ -106,6 +106,24 @@ def selection_mode(manifest: dict | None = None) -> str:
     return value
 
 
+def selection_mode_facts(manifest: dict | None = None) -> dict:
+    """Explain the actual selection policy without hiding a legacy override."""
+    manifest = manifest or {}
+    explicit = manifest.get("selection_mode")
+    configured = os.environ.get("JY_SELECTION_MODE", "").strip()
+    source = "manifest" if explicit else "env:JY_SELECTION_MODE" if configured else "default"
+    try:
+        mode = selection_mode(manifest)
+    except ValueError as exc:
+        return {"selection_mode": None, "selection_mode_source": source,
+                "selection_configuration_error": str(exc)}
+    warnings = []
+    if source == "env:JY_SELECTION_MODE" and mode != "ai_editor":
+        warnings.append("JY_SELECTION_MODE overrides the default ai_editor with " + mode)
+    return {"selection_mode": mode, "selection_mode_source": source,
+            "configuration_warnings": warnings}
+
+
 def is_ai_segment(item: dict) -> bool:
     return item.get("selection_mode") == "ai_editor" or "ai_selection" in item
 

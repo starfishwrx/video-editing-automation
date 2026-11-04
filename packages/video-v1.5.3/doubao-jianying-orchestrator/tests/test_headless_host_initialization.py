@@ -24,7 +24,7 @@ class HostInitializationTests(unittest.TestCase):
             with patch.dict(os.environ, {'JY_DRAFTS_ROOT': str(root / 'output'),
                     'JY_HEADLESS_FONT': str(root / 'font.ttf')}, clear=True), \
                     patch.object(headless, 'backend', return_value=native), \
-                    patch.object(headless.shutil, 'which', return_value='media-tool'):
+                    patch.object(headless, '_prepare_media_tools', return_value={}):
                 failed = headless.production_environment_report({'ready': True})
                 self.assertFalse(failed['ready'])
                 reason = failed['draft_backend_check']['reason']
@@ -44,6 +44,6 @@ class HostInitializationTests(unittest.TestCase):
             with patch.dict(os.environ, {'JY_DRAFTS_ROOT': str(root / 'output'),
                     'JY_HEADLESS_FONT': str(root / 'font.ttf')}, clear=True), \
                     patch.object(headless, 'backend', return_value=native), \
-                    patch.object(headless.shutil, 'which', return_value='media-tool'):
+                    patch.object(headless, '_prepare_media_tools', return_value={}):
                 report = headless.production_environment_report({'ready': True})
                 self.assertEqual(report['draft_backend_check']['reason'], 'NATIVE_CODEC_MISMATCH')

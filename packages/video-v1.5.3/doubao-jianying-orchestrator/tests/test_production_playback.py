@@ -158,6 +158,19 @@ class ProductionPlaybackTests(unittest.TestCase):
         self.assertEqual(self.plan['rows'], before)
         self.assertFalse(self.plan.get('window_reviews'))
 
+    def test_display_duplicate_review_respects_physical_video_boundary(self):
+        baseline, conflicts = self.display_duplicate_fixture()
+        self.manifest['qc_rejected_shots'] = {'2': ['long']}
+        self.shots[2]['material_duration_us'] = 9_000_000
+        def observe(_manifest, _sentence, shot, _directory, *, dense=False):
+            self.assertTrue(dense)
+            self.assertLessEqual(round(shot['source_end'] * 1e6), 8_800_000)
+            return {'verdict': 'uncertain'}
+        with patch.object(editor, '_review', side_effect=observe) as review:
+            self.assertFalse(editor._repair_display_duplicate_window(self.manifest, self.analysis,
+                self.plan, self.root, None, 2, baseline, conflicts))
+        self.assertEqual(review.call_count, 1)
+
     def test_display_duplicate_honours_shared_budget_and_qc_rejections(self):
         baseline, conflicts = self.display_duplicate_fixture()
         self.plan['window_repair_attempts'] = {str(i): {'index': 2, 'status': 'failed'} for i in range(3)}

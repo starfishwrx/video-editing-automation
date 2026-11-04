@@ -46,12 +46,15 @@ reviewed Jianying Headless backend with its `production_library` API and keep
 `JIANYING_HEADLESS_ROOT` pointing to that installation. `JIANYING_INSTALL_DIR`
 selects the locally installed, fingerprint-matched Windows native runtime;
 `JY_HEADLESS_FONT` selects a static TTF/OTF. `fonttools==4.60.2` is locked in uv.
-`ffmpeg` and `ffprobe` must be on PATH (the runner adds configured media-tool
-directories). Run `python -m tools.headless_runtime check` before activation.
+`FFMPEG_BIN` and `FFPROBE_BIN`, the skill-local tools, and PATH use the same
+discovery for the engine and native backend. The native check makes the chosen
+tools visible by command name, verifies that they run, and rejects invalid or
+conflicting paths. Run `python -m tools.headless_runtime check` before activation.
 The CLI `run.py env` combines base toolchain facts with this same writer check
 and returns a nonzero exit code when not ready. Use `env --input manifest.json`
 for task-specific backend/font settings, or explicit `env --profile base` for
-the base toolchain only; these checks do not authenticate cloud credentials.
+the base toolchain only. Production checks report missing vision settings and
+credential presence but do not authenticate credentials or contact the service.
 The backend is a separate licensed dependency and is not redistributed in this
 package. Use an authorized backend build providing `headless-production-library/v1`
 and its source-pinned entrypoint; an unextended checkout is rejected before paid work.

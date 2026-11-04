@@ -5,7 +5,7 @@
 ## 1. Windows 整体脚本与队列
 
 - 手动或定时执行整个项目：`scripts/run_pipeline.ps1`；`tools/workflow/scheduled.py` 读取本地队列，限制每条任务的重试并保存每轮记录。安装定时任务使用 `scripts/install_pipeline_task.ps1`，不运行安装脚本就不会注册。完整参数见 [Windows 脚本运行](../windows-pipeline.md)。
-- 内部批次执行入口：`python -m tools.batch_dispatch run --queue <queue.json>`；其他启动器向 `submit` 提交，制作进程须经账户级准入。同产品先完成公共准备，等待缓存不占制作池；已有草稿 QC 优先，其次就绪制作，再准备新产品。同级 FIFO。
+- 内部批次执行入口：`python -m tools.batch_dispatch run --queue <queue.json>`；制作进程须经账户级准入。另一轮正在运行时新入口明确返回可重试的忙碌状态；旧异步提交文件保留待核对，不自动重放。同产品先完成公共准备，等待缓存不占制作池；已有草稿 QC 优先，其次就绪制作，再准备新产品。同级 FIFO。
 - 按阶段恢复：`python -m tools.batch_dispatch resume --queue <queue.json> --record-id <id> --stage qc|build|material`。QC 只补未完成批次，不重做 TTS、选镜或建稿；独立 PASS 后才进入既有交付闸门。
 - 每轮清空 `batch_dispatch_progress.jsonl`；完整观察保留在 `dispatch_runs/`。用 `python -m tools.throughput_calibration --run <run.json>` 比较真实批次，不清生产缓存或额外调用模型。只有已确认账户容量才使用 `--confirmed-account-capacity 40` / `80`。
 - 工作根：`work/batch_queue.json`（记录列表）；每条任务落 `work/<record_id>/`
@@ -40,7 +40,7 @@
 
 `run_task.template.ps1`（JyRun）与 `jy_poll.ps1`（JyPoll）不再执行任务，调用即非零退出并提示迁移。它们不读取凭据、创建任务目录、挂载 NAS、调用 worker 或发送通知。
 
-单条任务按[快速开始](../quickstart.md)使用 manifest CLI；现有批队列从 `scripts/run_pipeline.ps1` 进入，内部复用 dispatcher。此改动不自动开启队列，不修改宿主计划任务，也不替换已经生成并使用中的生产脚本。
+单条正式任务使用 `scripts/run_pipeline.ps1 -RecordId <id>`，批量和定时任务使用同一入口；manifest CLI 是底层建稿/诊断入口。此改动不自动开启队列，不修改宿主计划任务，也不替换已经生成并使用中的生产脚本。
 
 ## 5. 测试
 - `packages/video-v1.5.3/tests/`：包级测试（评估/队列/守卫/索引）

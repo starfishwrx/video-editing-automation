@@ -11,12 +11,12 @@ uv sync --frozen
 $env:JY_CONCURRENCY_POLICY_FILE = (Resolve-Path work/concurrency-policy.json).Path
 uv run --frozen python -m tools.batch_dispatch run --queue work/batch_queue.json --dry-run
 uv run --frozen python -m tools.batch_dispatch run --queue work/batch_queue.json
-# 其他启动器提交到同一监督进程；空闲时接管监督职责。
-uv run --frozen python -m tools.batch_dispatch submit --queue work/additional_queue.json
+# 单条任务仍通过同一条正式入口。
+powershell -NoProfile -File scripts/run_pipeline.ps1 -RecordId <record>
 uv run --frozen python -m tools.batch_dispatch resume --record-id <record> --stage qc
 ```
 
-`batch_worker.py` 的旧单条选择、重试/skip入口保留，但选完后提交到统一调度。内部 `process_task` 只接受已准入的 worker；旧脚本直接调用它会明确报错，需改用 `submit`。所有入口共享账户槽目录下的监督锁、持久提交文件和制作槽。
+`batch_worker.py` 的旧单条选择、重试/skip入口保留，但选完后进入统一调度。内部 `process_task` 只接受已准入的 worker；旧脚本直接调用它会明确报错，需改用正式入口。所有入口共享账户槽目录下的监督锁和制作槽；另一轮正运行时返回可重试的忙碌状态。旧异步提交文件保留待核对，不能自动重放。
 
 已有草稿的 QC 优先，然后运行已准备就绪的任务；新产品在独立准备池执行。同产品先把所需媒体准备完，再执行 API 池。等待共享缓存的任务不占制作名额；不同产品可以交错准备、请求和制作。同级 FIFO，提交任务按记录去重。
 

@@ -96,6 +96,7 @@ class SentencePlanningTests(unittest.TestCase):
                                       trigger_phrase='', delivery_mode='formal')
             with mock.patch.object(cli, '_manifest_sources', return_value=[]), \
                  mock.patch.object(cli, 'environment_report', return_value={'ready': True}), \
+                 mock.patch.object(cli, '_production_environment_report', return_value={'ready': True}), \
                  mock.patch.object(sentence_planner, 'plan', side_effect=ValueError('SENTENCE_PLAN_TEXT_CHANGED')), \
                  mock.patch.object(cli, '_lock_voice_once') as voice:
                 self.assertEqual(cli.cmd_build(args), 1)
@@ -128,7 +129,9 @@ class SentencePlanningTests(unittest.TestCase):
                  'narration_timing_file': str(root / 'timing.json'), 'shot_analysis_file': str(root / 'analysis.json')}
             path = root / 'manifest.json'; path.write_text(json.dumps(m, ensure_ascii=False), encoding='utf8')
             args = argparse.Namespace(input=str(path), report_dir=str(root / 'report'), stage='semantic_match')
-            with mock.patch.object(cli, '_temporary_match', return_value=({'ok': True}, None)) as match:
+            with mock.patch.object(cli, 'environment_report', return_value={'ready': True}), \
+                 mock.patch.object(cli, '_production_environment_report', return_value={'ready': True}), \
+                 mock.patch.object(cli, '_temporary_match', return_value=({'ok': True}, None)) as match:
                 self.assertEqual(cli.cmd_recover(args), 0)
             self.assertEqual(match.call_args.kwargs['narration_timing'], timing)
 
@@ -150,6 +153,7 @@ class SentencePlanningTests(unittest.TestCase):
                                       trigger_phrase='', delivery_mode='formal')
             with mock.patch.object(cli, '_manifest_sources', return_value=[]), \
                  mock.patch.object(cli, 'environment_report', return_value={'ready': True}), \
+                 mock.patch.object(cli, '_production_environment_report', return_value={'ready': True}), \
                  mock.patch.object(sentence_planner, 'plan') as planner, \
                  mock.patch.object(cli, '_lock_voice_once', return_value=({}, None)), \
                  mock.patch.object(cli, '_pre_synthesize_narration', return_value=timing), \

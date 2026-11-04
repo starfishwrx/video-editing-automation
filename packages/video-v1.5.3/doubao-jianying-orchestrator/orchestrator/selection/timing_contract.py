@@ -108,22 +108,23 @@ def probe_material_duration_us(path: Any, *, ffprobe: str | None = None,
     `draft.VideoMaterial` = pymediainfo 视频轨 = 4.984s）。规划层拿容器时长把
     出点摆到 4.99，写入层零容差必然 raise「变速切片越出素材范围」。
 
-    策略（用户修正第 2 条的措辞）：**优先使用与写入层一致的视频素材时长；
-    只有容器时长时进入保守降级**。分级表：
+    策略：同时有 pymediainfo 视频轨和 ffprobe 视频轨时，取两者较小值。
+    旧版写入器采用前者，新版 headless 写入器采用后者；毫秒四舍五入可能使
+    两者相差不足一毫秒，但较大值仍会被新版写入器拒绝。只有容器时长时进入
+    保守降级。分级表：
 
     ========  ====================  ==========
     置信度    source                说明
     ========  ====================  ==========
-    HIGH      pymediainfo_video_track  写入层 VideoMaterial 同一代码路径，逐位一致
+    HIGH      pymediainfo_video_track  旧写入层口径，且不大于已测 headless 视频轨
     HIGH      ffprobe_video_stream     ``-select_streams v:0`` 视频轨时长
-    HIGH      last_video_pts           最后一个视频 packet 的 PTS（末帧起播点，
-                                       只代表「末帧从这开始」，天然不大于真值）
+    LOW       last_video_pts           未知起始时钟时，末 packet PTS 不能认证总长
     LOW       container_duration       容器时长 − 一帧安全边界，保守降级
     LOW       ffmpeg_container         ffmpeg stderr Duration − 一帧，保守降级
     ========  ====================  ==========
 
-    容器降级路径（只有容器时长时）：先尝试解析最后一个视频 packet 的 PTS
-    （升回 HIGH）；解析不了则至少减去一帧安全边界并标记 LOW。**LOW 的值不得
+    容器降级路径（只有容器时长时）：末 packet PTS 可能含非零起始偏移，不能
+    独自认证写入器边界；解析不了则再尝试容器并标记 LOW。**LOW 的值不得
     用于生成「已认证」的候选窗口** —— 调用方（engine/shot_analyzer）必须把
     confidence 带进产物，让认证闸门看见它。
 
@@ -140,21 +141,22 @@ def probe_material_duration_us(path: Any, *, ffprobe: str | None = None,
         return {"duration_us": int(duration_us), "source": source,
                 "confidence": confidence}
 
-    # 1) pymediainfo 视频轨 —— 写入层的同一把尺（HIGH）
+    # 1) Save the legacy writer's duration, but compare the native writer's
+    # stream duration before declaring a shared safe bound.
+    mediainfo_us = 0
     try:
         import pymediainfo
         info = pymediainfo.MediaInfo.parse(
             target, mediainfo_options={"File_TestContinuousFileNames": "0"})
         if info and info.video_tracks:
             ms = info.video_tracks[0].duration
-            if ms and isinstance(ms, (int, float)) and float(ms) > 0:
-                return result(int(float(ms) * 1e3),       # 与 VideoMaterial 逐位一致
-                              "pymediainfo_video_track", PROBE_CONFIDENCE_HIGH)
+            if ms and isinstance(ms, (int, float)) and math.isfinite(float(ms)) and float(ms) > 0:
+                mediainfo_us = int(float(ms) * 1e3)
     except Exception:
         pass
 
     if ffprobe:
-        # 2) ffprobe 视频轨（HIGH）
+        # 2) The lower of the two stream rulers is accepted by either writer.
         try:
             out = subprocess.run(
                 [str(ffprobe), "-v", "error", "-select_streams", "v:0",
@@ -163,14 +165,15 @@ def probe_material_duration_us(path: Any, *, ffprobe: str | None = None,
                 capture_output=True, text=True, encoding="utf-8", errors="replace",
                 timeout=30, check=True)
             seconds = float(out.stdout.strip() or 0.0)
-            if seconds > 0:
-                return result(int(seconds * US), "ffprobe_video_stream",
-                              PROBE_CONFIDENCE_HIGH)
+            if math.isfinite(seconds) and seconds > 0:
+                stream_us = int(seconds * US)
+                if mediainfo_us and mediainfo_us < stream_us:
+                    return result(mediainfo_us, "pymediainfo_video_track", PROBE_CONFIDENCE_HIGH)
+                return result(stream_us, "ffprobe_video_stream", PROBE_CONFIDENCE_HIGH)
         except (OSError, subprocess.SubprocessError, ValueError):
             pass
-        # 3) 最后一个视频 packet 的 PTS（HIGH）。容器时长可用而视频轨时长取不到
-        #    时的第一选择：末帧 PTS 天然 ≤ 真值（它不含末帧自身的显示时长），
-        #    不会把窗口摆到写入层拒绝的位置。
+        # 3) A packet PTS may include a nonzero stream start time; without
+        # matching the writer's clock, even the last packet is only LOW.
         try:
             out = subprocess.run(
                 [str(ffprobe), "-v", "error", "-select_streams", "v:0",
@@ -182,9 +185,12 @@ def probe_material_duration_us(path: Any, *, ffprobe: str | None = None,
                          if ln.strip() and ln.strip() != "N/A"]
             if pts_lines:
                 last_pts = float(pts_lines[-1].strip())
-                if last_pts > 0:
-                    return result(int(last_pts * US), "last_video_pts",
-                                  PROBE_CONFIDENCE_HIGH)
+                if math.isfinite(last_pts) and last_pts > 0:
+                    pts_us = int(last_pts * US)
+                    if mediainfo_us and mediainfo_us < pts_us:
+                        return result(mediainfo_us, "pymediainfo_video_track", PROBE_CONFIDENCE_LOW)
+                    return result(pts_us, "last_video_pts",
+                                  PROBE_CONFIDENCE_LOW)
         except (OSError, subprocess.SubprocessError, ValueError):
             pass
         # 4) ffprobe 容器（LOW，保守降级：至少减去一帧安全边界）
@@ -195,13 +201,19 @@ def probe_material_duration_us(path: Any, *, ffprobe: str | None = None,
                 capture_output=True, text=True, encoding="utf-8", errors="replace",
                 timeout=30, check=True)
             seconds = float(out.stdout.strip() or 0.0)
-            if seconds > 0:
+            if math.isfinite(seconds) and seconds > 0:
                 # 一帧安全边界按默认帧率取（此处拿不到真实 fps；真实漂移 5~19ms
                 # < 30fps 一帧 33.3ms，减一帧必然落到视频轨之下）。
                 return result(max(0, int(seconds * US) - frame_us()),
                               "container_duration", PROBE_CONFIDENCE_LOW)
         except (OSError, subprocess.SubprocessError, ValueError):
             pass
+
+    if mediainfo_us:
+        # With ffprobe configured but unable to establish a video bound,
+        # the headless writer's ruler is unknown; do not certify this fallback.
+        return result(mediainfo_us, "pymediainfo_video_track",
+                      PROBE_CONFIDENCE_LOW if ffprobe else PROBE_CONFIDENCE_HIGH)
 
     command = str(ffmpeg or "ffmpeg")
     # 5) ffmpeg stderr 容器（LOW，同上减一帧）
@@ -343,7 +355,10 @@ class WindowRequest:
     @property
     def hi_bound_us(self) -> int:
         """素材侧最晚可出点。"""
-        return (int(self.source_out_us) - max(0, int(self.tail_guard_us))
+        source_out = int(self.source_out_us)
+        if self.video_duration_us is not None and int(self.video_duration_us) > 0:
+            source_out = min(source_out, int(self.video_duration_us))
+        return (source_out - max(0, int(self.tail_guard_us))
                 - max(0, int(self.transition_out_handle_us)))
 
     @property

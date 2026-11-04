@@ -28,6 +28,7 @@ from ..audio import voice_tts
 from ..audio.library_resources import RuntimeCatalogError
 from .engine import OrchestrationEngine
 from ..runtime.platform_env import clear_environment_cache, environment_report
+from ..runtime.file_safety import content_identity
 from ..runtime.task_log import TaskAlreadyRunningError, TaskLogger
 
 
@@ -35,6 +36,13 @@ def _read(path: Path) -> dict:
     # Accept UTF-8 with or without BOM, as Windows PowerShell 5's
     # `Set-Content -Encoding UTF8` emits a BOM by default.
     return json.loads(path.read_text(encoding="utf-8-sig"))
+
+
+def _content_unchanged(identity: dict) -> bool:
+    try:
+        return content_identity(identity["path"]) == identity
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
 
 
 def _emit(obj: dict, code: int = 0) -> int:
@@ -70,8 +78,8 @@ def _compact_build_result(result: dict) -> dict:
                 "retryable", "safe_to_continue", "next_action", "run_id",
                 "pipeline_version", "message", "problems", "reason", "error", "missing",
                 "voice_input", "voice_candidates", "voice_auditions", "bgm_candidates", "bgm_auditions",
-                "pending_items", "coverage", "report", "confirmation", "task_id", "task_log",
-                "issues", "caption_report", "failed_stage", "resume_stage")
+                "pending_items", "coverage", "report", "confirmation", "task_id", "task_log", "draft_path",
+                "issues", "caption_report", "failed_stage", "resume_stage", "runtime")
         return {k: result[k] for k in keys if k in result}
     draft_path = result.get("draft_path")
     artifacts = []
@@ -93,6 +101,12 @@ def _compact_build_result(result: dict) -> dict:
         "草稿文件": artifacts,
         "生成日志": result.get("task_log", ""),
     }
+    runtime = result.get("runtime") or {}
+    payload["运行信息"] = {key: runtime.get(key) for key in (
+        "pipeline_version", "selection_mode", "selection_mode_source",
+        "configuration_source", "delivery_mode", "configuration_warnings")}
+    if result.get("delivery_mode") == "preview":
+        payload["交付模式"] = "preview（预览稿，不得用于正式交付）"
     # 唯一允许进成功合约的例外：**这份草稿不是正式交付**（定案第 9 条）。
     # 预览稿和有未认证理由的稿子，打开来跟正式稿一模一样，运营无从分辨 ——
     # 只看草稿文件是看不出来的，所以必须写在结果里。形状与已有合约一致：
@@ -121,24 +135,36 @@ def _compact_control_result(result: dict) -> dict:
         "parent_run_id", "recovery", "recovery_stage", "message", "error", "missing",
         "analysis", "match_report", "matched_manifest", "matched_manifest_sha256",
         "draft_path", "task_log", "reason", "failed_stage", "resume_stage",
+        "previous_match_report",
     )
     return {key: result[key] for key in keys if key in result}
 
 
-def _production_environment_report(base_report: dict, manifest: dict | None = None) -> dict:
+def _production_environment_report(base_report: dict, manifest: dict | None = None, *, require_vision: bool = False) -> dict:
     """Compose writer and audio-resource readiness at the application boundary."""
     from ..runtime.headless import production_environment_report
     from ..audio.bgm_request import normalize
     from ..audio.library_resources import catalog_report
+    from ..runtime import vision_config
     report = production_environment_report(base_report, manifest)
     catalogs = catalog_report(require_music=not normalize((manifest or {}).get("bgm")).get("path"))
     report["runtime_catalogs"] = catalogs
     report["hints"].extend(catalogs["errors"])
     report["ready"] = report["ready"] and catalogs["ready"]
+    try:
+        missing = vision_config.missing_required(manifest)
+    except ValueError as exc:
+        missing = [str(exc)]
+    report["vision_configuration"] = {"required": require_vision, "missing": missing}
+    if require_vision and missing:
+        report["ready"] = False
+        report["hints"].append("VISION_CONFIGURATION_MISSING: " + ", ".join(missing))
     report["status"] = "READY" if report["ready"] else "ENV_ERROR"
     if not report["ready"]:
         report["reason"] = (next(iter(catalogs["errors"]), None) or
-                            report["draft_backend_check"].get("reason") or "BASE_ENVIRONMENT_NOT_READY")
+                            report["draft_backend_check"].get("reason") or
+                            ("VISION_CONFIGURATION_MISSING: " + ", ".join(missing) if require_vision and missing else None) or
+                            "BASE_ENVIRONMENT_NOT_READY")
     return report
 
 
@@ -161,7 +187,7 @@ def cmd_env(args) -> int:
                       "reason": "ENV_MANIFEST_INVALID", "error": str(exc)}, 1)
     report = environment_report(refresh=True)
     if profile == "production":
-        report = _production_environment_report(report, manifest)
+        report = _production_environment_report(report, manifest, require_vision=True)
     else:
         report = {**report, "profile": "base"}
     return _emit(report, 0 if report.get("ready") else 1)
@@ -319,16 +345,31 @@ def _run_shot_analysis(manifest: dict, input_path: Path, report_dir: Path) -> di
             analysis = _read(path)
         except (OSError, ValueError) as exc:
             return {"ok": False, "pending_items": [{"type": "SHOT_ANALYSIS_FILE_INVALID", "message": str(exc)}]}
-        # 复用的候选一律交给 enrich 判定：输入签名对不上的整条重做，动作或文字复核
-        # 没做完的只补那一步；全部有效时 enrich 不调模型直接返回。
-        if not bool(manifest.get("vision_analysis", True)):
-            return analysis
+    # Keep the exact previous observations only if their digest is the one
+    # recorded by the task's old editor plan, before media metadata is refreshed.
+    prior = analysis
+    if prior is None and (report_dir / "shot_candidates.json").is_file():
+        try:
+            prior = _read(report_dir / "shot_candidates.json")
+        except (OSError, ValueError):
+            pass
+    if isinstance(prior, dict):
+        from ..selection import ai_editor
+        ai_editor.snapshot_previous_analysis(prior, report_dir)
     env = environment_report(refresh=True)
     if analysis is None:
         from ..vision import material_cache
         return material_cache.analyze_product(
             manifest, input_path.parent, report_dir, ffmpeg=env.get("ffmpeg"),
             ffprobe=env.get("ffprobe"), vision=bool(manifest.get("vision_analysis", True)))
+    from ..vision import material_cache
+    try:
+        analysis = material_cache.refresh_external_analysis(
+            analysis, input_path.parent, ffmpeg=env.get("ffmpeg"), ffprobe=env.get("ffprobe"))
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        return {"ok": False, "pending_items": [{"type": "MATERIAL_DURATION_RECHECK_FAILED", "message": str(exc)}]}
+    # Existing candidates still go through enrich for source/text validation;
+    # duration migration itself never upgrades their visual evidence.
     if not bool(manifest.get("vision_analysis", True)):
         return analysis
     from ..vision import vision_analyzer
@@ -493,20 +534,37 @@ def _validate_preserved_match(manifest: dict, analysis: dict, prior: dict,
     return ""
 
 
-def _invalidate_match_report(report_dir: Path, matching_input: dict | None, failure: dict) -> None:
+def _invalidate_match_report(report_dir: Path, matching_input: dict | None, failure: dict) -> str | None:
     path = report_dir / "shot_match_report.json"
+    backup = None
     try:
         current = _read(path)
     except (OSError, ValueError):
         current = {}
     if (not isinstance(current, dict) or current.get("ok") is not False
             or current.get("input_manifest") != matching_input):
+        if path.is_file():
+            raw = path.read_bytes()
+            if raw:
+                archive = report_dir / "match_history"
+                archive.mkdir(parents=True, exist_ok=True)
+                backup = archive / (hashlib.sha256(raw).hexdigest() + ".json")
+                try:
+                    with backup.open("xb") as handle:
+                        handle.write(raw)
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                except FileExistsError:
+                    if backup.read_bytes() != raw:
+                        raise OSError("MATCH_REPORT_ARCHIVE_CONFLICT")
         current = {}
     current.update({"ok": False, "input_manifest": matching_input,
                     "status": failure.get("status", "SHOT_MATCH_BLOCKED"),
                     "message": failure.get("message", "本次匹配未完成，旧成功结果不可用于恢复。")})
     report_dir.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
+    from ..runtime.file_safety import atomic_write_text
+    atomic_write_text(path, json.dumps(current, ensure_ascii=False, indent=2))
+    return str(backup) if backup else None
 
 
 def _temporary_match(manifest: dict, input_path: Path, report_dir: Path,
@@ -782,9 +840,9 @@ def cmd_build(args) -> int:
     # 里的 `match_manifest` 会读它决定「窗口无解时是报缺口还是先出占位画面」。
     # 引擎构造之后才注入就晚了 —— 那时整句已经被判成 SHOT_TIMING_INFEASIBLE，
     # 草稿层根本没有机会出图。这里是唯一入口，引擎侧只做归一化与读取。
-    mode = str(getattr(args, "delivery_mode", "") or "formal").strip().lower()
+    mode = str(getattr(args, "delivery_mode", None) or manifest.get("delivery_mode") or "preview").strip().lower()
     manifest = _apply_operator_voice_input(manifest)
-    manifest["delivery_mode"] = "preview" if mode == "preview" else "formal"
+    manifest["delivery_mode"] = mode
     # 品类规则（转场、配音倍速、句间气口）同样要在 TTS 与选镜之前定下来。
     try:
         manifest = rulepack.apply_manifest_defaults(manifest)
@@ -817,6 +875,15 @@ def cmd_build(args) -> int:
         if manifest.get("shot_notes_unmatched"):
             result.setdefault("shot_notes_unmatched", list(manifest["shot_notes_unmatched"]))
         return logger.finalize(result)
+
+    if mode not in {"preview", "formal"}:
+        return _emit(_compact_build_result(finalize({"status": "ENV_ERROR",
+            "failure_class": "environment", "reason": "INVALID_DELIVERY_MODE"})), 1)
+    if logger.runtime.get("selection_configuration_error"):
+        return _emit(_compact_build_result(finalize({"status": "ENV_ERROR",
+            "failure_class": "environment", "reason": logger.runtime["selection_configuration_error"]})), 1)
+    for warning in logger.runtime.get("configuration_warnings") or []:
+        print("WARNING: " + warning, file=sys.stderr)
 
     # Do the cheap, deterministic checks before TTS or vision work.  A missing
     # source or unusable runtime must stop this run and never become a generic
@@ -853,12 +920,43 @@ def cmd_build(args) -> int:
         })
         return _emit(_compact_build_result(result), 1)
 
-    draft_env = _production_environment_report(env, manifest)
+    draft_env = _production_environment_report(env, manifest,
+        require_vision=bool(manifest.get("temporary_material_analysis") or manifest.get("auto_match_shots")))
     if not draft_env["ready"]:
         return _emit(_compact_build_result(finalize({'status': 'ENV_ERROR', 'failure_class': 'environment',
             'message': '建稿环境预检未通过，未开始配音或视觉分析。',
             'reason': draft_env['reason'],
             'environment': draft_env})), 1)
+
+    from .task_inputs import validate_explicit_audio
+    try:
+        segments = validate_explicit_audio(manifest.get("segments"), input_path.parent,
+            ffprobe=str(((draft_env.get("draft_backend_check") or {}).get("media_tools") or {}).get("ffprobe")
+                        or env.get("ffprobe") or "ffprobe"))
+        if "segments" in manifest:
+            manifest["segments"] = segments
+        fixed_audio = {i: content_identity(row["audio"])
+                       for i, row in enumerate(segments or [], 1)
+                       if isinstance(row, dict) and row.get("audio")}
+    except (OSError, ValueError, TypeError) as exc:
+        reason = str(exc) if str(exc).startswith("FIXED_NARRATION_") else "FIXED_NARRATION_CHANGED"
+        return _emit(_compact_build_result(finalize({"status": "ENV_ERROR",
+            "failure_class": "environment", "reason": reason,
+            "message": "指定配音不可读取，未开始视觉分析或重新合成。"})), 1)
+    from ..audio import bgm_request
+    bgm_identity = None
+    try:
+        bgm = bgm_request.normalize(manifest.get("bgm"))
+        if bgm.get("path"):
+            checked_bgm = validate_explicit_audio([{"audio": bgm["path"]}], input_path.parent,
+                ffprobe=str(((draft_env.get("draft_backend_check") or {}).get("media_tools") or {}).get("ffprobe")
+                            or env.get("ffprobe") or "ffprobe"))
+            manifest["bgm"] = {**bgm, "path": checked_bgm[0]["audio"]}
+            bgm_identity = content_identity(checked_bgm[0]["audio"])
+    except (OSError, ValueError, TypeError):
+        return _emit(_compact_build_result(finalize({"status": "ENV_ERROR",
+            "failure_class": "environment", "reason": "BGM_SOURCE_AUDIO_INVALID",
+            "message": "指定背景音乐不可读取，未开始视觉分析或配音。"})), 1)
 
     # Freeze one verified text plan before narration, matching and note binding.
     # Existing segment/audio mappings and explicit notes are never reindexed.
@@ -895,6 +993,18 @@ def cmd_build(args) -> int:
             # 装不下的镜头在**规划阶段**就被判 SHOT_TIMING_INFEASIBLE，
             # 而不是拖到 write_draft 才 AUDIO_VIDEO_MISMATCH。
             narration_timing = _pre_synthesize_narration(manifest, report_dir, locked_voice)
+            supplied = {i for i, row in enumerate(manifest.get("segments") or [], 1)
+                        if isinstance(row, dict) and row.get("audio")}
+            verified = {row.get("index") for row in narration_timing.get("rows", [])
+                        if row.get("timing_certainty") == "audio" and not row.get("probe_error")}
+            if supplied - verified:
+                return _emit(_compact_build_result(finalize({"status": "ENV_ERROR",
+                    "failure_class": "environment", "reason": "FIXED_NARRATION_TIMING_UNAVAILABLE",
+                    "message": "指定配音无法确定真实时长，未开始选镜。"})), 1)
+            if any(not _content_unchanged(row) for row in fixed_audio.values()):
+                return _emit(_compact_build_result(finalize({"status": "ENV_ERROR",
+                    "failure_class": "environment", "reason": "FIXED_NARRATION_CHANGED",
+                    "message": "指定配音在测时期间发生变化，未开始选镜。"})), 1)
             manifest["narration_timing_file"] = str(report_dir / "narration_timing.json")
             if manifest.get("sentence_plan_version") == "semantic-v1":
                 # A frozen input skips the planner, including its directory setup.
@@ -905,12 +1015,11 @@ def cmd_build(args) -> int:
             for row in narration_timing.get("rows", []):
                 path = Path(str(row.get("tts_path") or ""))
                 if path.is_file():
-                    stat = path.stat()
-                    audio_files.append({"path": str(path.resolve()), "size": stat.st_size, "mtime_ns": stat.st_mtime_ns})
+                    audio_files.append(content_identity(path))
             manifest["_selection_attempt"] = logger.run_id
             (report_dir / "selection_resume.json").write_text(json.dumps({
                 "input_manifest": _read(input_path), "manifest": manifest,
-                "audio_files": audio_files, "timing": narration_timing,
+                "audio_files": audio_files, "bgm_file": bgm_identity, "timing": narration_timing,
                 "run_id": logger.run_id,
             }, ensure_ascii=False, indent=2), encoding="utf-8")
             manifest, blocker = _temporary_match(manifest, input_path, report_dir,
@@ -919,6 +1028,22 @@ def cmd_build(args) -> int:
             if blocker:
                 blocker["report_dir"] = str(report_dir)
                 return _emit(_compact_build_result(finalize(blocker)), 1)
+            if any(not _content_unchanged(row) for row in audio_files):
+                return _emit(_compact_build_result(finalize({"status": "ENV_ERROR",
+                    "failure_class": "environment", "reason": "SELECTION_AUDIO_CHANGED",
+                    "message": "选镜期间配音发生变化，未开始写稿。"})), 1)
+            if bgm_identity and not _content_unchanged(bgm_identity):
+                return _emit(_compact_build_result(finalize({"status": "ENV_ERROR",
+                    "failure_class": "environment", "reason": "BGM_CHANGED_DURING_SELECTION",
+                    "message": "选镜期间指定音乐发生变化，未开始写稿。"})), 1)
+            selected_segments = manifest.get("segments") or []
+            for index, identity in fixed_audio.items():
+                row = selected_segments[index - 1] if index <= len(selected_segments) else None
+                if (not isinstance(row, dict) or not row.get("audio")
+                        or str(Path(str(row["audio"])).resolve()) != identity["path"]):
+                    return _emit(_compact_build_result(finalize({"status": "ENV_ERROR",
+                        "failure_class": "environment", "reason": "FIXED_NARRATION_BINDING_CHANGED:S%d" % index,
+                        "message": "选镜结果未保留指定配音，未开始写稿。"})), 1)
             if manifest.get("usage_ledger_path"):
                 try:
                     usage_ledger.record(manifest, manifest.get("segments") or [], reserved=True)
@@ -947,6 +1072,14 @@ def cmd_build(args) -> int:
     except Exception as exc:  # noqa: BLE001
         logger.event("task_exception", error_type=type(exc).__name__, error=str(exc))
         result = {"status": "ERROR", "error": str(exc), "error_type": type(exc).__name__}
+    if any(not _content_unchanged(row) for row in fixed_audio.values()):
+        result = {**result, "status": "ENV_ERROR", "failure_class": "environment",
+                  "reason": "FIXED_NARRATION_CHANGED_DURING_BUILD",
+                  "message": "建稿期间指定配音发生变化，保留本地结果供复核，不交付。"}
+    elif bgm_identity and not _content_unchanged(bgm_identity):
+        result = {**result, "status": "ENV_ERROR", "failure_class": "environment",
+                  "reason": "BGM_CHANGED_DURING_BUILD",
+                  "message": "建稿期间指定音乐发生变化，保留本地结果供复核，不交付。"}
     if manifest.get("usage_ledger_path"):
         try:
             if result.get("status") == "SUCCESS":
@@ -992,6 +1125,15 @@ def cmd_match_shots(args) -> int:
             return _emit({"status": "SHOT_ANALYSIS_FILE_INVALID", "message": str(exc)}, 1)
         from ..selection import ai_editor
         from .. import ai_editor_contract
+        from ..vision import material_cache
+        ai_editor.snapshot_previous_analysis(analysis, report_dir)
+        env = environment_report(refresh=True)
+        try:
+            analysis = material_cache.refresh_external_analysis(
+                analysis, input_path.parent, ffmpeg=env.get("ffmpeg"), ffprobe=env.get("ffprobe"))
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            return _emit({"status": "SHOT_MATCH_BLOCKED", "reason": "MATERIAL_DURATION_RECHECK_FAILED",
+                          "message": str(exc)}, 1)
         manifest = {**manifest, "selection_mode": ai_editor_contract.selection_mode(manifest)}
         if manifest["selection_mode"] == "ai_editor":
             analysis = ai_editor.prepare(manifest, analysis, report_dir)
@@ -1040,6 +1182,10 @@ def cmd_recover(args) -> int:
     parent_run_id = str(manifest.get("parent_run_id") or manifest.get("run_id") or
                         manifest.get("task_id") or "").strip() or None
     manifest = dict(manifest)
+    recovery_mode = str(manifest.get("delivery_mode") or "preview").strip().lower()
+    if recovery_mode in {"preview_only", "预览"}:
+        recovery_mode = "preview"
+    manifest["delivery_mode"] = recovery_mode
     manifest["parent_run_id"] = parent_run_id
     manifest["recovery_stage"] = stage
     suffix = time.strftime("%Y%m%d_%H%M%S")
@@ -1066,10 +1212,16 @@ def cmd_recover(args) -> int:
         if stage == "semantic_match" and result.get("status") != "SHOT_MATCH_READY":
             # An early failure may occur before the matcher writes its report.
             # It must invalidate a prior successful attempt in this directory.
-            _invalidate_match_report(report_dir, recovery_input, result)
+            backup = _invalidate_match_report(report_dir, recovery_input, result)
+            if backup:
+                result["previous_match_report"] = backup
         result["recovery"] = True
         result["recovery_stage"] = stage
         return logger.finalize(result)
+
+    if recovery_mode not in {"preview", "formal"}:
+        return _emit(_compact_control_result(finalize({"status": "ENV_ERROR",
+            "failure_class": "environment", "reason": "INVALID_DELIVERY_MODE"})), 1)
 
     if stage in {"preflight", "semantic_match", "draft_write"}:
         configuration_blocker = _vision_configuration_gate(logger.runtime)
@@ -1079,7 +1231,7 @@ def cmd_recover(args) -> int:
     if stage == "preflight":
         missing = [str(path) for path in _manifest_sources(manifest, input_path.parent)
                    if not path.is_file()]
-        env = _production_environment_report(environment_report(refresh=True), manifest)
+        env = _production_environment_report(environment_report(refresh=True), manifest, require_vision=True)
         if missing or not env.get("ready"):
             result = finalize({
                 "status": "ENV_ERROR",
@@ -1185,6 +1337,13 @@ def cmd_recover(args) -> int:
             })
             return _emit(_compact_control_result(result), 1)
         manifest["shot_analysis_file"] = str(analysis_path.resolve())
+        env = _production_environment_report(environment_report(refresh=True), manifest, require_vision=True)
+        if not env.get("ready"):
+            result = finalize({"status": "ENV_ERROR", "failure_class": "environment",
+                               "reason": env.get("reason") or "BASE_ENVIRONMENT_NOT_READY",
+                               "failed_stage": "preflight",
+                               "message": "恢复选镜前的建稿环境未就绪；未调用视觉服务。"})
+            return _emit(_compact_control_result(result), 1)
         try:
             matched_manifest, blocker = _temporary_match(manifest, input_path, report_dir,
                                                          narration_timing=timing)
@@ -1247,8 +1406,20 @@ def cmd_recover(args) -> int:
             "matched_manifest": str(cached_path),
         })
         return _emit(_compact_control_result(result), 1)
+    stored_modes = []
+    for value in (cached.get("delivery_mode"), cached_result.get("delivery_mode")):
+        if value is not None and str(value).strip():
+            mode_value = str(value).strip().lower()
+            stored_modes.append("preview" if mode_value in {"preview_only", "预览"} else mode_value)
+    if any(value != recovery_mode for value in stored_modes) or (not stored_modes and recovery_mode == "formal"):
+        return _emit(_compact_control_result(finalize({
+            "status": "RECOVERY_MATCHED_MANIFEST_REQUIRED", "failure_class": "semantic",
+            "reason": "RECOVERY_DELIVERY_MODE_MISMATCH",
+            "message": "匹配结果与恢复任务的交付模式不一致或缺少正式模式证据；未进入写稿。",
+            "matched_manifest": str(cached_path),
+        })), 1)
     recovery_controls = {key: manifest[key] for key in
-                         ("draft_name", "force_overwrite", "recovery_stage", "parent_run_id")}
+                         ("draft_name", "force_overwrite", "recovery_stage", "parent_run_id", "delivery_mode")}
     manifest.update(cached)
     manifest.update(recovery_controls)
     from . import recovery_audio
@@ -1558,10 +1729,10 @@ def main(argv=None) -> int:
     bd.add_argument("--input", required=True, help="manifest.json")
     bd.add_argument("--report-dir", default=".jy_run")
     bd.add_argument("--strict-script", action="store_true", help="文案校验不通过则阻断")
-    bd.add_argument("--delivery-mode", choices=("formal", "preview"), default="formal",
-                    help="formal（默认）：时序无解即阻断，不得静默通过；"
+    bd.add_argument("--delivery-mode", choices=("formal", "preview"), default=None,
+                    help="formal：时序无解即阻断，不得静默通过；"
                          "preview：未解出的段落按素材可用长度出占位画面并在成片上打"
-                         "未认证标注，仅供预览，不得用于正式交付。")
+                         "未认证标注，仅供预览，不得用于正式交付；省略时使用清单声明，未声明则为 preview。")
     bd.add_argument("--trigger-phrase", default="", help=argparse.SUPPRESS)
     bd.set_defaults(func=cmd_build)
 

@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import shutil
 import socket
@@ -27,6 +28,21 @@ PathLike = Union[str, "os.PathLike[str]"]
 
 class SkipUpdate(Exception):
     """``locked_json_update`` 的 mutate 抛出它表示放弃写入，原文件不动。"""
+
+
+def content_identity(path: PathLike) -> dict:
+    """Bind a small retained asset to its bytes and detect concurrent writes."""
+    target = Path(path).resolve()
+    before = target.stat()
+    digest = hashlib.sha256()
+    with target.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    after = target.stat()
+    if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+        raise ValueError("FILE_CHANGED_DURING_HASH")
+    return {"path": str(target), "size": after.st_size, "mtime_ns": after.st_mtime_ns,
+            "sha256": digest.hexdigest()}
 
 
 def _lock_path(path: PathLike) -> Path:

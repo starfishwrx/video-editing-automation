@@ -86,6 +86,204 @@ class WorkerSelectionRecoveryTests(unittest.TestCase):
         self.assertEqual(bound["segments"][0]["audio_mode"], "file")
         self.assertFalse(selection_recovery.pending(self.report))
 
+    def test_failed_preflight_preserves_the_single_selection_retry(self):
+        before = self.audio.read_bytes()
+        blocked = Mock(return_value=SimpleNamespace(returncode=1, stdout='missing font', stderr=''))
+        first = self.recover(run=blocked)
+        self.assertFalse(first['stage_retry_exhausted'])
+        self.assertIn('SELECTION_RECOVERY_PREFLIGHT_FAILED', first['stdout'])
+        self.assertEqual(json.loads((self.report / 'selection_recovery_state.json').read_text())['attempts'], 0)
+        self.assertEqual(self.audio.read_bytes(), before)
+        retry = Mock(side_effect=self.successful_cli)
+        second = self.recover(run=retry)
+        self.assertEqual(second['rc'], 0, second)
+        self.assertEqual([call.args[0][-1] for call in retry.call_args_list],
+                         ['preflight', 'semantic_match', 'draft_write'])
+        self.assertEqual(self.audio.read_bytes(), before)
+
+    def test_second_explicit_preflight_failure_preserves_budget_but_unknown_failure_does_not(self):
+        def failed_inside_semantic(command, **kwargs):
+            if command[-1] == 'preflight':
+                return SimpleNamespace(returncode=0, stdout='{}', stderr='')
+            return SimpleNamespace(returncode=1, stdout=json.dumps({'status': 'ENV_ERROR',
+                'failure_class': 'environment', 'failed_stage': 'preflight'}), stderr='')
+        result = self.recover(run=Mock(side_effect=failed_inside_semantic))
+        self.assertTrue(result['preflight_only'])
+        self.assertEqual(json.loads((self.report / 'selection_recovery_state.json').read_text())['attempts'], 0)
+
+    def test_changed_audio_after_blocked_preflight_is_not_retryable(self):
+        blocked = Mock(return_value=SimpleNamespace(returncode=1, stdout='missing font', stderr=''))
+        self.recover(run=blocked)
+        self.audio.write_bytes(b'changed audio bytes')
+        result = self.recover(run=Mock())
+        self.assertIn('SELECTION_RECOVERY_AUDIO_CHANGED', result['stdout'])
+        self.assertFalse(result['preflight_only'])
+        self.assertFalse(json.loads(result['stdout'])['retryable'])
+
+    def test_same_metadata_changed_audio_cannot_resume_when_snapshot_has_hash(self):
+        import os
+        from orchestrator.runtime.file_safety import content_identity
+        self.snapshot["audio_files"] = [content_identity(self.audio)]
+        self.write("selection_resume.json", self.snapshot)
+        before = self.audio.stat()
+        contents = bytearray(self.audio.read_bytes())
+        contents[0] ^= 1
+        self.audio.write_bytes(contents)
+        os.utime(self.audio, ns=(before.st_atime_ns, before.st_mtime_ns))
+        run = Mock()
+        result = self.recover(run=run)
+        self.assertIn("SELECTION_RECOVERY_AUDIO_CHANGED", result["stdout"])
+        run.assert_not_called()
+
+    def test_audio_changed_during_recovered_draft_write_cannot_succeed(self):
+        import os
+        from orchestrator.runtime.file_safety import content_identity
+        self.snapshot["audio_files"] = [content_identity(self.audio)]
+        self.write("selection_resume.json", self.snapshot)
+
+        def changed_during_write(command, **kwargs):
+            result = self.successful_cli(command, **kwargs)
+            if command[-1] == "draft_write":
+                before = self.audio.stat()
+                contents = bytearray(self.audio.read_bytes())
+                contents[0] ^= 1
+                self.audio.write_bytes(contents)
+                os.utime(self.audio, ns=(before.st_atime_ns, before.st_mtime_ns))
+            return result
+
+        result = self.recover(run=Mock(side_effect=changed_during_write))
+        self.assertEqual(result["rc"], 1)
+        self.assertIn("SELECTION_RECOVERY_AUDIO_CHANGED", result["stdout"])
+
+    def test_fixed_bgm_must_be_frozen_and_unchanged_through_recovery(self):
+        import os
+        from orchestrator.runtime.file_safety import content_identity
+        music = self.root / "music.wav"
+        music.write_bytes(b"original-music-fixture")
+        self.manifest["bgm"] = {"path": str(music)}
+        self.snapshot["input_manifest"] = copy.deepcopy(self.manifest)
+        self.snapshot["manifest"]["bgm"] = {"path": str(music)}
+        self.write("selection_resume.json", self.snapshot)
+        run = Mock()
+        self.assertIn("SELECTION_RECOVERY_BGM_IDENTITY_REQUIRED", self.recover(run=run)["stdout"])
+        run.assert_not_called()
+        self.snapshot["bgm_file"] = content_identity(music)
+        self.write("selection_resume.json", self.snapshot)
+
+        def changed_during_write(command, **kwargs):
+            result = self.successful_cli(command, **kwargs)
+            if command[-1] == "draft_write":
+                before = music.stat()
+                contents = bytearray(music.read_bytes())
+                contents[0] ^= 1
+                music.write_bytes(contents)
+                os.utime(music, ns=(before.st_atime_ns, before.st_mtime_ns))
+            return result
+
+        result = self.recover(run=Mock(side_effect=changed_during_write))
+        self.assertEqual(result["rc"], 1)
+        self.assertIn("SELECTION_RECOVERY_BGM_CHANGED", result["stdout"])
+
+    def test_audio_or_bgm_changed_during_preflight_is_not_a_retryable_preflight(self):
+        import os
+        from orchestrator.runtime.file_safety import content_identity
+        for changed in ("audio", "bgm"):
+            with self.subTest(changed=changed):
+                music = self.root / (changed + "-music.wav")
+                music.write_bytes(b"original-music-fixture")
+                self.manifest["bgm"] = {"path": str(music)}
+                self.snapshot["input_manifest"] = copy.deepcopy(self.manifest)
+                self.snapshot["manifest"]["bgm"] = {"path": str(music)}
+                self.snapshot["audio_files"] = [content_identity(self.audio)]
+                self.snapshot["bgm_file"] = content_identity(music)
+                self.write("selection_resume.json", self.snapshot)
+
+                def changed_during_preflight(command, **kwargs):
+                    result = self.successful_cli(command, **kwargs)
+                    target = self.audio if changed == "audio" else music
+                    before = target.stat()
+                    data = bytearray(target.read_bytes())
+                    data[0] ^= 1
+                    target.write_bytes(data)
+                    os.utime(target, ns=(before.st_atime_ns, before.st_mtime_ns))
+                    return result
+
+                run = Mock(side_effect=changed_during_preflight)
+                result = self.recover(run=run)
+                self.assertEqual(result["rc"], 1)
+                self.assertFalse(result["preflight_only"])
+                self.assertFalse(json.loads(result["stdout"])["retryable"])
+                run.assert_called_once()
+                state = self.report / "selection_recovery_state.json"
+                if state.exists():
+                    state.unlink()
+
+    def test_bgm_changed_when_preflight_child_fails_is_not_retryable(self):
+        from orchestrator.runtime.file_safety import content_identity
+        music = self.root / "music-preflight-failure.wav"
+        music.write_bytes(b"original-music-fixture")
+        self.manifest["bgm"] = {"path": str(music)}
+        self.snapshot["input_manifest"] = copy.deepcopy(self.manifest)
+        self.snapshot["manifest"]["bgm"] = {"path": str(music)}
+        self.snapshot["bgm_file"] = content_identity(music)
+        self.write("selection_resume.json", self.snapshot)
+
+        def failed_preflight(command, **kwargs):
+            music.write_bytes(b"changed-music-fixture!")
+            return SimpleNamespace(returncode=1, stdout="preflight failed", stderr="")
+
+        result = self.recover(run=Mock(side_effect=failed_preflight))
+        self.assertIn("SELECTION_RECOVERY_BGM_CHANGED", result["stdout"])
+        self.assertFalse(result["preflight_only"])
+        self.assertFalse(json.loads(result["stdout"])["retryable"])
+
+    def test_bgm_changed_during_preflight_timeout_is_not_retryable(self):
+        from orchestrator.runtime.file_safety import content_identity
+        music = self.root / "music-preflight-timeout.wav"
+        music.write_bytes(b"original-music-fixture")
+        self.manifest["bgm"] = {"path": str(music)}
+        self.snapshot["input_manifest"] = copy.deepcopy(self.manifest)
+        self.snapshot["manifest"]["bgm"] = {"path": str(music)}
+        self.snapshot["bgm_file"] = content_identity(music)
+        self.write("selection_resume.json", self.snapshot)
+
+        def timeout(command, **kwargs):
+            music.write_bytes(b"changed-music-fixture!")
+            raise subprocess.TimeoutExpired(command, 1)
+
+        result = self.recover(run=Mock(side_effect=timeout))
+        self.assertIn("SELECTION_RECOVERY_BGM_CHANGED", result["stdout"])
+        self.assertFalse(result["preflight_only"])
+        self.assertFalse(json.loads(result["stdout"])["retryable"])
+
+    def test_worker_propagates_preflight_block_to_done_without_a_second_attempt(self):
+        blocked = self.recover(run=Mock(return_value=SimpleNamespace(
+            returncode=1, stdout='missing font', stderr='')))
+        task = {'record_id': 'record', 'title': 'draft', 'script': '一句',
+                'material_dir': str(self.root), 'delivery_mode': 'preview'}
+        source = self.root / 'source.mp4'
+        source.write_bytes(b'fixture')
+        (self.root / 'record' / 'eval').mkdir(parents=True)
+        with patch.object(worker, 'WORK', self.root), patch.object(worker, 'DRAFTS', self.drafts), \
+             patch.object(worker, '_runtime_facts', return_value={}), \
+             patch.object(worker, 'video_files', return_value=[str(source)]), \
+             patch.object(worker, '_save_frozen_task'), \
+             patch.object(worker, 'restore_qc_rejections', return_value=({}, {})), \
+             patch.object(worker, 'build_progress_inputs', return_value={'fixture': True}), \
+             patch.object(worker, 'publish_failure_notification', return_value={}), \
+             patch.object(worker, 'progress'), patch.object(worker, 'log'), \
+             patch.object(worker.production_eval, 'runtime_identity', return_value={}), \
+             patch.object(worker.production_eval, 'freeze', return_value={'mode': 'enforce'}), \
+             patch.object(worker.production_eval, 'write_once'), \
+             patch.object(worker, 'run_build', return_value=blocked) as build:
+            worker.process_task(task, admitted=True)
+        done = json.loads((self.root / 'record' / 'done.json').read_text(encoding='utf-8'))
+        self.assertEqual(build.call_count, 1, done)
+        self.assertEqual(done['failure_class'], 'environment')
+        self.assertEqual(done['failure_code'], 'ENVIRONMENT_PRECHECK_FAILED')
+        self.assertTrue(done['retryable'])
+        self.assertEqual(done['resume_stage'], 'semantic_match')
+
     def test_changed_task_input_never_launches_cli_or_falls_back_to_build(self):
         run = Mock()
         for field, value in (("voice", "another-speaker"), ("full_script", "另一句"), ("material_sources", ["different.mp4"])):

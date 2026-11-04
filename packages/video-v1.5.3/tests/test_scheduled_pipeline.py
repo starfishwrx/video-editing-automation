@@ -61,6 +61,80 @@ class ScheduledPipelineTests(unittest.TestCase):
         self.assertEqual(first["tasks"][0]["stage"], "build")
         self.assertEqual(second["tasks"][0]["reason"], "PREVIEW_LOCAL_ONLY")
 
+    def test_single_record_uses_the_same_dispatcher_as_a_batch(self):
+        self.queue_tasks([{"record_id": "one"}, {"record_id": "two", "delivery_mode": "preview"}])
+        calls = []
+        result = scheduled.run_once(self.queue, self.work, record_id="TWO",
+            dispatcher=lambda tasks, **kwargs: calls.append((tasks, kwargs)) or
+                [{"record_id": "two", "status": "PREVIEW_READY"}])
+        self.assertEqual([task['record_id'] for task in calls[0][0]], ['two'])
+        self.assertEqual(calls[0][0][0]['delivery_mode'], 'preview')
+        self.assertEqual(calls[0][1]['work'], self.work.resolve())
+        self.assertEqual(result['status'], 'OK')
+
+    def test_environment_block_does_not_consume_a_build_attempt(self):
+        self.queue_tasks([{"record_id": "one"}])
+        def blocked(tasks, **kwargs):
+            return [{"record_id": "one", "stage": "preflight", "status": "BLOCKED",
+                     "retryable": True, "error": "missing font"}]
+        first = scheduled.run_once(self.queue, self.work, dispatcher=blocked)
+        self.assertTrue(first['tasks'][0]['preflight_only'])
+        self.assertEqual(json.loads((self.work / 'pipeline_state.json').read_text())['records']['one']['build_attempts'], 0)
+        calls = []
+        second = scheduled.run_once(self.queue, self.work,
+            dispatcher=lambda tasks, **kwargs: calls.extend(tasks) or [{"record_id": "one", "status": "PREVIEW_READY"}])
+        self.assertEqual(second['status'], 'OK')
+        self.assertEqual(calls[0]['record_id'], 'one')
+
+    def test_busy_supervisor_then_normal_retry_uses_the_same_dispatch_chain(self):
+        from tools import batch_dispatch
+        from orchestrator.runtime_policy import RuntimePolicy
+        from orchestrator.file_safety import file_lock
+        self.queue_tasks([{'record_id': 'one'}])
+        policy = RuntimePolicy(task_workers=1, prep_workers=1, slot_dir=str(self.root / 'slots'))
+        calls = []
+        def dispatcher(tasks, **kwargs):
+            return batch_dispatch.dispatch(tasks, **kwargs, policy=policy,
+                preparer=lambda *args: 'fixture-analysis',
+                runner=lambda task, *args: calls.append(task['record_id']) or
+                    {'record_id': task['record_id'], 'status': 'PREVIEW_READY'})
+        with patch.object(batch_dispatch, '_production_preflight', return_value={'ready': True, 'runtime': {}}):
+            with file_lock(Path(policy.slot_dir) / 'batch_dispatch', timeout=0):
+                first = scheduled.run_once(self.queue, self.work, dispatcher=dispatcher)
+            self.assertTrue(first['tasks'][0]['preflight_only'])
+            self.assertEqual(calls, [])
+            second = scheduled.run_once(self.queue, self.work, dispatcher=dispatcher)
+        self.assertEqual(second['status'], 'OK')
+        self.assertEqual(calls, ['one'])
+
+    def test_worker_recovery_preflight_block_reaches_scheduler_and_can_retry(self):
+        from tools import batch_dispatch
+        from orchestrator.runtime_policy import RuntimePolicy
+        from types import SimpleNamespace
+        self.queue_tasks([{'record_id': 'one', 'delivery_mode': 'preview'}])
+        policy = RuntimePolicy(task_workers=1, prep_workers=1, slot_dir=str(self.root / 'slots'))
+        calls = []
+        def worker_process(command, **kwargs):
+            calls.append(command)
+            if len(calls) == 1:
+                self.done('one', {'status': 'ERROR', 'retryable': True,
+                    'resume_stage': 'semantic_match', 'failures': [{'preflight_only': True}]})
+            else:
+                self.done('one', {'status': 'PREVIEW_READY', 'retryable': False, 'failures': []})
+            return SimpleNamespace(returncode=0, stdout='', stderr='')
+        def dispatcher(tasks, **kwargs):
+            return batch_dispatch.dispatch(tasks, **kwargs, policy=policy,
+                preparer=lambda *args: 'fixture-analysis')
+        with patch.object(batch_dispatch, '_production_preflight', return_value={'ready': True, 'runtime': {}}), \
+             patch.object(batch_dispatch.subprocess, 'run', side_effect=worker_process):
+            first = scheduled.run_once(self.queue, self.work, dispatcher=dispatcher)
+            self.assertTrue(first['tasks'][0]['preflight_only'])
+            state = json.loads((self.work / 'pipeline_state.json').read_text())
+            self.assertEqual(state['records']['one']['build_attempts'], 0)
+            second = scheduled.run_once(self.queue, self.work, dispatcher=dispatcher)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(second['status'], 'OK')
+
     def test_qc_and_delivery_recovery_are_bounded_and_never_build(self):
         self.queue_tasks([{"record_id": "qc", "delivery_mode": "formal"}])
         self.done("qc", {"status": "PARTIAL", "drafts": ["retained"], "resume_stage": "delivery"})
@@ -144,7 +218,8 @@ class ScheduledPipelineTests(unittest.TestCase):
         def dispatcher(tasks, **kwargs):
             return batch_dispatch.dispatch(tasks, **kwargs, policy=policy,
                 preparer=lambda *args: prepared.append(True) or "offline-analysis.json", runner=runner)
-        result = scheduled.run_once(self.queue, self.work, dispatcher=dispatcher)
+        with patch.object(batch_dispatch, "_production_preflight", return_value={"ready": True, "runtime": {}}):
+            result = scheduled.run_once(self.queue, self.work, dispatcher=dispatcher)
         self.assertEqual(prepared, [True])
         self.assertEqual(ran, ["bad", "good"])
         self.assertEqual(result["status"], "ERROR")
@@ -200,6 +275,22 @@ class ScheduledPipelineTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(json.loads(proc.stdout)["reason"], "PIPELINE_ALREADY_RUNNING")
         self.assertFalse((self.work / "pipeline_state.json").exists())
+
+    @unittest.skipUnless(POWERSHELL, "PowerShell is unavailable")
+    def test_copied_example_config_points_at_the_editor_skill(self):
+        package = self.root / "包 空格"
+        work = package / "work"
+        work.mkdir(parents=True)
+        config = work / "config.local.ps1"
+        shutil.copyfile(ROOT / "examples/config.example.ps1", config)
+        command = (". '" + str(config).replace("'", "''") + "'; "
+                   "@{skill=$env:JY_SKILL_ROOT; source=$env:JY_CONFIG_SOURCE} | ConvertTo-Json -Compress")
+        proc = subprocess.run([POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", command],
+                              capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        result = json.loads(proc.stdout)
+        self.assertEqual(Path(result['skill']).resolve(), (package / 'jianying-editor').resolve())
+        self.assertEqual(Path(result['source']).resolve(), config.resolve())
 
     @unittest.skipUnless(POWERSHELL, "PowerShell is unavailable")
     def test_powershell_runner_handles_unicode_spaces_dry_run(self):

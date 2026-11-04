@@ -2,6 +2,7 @@ from dataclasses import replace
 import json
 from pathlib import Path
 import sys
+import subprocess
 import tempfile
 import threading
 import time
@@ -23,6 +24,117 @@ class BatchDispatchTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.policy = RuntimePolicy(task_workers=1, prep_workers=2, slot_dir=str(self.root / "slots"))
+        self.preflight = patch.object(dispatch, "_production_preflight", return_value={"ready": True, "runtime": {}})
+        self.preflight.start()
+        self.addCleanup(self.preflight.stop)
+
+    def test_task_writer_preflight_blocks_before_any_material_preparation(self):
+        self.preflight.stop()
+        from orchestrator.application import cli
+        from orchestrator.runtime import platform_env, task_log
+        prepared = []
+        with patch.object(platform_env, "environment_report", return_value={"ready": True}), \
+             patch.object(cli, "_production_environment_report", return_value={
+                 "ready": False, "reason": "HEADLESS_SUBTITLE_FONT_REQUIRED"}) as check, \
+             patch.object(task_log, "runtime_facts", return_value={"pipeline_version": "test"}):
+            rows = dispatch.dispatch([{"record_id": "r1", "draft_backend": "headless",
+                                       "subtitle_font_path": "missing-font"}],
+                work=self.root, policy=self.policy,
+                preparer=lambda *args: prepared.append(True),
+                runner=lambda *args: self.fail("worker must not run"))
+        self.assertEqual(prepared, [])
+        self.assertEqual(rows[0]["stage"], "preflight")
+        self.assertIn("HEADLESS_SUBTITLE_FONT_REQUIRED", rows[0]["error"])
+        self.assertEqual(check.call_args.args[1]["subtitle_font_path"], "missing-font")
+
+    def test_qc_resume_preflights_the_frozen_task_before_the_runner(self):
+        task_dir = self.root / 'qc'
+        task_dir.mkdir()
+        (task_dir / 'task.json').write_text(json.dumps({
+            'record_id': 'qc', 'selection_mode': 'legacy'}), encoding='utf-8')
+        self.preflight.stop()
+        with patch.object(dispatch, '_production_preflight', return_value={
+                'ready': False, 'reason': 'font missing', 'runtime': {}}) as check:
+            result = dispatch.dispatch([{'record_id': 'qc', 'selection_mode': 'ai_editor'}],
+                work=self.root, policy=self.policy, resume_stage='qc',
+                runner=lambda *args: self.fail('QC must not call the model'))
+        self.assertEqual(check.call_args.args[0]['selection_mode'], 'legacy')
+        self.assertEqual(result[0]['stage'], 'preflight')
+        self.assertEqual(result[0]['status'], 'BLOCKED')
+
+    def test_missing_qwen_configuration_blocks_before_preparation(self):
+        self.preflight.stop()
+        from orchestrator.runtime import platform_env
+        from orchestrator.application import cli
+        env = {'JY_VISION_TRANSPORT': 'qwen', 'JY_QWEN_BASE_URL': '', 'JY_QWEN_MODEL': '',
+               'JY_QWEN_API_KEY': '', 'JY_VISION_TEXT_BASE_URL': '', 'JY_VISION_TEXT_MODEL': '',
+               'JY_VISION_TEXT_API_KEY': ''}
+        with patch.dict(dispatch.os.environ, env), \
+             patch.object(platform_env, 'environment_report', return_value={'ready': True}), \
+             patch('orchestrator.runtime.headless.preflight', return_value={'status': 'READY'}), \
+             patch.object(cli, '_manifest_sources', return_value=[]):
+            result = dispatch.dispatch([{'record_id': 'missing'}], work=self.root, policy=self.policy,
+                preparer=lambda *args: self.fail('vision must not start'),
+                runner=lambda *args: self.fail('build must not start'))
+        self.assertEqual(result[0]['stage'], 'preflight')
+        self.assertIn('JY_QWEN_MODEL', result[0]['error'])
+        self.assertIn('JY_QWEN_API_KEY', result[0]['error'])
+
+    def test_glm_with_qwen_editor_requires_the_qwen_route_before_preparation(self):
+        self.preflight.stop()
+        from orchestrator.runtime import platform_env
+        env = {'JY_VISION_TRANSPORT': 'glm', 'ARK_API_KEY': 'fixture-secret', 'JY_AI_EDITOR_QWEN': '1',
+               'JY_VISION_TEXT_BASE_URL': '', 'JY_VISION_TEXT_MODEL': '', 'JY_VISION_TEXT_API_KEY': ''}
+        with patch.dict(dispatch.os.environ, env), \
+             patch.object(platform_env, 'environment_report', return_value={'ready': True}), \
+             patch('orchestrator.runtime.headless.preflight', return_value={'status': 'READY'}):
+            result = dispatch.dispatch([{'record_id': 'missing'}], work=self.root, policy=self.policy,
+                preparer=lambda *args: self.fail('vision must not start'))
+        self.assertIn('JY_VISION_TEXT_MODEL', result[0]['error'])
+        self.assertNotIn('fixture-secret', json.dumps(result))
+
+    def test_invalid_qwen_url_is_reported_without_echoing_it(self):
+        from orchestrator.runtime import vision_config
+        for address in ('not-a-url-secret', 'http://localhost:notaport',
+                        'http://bad host', 'http://example.com:99999'):
+            with self.subTest(address=address), patch.dict(dispatch.os.environ, {'JY_VISION_TRANSPORT': 'qwen',
+                    'JY_QWEN_BASE_URL': address, 'JY_QWEN_MODEL': 'fixture',
+                    'JY_QWEN_API_KEY': 'fixture-secret'}):
+                errors = vision_config.missing_required()
+            self.assertEqual(errors, ['JY_QWEN_BASE_URL_INVALID'])
+            self.assertNotIn(address, str(errors))
+
+    def test_unidentified_old_submission_is_retained_for_manual_recovery(self):
+        spool = Path(self.policy.slot_dir) / 'batch_submissions'
+        spool.mkdir(parents=True)
+        old = spool / 'old.json'
+        contents = json.dumps({'tasks': [{'record_id': 'old'}], 'work_root': str(self.root)})
+        old.write_text(contents, encoding='utf-8')
+        rows = dispatch.dispatch([], work=self.root, policy=self.policy,
+            preparer=lambda *args: self.fail('old task must not start'))
+        self.assertTrue(old.exists())
+        self.assertEqual(old.read_text(encoding='utf-8'), contents)
+        self.assertEqual(rows[0]['error'], 'LEGACY_SUBMISSION_REQUIRES_RECOVERY')
+
+    def test_corrupt_old_submission_is_retained_and_reported_as_blocked(self):
+        spool = Path(self.policy.slot_dir) / 'batch_submissions'
+        spool.mkdir(parents=True)
+        old = spool / 'damaged.json'
+        old.write_text('{not-json', encoding='utf-8')
+        rows = dispatch.dispatch([], work=self.root, policy=self.policy)
+        self.assertEqual(rows[0]['status'], 'BLOCKED')
+        self.assertEqual(Path(rows[0]['submission']), old)
+        self.assertEqual(old.read_text(encoding='utf-8'), '{not-json')
+
+    def test_old_spool_blocks_a_new_task_before_it_can_be_replayed(self):
+        spool = Path(self.policy.slot_dir) / 'batch_submissions'
+        spool.mkdir(parents=True)
+        (spool / 'old.json').write_text(json.dumps({'tasks': [{'record_id': 'same'}]}), encoding='utf-8')
+        rows = dispatch.dispatch([{'record_id': 'same'}], work=self.root, policy=self.policy,
+            preparer=lambda *args: self.fail('legacy spool must block new material work'),
+            runner=lambda *args: self.fail('legacy spool must block a duplicate build'))
+        self.assertTrue(rows)
+        self.assertTrue(all(row['status'] == 'BLOCKED' for row in rows))
 
     def test_cold_waiters_do_not_take_ready_worker_and_product_is_prepared_once(self):
         released = threading.Event()
@@ -52,6 +164,13 @@ class BatchDispatchTests(unittest.TestCase):
         self.assertNotEqual(dispatch.product_key(task), dispatch.product_key({**task, "material_sources": ["two.mp4"]}))
         self.assertNotEqual(dispatch.product_key(task), dispatch.product_key({**task, "sku": "b"}))
 
+    def test_product_group_keeps_explicit_source_order(self):
+        base = {"product": "generic", "material_dir": str(self.root),
+                "material_sources": [str(self.root / "weipin" / "a.mp4"),
+                                     str(self.root / "paper" / "b.mp4")]}
+        self.assertNotEqual(dispatch.product_key(base),
+                            dispatch.product_key({**base, "material_sources": list(reversed(base["material_sources"]))}))
+
     def test_qc_priority_then_fifo_and_duplicate_record_is_once(self):
         ran = []
         for rid in ("q1", "q2"):
@@ -66,17 +185,14 @@ class BatchDispatchTests(unittest.TestCase):
                           preparer=lambda *args: "shared.json", runner=run)
         self.assertEqual(ran, [("q1", "qc"), ("q2", "qc"), ("b1", "build"), ("b2", "build")])
 
-    def test_second_entry_is_durable_and_owner_absorbs_submission(self):
+    def test_second_entry_remains_retryable_while_supervisor_is_busy(self):
+        Path(self.policy.slot_dir).mkdir(parents=True, exist_ok=True)
         with file_lock(Path(self.policy.slot_dir) / "batch_dispatch", timeout=0):
             result = dispatch.dispatch([{"record_id": "queued"}], work=self.root, policy=self.policy)
-        self.assertEqual(result[0]["status"], "SUBMITTED")
-        self.assertTrue(Path(result[0]["submission"]).is_file())
-        ran = []
-        dispatch.dispatch([], work=self.root, policy=self.policy,
-            preparer=lambda *args: "shared.json",
-            runner=lambda task, stage, env, work: ran.append(task["record_id"]) or {"record_id": task["record_id"]})
-        self.assertEqual(ran, ["queued"])
-        self.assertFalse(Path(result[0]["submission"]).exists())
+        self.assertEqual(result[0]["status"], "BLOCKED")
+        self.assertEqual(result[0]["error"], "DISPATCH_SUPERVISOR_BUSY_RETRY")
+        self.assertTrue(result[0]["retryable"])
+        self.assertFalse((Path(self.policy.slot_dir) / 'batch_submissions').exists())
 
     def test_dry_run_is_read_only_and_material_resume_does_not_build(self):
         work = self.root / "new"
@@ -87,6 +203,16 @@ class BatchDispatchTests(unittest.TestCase):
             preparer=lambda *args: "shared.json",
             runner=lambda *args: self.fail("material resume invoked build"))
         self.assertEqual(result[0]["status"], "READY")
+
+    def test_missing_or_invalid_queue_cannot_look_like_an_empty_queue(self):
+        for name, contents in [('missing', None), ('invalid', '{}')]:
+            path = self.root / (name + '.json')
+            if contents is not None:
+                path.write_text(contents, encoding='utf-8')
+            proc = subprocess.run([sys.executable, '-m', 'tools.batch_dispatch', 'run',
+                                   '--queue', str(path), '--work-root', str(self.root), '--dry-run'],
+                                  cwd=ROOT, capture_output=True, text=True, timeout=20)
+            self.assertNotEqual(proc.returncode, 0, proc.stdout)
 
     def test_wait_uses_short_timeout_to_allow_periodic_polling(self):
         # Verify that dispatch.wait is called with a timeout to enable periodic polling
@@ -133,17 +259,16 @@ class BatchDispatchTests(unittest.TestCase):
         self.assertIsNone(task["final_mp4_deliveries"])
         self.assertEqual(task["queue_wait_origin"], "supervisor_admission")
 
-    def test_submission_wait_starts_at_submission_not_supervisor_start(self):
+    def test_legacy_submission_is_not_replayed_automatically(self):
         submitted_at = dispatch.time.time() - 30
         with patch.object(dispatch.time, "time", return_value=submitted_at):
-            dispatch.submit([{"record_id": "late"}], work=self.root, policy=self.policy,
-                            resume_stage="qc")
+            path = dispatch.submit([{"record_id": "late"}], work=self.root, policy=self.policy,
+                                   resume_stage="qc")
         rows = dispatch.dispatch([], work=self.root, policy=self.policy,
             preparer=lambda *args: self.fail("QC should not prepare material"),
-            runner=lambda *args: {"record_id": "late"})
-        self.assertEqual(rows[0]["queue_wait_origin"], "submission")
-        self.assertGreaterEqual(rows[0]["queue_wait_s"], 29.9)
-        self.assertEqual(rows[0]["material_wait_s"], 0)
+            runner=lambda *args: self.fail("legacy task must not replay"))
+        self.assertEqual(rows[0]['error'], 'LEGACY_SUBMISSION_REQUIRES_RECOVERY')
+        self.assertTrue(path.is_file())
 
     def test_failed_preparation_and_runner_retain_measured_timings(self):
         def fail(*args):
@@ -277,6 +402,16 @@ class BatchDispatchTests(unittest.TestCase):
                 preparer=lambda *args: self.fail("QC must not prepare material"),
                 runner=lambda task, *args: {"record_id": task["record_id"], "status": "OK"})
             self.assertEqual(rows[0]["status"], "OK")
+
+    def test_busy_supervisor_does_not_persist_another_configuration(self):
+        Path(self.policy.slot_dir).mkdir(parents=True, exist_ok=True)
+        with patch.dict(dispatch.os.environ, {'JY_SELECTION_MODE': 'ai_editor', 'ARK_API_KEY': 'fixture-secret'}):
+            with file_lock(Path(self.policy.slot_dir) / 'batch_dispatch', timeout=0), \
+                 patch.dict(dispatch.os.environ, {'JY_SELECTION_MODE': 'legacy'}):
+                result = dispatch.dispatch([{'record_id': 'other'}], work=self.root, policy=self.policy)
+        self.assertEqual(result[0]['status'], 'BLOCKED')
+        self.assertEqual(result[0]['error'], 'DISPATCH_SUPERVISOR_BUSY_RETRY')
+        self.assertNotIn('fixture-secret', json.dumps(result))
 
     def test_missing_voice_catalog_blocks_even_empty_or_preset_voice_before_preparation(self):
         from orchestrator.audio import library_resources

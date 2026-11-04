@@ -20,21 +20,32 @@ flowchart LR
 ```powershell
 uv sync --frozen
 New-Item -ItemType Directory -Force work | Out-Null
-Copy-Item examples/config.example.ps1 work/config.local.ps1
-Copy-Item examples/queue.example.json work/batch_queue.json
+if (-not (Test-Path work/config.local.ps1)) { Copy-Item examples/config.example.ps1 work/config.local.ps1 }
+if (-not (Test-Path work/batch_queue.json)) { Copy-Item examples/queue.example.json work/batch_queue.json }
 
 # 在私有队列中填写真实素材和任务后，先查看本轮计划。
 powershell -NoProfile -File scripts/run_pipeline.ps1 -DryRun
 
 # 执行完整一轮。
 powershell -NoProfile -File scripts/run_pipeline.ps1
+
+# 只处理队列中的一条；仍经过相同的调度、建稿、独立质检和交付门禁。
+powershell -NoProfile -File scripts/run_pipeline.ps1 -RecordId example-product-a
 ```
 
 配置副本保存在忽略的 `work/config.local.ps1`。已有私有配置不要用示例覆盖。默认 Python 为包内 `.venv/Scripts/python.exe`，可用 `-PythonPath` 指定；`-WorkRoot`、`-DraftRoot`、`-QueuePath` 和 `-ConfigPath` 接受绝对路径，支持中文和空格。默认队列是 `<WorkRoot>/batch_queue.json`，默认配置是 `<WorkRoot>/config.local.ps1`。显式参数优先。
 
 队列是 JSON 任务列表，或 `{"tasks": [...]}`。沿用既有 worker 字段：`record_id`、`title`、`script`、`product`、`category`、`sku`、`material_dir`、`count`、`voice`、`bgm` 等。素材目录必须对运行账号可读，支持本机目录和已可访问的共享目录；脚本不依赖宿主私有的挂载辅助文件。任务获取方负责把任务写入此本地队列，本入口不自行拉取飞书任务。
 
-`delivery_mode` 只能是 `preview` 或 `formal`，省略时按预览处理。预览保留本地草稿和未认证原因。正式模式通过验收后进入配置的 NAS／表格交付；本机留稿可设置 `JY_SKIP_SHIP=1`。NAS 与飞书凭据和路径见包内 `ENVIRONMENT.md`。
+需要固定已有逐句配音时，任务可在 `manifest.segments` 中提供按顺序排列的 `{"text": "原句", "audio": "绝对音频文件路径", "audio_mode": "file"}`；`script` 仍须完整填写，逐句拼接必须与原文一致。每句都须提供真实可读的音频，字段只接受这三项，不导入旧选镜或自报时长。入口在素材视觉分析前校验文件；使用原音频及实测时长，不重新合成。缺失、损坏或文案不一致会明确阻断。
+
+需要固定素材范围时，可在任务中提供非空的 `material_sources` 绝对路径列表；素材准备和建稿共用该列表，目录中后来增加的文件不会自动加入。清单缺失、重复、不可读或与素材索引筛选结果冲突时会阻断，不自动扩大范围。
+
+`delivery_mode` 只能是 `preview` 或 `formal`，省略时按预览处理。预览保留本地草稿和独立质检结果，不进行 NAS 分发或业务表状态回写；预览失败也只记录本地原因。正式模式通过验收后进入配置的 NAS／表格交付；本机留稿可设置 `JY_SKIP_SHIP=1`。NAS 与飞书凭据和路径见包内 `ENVIRONMENT.md`。
+
+单条任务、整批和计划任务都通过上述入口及同一个 dispatcher。`run.py build` 是供诊断和嵌入的底层建稿命令，不单独承担队列的独立质检与交付闭环。任务在付费步骤前因环境预检被阻断时，修好配置可从正常入口重试，不消耗建稿尝试次数。
+
+同一机器已有另一轮运行时，新一轮返回可重试的 `DISPATCH_SUPERVISOR_BUSY_RETRY`，不异步借用对方的配置。当前轮结束后从原入口重试，定时运行也会在下一轮重新选择任务。旧版遗留的异步提交文件会保留并报 `LEGACY_SUBMISSION_REQUIRES_RECOVERY`：需先核对原任务的运行、草稿和阶段收据，再决定恢复或跳过，不能自动重放。
 
 ## 默认建稿与音乐（1.6.0）
 
@@ -45,8 +56,10 @@ powershell -NoProfile -File scripts/run_pipeline.ps1
 
 本机配置需提供 `JIANYING_HEADLESS_ROOT`、`JIANYING_INSTALL_DIR`、
 `JY_HEADLESS_FONT`；`JY_DRAFT_ROOT` 指向不占用剪映首页的私有原生草稿库。
-`python -m tools.headless_runtime check` 在付费阶段前检查后端、字体和媒体工具。
+队列调度在每条任务调用配音或视觉服务前，按任务实际设置检查后端、字体、媒体工具和配置；`python -m tools.headless_runtime check` 也可单独检查默认后端。
 配置示例仍需填写本机路径，不携带官方 DLL、业务缓存或凭据。
+
+每次任务的结果记录实际版本、选镜策略及配置来源。显式 `JY_SELECTION_MODE` 若覆盖默认 `ai_editor`，运行时会提示；`legacy` 只按显式配置使用，新策略失败不会自动切回。素材诊断命令 `analyze-shots --no-vision` 不是正式建稿入口。
 
 草稿使用原生加密时间轴及字体资源，QC、包验收、NAS 复制、重试和版本归档均
 读取当前活动镜像。分发只改新副本内的素材／字体路径，源稿不动；原有正式
@@ -76,6 +89,8 @@ powershell -NoProfile -File scripts/install_pipeline_task.ps1 -TaskName VideoAut
 操作系统锁防止多进程重入。已完成、正在执行、普通预览和确定性失败会跳过；明确可重试的制作最多尝试两次，保留草稿的 QC／交付最多自动恢复两次，次数在开始前保存。恢复复用草稿，不重做 TTS 或选镜。同一记录的输入变化不能重置次数，必须使用新记录或显式定向恢复。不要删除整个状态文件来重放全部任务。
 
 选镜服务超时/限流的制作重试改为阶段恢复：复用冻结的配音、句长、素材分析及完成的候选观察，仅补失败调用。每次原始运行持久记录一次恢复预算，中断也不清零；缓存缺失、输入变化或预算耗尽直接停止，不回到完整build。选镜完成后的BGM/写稿超时保留匹配结果。恢复产物和原始运行身份见[运行时与恢复](subsystems/runtime-and-recovery.md)。
+
+指定配音和音乐在选镜及建稿期间按文件字节核对，变化时停止而不自动重建。旧的选镜恢复快照若指定音乐却没有音乐身份，需人工核对并显式处理，不会自动把当前文件冒充原曲。
 
 有明确修复后，可使用现有入口定向恢复：`python -m tools.batch_dispatch resume --queue <queue.json> --work-root <work> --record-id <id> --stage qc`。制作缺失才使用 `--stage build`，不会因定时器重复触发而无限重建。
 

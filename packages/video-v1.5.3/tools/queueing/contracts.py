@@ -18,14 +18,51 @@ TRANSIENT_BUILD_MARKERS = (
 )
 
 
-def meeting_bgm_spec(value: object) -> dict:
+def task_runtime_overrides(task: dict) -> dict:
+    """Apply the same explicit settings to queue preflight and generated builds."""
+    nested = task.get("manifest")
+    if nested is None:
+        nested = {}
+    if not isinstance(nested, dict):
+        raise ValueError("INVALID_TASK_MANIFEST")
+    result = {}
+    for key in ("selection_mode", "draft_backend", "subtitle_font_path"):
+        value = task.get(key)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            value = nested.get(key)
+        if value is not None and not (isinstance(value, str) and not value.strip()):
+            result[key] = value
+    return result
+
+
+def task_product_fields(task: dict) -> dict:
+    """Normalize product identity once for preparation and selection."""
+    nested = task.get("manifest") or {}
+    if not isinstance(nested, dict):
+        raise ValueError("INVALID_TASK_MANIFEST")
+    result = {}
+    for key in ("product", "product_key", "product_id", "brand", "sku", "category",
+                "product_name", "title", "task_title", "series"):
+        value = task.get(key)
+        if value is None or not str(value).strip():
+            value = nested.get(key)
+        if value is not None and str(value).strip():
+            result[key] = str(value).strip()
+    return result
+
+
+def meeting_bgm_spec(value: object, *, base_dir: pathlib.Path | None = None) -> dict:
     """Preserve an explicit worker BGM choice; strings never become random auto."""
     import importlib.util
     path = pathlib.Path(__file__).resolve().parents[2] / "doubao-jianying-orchestrator/orchestrator/audio/bgm_request.py"
     spec = importlib.util.spec_from_file_location("_queue_bgm_request", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module.normalize(value)
+    result = module.normalize(value)
+    if base_dir is not None and result.get("path"):
+        target = pathlib.Path(str(result["path"])).expanduser()
+        result["path"] = str((target if target.is_absolute() else base_dir / target).resolve())
+    return result
 
 
 def safe_manifest_stem(name: str) -> str:
@@ -78,7 +115,16 @@ def batch_result_contract(status: str, *, pipeline_version: str, run_id: str, fa
     lower = text.lower()
     first = rows[0] if rows else {}
     failure_type = str(first.get("type") or "").lower()
-    if "voice_selection_required" in lower:
+    if first.get("preflight_only") is True and first.get("failure_code") == "ENVIRONMENT_PRECHECK_FAILED":
+        failure_class, failure_code = "environment", "ENVIRONMENT_PRECHECK_FAILED"
+    elif any(marker in lower for marker in ("material_duration_", "material_geometry_requires_reanalysis",
+                                             "material_source_changed_during_preparation", "material_source_missing")):
+        failure_class, failure_code = "environment", "MATERIAL_DURATION_UNAVAILABLE"
+    elif any(marker in lower for marker in ("fixed_narration_", "selection_audio_changed",
+            "selection_recovery_audio_changed", "selection_recovery_bgm_", "bgm_changed_during_", "bgm_source_audio_invalid",
+            "material_source_list_", "file_changed_during_hash")):
+        failure_class, failure_code = "environment", "FIXED_INPUT_INVALID_OR_CHANGED"
+    elif "voice_selection_required" in lower:
         failure_class, failure_code = "environment", "VOICE_SELECTION_REQUIRED"
     elif "bgm_required" in lower:
         failure_class, failure_code = "environment", "BGM_REQUIRED"
@@ -118,6 +164,9 @@ def batch_result_contract(status: str, *, pipeline_version: str, run_id: str, fa
             "deadline_exceeded", "request_timeout", "connect_timeout",
         ))
     )
+    if (first.get("preflight_only") is True and first.get("retryable") is True
+            and first.get("resume_stage") == "semantic_match"):
+        retryable = True
     if any(row.get("stage_retry_exhausted") is True or row.get("retryable") is False for row in rows) or any(
             token in lower for token in ("unauthorized", "forbidden", "invalid api key", "insufficient balance", "http 401", "http 403")):
         retryable = False
@@ -171,18 +220,23 @@ def classify_build_failure(text: str, *, transient_markers=TRANSIENT_BUILD_MARKE
         "insufficient balance", "401", "403", "invalid path", "path not found",
         "file not found", "no such file", "encoding error", "unicode decode",
     ))
-    deterministic_block = any(marker.lower() in lower_blob for marker in (
+    material_duration_block = any(marker in lower_blob for marker in (
+        "material_duration_", "material_geometry_requires_reanalysis",
+        "material_source_changed_during_preparation", "material_source_missing"))
+    deterministic_block = material_duration_block or any(marker.lower() in lower_blob for marker in (
         "VISUAL_MATCH_BLOCKED", "SHOT_MATCH_BLOCKED", "AUDIO_VIDEO_MISMATCH",
         "TASK_BUDGET", "Invalid argument", "INVALID_ARGUMENT",
         "DESKTOP_IMPORT_BLOCKED", "DRAFT_INVALID", "VOICE_SELECTION_REQUIRED",
         "BGM_REQUIRED", "SENTENCE_PLAN_REVIEW_REQUIRED",
         "SELECTION_STAGE_RETRY_EXHAUSTED", "SELECTION_RECOVERY_INPUT_CHANGED",
+        "FIXED_NARRATION_", "SELECTION_AUDIO_CHANGED", "SELECTION_RECOVERY_AUDIO_CHANGED",
+        "SELECTION_RECOVERY_BGM_", "BGM_CHANGED_DURING_", "BGM_SOURCE_AUDIO_INVALID", "MATERIAL_SOURCE_LIST_", "FILE_CHANGED_DURING_HASH",
     )) or credential_or_input_block or ("vision_call_failed" in lower_blob and not transient)
     vision_hard = ("draft_visual_qc_blocked" in lower_blob) or (
         "no auditable visual top1" in lower_blob) or (
         "visual_match_blocked" in lower_blob and not hits)
     return {
-        "transient": bool(hits and transient and not credential_or_input_block),
+        "transient": bool(hits and transient and not credential_or_input_block and not material_duration_block),
         "vision_hard": vision_hard,
         "deterministic_block": deterministic_block,
         "markers": hits,

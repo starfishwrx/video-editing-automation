@@ -72,8 +72,10 @@ def proposals(manifest, analysis, plan, index, narration_timing):
                 if any(certainty == "estimated" or duration <= 0 for duration, certainty in durations):
                     continue
                 total = sum(d + pad for d, _ in durations)
+                material_us = shot.get("material_duration_us")
                 solution = timing.solve_window(timing.WindowRequest(
                     source_in_us=round(shot["source_start"] * 1e6), source_out_us=round(shot["source_end"] * 1e6),
+                    video_duration_us=material_us if type(material_us) is int and material_us > 0 else None,
                     audio_duration_us=total, tail_pad_us=0,
                     head_guard_us=timing.us_of(manifest.get("head_trim_s"), 300_000),
                     tail_guard_us=timing.us_of(manifest.get("tail_trim_s"), 200_000),

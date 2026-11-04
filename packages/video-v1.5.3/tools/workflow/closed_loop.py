@@ -430,12 +430,21 @@ def failure_update(task_path: pathlib.Path, done_path: pathlib.Path,
     This is separate from the successful delivery gate: it only writes the
     failure status and bounded feedback, never a draft path or success status.
     """
-    rules = policy(policy_path)
     task = read_json(task_path)
     done = read_json(done_path)
     record_id = str(task.get("record_id") or done.get("record_id") or "").strip()
     task_id = str(task.get("task_id") or record_id).strip()
     status = str(done.get("status") or "ERROR").upper()
+    try:
+        preview = delivery_gate.preview_requested(task, done)
+    except ValueError:
+        preview = True
+    if preview:
+        receipt = {"ok": False, "status": "SKIPPED", "reason": "PREVIEW_OR_INVALID_MODE_NO_WRITEBACK",
+                   "record_id": record_id, "task_id": task_id}
+        write_json(done_path.parent / "failure_notification_receipt.json", receipt)
+        return receipt
+    rules = policy(policy_path)
     if status in {"OK", "SUCCESS", "PREVIEW_READY"}:
         return {"ok": False, "status": "SKIPPED", "reason": "NOT_A_FAILURE", "record_id": record_id}
     failure_cfg = rules.get("failure_notification") or {}

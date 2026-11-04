@@ -40,6 +40,85 @@ def _save(path: Path, data: dict) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8")
 
 
+def snapshot_previous_analysis(analysis: dict, report_dir: Path) -> None:
+    """Save only an analysis whose full digest belongs to the existing plan."""
+    from ..runtime.file_safety import atomic_write_text
+    directory = report_dir / "ai_editor"
+    try:
+        previous = json.loads((directory / "plan.json").read_text(encoding="utf-8"))
+        payload = {k: v for k, v in analysis.items() if k != "ai_editor_plan"}
+        digest = previous.get("identity", {}).get("analysis_sha256")
+        if (digest != previous.get("resume_identity", {}).get("analysis_sha256")
+                or digest not in {contract.digest(payload), _analysis_digest(payload)}):
+            return
+        path = directory / f"previous_analysis_{digest}.json"
+        if path.exists():
+            # Preserve the first receipt; a corrupt existing one must not be
+            # silently replaced and will fail its digest check on resume.
+            return
+        atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False))
+    except (OSError, ValueError, TypeError):
+        return
+
+
+def _duration_migration_equivalent(previous: dict, current: dict) -> bool:
+    """Compare all facts, excluding only duration ruler and lock telemetry."""
+    def normalize(analysis):
+        result = copy.deepcopy({k: v for k, v in analysis.items() if k != "ai_editor_plan"})
+        for row in result.get("shots", []):
+            for key in ("material_duration_us", "material_duration_source",
+                        "material_duration_confidence"):
+                row.pop(key, None)
+        vision = result.get("vision_analysis")
+        if isinstance(vision, dict):
+            vision.pop("cache_wait_s", None)
+        return result
+    return normalize(previous) == normalize(current)
+
+
+def _duration_resume_safe(previous: dict, resume_identity: dict, analysis: dict, directory: Path) -> bool:
+    old_identity = previous.get("resume_identity") or {}
+    if ({k: v for k, v in old_identity.items() if k != "analysis_sha256"}
+            != {k: v for k, v in resume_identity.items() if k != "analysis_sha256"}):
+        return False
+    try:
+        digest = old_identity.get("analysis_sha256")
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            return False
+        snapshot = json.loads((directory / f"previous_analysis_{digest}.json").read_text(encoding="utf-8"))
+        if (old_identity.get("analysis_sha256") != previous.get("identity", {}).get("analysis_sha256")
+                or old_identity.get("analysis_sha256") not in {contract.digest(snapshot), _analysis_digest(snapshot)}
+                or not _duration_migration_equivalent(snapshot, analysis)):
+            return False
+        # A legacy raw digest can differ solely because the newer digest omits
+        # lock-wait telemetry. Its full snapshot proves no material bound moved.
+        identity_only = _analysis_digest(snapshot) == _analysis_digest(analysis)
+        # Joint groups and reviewed subwindows must be rebuilt if their reviewed
+        # range crosses a new physical boundary; old facts stay in the snapshot.
+        shots = {str(s["shot_id"]): s for s in analysis.get("shots", [])}
+        for row in previous.get("rows", []):
+            group_key = row.get("continuity_key")
+            if group_key:
+                if not identity_only:
+                    return False
+                context = previous["continuity_reviews"][group_key]["input"]
+                limit = shots[context["shot_id"]].get("material_duration_us")
+                end = context["window_us"]["end"]
+                if type(limit) is not int or type(end) is not int or end > limit:
+                    return False
+            for part in row.get("parts", []):
+                key = part.get("window_review_key")
+                if key:
+                    reviewed = previous.get("window_reviews", {}).get(key) or {}
+                    limit = shots[part["shot_id"]].get("material_duration_us")
+                    if (type(limit) is not int or type(reviewed.get("review_window_us", {}).get("end")) is not int
+                            or reviewed["review_window_us"]["end"] > limit):
+                        return False
+        return True
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return False
+
+
 def _scene_ids(value, manifest: dict, error: str) -> tuple[list, list]:
     known = {row["id"] for row in contract.editorial_context(manifest)["rules"].get("semantic_contracts", [])}
     if not isinstance(value, list) or any(not isinstance(sid, str) for sid in value):
@@ -753,7 +832,7 @@ def _assemble(manifest: dict, analysis: dict, plan: dict, *, narration_timing: d
             solution = shot_analyzer.candidate_window(observed, audio_duration_us=part["audio_duration_us"],
                 manifest=cfg, time_sensitive=review["time_sensitive"])
             if not solution.ok:
-                raise WindowFailure(index, sid, solution.reason)
+                raise WindowFailure(index, sid, solution.reason, part_index=n)
             item = {**solution.to_dict(), "video": shot["video"], "shot_id": sid,
                     "temporary_shot_id": sid, "source_start": solution.source_start_us / 1e6,
                     "source_end": solution.source_end_us / 1e6, "duration": solution.material_us / 1e6,
@@ -870,16 +949,53 @@ def _build_edit_inventory(manifest: dict, analysis: dict, plan: dict,
     return inventory
 
 
-def _review_proposed_window(manifest, plan, directory, sentence, shot, window):
+def _review_proposed_window(manifest, plan, directory, sentence, shot, window, *, attempt_metadata=None):
     """Spend the persistent sentence budget only on new, actual window pixels."""
     index = sentence["index"]
+    limit = shot.get("material_duration_us")
+    if type(limit) is int and limit > 0 and window[1] > limit:
+        return None
     source = contract.source_identity(shot["video"])
     key = contract.digest([sentence, shot["shot_id"], source, window])[:24]
     attempts = plan.setdefault("window_repair_attempts", {})
-    if key in attempts or sum(v.get("index") == index for v in attempts.values()) >= 3:
+    if key in attempts:
+        # A process may stop after saving a valid review but before attaching
+        # it to the selected part. Resume only the exact persisted evidence.
+        attempt = attempts[key]
+        saved = plan.get("window_reviews", {}).get(key) or {}
+        if not isinstance(attempt, dict) or not isinstance(saved, dict):
+            return None
+        intervals = saved.get("evidence_intervals_us")
+        confidence = saved.get("confidence")
+        supported = saved.get("supported_point_ids")
+        allowed = {p["id"] for p in sentence["selling_points"]}
+        playback = saved.get("playback_observation")
+        process = contract.playback.process_window(playback) if playback is not None else None
+        if (attempt.get("status") == "reviewed" and attempt.get("index") == index
+                and attempt.get("shot_id") == shot["shot_id"]
+                and attempt.get("window_us") == {"start": window[0], "end": window[1]}
+                and saved.get("sentence_index") == index and saved.get("shot_id") == shot["shot_id"]
+                and saved.get("verdict") == "matched" and saved.get("same_product") is True
+                and saved.get("source_identity") == source and not saved.get("continuity_key")
+                and saved.get("review_window_us") == {"start": window[0], "end": window[1]}
+                and isinstance(confidence, (int, float)) and not isinstance(confidence, bool)
+                and math.isfinite(confidence) and .6 <= confidence <= 1
+                and saved.get("basis") in contract.BASES and type(saved.get("time_sensitive")) is bool
+                and all(isinstance(saved.get(k), str) and saved[k].strip() for k in ("observation", "reason"))
+                and isinstance(intervals, list) and intervals
+                and all(isinstance(ev, dict) and type(ev.get("start")) is int and type(ev.get("end")) is int
+                        and window[0] <= ev["start"] < ev["end"] <= window[1] for ev in intervals)
+                and (playback is None or (process is not None and window[0] <= process[0] < process[1] <= window[1]))
+                and isinstance(supported, list) and all(isinstance(p, str) and p in allowed for p in supported)
+                and contract.points_supported(allowed, set(supported))):
+            return key
+        return None
+    if sum(v.get("index") == index for v in attempts.values()) >= 3:
         return None
     attempts[key] = {"index": index, "shot_id": shot["shot_id"],
                      "window_us": {"start": window[0], "end": window[1]}, "status": "reviewing"}
+    if attempt_metadata:
+        attempts[key].update(attempt_metadata)
     _save(directory / "plan.json", plan)
     try:
         reviewed = _review(manifest, sentence,
@@ -908,24 +1024,48 @@ def _repair_selected_window(manifest: dict, analysis: dict, plan: dict, director
                             failure: WindowFailure) -> bool:
     sentence = next(s for s in plan["sentences"] if s["index"] == failure.index)
     row = next(r for r in plan["rows"] if r["index"] == failure.index)
-    part = next((p for p in row["parts"] if p.get("shot_id") == failure.shot_id), None)
+    parts = row["parts"]
+    if failure.part_index is not None:
+        part = (parts[failure.part_index] if 0 <= failure.part_index < len(parts)
+                and parts[failure.part_index].get("shot_id") == failure.shot_id else None)
+    else:
+        matching = [p for p in parts if p.get("shot_id") == failure.shot_id]
+        part = matching[0] if len(matching) == 1 else None
+    if part is None:
+        return False
     shot = next(s for s in analysis["shots"] if s["shot_id"] == failure.shot_id)
     proposal = dict(part or {})
-    if "source_start_us" not in proposal:
-        reviews = (plan["reviews"].get(str(failure.index), [])
-                   if sentence["kind"] == "selling_point" else plan["display_reviews"])
-        review = next((r for r in reviews if r.get("shot_id") == failure.shot_id
-                       and r.get("verdict") == "matched"), {})
-        intervals = review.get("evidence_intervals_us") or []
-        if intervals:
-            proposal["source_start_us"] = min(ev["start"] for ev in intervals)
+    reviews = (plan["reviews"].get(str(failure.index), [])
+               if sentence["kind"] == "selling_point" else plan["display_reviews"])
+    review = next((r for r in reviews if r.get("shot_id") == failure.shot_id
+                   and r.get("verdict") == "matched"), {})
+    intervals = review.get("evidence_intervals_us") or []
+    adjusted_start = False
+    if intervals:
+        start = proposal.get("source_start_us", min(ev["start"] for ev in intervals))
+        physical_end = shot.get("material_duration_us")
+        scene_end = round(float(shot["source_end"]) * 1e6)
+        duration = proposal.get("audio_duration_us")
+        if (type(start) is int and type(physical_end) is int and 0 < physical_end < scene_end
+                and type(duration) is int and duration > 0
+                and max(ev["end"] for ev in intervals) > physical_end
+                and start + duration > physical_end):
+            # Move the proposed window only for a fresh pixel review. The old
+            # evidence is never shortened or relabelled as a new observation.
+            scene_start = round(float(shot["source_start"]) * 1e6)
+            start = max(scene_start, physical_end - duration)
+            adjusted_start = True
+        proposal["source_start_us"] = start
     window = proposed_window(shot, proposal, max_speed=contract.playback.PROCESS_PREFERRED_MAX)
     if window is None:
         return False
-    key = _review_proposed_window(manifest, plan, directory, sentence, shot, window)
+    metadata = {"original_source_start_us": part.get("source_start_us")} if adjusted_start else None
+    key = _review_proposed_window(manifest, plan, directory, sentence, shot, window, attempt_metadata=metadata)
     if key is None:
         return False
     part["window_review_key"] = key
+    if adjusted_start:
+        part["source_start_us"] = window[0]
     _save(directory / "plan.json", plan)
     return True
 
@@ -983,7 +1123,11 @@ def _repair_display_duplicate_window(manifest, analysis, plan, directory, narrat
             continue
         lo = round(shot["source_start"] * 1e6) + timing_contract.us_of(
             manifest.get("head_trim_s"), round(shot_analyzer.DEFAULT_HEAD_TRIM_S * 1e6))
-        hi = round(shot["source_end"] * 1e6) - timing_contract.us_of(
+        scene_end = round(shot["source_end"] * 1e6)
+        limit = shot.get("material_duration_us")
+        if type(limit) is int and limit > 0:
+            scene_end = min(scene_end, limit)
+        hi = scene_end - timing_contract.us_of(
             manifest.get("tail_trim_s"), round(shot_analyzer.DEFAULT_TAIL_TRIM_S * 1e6))
         if hi - lo < duration:
             continue
@@ -1492,14 +1636,32 @@ def prepare(manifest: dict, analysis: dict, report_dir: Path, *, narration_timin
             previous = json.loads((directory / "plan.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
             previous = {}
-        if previous.get("resume_identity") == plan["resume_identity"]:
+        duration_resume = (previous.get("resume_identity") != plan["resume_identity"]
+                           and _duration_resume_safe(previous, plan["resume_identity"], analysis, directory))
+        identity_only_resume = False
+        if duration_resume:
+            old_digest = previous["resume_identity"]["analysis_sha256"]
+            snapshot = json.loads((directory / f"previous_analysis_{old_digest}.json").read_text(encoding="utf-8"))
+            identity_only_resume = _analysis_digest(snapshot) == _analysis_digest(analysis)
+        if previous.get("resume_identity") == plan["resume_identity"] or duration_resume:
             for key in ("sentences", "reviews", "display_reviews", "coverage", "rows", "window_reviews",
+                        "duration_migration", "duration_migrations",
                         "window_repair_attempts", "repair_history", "duplicate_repair_reviews", "continuity_reviews", "continuity_attempts", "continuity_repairs"):
                 if key in previous:
                     plan[key] = copy.deepcopy(previous[key])
-            _restore_interrupted_groups(manifest, analysis, plan, previous, narration_timing)
+            if not duration_resume or identity_only_resume:
+                _restore_interrupted_groups(manifest, analysis, plan, previous, narration_timing)
             _clear_incomplete_groups(plan)
             plan["_resume_rows"] = bool(plan.get("rows"))
+            if duration_resume:
+                old_digest = previous["resume_identity"]["analysis_sha256"]
+                migration = {"previous_analysis_sha256": old_digest,
+                             "current_analysis_sha256": plan["resume_identity"]["analysis_sha256"],
+                             "kind": "analysis_identity" if identity_only_resume else "material_duration",
+                             "snapshot": f"previous_analysis_{old_digest}.json",
+                             "snapshot_content_sha256": contract.digest(snapshot)}
+                plan["duration_migrations"] = [*plan.get("duration_migrations", []), migration]
+                plan["duration_migration"] = migration
             groups = {**plan["reviews"], "display_pool": plan["display_reviews"]}
             for key, reviews in groups.items():
                 retained = [r for r in reviews if r.get("shot_id") in by_id
@@ -1841,7 +2003,10 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
                     raise ValueError(f"AI_REFILL_WINDOW_INFEASIBLE:{index}")
                 raise ValueError(f"AI_REFILL_NO_MATCH:{index}")
             mini_manifest = {k: v for k, v in manifest.items() if k not in ("segments", "full_script", "script")}
-            mini_manifest.update(full_script=sentence["text"], selection_mode="ai_editor")
+            # Keep this sentence's real audio and other input attributes. The
+            # one-sentence assembly replaces only its visual selection.
+            mini_manifest.update(full_script=sentence["text"], selection_mode="ai_editor",
+                                 segments=[copy.deepcopy(original[index - 1])])
             timing_row = {"key": "s1", "text": sentence["text"], "audio_duration_us": audio_us,
                           "timing_certainty": certainty}
             if narration_timing and index <= len(narration_timing.get("rows", [])):

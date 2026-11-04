@@ -4,11 +4,13 @@
 $examplePackageRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $exampleDraftRoot = Join-Path $examplePackageRoot 'work/quickstart/drafts'
 
-$env:JY_SKILL_ROOT = $examplePackageRoot
+$env:JY_SKILL_ROOT = Join-Path $examplePackageRoot 'jianying-editor'
+$env:JY_CONFIG_SOURCE = $PSCommandPath
 $env:JY_DRAFT_ROOT = $exampleDraftRoot
 $env:JY_DRAFTS_ROOT = $exampleDraftRoot
 $env:JY_PROJECTS_ROOT = $exampleDraftRoot
-$env:JY_SELECTION_MODE = 'ai_editor'
+# The application defaults to ai_editor. An existing JY_SELECTION_MODE remains
+# visible and is reported by the task instead of being silently overwritten.
 $env:JY_DRAFT_BACKEND = 'headless'
 # Configure the separately installed, verified headless project and native font.
 # Set JIANYING_HEADLESS_ROOT, JIANYING_INSTALL_DIR and JY_HEADLESS_FONT locally.
