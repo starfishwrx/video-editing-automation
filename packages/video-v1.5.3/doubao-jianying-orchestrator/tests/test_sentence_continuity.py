@@ -45,6 +45,173 @@ class SentenceContinuityTests(unittest.TestCase):
         self.manifest['qc_rejected_shots'] = {'3': ['long']}
         self.assertTrue(list(sharing.proposals(self.manifest, self.analysis, self.plan, 1, None)))
 
+    def unseen_neighbour_anchor(self):
+        self.plan['reviews']['1'] = []
+        self.plan['reviews']['2'][0]['evidence_intervals_us'] = [{'start': 0, 'end': 8_000_000}]
+        self.plan['window_reviews'] = {'compact': {**copy.deepcopy(self.original_review),
+            'sentence_index': 2, 'review_window_us': {'start': 3_000_000, 'end': 5_500_000},
+            'evidence_intervals_us': [{'start': 3_000_000, 'end': 5_300_000}]}}
+
+    def test_compact_anchor_retrieves_unseen_neighbour_but_requires_joint_pixels(self):
+        self.unseen_neighbour_anchor()
+        before = copy.deepcopy(self.plan['reviews'])
+        context = next(sharing.proposals(self.manifest, self.analysis, self.plan, 2, None))
+        self.assertEqual([m['index'] for m in context['members']], [1, 2])
+        self.assertEqual(context['window_us']['end'] - context['window_us']['start'], 4_000_000)
+        with self.assertRaises(ValueError):
+            editor._assemble(self.manifest, self.analysis, self.plan, narration_timing=None)
+        group = self.group(context)
+        sharing.install(self.plan, contract.digest(context)[:24], group)
+        result = editor._assemble(self.manifest, self.analysis, self.plan, narration_timing=None, verify_sources=True)
+        self.assertTrue(result['ok'])
+        self.assertTrue(all(row['video_speed'] == 1 for row in result['segments']))
+        self.assertEqual(self.plan['reviews'], before)
+        self.assertEqual(list(editor._short_complete_rows(self.manifest, self.analysis, self.plan, 1, None)), [])
+
+    def test_unseen_neighbour_fallback_rejects_negative_history_qc_and_stale_anchor(self):
+        self.unseen_neighbour_anchor()
+        original = copy.deepcopy(self.plan)
+        for verdict in ('mismatch', 'uncertain'):
+            with self.subTest(verdict=verdict):
+                self.plan = copy.deepcopy(original)
+                self.plan['window_reviews']['negative'] = {**self.original_review,
+                    'sentence_index': 1, 'verdict': verdict}
+                self.assertEqual(list(sharing.proposals(self.manifest, self.analysis, self.plan, 2, None)), [])
+        self.plan = copy.deepcopy(original)
+        self.manifest['qc_rejected_shots'] = {'1': ['long']}
+        self.assertEqual(list(sharing.proposals(self.manifest, self.analysis, self.plan, 2, None)), [])
+        self.manifest.pop('qc_rejected_shots')
+        self.plan['window_reviews']['compact']['source_identity'] = {'path': 'changed'}
+        self.assertEqual(list(sharing.proposals(self.manifest, self.analysis, self.plan, 2, None)), [])
+
+    def test_unseen_neighbour_joint_uncertainty_does_not_install_partial_permission(self):
+        self.unseen_neighbour_anchor()
+        before = copy.deepcopy(self.plan['rows'])
+        with patch.object(sharing, 'review_group', side_effect=ValueError('CONTINUITY_REVIEW_UNCERTAIN')):
+            self.assertFalse(sharing.repair(self.manifest, self.analysis, self.plan, self.root,
+                WindowFailure(2, 'long', 'EVIDENCE_SPAN_TOO_LONG'), None))
+        self.assertEqual(self.plan['rows'], before)
+        self.assertFalse(self.plan.get('continuity_reviews'))
+
+    def outside_duplicates(self, hidden_group_conflict=False):
+        self.plan['ok'] = False
+        self.analysis['shots'].append(self.shots[2])
+        for index in (3, 4):
+            text = 'outside ' + str(index)
+            self.manifest['segments'].append({'text': text, 'audio_duration_us': 2_000_000})
+            self.plan['sentences'].append({'index': index, 'text': text, 'kind': 'selling_point',
+                'selling_points': [{'id': 'p1', 'text': text}], 'candidate_ids': ['other']})
+            self.plan['rows'].append({'index': index, 'parts': [{'shot_id': 'other', 'audio_duration_us': 2_000_000}]})
+            self.plan['reviews'][str(index)] = [copy.deepcopy(self.reviews[2])]
+        if hidden_group_conflict:
+            text = 'hidden repeat'
+            self.manifest['segments'].append({'text': text, 'audio_duration_us': 2_000_000})
+            self.plan['sentences'].append({'index': 5, 'text': text, 'kind': 'selling_point',
+                'selling_points': [{'id': 'p1', 'text': text}], 'candidate_ids': ['long']})
+            self.plan['rows'].append({'index': 5, 'parts': [{'shot_id': 'long', 'audio_duration_us': 2_000_000}]})
+            self.plan['reviews']['5'] = [{**self.original_review,
+                'evidence_intervals_us': [{'start': 0, 'end': 1_000_000}]}]
+        self.identity()
+
+    def test_validated_group_can_wait_for_entirely_external_duplicates(self):
+        self.outside_duplicates()
+        outside = copy.deepcopy(self.plan['rows'][2:])
+        with patch.object(sharing, 'review_group', side_effect=lambda m, context, s, d:self.group(context)):
+            self.assertTrue(sharing.repair(self.manifest, self.analysis, self.plan, self.root,
+                WindowFailure(1, 'long', 'EVIDENCE_SPAN_TOO_LONG'), None))
+        self.assertFalse(self.plan['ok'])
+        self.assertEqual(self.plan['rows'][2:], outside)
+        with self.assertRaisesRegex(ValueError, 'REPEATED_SOURCE_WINDOW:3:4'):
+            editor._assemble(self.manifest, self.analysis, self.plan, narration_timing=None, verify_sources=True)
+
+    def test_external_first_error_cannot_hide_later_conflict_touching_group(self):
+        self.outside_duplicates(hidden_group_conflict=True)
+        before = copy.deepcopy(self.plan['rows'])
+        with patch.object(sharing, 'review_group', side_effect=lambda m, context, s, d:self.group(context)):
+            self.assertFalse(sharing.repair(self.manifest, self.analysis, self.plan, self.root,
+                WindowFailure(1, 'long', 'EVIDENCE_SPAN_TOO_LONG'), None))
+        self.assertEqual(self.plan['rows'], before)
+        self.assertFalse(self.plan['ok'])
+
+    def test_group_survives_external_single_shot_speed_failure_but_is_not_certified(self):
+        self.outside_duplicates()
+        original_check = contract.validate_segment_receipt
+        def fail_outside(segment, *, index, manifest):
+            if index == 3:
+                return {'ok': False, 'reasons': ['PLAYBACK_SPEED_CONFLICT']}
+            return original_check(segment, index=index, manifest=manifest)
+        with patch.object(contract, 'validate_segment_receipt', side_effect=fail_outside), \
+             patch.object(sharing, 'review_group', side_effect=lambda m, context, s, d:self.group(context)):
+            self.assertTrue(sharing.repair(self.manifest, self.analysis, self.plan, self.root,
+                WindowFailure(1, 'long', 'EVIDENCE_SPAN_TOO_LONG'), None))
+            self.assertFalse(self.plan['ok'])
+            self.assertEqual(self.plan['rows'][0]['continuity_key'], self.plan['rows'][1]['continuity_key'])
+            with self.assertRaises(WindowFailure) as caught:
+                editor._assemble(self.manifest, self.analysis, self.plan, narration_timing=None, verify_sources=True)
+            self.assertEqual(caught.exception.index, 3)
+            self.assertEqual(caught.exception.reason, 'PLAYBACK_SPEED_CONFLICT')
+
+    def test_group_member_speed_failure_still_rejects_group(self):
+        original_check = contract.validate_segment_receipt
+        def fail_member(segment, *, index, manifest):
+            if index == 2:
+                return {'ok': False, 'reasons': ['PLAYBACK_SPEED_CONFLICT']}
+            return original_check(segment, index=index, manifest=manifest)
+        before = copy.deepcopy(self.plan['rows'])
+        with patch.object(contract, 'validate_segment_receipt', side_effect=fail_member), \
+             patch.object(sharing, 'review_group', side_effect=lambda m, context, s, d:self.group(context)):
+            self.assertFalse(sharing.repair(self.manifest, self.analysis, self.plan, self.root,
+                WindowFailure(1, 'long', 'EVIDENCE_SPAN_TOO_LONG'), None))
+        self.assertEqual(self.plan['rows'], before)
+
+    def test_focused_edit_dissolves_entire_group_and_requires_reselection(self):
+        self.install()
+        original_observations = copy.deepcopy(self.plan['continuity_reviews'])
+        new_row = {'index': 1, 'parts': [{'shot_id': 'long', 'audio_duration_us': 2_000_000}]}
+        editor._replace_focused_row(self.plan, 1, new_row)
+        self.assertEqual(self.plan['rows'][0], new_row)
+        self.assertEqual(self.plan['rows'][1]['parts'], [])
+        self.assertNotIn('continuity_key', self.plan['rows'][1])
+        self.assertEqual(self.plan['continuity_reviews'], original_observations)
+        self.assertEqual(sharing.validate_plan(self.manifest, self.analysis, self.plan, None), {})
+
+    def test_focused_edit_refuses_already_orphaned_group(self):
+        self.install()
+        self.plan['rows'][1].pop('continuity_key')
+        before = copy.deepcopy(self.plan['rows'])
+        with self.assertRaisesRegex(ValueError, 'CONTINUITY_INPUT_CHANGED'):
+            editor._replace_focused_row(self.plan, 1, {'index': 1, 'parts': []})
+        self.assertEqual(self.plan['rows'], before)
+
+    def test_resume_deselects_only_orphaned_group_members(self):
+        self.install()
+        self.plan['rows'][0] = {'index': 1, 'parts': [{'shot_id': 'other', 'audio_duration_us': 2_000_000}]}
+        revised = copy.deepcopy(self.plan['rows'][0])
+        editor._clear_incomplete_groups(self.plan)
+        self.assertEqual(self.plan['rows'][0], revised)
+        self.assertEqual(self.plan['rows'][1]['parts'], [])
+        self.assertNotIn('continuity_key', self.plan['rows'][1])
+        self.assertEqual(sharing.validate_plan(self.manifest, self.analysis, self.plan, None), {})
+
+    def test_resume_restores_reviewed_group_split_by_failed_partial_edit(self):
+        self.install()
+        grouped = copy.deepcopy(self.plan['rows'])
+        self.plan['rows'][0] = {'index': 1, 'parts': [{'shot_id': 'other', 'audio_duration_us': 2_000_000}]}
+        previous = {'issues': [{'message': 'CONTINUITY_INPUT_CHANGED'}]}
+        editor._restore_interrupted_groups(self.manifest, self.analysis, self.plan, previous, None)
+        self.assertEqual(self.plan['rows'], grouped)
+        self.assertEqual(len(sharing.validate_plan(self.manifest, self.analysis, self.plan, None)), 1)
+        self.assertFalse(self.plan.get('ok', False))
+
+    def test_resume_never_restores_qc_rejected_group(self):
+        self.install()
+        self.plan['rows'][0] = {'index': 1, 'parts': []}
+        self.manifest['qc_rejected_shots'] = {'1': ['long']}
+        editor._restore_interrupted_groups(self.manifest, self.analysis, self.plan,
+                                          {'issues': [{'message': 'CONTINUITY_INPUT_CHANGED'}]}, None)
+        editor._clear_incomplete_groups(self.plan)
+        self.assertEqual([r['parts'] for r in self.plan['rows']], [[], []])
+
     def group(self, context=None):
         context = context or next(sharing.proposals(self.manifest, self.analysis, self.plan, 1, None))
         observations = [{'index': m['index'], 'verdict': 'matched', 'same_product': True,
@@ -341,13 +508,14 @@ class SentenceContinuityTests(unittest.TestCase):
                 continuity.validate(group)
 
     def test_retrieval_does_not_combine_unrelated_source_hook_or_unfitting_action(self):
-        self.plan['reviews']['2'] = self.reviews[2:]
+        self.plan['reviews']['2'] = self.reviews[2:] + [{**self.original_review, 'verdict': 'mismatch'}]
         self.assertEqual(list(sharing.proposals(self.manifest, self.analysis, self.plan, 1, None)), [])
         self.plan['reviews']['2'] = [self.original_review]
         self.plan['sentences'][1]['kind'] = 'hook'
         self.assertEqual(list(sharing.proposals(self.manifest, self.analysis, self.plan, 1, None)), [])
         self.plan['sentences'][1]['kind'] = 'selling_point'
         self.original_review['evidence_intervals_us'][0]['end'] = 10_000_000
+        self.plan['reviews']['1'][0]['evidence_intervals_us'][0]['end'] = 10_000_000
         self.assertEqual(list(sharing.proposals(self.manifest, self.analysis, self.plan, 1, None)), [])
 
     def test_recovery_reuses_joint_and_narrow_observations_without_call(self):

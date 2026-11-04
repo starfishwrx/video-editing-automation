@@ -90,8 +90,10 @@ def normalize_video(source, directory, *, ffmpeg="ffmpeg", ffprobe="ffprobe") ->
     pixel_format = stream.get("pix_fmt")
     # 90-degree rotation must preserve the chroma sampling axes too. Do not
     # silently convert 4:2:2, RGB, or unsupported bit depths to 8-bit 4:2:0.
-    if pixel_format not in {"yuv420p", "yuv444p", "yuv420p10le", "yuv444p10le"}:
+    if pixel_format not in {"yuv420p", "yuvj420p", "yuv444p", "yuv420p10le", "yuv444p10le"}:
         raise ValueError(f"SOURCE_ROTATION_PIXEL_FORMAT_UNSUPPORTED:{pixel_format}")
+    if pixel_format == "yuvj420p" and stream.get("color_range") != "pc":
+        raise ValueError("SOURCE_ROTATION_FULL_RANGE_UNCERTAIN")
     colors = {key: stream[key] for key in
               ("color_range", "color_space", "color_transfer", "color_primaries") if key in stream}
     if any(any(term in side.get("side_data_type", "").lower() for term in
@@ -118,12 +120,16 @@ def normalize_video(source, directory, *, ffmpeg="ffmpeg", ffprobe="ffprobe") ->
             # timestamps and native audio; do not resize, trim or resample video.
             source_rate = source_video_bitrate(facts)
             target_rate, peak_rate = round(source_rate * TARGET_RATIO), round(source_rate * PEAK_RATIO)
+            # yuvj420p is the full-range 8-bit 4:2:0 representation. H.264
+            # encoders accept yuv420p plus an explicit full-range signal.
+            encoder_format = "yuv420p" if pixel_format == "yuvj420p" else pixel_format
+            output_color = ["-color_range", "pc"] if pixel_format == "yuvj420p" else []
             encoder, _ = run_h264_encode(str(ffmpeg), ["-y", "-hide_banner", "-loglevel", "error",
                 "-i", str(source), "-map", "0:v:0", "-map", "0:a:0?", "-fps_mode", "passthrough",
                 "-enc_time_base:v", "demux"],
-                temporary, trailing=["-c:a", "copy", "-metadata:s:v:0", "rotate=0"],
+                temporary, trailing=["-c:a", "copy", "-metadata:s:v:0", "rotate=0", *output_color],
                 quality_bitrate=target_rate, quality_maxrate=peak_rate,
-                pixel_format=pixel_format, timeout=1200)
+                pixel_format=encoder_format, timeout=1200)
             actual = probe_media(temporary, ffprobe=ffprobe)
             width, height = facts["width"], facts["height"]
             if angle in {90, 270}:

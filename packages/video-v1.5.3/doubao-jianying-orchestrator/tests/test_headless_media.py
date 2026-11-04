@@ -194,6 +194,33 @@ class HeadlessMediaTests(unittest.TestCase):
         self.assertEqual(record["color_metadata"]["color_space"], "bt2020nc")
         self.assertGreaterEqual(self.ssim(source, prepared), 0.97)
 
+    def test_rotation_preserves_full_range_420_and_color_metadata(self):
+        plain, source = self.root / "full-range.mp4", self.root / "full-range-rotated.mp4"
+        self.command("-f", "lavfi", "-i", "testsrc2=size=96x64:rate=10:duration=1",
+                     "-c:v", "libx264", "-qp", "0", "-pix_fmt", "yuv420p", "-color_range", "pc",
+                     "-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709", plain)
+        self.command("-display_rotation", "-90", "-i", plain, "-c", "copy", source)
+        facts = probe_media(source, ffprobe=FFPROBE)
+        video = next(s for s in facts['streams'] if s.get('codec_type') == 'video')
+        self.assertEqual((video['pix_fmt'], video['color_range']), ('yuvj420p', 'pc'))
+        with patch.dict(os.environ, {"JY_GPU_DISABLE": "1"}):
+            record = normalization.normalize_video(source, self.root / "cache", ffmpeg=FFMPEG, ffprobe=FFPROBE)
+        prepared = Path(record['prepared']['path'])
+        self.assertEqual(record['pixel_format'], 'yuvj420p')
+        self.assertEqual(record['color_metadata']['color_range'], 'pc')
+        self.assertEqual(normalization.rotation(probe_media(prepared, ffprobe=FFPROBE)), 0)
+        self.assertEqual(normalization._clock(source, FFPROBE), normalization._clock(prepared, FFPROBE))
+        self.assertGreaterEqual(self.ssim(source, prepared), 0.97)
+
+    def test_rotation_rejects_ambiguous_full_range_signal(self):
+        source = self.rotated_video()
+        facts = probe_media(source, ffprobe=FFPROBE)
+        video = next(s for s in facts['streams'] if s.get('codec_type') == 'video')
+        video['pix_fmt'], video['color_range'] = 'yuvj420p', 'tv'
+        with patch.object(normalization, 'probe_media', return_value=facts):
+            with self.assertRaisesRegex(ValueError, 'SOURCE_ROTATION_FULL_RANGE_UNCERTAIN'):
+                normalization.normalize_video(source, self.root / 'cache', ffmpeg=FFMPEG, ffprobe=FFPROBE)
+
     def test_rotated_vfr_retains_demux_time_base_and_all_frame_timestamps(self):
         plain, source = self.root / "vfr.mp4", self.root / "vfr-rotated.mp4"
         self.command("-f", "lavfi", "-i", "testsrc2=size=96x64:rate=30:duration=1",

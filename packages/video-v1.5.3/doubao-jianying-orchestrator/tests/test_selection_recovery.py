@@ -55,6 +55,94 @@ class SelectionRecoveryTests(unittest.TestCase):
         plan["rows"][1]["parts"][0]["source_start_us"] = 6_000_000
         return plan
 
+    def test_short_window_repair_starts_before_full_pool_without_claiming_exhaustion(self):
+        sentence = copy.deepcopy(self.sentences[0])
+        shots = {}
+        for i in range(24):
+            sid = f'candidate{i}'
+            shots[sid] = {**self.shots[0], 'shot_id': sid}
+        sentence['candidate_ids'] = list(shots)
+        def reviewed(_manifest, _sentence, shot, _directory, **kwargs):
+            return {**copy.deepcopy(self.reviews['1'][0]), 'shot_id': shot['shot_id'],
+                    'evidence_intervals_us': [{'start': 1_000_000, 'end': 8_000_000}]}
+        def serial(ids, _shots, _directory, call, **kwargs):
+            return ((sid, call(sid)) for sid in ids)
+        with patch.object(editor, '_review', side_effect=reviewed), patch.object(editor, '_iter_review_round', side_effect=serial):
+            reviews, coverage = editor._review_pool(self.manifest, sentence, shots, self.root, {}, early_window_repair=True)
+            self.assertEqual((len(reviews), coverage['checked'], coverage['total']), (16, 16, 24))
+            self.assertFalse(coverage['exhausted'])
+            self.assertFalse(coverage['feasible'])
+            self.assertEqual(coverage['reason'], 'KNOWN_WINDOWS_INFEASIBLE')
+            full, full_coverage = editor._review_pool(self.manifest, sentence, shots, self.root, {},
+                                                      exhaustive=True, existing_reviews=reviews)
+        self.assertEqual(len(full), 24)
+        self.assertTrue(full_coverage['exhausted'])
+        self.assertFalse(full_coverage['feasible'])
+
+    def test_failed_short_window_expands_only_failed_sentence_then_retries(self):
+        plan = self.plan()
+        plan['coverage'] = {'1': {'reason': 'KNOWN_WINDOWS_INFEASIBLE', 'exhausted': False},
+                            '2': {'reason': 'READY', 'exhausted': False}}
+        failure = editor.WindowFailure(1, 'shot1', 'EVIDENCE_SPAN_TOO_LONG')
+        full = {'checked': 24, 'total': 24, 'exhausted': True, 'feasible': True, 'reason': 'READY'}
+        before = copy.deepcopy(plan['reviews']['2'])
+        with patch.object(editor, '_edit_plan', side_effect=[failure, None]) as edit, \
+             patch.object(editor, '_review_pool', return_value=(copy.deepcopy(self.reviews['1']), full)) as review:
+            editor._edit_with_review_fallback(self.manifest, self.analysis, plan, self.root, None)
+        self.assertEqual(edit.call_count, 2)
+        self.assertEqual(review.call_count, 1)
+        self.assertTrue(review.call_args.kwargs['exhaustive'])
+        self.assertEqual(review.call_args.args[1]['index'], 1)
+        self.assertEqual(plan['reviews']['2'], before)
+        self.assertEqual(plan['review_expansions'][0]['index'], 1)
+        self.assertTrue(plan['_resume_rows'])
+
+    def test_provider_error_does_not_prevent_later_feasible_candidate(self):
+        sentence = copy.deepcopy(self.sentences[0])
+        shots = {f'candidate{i}': {**self.shots[0], 'shot_id': f'candidate{i}'} for i in range(24)}
+        sentence['candidate_ids'] = list(shots)
+        def reviewed(_manifest, _sentence, shot, _directory, **kwargs):
+            if shot['shot_id'] == 'candidate15':
+                return {'shot_id': shot['shot_id'], 'verdict': 'uncertain',
+                        'error': 'AI_EDITOR_CALL_FAILED:REQUEST_TIMEOUT'}
+            return {**copy.deepcopy(self.reviews['1'][0]), 'shot_id': shot['shot_id']}
+        def serial(ids, _shots, _directory, call, **kwargs):
+            return ((sid, call(sid)) for sid in ids)
+        def feasible(_manifest, _sentence, _shots, reviews, _audio):
+            return any(r['shot_id'] == 'candidate16' for r in reviews)
+        with patch.object(editor, '_review', side_effect=reviewed), \
+             patch.object(editor, '_iter_review_round', side_effect=serial), \
+             patch.object(editor, '_cached_reviews_feasible', side_effect=feasible):
+            reviews, coverage = editor._review_pool(self.manifest, sentence, shots, self.root, {}, early_window_repair=True)
+        self.assertTrue(coverage['feasible'])
+        self.assertIn('candidate16', {r['shot_id'] for r in reviews})
+
+    def test_short_window_failure_remains_failure_after_full_pool(self):
+        plan = self.plan()
+        plan['coverage'] = {'1': {'reason': 'KNOWN_WINDOWS_INFEASIBLE', 'exhausted': False}}
+        failure = editor.WindowFailure(1, 'shot1', 'EVIDENCE_SPAN_TOO_LONG')
+        full = {'checked': 24, 'total': 24, 'exhausted': True, 'feasible': False,
+                'reason': 'KNOWN_WINDOWS_INFEASIBLE'}
+        with patch.object(editor, '_edit_plan', side_effect=[failure, failure]), \
+             patch.object(editor, '_review_pool', return_value=(copy.deepcopy(self.reviews['1']), full)) as review:
+            with self.assertRaises(editor.WindowFailure):
+                editor._edit_with_review_fallback(self.manifest, self.analysis, plan, self.root, None)
+        self.assertEqual(review.call_count, 1)
+
+    def test_failed_full_pool_preserves_provider_failure(self):
+        plan = self.plan()
+        plan['coverage'] = {'1': {'reason': 'KNOWN_WINDOWS_INFEASIBLE', 'exhausted': False}}
+        failure = editor.WindowFailure(1, 'shot1', 'EVIDENCE_SPAN_TOO_LONG')
+        full = {'checked': 24, 'total': 24, 'exhausted': True, 'feasible': False,
+                'reason': 'KNOWN_WINDOWS_INFEASIBLE'}
+        reviews = [*copy.deepcopy(self.reviews['1']), {'shot_id': 'other', 'verdict': 'uncertain',
+                   'error': 'AI_EDITOR_CALL_FAILED:REQUEST_TIMEOUT'}]
+        with patch.object(editor, '_edit_plan', side_effect=failure) as edit, \
+             patch.object(editor, '_review_pool', return_value=(reviews, full)):
+            with self.assertRaisesRegex(ValueError, 'AI_EDITOR_CALL_FAILED:REQUEST_TIMEOUT'):
+                editor._edit_with_review_fallback(self.manifest, self.analysis, plan, self.root, None)
+        self.assertEqual(edit.call_count, 1)
+
     def test_invalid_inapplicable_taxonomy_is_recorded_without_granting_support(self):
         model = {"sentences": [{**s, "scene_ids": ["absorb_rewet"]} for s in self.sentences], "display_pool_ids": []}
         with patch.object(editor, "_call", return_value=copy.deepcopy(model)):
@@ -153,6 +241,34 @@ class SelectionRecoveryTests(unittest.TestCase):
         self.assertIn("只返回index=2", call.call_args_list[1].args[0])
         self.assertIn('"shot_id": "shot1"', call.call_args_list[1].args[0])
         self.assertIn('"shot_id": "shot2"', call.call_args_list[1].args[0])
+
+    def test_duplicate_repair_prefers_ungrouped_earlier_sentence(self):
+        plan = self.plan()
+        plan['rows'][1]['continuity_key'] = 'reviewed-group'
+        grouped = copy.deepcopy(plan['rows'][1])
+        failure = ValueError('AI_EDITOR_REPEATED_SOURCE_WINDOW:1:2')
+        self.assertEqual(editor._duplicate_repair_focus(plan, failure), 1)
+        def repair(_m, _a, target_plan, _d, _t, index, _expanded):
+            self.assertEqual(index, 1)
+            target_plan['rows'][0]['parts'][0]['source_start_us'] = 3_000_000
+            return True
+        with patch.object(editor, '_revalidate_rows', side_effect=[failure, {'ok': True}]), \
+             patch.object(editor, '_repair_repeated_window', side_effect=repair):
+            result = editor._repair_reviewed_rows(self.manifest, self.analysis, plan, self.root, None, set())
+        self.assertTrue(result['ok'])
+        self.assertEqual(plan['rows'][1], grouped)
+
+    def test_duplicate_editor_focus_preserves_grouped_later_sentence(self):
+        plan = self.plan()
+        plan['rows'][1]['continuity_key'] = 'reviewed-group'
+        grouped = copy.deepcopy(plan['rows'][1])
+        revised = copy.deepcopy(plan['rows'][0])
+        revised['parts'][0]['source_start_us'] = 3_000_000
+        with patch.object(editor, '_call', side_effect=[{'rows': copy.deepcopy(plan['rows'])}, {'rows': [revised]}]) as call, \
+             patch.object(editor, '_repair_reviewed_rows', side_effect=[ValueError('AI_EDITOR_REPEATED_SOURCE_WINDOW:1:2'), None]):
+            editor._edit_plan(self.manifest, self.analysis, plan, self.root)
+        self.assertIn('只返回index=1', call.call_args_list[1].args[0])
+        self.assertEqual(plan['rows'][1], grouped)
 
     def test_repeated_window_uses_existing_pixel_reviewed_alternative(self):
         plan = self.plan()
