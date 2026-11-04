@@ -26,7 +26,7 @@ from orchestrator.file_safety import atomic_write_text, file_lock
 from orchestrator.runtime_policy import RuntimePolicy, load_policy
 from orchestrator.proc_slots import slot
 from orchestrator.visual_qc_contract import report_status, report_matches_draft
-from tools.queueing.contracts import task_runtime_overrides
+from tools.queueing.contracts import meeting_bgm_spec, task_product_fields, task_runtime_overrides
 
 
 def _string_seconds(value) -> str:
@@ -49,12 +49,26 @@ def _read(path: Path) -> dict:
 def product_key(task: dict) -> str:
     # Even explicit SKU identities include their source location: two different
     # material inventories may not silently borrow the other's observations.
-    manifest = task.get("manifest") or {}
+    manifest = task.get("manifest") if isinstance(task.get("manifest"), dict) else {}
     sources = task.get("material_sources") or manifest.get("material_sources") or []
-    identity = {key: task.get(key) or manifest.get(key) for key in
-                ("product_key", "product", "sku", "category")}
+    if not isinstance(sources, list):
+        sources = []  # The task preflight will report the invalid inventory.
+    try:
+        fields = task_product_fields(task)
+    except ValueError:
+        fields = {}  # The task preflight will report the invalid manifest.
+    identity = {key: fields.get(key) for key in ("product", "product_key", "product_id", "brand", "sku", "category")}
+    from orchestrator import rulepack
+    if not rulepack.normalize_category(identity.get("category")):
+        # Group by the inferred category and its textual basis. The source
+        # inventory/directory is already part of the product key below.
+        identity["category_inference"] = rulepack.detect_category({**fields,
+            "full_script": str(task.get("script") or ""),
+            "draft_name": str(task.get("title") or task.get("record_id") or "")})
     identity["material_dir"] = str(Path(str(task.get("material_dir") or ".")).resolve()).casefold()
-    identity["sources"] = sorted(str(Path(str(path)).resolve()).casefold() for path in sources)
+    # The first source can determine the category; order also changes stable
+    # candidate numbering, so reversed inventories cannot share preparation.
+    identity["sources"] = [str(Path(str(path)).resolve()).casefold() for path in sources]
     return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:24]
 
 
@@ -150,11 +164,13 @@ def _bgm_error(task: dict) -> str | None:
     return None
 
 
-def _production_preflight(task: dict, *, environment_cache: dict | None = None) -> dict:
+def _production_preflight(task: dict, *, environment_cache: dict | None = None,
+                          check_narration: bool = True) -> dict:
     """Check the actual task's writer and configuration before material AI."""
     from orchestrator.application.cli import _production_environment_report
     from orchestrator.runtime.platform_env import environment_report
     from orchestrator.runtime.task_log import runtime_facts
+    from orchestrator.task_inputs import fixed_narration_segments, validate_explicit_audio
     from tools.acceptance.delivery_gate import requested_mode
 
     manifest = task_runtime_overrides(task)
@@ -174,20 +190,37 @@ def _production_preflight(task: dict, *, environment_cache: dict | None = None) 
     selected_media = (report.get("draft_backend_check") or {}).get("media_tools") or base
     for name in ("ffmpeg", "ffprobe"):
         facts[name] = selected_media.get(name)
+    if report.get("ready") and check_narration:
+        try:
+            segments = fixed_narration_segments(task)
+            if segments:
+                validate_explicit_audio(segments, ROOT, ffprobe=str(facts.get("ffprobe") or "ffprobe"))
+            nested = task.get("manifest") if isinstance(task.get("manifest"), dict) else {}
+            if "material_sources" in task or "material_sources" in nested:
+                import batch_worker
+                batch_worker.task_video_files(task)
+        except (OSError, ValueError, TypeError) as exc:
+            return {"ready": False, "reason": str(exc), "runtime": facts}
+        try:
+            bgm = meeting_bgm_spec(task.get("bgm"), base_dir=ROOT)
+            if bgm.get("path"):
+                validate_explicit_audio([{"audio": bgm["path"]}], ROOT,
+                                        ffprobe=str(facts.get("ffprobe") or "ffprobe"))
+        except (OSError, ValueError, TypeError):
+            return {"ready": False, "reason": "BGM_SOURCE_AUDIO_INVALID", "runtime": facts}
     return {"ready": bool(report.get("ready")), "reason": report.get("reason"), "runtime": facts}
 
 
 def prepare_product(task: dict, product_dir: Path, env: dict) -> str:
     """Validate hot caches or prepare a cold product through the canonical CLI."""
     import batch_worker
-    sources = task.get("material_sources") or batch_worker.video_files(str(task.get("material_dir") or ""))
+    sources = batch_worker.task_video_files(task)
     if not sources:
         raise ValueError("MATERIAL_PREP_NO_SOURCES")
     manifest = dict(task.get("manifest") or {})
-    manifest.update(material_sources=sources)
-    for key in ("product", "product_key", "sku", "category"):
-        if key in task:
-            manifest[key] = task[key]
+    manifest.update(material_sources=sources, full_script=str(task.get("script") or "").strip(),
+                    draft_name=str(task.get("title") or task.get("record_id") or "").strip(),
+                    **task_product_fields(task))
     product_dir.mkdir(parents=True, exist_ok=True)
     path = product_dir / "manifest.json"
     atomic_write_text(path, json.dumps(manifest, ensure_ascii=False, indent=2))
@@ -405,7 +438,9 @@ def dispatch(tasks: list[dict], *, work: Path, policy: RuntimePolicy | None = No
                         frozen = _read(task_work / rid / "task.json") if stage == "qc" else {}
                         actual_task = frozen if frozen.get("record_id") == rid else task
                         try:
-                            preflight_results[rid] = _production_preflight(actual_task, environment_cache=preflight_environment)
+                            preflight_results[rid] = _production_preflight(
+                                actual_task, environment_cache=preflight_environment,
+                                check_narration=stage != "qc")
                         except (OSError, ValueError, TypeError, RuntimeError, ImportError) as exc:
                             preflight_results[rid] = {"ready": False, "reason": str(exc)}
                         for warning in (preflight_results[rid].get("runtime") or {}).get("configuration_warnings", []):

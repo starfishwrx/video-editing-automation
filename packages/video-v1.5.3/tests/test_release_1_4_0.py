@@ -67,7 +67,7 @@ class Release140ContractTests(unittest.TestCase):
             root = Path(raw)
             task = root / "task.json"
             done = root / "done.json"
-            task.write_text(json.dumps({"record_id": "rec-fail", "task_id": "task-fail", "issue": "视觉匹配失败"}), encoding="utf-8")
+            task.write_text(json.dumps({"record_id": "rec-fail", "task_id": "task-fail", "issue": "视觉匹配失败", "delivery_mode": "formal"}), encoding="utf-8")
             done.write_text(json.dumps({"status": "ERROR", "failures": [{"phase": "visual", "message": "SHOT_MATCH_BLOCKED"}]}), encoding="utf-8")
             with mock.patch.dict(os.environ, {}, clear=True):
                 result = closed_loop.failure_update(task, done, ROOT / "WINDOWS_VIDEO_CLOSED_LOOP_RULES_20260930.json")
@@ -83,7 +83,7 @@ class Release140ContractTests(unittest.TestCase):
             root = Path(raw)
             task = root / "task.json"
             done = root / "done.json"
-            task.write_text(json.dumps({"record_id": "rec-bom", "task_id": "task-bom"}), encoding="utf-8-sig")
+            task.write_text(json.dumps({"record_id": "rec-bom", "task_id": "task-bom", "delivery_mode": "formal"}), encoding="utf-8-sig")
             done.write_text(json.dumps({"status": "ERROR", "error": "bom"}), encoding="utf-8-sig")
             with mock.patch.dict(os.environ, {}, clear=True):
                 result = closed_loop.failure_update(task, done, ROOT / "WINDOWS_VIDEO_CLOSED_LOOP_RULES_20260930.json")
@@ -95,7 +95,7 @@ class Release140ContractTests(unittest.TestCase):
             root = Path(raw)
             task = root / "task.json"
             done = root / "done.json"
-            task.write_text(json.dumps({"record_id": "rec-fail", "task_id": "task-fail"}), encoding="utf-8")
+            task.write_text(json.dumps({"record_id": "rec-fail", "task_id": "task-fail", "delivery_mode": "formal"}), encoding="utf-8")
             done.write_text(json.dumps({"status": "PARTIAL", "error": "timeout"}), encoding="utf-8")
             fake = mock.Mock(returncode=0, stdout='{"ok": true}', stderr="")
             with mock.patch.dict(os.environ, {"LARK_BASE_TOKEN": "token", "LARK_TABLE_ID": "tbl"}, clear=True), \
@@ -108,6 +108,22 @@ class Release140ContractTests(unittest.TestCase):
             self.assertEqual(patch["任务状态"], ["生成失败"])
             self.assertIn("问题反馈", patch)
             self.assertNotIn("草稿文件", patch)
+
+    def test_preview_failure_never_writes_business_table(self):
+        with tempfile.TemporaryDirectory(prefix="video_preview_failure_") as raw:
+            root = Path(raw)
+            task, done = root / "task.json", root / "done.json"
+            done.write_text(json.dumps({"status": "ERROR"}), encoding="utf-8")
+            for mode in ("preview", None, "invalid"):
+                data = {"record_id": "preview", "lark_base_token": "fixture", "lark_table_id": "fixture"}
+                if mode is not None:
+                    data["delivery_mode"] = mode
+                task.write_text(json.dumps(data), encoding="utf-8")
+                with mock.patch.dict(os.environ, {"LARK_BASE_TOKEN": "fixture", "LARK_TABLE_ID": "fixture"}), \
+                     mock.patch.object(closed_loop.subprocess, "run") as run:
+                    result = closed_loop.failure_update(task, done, ROOT / "WINDOWS_VIDEO_CLOSED_LOOP_RULES_20260930.json")
+                self.assertEqual(result["reason"], "PREVIEW_OR_INVALID_MODE_NO_WRITEBACK")
+                run.assert_not_called()
 
 
 if __name__ == "__main__":

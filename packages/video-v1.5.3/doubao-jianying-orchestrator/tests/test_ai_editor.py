@@ -197,6 +197,33 @@ class AIEditorTests(unittest.TestCase):
         self.assertEqual(row["ai_selection"]["index"], 2)
         self.assertTrue(contract.validate_segment_receipt(row, index=2, verify_source=True, manifest=manifest)["ok"])
 
+    def test_refill_preserves_fixed_audio_through_engine_clips(self):
+        from orchestrator.application import engine
+        audio = self.root / "fixed.wav"
+        audio.write_bytes(b"fixture audio; no synthesis")
+        original = {**self.manifest["segments"][0], "audio": str(audio), "audio_mode": "file"}
+        manifest = {**self.manifest, "selection_mode": "rule_then_ai", "segments": [original]}
+        matched = {"segments": [{"index": 1, "text": original["text"]}], "pending_items": []}
+        with mock.patch.object(editor, "_review_pool", return_value=([self.review], {"feasible": True})):
+            result = editor.refill_indices(manifest, {"shots": [self.shot]}, matched, [1], self.root)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual((result["segments"][0]["audio"], result["segments"][0]["audio_mode"]),
+                         (str(audio), "file"))
+        with mock.patch.object(engine, "apply_process_priority"):
+            clips = engine.OrchestrationEngine(result["manifest"], self.root, self.root).build_clips()
+        self.assertEqual([(clip.audio, clip.audio_mode) for clip in clips], [(str(audio.resolve()), "file")])
+
+    def test_multishot_audio_path_implies_file_mode_for_each_part(self):
+        from orchestrator.application import engine
+        audio = self.root / "fixed.wav"
+        audio.write_bytes(b"fixture audio; no synthesis")
+        raw = {"text": "一句", "video": str(self.video), "audio": str(audio), "multi_shot": True,
+               "span_parts": [{"video": str(self.video), "source_start": 0, "source_end": 1, "segment_s": 1},
+                              {"video": str(self.video), "source_start": 1, "source_end": 2, "segment_s": 1}]}
+        with mock.patch.object(engine, "apply_process_priority"):
+            clips = engine.OrchestrationEngine({"segments": [raw]}, self.root, self.root).build_clips()
+        self.assertEqual([(clip.audio, clip.audio_mode) for clip in clips], [(str(audio.resolve()), "file")] * 2)
+
     def test_refill_combines_reviewed_claims_without_losing_timing_or_evidence(self):
         text = "擦油污、擦水渍都好用，湿水不容易破。"
         manifest = {**self.manifest, "selection_mode": "rule_then_ai", "delivery_mode": "preview",

@@ -66,6 +66,17 @@ class QueueContractTests(unittest.TestCase):
         self.assertFalse(result["retryable"])
         self.assertFalse(result["safe_to_continue"])
 
+    def test_fixed_input_change_cannot_retry_as_a_new_build(self):
+        for reason in ("FIXED_NARRATION_CHANGED_DURING_BUILD", "SELECTION_AUDIO_CHANGED",
+                       "BGM_CHANGED_DURING_BUILD", "BGM_SOURCE_AUDIO_INVALID", "MATERIAL_SOURCE_LIST_INVALID"):
+            with self.subTest(reason=reason):
+                classified = contracts.classify_build_failure(reason)
+                self.assertTrue(classified["deterministic_block"])
+                result = contracts.batch_result_contract("ERROR", pipeline_version="test-runtime", run_id="run-test",
+                    failures=[{"type": "transient", "message": reason + " network timeout"}])
+                self.assertEqual(result["failure_class"], "environment")
+                self.assertFalse(result["retryable"])
+
     def test_queue_target_requires_unique_record_and_does_not_mutate(self):
         queue = [{"record_id": "first"}, {"record_id": "second"}]
         original = copy.deepcopy(queue)

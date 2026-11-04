@@ -112,8 +112,15 @@ def recover(manifest: dict, report_dir: Path, *, prefix: list[str], run, env: di
         if not rows or len(files) != len(rows) or any(
                 int(r.get("audio_duration_us") or 0) <= 0 or r.get("timing_certainty") != "audio" for r in rows):
             return result(1, "SELECTION_RECOVERY_AUDIO_REQUIRED")
+        from orchestrator.audio import bgm_request
+        bgm_path = bgm_request.normalize(frozen["manifest"].get("bgm")).get("path")
+        bgm_identity = frozen.get("bgm_file")
+        if bgm_path and (not isinstance(bgm_identity, dict) or
+                         str(Path(str(bgm_path)).resolve()) != str(bgm_identity.get("path") or "")):
+            return result(1, "SELECTION_RECOVERY_BGM_IDENTITY_REQUIRED")
 
         def check_audio():
+            from orchestrator.runtime.file_safety import content_identity
             for row in files:
                 try:
                     stat = Path(row["path"]).stat()
@@ -121,6 +128,20 @@ def recover(manifest: dict, report_dir: Path, *, prefix: list[str], run, env: di
                     raise ValueError("SELECTION_RECOVERY_AUDIO_REQUIRED") from exc
                 if stat.st_size != row["size"] or stat.st_mtime_ns != row["mtime_ns"]:
                     raise ValueError("SELECTION_RECOVERY_AUDIO_CHANGED")
+                if row.get("sha256"):
+                    try:
+                        same_audio = content_identity(row["path"]) == row
+                    except (OSError, ValueError):
+                        same_audio = False
+                    if not same_audio:
+                        raise ValueError("SELECTION_RECOVERY_AUDIO_CHANGED")
+            if bgm_identity:
+                try:
+                    same_bgm = content_identity(bgm_identity["path"]) == bgm_identity
+                except (OSError, ValueError, KeyError, TypeError):
+                    same_bgm = False
+                if not same_bgm:
+                    raise ValueError("SELECTION_RECOVERY_BGM_CHANGED")
         check_audio()
         if not (report_dir / "shot_candidates.json").is_file():
             return result(1, "SELECTION_RECOVERY_ANALYSIS_REQUIRED")
@@ -153,6 +174,9 @@ def recover(manifest: dict, report_dir: Path, *, prefix: list[str], run, env: di
                           encoding="utf-8", errors="replace", timeout=remaining + 30)
             outputs.append(process.stdout or "")
             errors.append(process.stderr or "")
+            # Identity changes take precedence over a retryable preflight
+            # error, including when the child itself exited unsuccessfully.
+            check_audio()
             if process.returncode:
                 if stage == "preflight":
                     state.update(status="PREFLIGHT_BLOCKED")
@@ -182,5 +206,16 @@ def recover(manifest: dict, report_dir: Path, *, prefix: list[str], run, env: di
                 "combined": "\n".join(outputs + errors), "manifest": str(input_path),
                 "draft_name": draft.name, "selection_recovered": True}
     except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError) as exc:
-        is_preflight = preflight_started and isinstance(locals().get("state"), dict) and state.get("attempts") == 0
+        verify = locals().get("check_audio")
+        if callable(verify):
+            try:
+                verify()
+            except (OSError, ValueError, TypeError, KeyError) as identity_exc:
+                message = str(identity_exc)
+                exc = ValueError(message if message.startswith(("SELECTION_RECOVERY_AUDIO_", "SELECTION_RECOVERY_BGM_"))
+                                 else "SELECTION_RECOVERY_AUDIO_CHANGED")
+        identity_error = str(exc).startswith(("SELECTION_RECOVERY_AUDIO_", "SELECTION_RECOVERY_BGM_",
+                                              "FILE_CHANGED_DURING_HASH"))
+        is_preflight = (not identity_error and preflight_started and isinstance(locals().get("state"), dict)
+                        and state.get("attempts") == 0)
         return result(1, str(exc), preflight_only=is_preflight)

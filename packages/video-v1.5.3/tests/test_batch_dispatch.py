@@ -164,6 +164,13 @@ class BatchDispatchTests(unittest.TestCase):
         self.assertNotEqual(dispatch.product_key(task), dispatch.product_key({**task, "material_sources": ["two.mp4"]}))
         self.assertNotEqual(dispatch.product_key(task), dispatch.product_key({**task, "sku": "b"}))
 
+    def test_product_group_keeps_explicit_source_order(self):
+        base = {"product": "generic", "material_dir": str(self.root),
+                "material_sources": [str(self.root / "weipin" / "a.mp4"),
+                                     str(self.root / "paper" / "b.mp4")]}
+        self.assertNotEqual(dispatch.product_key(base),
+                            dispatch.product_key({**base, "material_sources": list(reversed(base["material_sources"]))}))
+
     def test_qc_priority_then_fifo_and_duplicate_record_is_once(self):
         ran = []
         for rid in ("q1", "q2"):

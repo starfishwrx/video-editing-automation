@@ -28,6 +28,7 @@ from ..audio import voice_tts
 from ..audio.library_resources import RuntimeCatalogError
 from .engine import OrchestrationEngine
 from ..runtime.platform_env import clear_environment_cache, environment_report
+from ..runtime.file_safety import content_identity
 from ..runtime.task_log import TaskAlreadyRunningError, TaskLogger
 
 
@@ -35,6 +36,13 @@ def _read(path: Path) -> dict:
     # Accept UTF-8 with or without BOM, as Windows PowerShell 5's
     # `Set-Content -Encoding UTF8` emits a BOM by default.
     return json.loads(path.read_text(encoding="utf-8-sig"))
+
+
+def _content_unchanged(identity: dict) -> bool:
+    try:
+        return content_identity(identity["path"]) == identity
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
 
 
 def _emit(obj: dict, code: int = 0) -> int:
@@ -70,7 +78,7 @@ def _compact_build_result(result: dict) -> dict:
                 "retryable", "safe_to_continue", "next_action", "run_id",
                 "pipeline_version", "message", "problems", "reason", "error", "missing",
                 "voice_input", "voice_candidates", "voice_auditions", "bgm_candidates", "bgm_auditions",
-                "pending_items", "coverage", "report", "confirmation", "task_id", "task_log",
+                "pending_items", "coverage", "report", "confirmation", "task_id", "task_log", "draft_path",
                 "issues", "caption_report", "failed_stage", "resume_stage", "runtime")
         return {k: result[k] for k in keys if k in result}
     draft_path = result.get("draft_path")
@@ -905,6 +913,36 @@ def cmd_build(args) -> int:
             'reason': draft_env['reason'],
             'environment': draft_env})), 1)
 
+    from .task_inputs import validate_explicit_audio
+    try:
+        segments = validate_explicit_audio(manifest.get("segments"), input_path.parent,
+            ffprobe=str(((draft_env.get("draft_backend_check") or {}).get("media_tools") or {}).get("ffprobe")
+                        or env.get("ffprobe") or "ffprobe"))
+        if "segments" in manifest:
+            manifest["segments"] = segments
+        fixed_audio = {i: content_identity(row["audio"])
+                       for i, row in enumerate(segments or [], 1)
+                       if isinstance(row, dict) and row.get("audio")}
+    except (OSError, ValueError, TypeError) as exc:
+        reason = str(exc) if str(exc).startswith("FIXED_NARRATION_") else "FIXED_NARRATION_CHANGED"
+        return _emit(_compact_build_result(finalize({"status": "ENV_ERROR",
+            "failure_class": "environment", "reason": reason,
+            "message": "指定配音不可读取，未开始视觉分析或重新合成。"})), 1)
+    from ..audio import bgm_request
+    bgm_identity = None
+    try:
+        bgm = bgm_request.normalize(manifest.get("bgm"))
+        if bgm.get("path"):
+            checked_bgm = validate_explicit_audio([{"audio": bgm["path"]}], input_path.parent,
+                ffprobe=str(((draft_env.get("draft_backend_check") or {}).get("media_tools") or {}).get("ffprobe")
+                            or env.get("ffprobe") or "ffprobe"))
+            manifest["bgm"] = {**bgm, "path": checked_bgm[0]["audio"]}
+            bgm_identity = content_identity(checked_bgm[0]["audio"])
+    except (OSError, ValueError, TypeError):
+        return _emit(_compact_build_result(finalize({"status": "ENV_ERROR",
+            "failure_class": "environment", "reason": "BGM_SOURCE_AUDIO_INVALID",
+            "message": "指定背景音乐不可读取，未开始视觉分析或配音。"})), 1)
+
     # Freeze one verified text plan before narration, matching and note binding.
     # Existing segment/audio mappings and explicit notes are never reindexed.
     from .. import ai_editor_contract
@@ -940,6 +978,18 @@ def cmd_build(args) -> int:
             # 装不下的镜头在**规划阶段**就被判 SHOT_TIMING_INFEASIBLE，
             # 而不是拖到 write_draft 才 AUDIO_VIDEO_MISMATCH。
             narration_timing = _pre_synthesize_narration(manifest, report_dir, locked_voice)
+            supplied = {i for i, row in enumerate(manifest.get("segments") or [], 1)
+                        if isinstance(row, dict) and row.get("audio")}
+            verified = {row.get("index") for row in narration_timing.get("rows", [])
+                        if row.get("timing_certainty") == "audio" and not row.get("probe_error")}
+            if supplied - verified:
+                return _emit(_compact_build_result(finalize({"status": "ENV_ERROR",
+                    "failure_class": "environment", "reason": "FIXED_NARRATION_TIMING_UNAVAILABLE",
+                    "message": "指定配音无法确定真实时长，未开始选镜。"})), 1)
+            if any(not _content_unchanged(row) for row in fixed_audio.values()):
+                return _emit(_compact_build_result(finalize({"status": "ENV_ERROR",
+                    "failure_class": "environment", "reason": "FIXED_NARRATION_CHANGED",
+                    "message": "指定配音在测时期间发生变化，未开始选镜。"})), 1)
             manifest["narration_timing_file"] = str(report_dir / "narration_timing.json")
             if manifest.get("sentence_plan_version") == "semantic-v1":
                 # A frozen input skips the planner, including its directory setup.
@@ -950,12 +1000,11 @@ def cmd_build(args) -> int:
             for row in narration_timing.get("rows", []):
                 path = Path(str(row.get("tts_path") or ""))
                 if path.is_file():
-                    stat = path.stat()
-                    audio_files.append({"path": str(path.resolve()), "size": stat.st_size, "mtime_ns": stat.st_mtime_ns})
+                    audio_files.append(content_identity(path))
             manifest["_selection_attempt"] = logger.run_id
             (report_dir / "selection_resume.json").write_text(json.dumps({
                 "input_manifest": _read(input_path), "manifest": manifest,
-                "audio_files": audio_files, "timing": narration_timing,
+                "audio_files": audio_files, "bgm_file": bgm_identity, "timing": narration_timing,
                 "run_id": logger.run_id,
             }, ensure_ascii=False, indent=2), encoding="utf-8")
             manifest, blocker = _temporary_match(manifest, input_path, report_dir,
@@ -964,6 +1013,22 @@ def cmd_build(args) -> int:
             if blocker:
                 blocker["report_dir"] = str(report_dir)
                 return _emit(_compact_build_result(finalize(blocker)), 1)
+            if any(not _content_unchanged(row) for row in audio_files):
+                return _emit(_compact_build_result(finalize({"status": "ENV_ERROR",
+                    "failure_class": "environment", "reason": "SELECTION_AUDIO_CHANGED",
+                    "message": "选镜期间配音发生变化，未开始写稿。"})), 1)
+            if bgm_identity and not _content_unchanged(bgm_identity):
+                return _emit(_compact_build_result(finalize({"status": "ENV_ERROR",
+                    "failure_class": "environment", "reason": "BGM_CHANGED_DURING_SELECTION",
+                    "message": "选镜期间指定音乐发生变化，未开始写稿。"})), 1)
+            selected_segments = manifest.get("segments") or []
+            for index, identity in fixed_audio.items():
+                row = selected_segments[index - 1] if index <= len(selected_segments) else None
+                if (not isinstance(row, dict) or not row.get("audio")
+                        or str(Path(str(row["audio"])).resolve()) != identity["path"]):
+                    return _emit(_compact_build_result(finalize({"status": "ENV_ERROR",
+                        "failure_class": "environment", "reason": "FIXED_NARRATION_BINDING_CHANGED:S%d" % index,
+                        "message": "选镜结果未保留指定配音，未开始写稿。"})), 1)
             if manifest.get("usage_ledger_path"):
                 try:
                     usage_ledger.record(manifest, manifest.get("segments") or [], reserved=True)
@@ -992,6 +1057,14 @@ def cmd_build(args) -> int:
     except Exception as exc:  # noqa: BLE001
         logger.event("task_exception", error_type=type(exc).__name__, error=str(exc))
         result = {"status": "ERROR", "error": str(exc), "error_type": type(exc).__name__}
+    if any(not _content_unchanged(row) for row in fixed_audio.values()):
+        result = {**result, "status": "ENV_ERROR", "failure_class": "environment",
+                  "reason": "FIXED_NARRATION_CHANGED_DURING_BUILD",
+                  "message": "建稿期间指定配音发生变化，保留本地结果供复核，不交付。"}
+    elif bgm_identity and not _content_unchanged(bgm_identity):
+        result = {**result, "status": "ENV_ERROR", "failure_class": "environment",
+                  "reason": "BGM_CHANGED_DURING_BUILD",
+                  "message": "建稿期间指定音乐发生变化，保留本地结果供复核，不交付。"}
     if manifest.get("usage_ledger_path"):
         try:
             if result.get("status") == "SUCCESS":

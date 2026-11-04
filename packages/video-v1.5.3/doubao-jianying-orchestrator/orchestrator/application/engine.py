@@ -819,7 +819,9 @@ class OrchestrationEngine:
                 text=str(raw.get("text", "") or ""),
                 claim_text=str(raw.get("claim_text", "") or ""),
                 temporary_shot_id=part.get("shot_id") or raw.get("temporary_shot_id"),
-                audio_mode=str(raw.get("audio_mode", "tts")).lower(),
+                # build_clips has already inferred file mode from `audio`,
+                # even when the input did not spell out audio_mode.
+                audio_mode=c.audio_mode,
                 evidence_intervals=part.get("evidence_intervals") or raw.get("evidence_intervals"),
                 rationale=str(raw.get("rationale", "") or ""),
                 action_complete=raw.get("action_complete"),

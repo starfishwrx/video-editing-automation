@@ -385,6 +385,32 @@ def video_files(material_dir: str) -> list[str]:
     return hits
 
 
+def task_video_files(task: dict) -> list[str]:
+    """Use the same explicit inventory for preparation and draft building."""
+    nested = task.get("manifest") if isinstance(task.get("manifest"), dict) else {}
+    top_level = "material_sources" in task
+    nested_level = "material_sources" in nested
+    if not top_level and not nested_level:
+        return video_files(str(task.get("material_dir") or ""))
+    if top_level and nested_level and task["material_sources"] != nested["material_sources"]:
+        raise ValueError("MATERIAL_SOURCE_LIST_CONFLICT")
+    raw = task["material_sources"] if top_level else nested["material_sources"]
+    if not isinstance(raw, list) or not raw or any(not isinstance(value, str) or not value.strip() for value in raw):
+        raise ValueError("MATERIAL_SOURCE_LIST_INVALID")
+    result, seen = [], set()
+    for value in raw:
+        path = pathlib.Path(value).expanduser()
+        if not path.is_absolute() or path.suffix.lower() not in VIDEO_EXTS or not path.is_file():
+            raise ValueError("MATERIAL_SOURCE_LIST_INVALID")
+        path = path.resolve()
+        key = os.path.normcase(str(path))
+        if key in seen:
+            raise ValueError("MATERIAL_SOURCE_LIST_DUPLICATE")
+        seen.add(key)
+        result.append(str(path))
+    return result
+
+
 def calibrated_source_limit() -> int | None:
     """Read the render host's last verified source limit, if available."""
     try:
@@ -799,14 +825,22 @@ def resume_task_qc(task: dict) -> dict:
             reports.append({"draft": name, "status": answer.get("status"),
                             "report": answer.get("output")})
         all_pass = all(row["status"] == "PASS" for row in reports)
+        preview = requested_mode(task) == "preview"
+        missing_drafts = max(0, max(1, int(task.get("count") or 1)) - len(retained))
+        complete = all_pass and not missing_drafts
         payload = dict(previous, record_id=rid, drafts=list(retained), qc_reports=reports,
-                       status="PREVIEW_READY" if all_pass else "PARTIAL",
-                       resume_stage="delivery" if all_pass else "qc",
-                       terminal_state="QC_READY_FOR_DELIVERY" if all_pass else "QC_PENDING",
-                       failed_stage=None if all_pass else "qc", safe_to_continue=True,
+                       status="PREVIEW_READY" if complete else "PARTIAL",
+                       resume_stage=((None if preview else "delivery") if complete else
+                                     "build" if all_pass else "qc"),
+                       terminal_state=(("PREVIEW_LOCAL_ONLY" if preview else "QC_READY_FOR_DELIVERY") if complete else
+                                       "MISSING_REQUESTED_DRAFTS" if all_pass else "QC_PENDING"),
+                       failed_stage=None if complete else "build" if all_pass else "qc",
+                       missing_draft_count=missing_drafts, safe_to_continue=True,
                        finished_at=time.strftime("%Y-%m-%d %H:%M:%S"))
+        if preview:
+            payload.update(delivery_mode="preview", distribution_status="LOCAL_ONLY")
         atomic_write_text(task_dir / "done.json", json.dumps(payload, ensure_ascii=False, indent=2))
-        if all_pass and len(retained) >= max(1, int(task.get("count") or 1)) and not SKIP_SHIP:
+        if complete and not SKIP_SHIP and not preview:
             result = finalize_closed_loop(task_dir, task, list(retained), reports)
             payload = _read_json(task_dir / "done.json")
             payload["resume_stage"] = None if result.get("ok") else "delivery"
@@ -1172,7 +1206,7 @@ def process_task(task: dict, *, retry_partial: bool = False,
         raise RuntimeError("DISPATCH_ADMISSION_REQUIRED: submit through tools.batch_dispatch")
     if str(SKILL) not in sys.path:
         sys.path.insert(0, str(SKILL))
-    from orchestrator.task_inputs import normalize_meeting_task, manifest_meeting_fields
+    from orchestrator.task_inputs import normalize_meeting_task, manifest_meeting_fields, fixed_narration_segments
     task = normalize_meeting_task(task)
     rid = task["record_id"]
     run_id = "%s-%s-%s" % (rid, time.strftime("%Y%m%d%H%M%S"), uuid.uuid4().hex[:8])
@@ -1268,12 +1302,13 @@ def process_task(task: dict, *, retry_partial: bool = False,
         except (OSError, ValueError):
             pass
     try:
+        fixed_narration = fixed_narration_segments(task)
         if str(task.get("voice_tempo_status") or "").lower() == "invalid":
             raise RuntimeError("VOICE_TEMPO_INVALID: refusing category-default fallback")
         mdir = str(task.get("material_dir") or "").strip()
         if not mdir:
             raise RuntimeError("material_dir empty")
-        sources = video_files(mdir)
+        sources = task_video_files(task)
         if not sources:
             raise RuntimeError("no video files under material_dir: %s" % mdir)
         log("candidate_pool=%d" % len(sources))
@@ -1301,12 +1336,13 @@ def process_task(task: dict, *, retry_partial: bool = False,
             "full_script": str(task.get("script") or "").strip(),
             "product": str(task.get("product") or "").strip(),
             "category": str(task.get("category") or "").strip(),
+            **queue_contracts.task_product_fields(task),
             # Feedback guides editing; independent QC must verify the result.
             "revision_feedback": str(task.get("revision_feedback") or "").strip(),
             "voice": str(task.get("voice") or "").strip(),
             "voice_tempo": task.get("voice_tempo"),
             **manifest_meeting_fields(task),
-            "bgm": _meeting_bgm_spec(task.get("bgm")),
+            "bgm": _meeting_bgm_spec(task.get("bgm"), base_dir=PIPE_ROOT),
             "bgm_state_dir": str(WORK / "bgm-selection"),
             "batch_id": str(task.get("batch_id") or task.get("batch_identity")
                              or task.get("worker_batch_identity") or task.get("task_id") or rid),
@@ -1328,6 +1364,8 @@ def process_task(task: dict, *, retry_partial: bool = False,
             "tail_trim_s": 0,
         }
         manifest.update(queue_contracts.task_runtime_overrides(task))
+        if fixed_narration is not None:
+            manifest["segments"] = fixed_narration
         task_id = str(manifest["task_id"])
         manifest_sha256 = _payload_sha256(manifest)
         if not manifest["full_script"]:
@@ -1345,7 +1383,14 @@ def process_task(task: dict, *, retry_partial: bool = False,
             cached_analysis = tdir / "material_index_analysis.json"
             cached_analysis.write_text(json.dumps(material_index.shot_analysis(approved_rows), ensure_ascii=False, indent=2), encoding="utf-8")
             manifest["shot_analysis_file"] = str(cached_analysis)
-            manifest["material_sources"] = list(dict.fromkeys(row["source_path"] for row in approved_rows))
+            approved_sources = list(dict.fromkeys(row["source_path"] for row in approved_rows))
+            nested = task.get("manifest") if isinstance(task.get("manifest"), dict) else {}
+            if "material_sources" in task or "material_sources" in nested:
+                selected = {os.path.normcase(str(pathlib.Path(path).resolve())) for path in approved_sources}
+                if selected != {os.path.normcase(str(pathlib.Path(path).resolve())) for path in sources}:
+                    raise RuntimeError("MATERIAL_SOURCE_LIST_INDEX_CONFLICT")
+                approved_sources = sources
+            manifest["material_sources"] = approved_sources
             manifest["material_index_sha256"] = production_eval.file_hash(pathlib.Path(index_file))
             manifest["material_cache_reused"] = True
             sources = manifest["material_sources"]
@@ -1752,7 +1797,8 @@ def process_task(task: dict, *, retry_partial: bool = False,
                 break
 
         closed_loop_result = None
-        if not failures and not qc_gaps and not SKIP_SHIP:
+        preview = requested_mode(task) == "preview"
+        if not failures and not qc_gaps and not SKIP_SHIP and not preview:
             closed = finalize_closed_loop(tdir, task, drafts, qc_reports,
                                           delivery_receipts=distribution_receipts)
             closed_loop_result = closed
@@ -1765,7 +1811,7 @@ def process_task(task: dict, *, retry_partial: bool = False,
                 })
                 log("CLOSED_LOOP_BLOCKED: %s" % closed)
 
-        if failures or qc_gaps or SKIP_SHIP:
+        if failures or qc_gaps or SKIP_SHIP or preview:
             status = ("PREVIEW_READY" if drafts and not failures else
                       "PARTIAL" if drafts else "ERROR")
             all_issues = [*failures, *qc_gaps]
@@ -1780,7 +1826,7 @@ def process_task(task: dict, *, retry_partial: bool = False,
                                      or distribution_receipts)
             verified_by_name = {row.get("draft_name"): row for row in distribution_receipts}
             shipped_drafts = [name for name in drafts if name in verified_by_name]
-            if SKIP_SHIP:
+            if SKIP_SHIP or preview:
                 distribution_status = "LOCAL_ONLY"
             elif len(shipped_drafts) == len(drafts) and drafts:
                 distribution_status = "SHIPPED_VERIFIED"
@@ -1795,7 +1841,7 @@ def process_task(task: dict, *, retry_partial: bool = False,
             else:
                 distribution_status = "NOT_SHIPPED"
             payload = {
-                "record_id": rid, "status": status, "drafts": drafts,
+                "record_id": rid, "status": status, "drafts": drafts, "delivery_mode": requested_mode(task),
                 "nas_links": [verified_by_name[name]["nas_target"] for name in shipped_drafts],
                 "local_only_drafts": local_only_drafts,
                 "distribution_status": distribution_status,

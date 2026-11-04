@@ -37,7 +37,11 @@ powershell -NoProfile -File scripts/run_pipeline.ps1 -RecordId example-product-a
 
 队列是 JSON 任务列表，或 `{"tasks": [...]}`。沿用既有 worker 字段：`record_id`、`title`、`script`、`product`、`category`、`sku`、`material_dir`、`count`、`voice`、`bgm` 等。素材目录必须对运行账号可读，支持本机目录和已可访问的共享目录；脚本不依赖宿主私有的挂载辅助文件。任务获取方负责把任务写入此本地队列，本入口不自行拉取飞书任务。
 
-`delivery_mode` 只能是 `preview` 或 `formal`，省略时按预览处理。预览保留本地草稿和未认证原因。正式模式通过验收后进入配置的 NAS／表格交付；本机留稿可设置 `JY_SKIP_SHIP=1`。NAS 与飞书凭据和路径见包内 `ENVIRONMENT.md`。
+需要固定已有逐句配音时，任务可在 `manifest.segments` 中提供按顺序排列的 `{"text": "原句", "audio": "绝对音频文件路径", "audio_mode": "file"}`；`script` 仍须完整填写，逐句拼接必须与原文一致。每句都须提供真实可读的音频，字段只接受这三项，不导入旧选镜或自报时长。入口在素材视觉分析前校验文件；使用原音频及实测时长，不重新合成。缺失、损坏或文案不一致会明确阻断。
+
+需要固定素材范围时，可在任务中提供非空的 `material_sources` 绝对路径列表；素材准备和建稿共用该列表，目录中后来增加的文件不会自动加入。清单缺失、重复、不可读或与素材索引筛选结果冲突时会阻断，不自动扩大范围。
+
+`delivery_mode` 只能是 `preview` 或 `formal`，省略时按预览处理。预览保留本地草稿和独立质检结果，不进行 NAS 分发或业务表状态回写；预览失败也只记录本地原因。正式模式通过验收后进入配置的 NAS／表格交付；本机留稿可设置 `JY_SKIP_SHIP=1`。NAS 与飞书凭据和路径见包内 `ENVIRONMENT.md`。
 
 单条任务、整批和计划任务都通过上述入口及同一个 dispatcher。`run.py build` 是供诊断和嵌入的底层建稿命令，不单独承担队列的独立质检与交付闭环。任务在付费步骤前因环境预检被阻断时，修好配置可从正常入口重试，不消耗建稿尝试次数。
 
@@ -85,6 +89,8 @@ powershell -NoProfile -File scripts/install_pipeline_task.ps1 -TaskName VideoAut
 操作系统锁防止多进程重入。已完成、正在执行、普通预览和确定性失败会跳过；明确可重试的制作最多尝试两次，保留草稿的 QC／交付最多自动恢复两次，次数在开始前保存。恢复复用草稿，不重做 TTS 或选镜。同一记录的输入变化不能重置次数，必须使用新记录或显式定向恢复。不要删除整个状态文件来重放全部任务。
 
 选镜服务超时/限流的制作重试改为阶段恢复：复用冻结的配音、句长、素材分析及完成的候选观察，仅补失败调用。每次原始运行持久记录一次恢复预算，中断也不清零；缓存缺失、输入变化或预算耗尽直接停止，不回到完整build。选镜完成后的BGM/写稿超时保留匹配结果。恢复产物和原始运行身份见[运行时与恢复](subsystems/runtime-and-recovery.md)。
+
+指定配音和音乐在选镜及建稿期间按文件字节核对，变化时停止而不自动重建。旧的选镜恢复快照若指定音乐却没有音乐身份，需人工核对并显式处理，不会自动把当前文件冒充原曲。
 
 有明确修复后，可使用现有入口定向恢复：`python -m tools.batch_dispatch resume --queue <queue.json> --work-root <work> --record-id <id> --stage qc`。制作缺失才使用 `--stage build`，不会因定时器重复触发而无限重建。
 

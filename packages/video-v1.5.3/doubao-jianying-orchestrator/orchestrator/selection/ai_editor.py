@@ -1594,7 +1594,10 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
                     raise ValueError(f"AI_REFILL_WINDOW_INFEASIBLE:{index}")
                 raise ValueError(f"AI_REFILL_NO_MATCH:{index}")
             mini_manifest = {k: v for k, v in manifest.items() if k not in ("segments", "full_script", "script")}
-            mini_manifest.update(full_script=sentence["text"], selection_mode="ai_editor")
+            # Keep this sentence's real audio and other input attributes. The
+            # one-sentence assembly replaces only its visual selection.
+            mini_manifest.update(full_script=sentence["text"], selection_mode="ai_editor",
+                                 segments=[copy.deepcopy(original[index - 1])])
             timing_row = {"key": "s1", "text": sentence["text"], "audio_duration_us": audio_us,
                           "timing_certainty": certainty}
             if narration_timing and index <= len(narration_timing.get("rows", [])):

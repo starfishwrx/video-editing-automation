@@ -35,14 +35,34 @@ def task_runtime_overrides(task: dict) -> dict:
     return result
 
 
-def meeting_bgm_spec(value: object) -> dict:
+def task_product_fields(task: dict) -> dict:
+    """Normalize product identity once for preparation and selection."""
+    nested = task.get("manifest") or {}
+    if not isinstance(nested, dict):
+        raise ValueError("INVALID_TASK_MANIFEST")
+    result = {}
+    for key in ("product", "product_key", "product_id", "brand", "sku", "category",
+                "product_name", "title", "task_title", "series"):
+        value = task.get(key)
+        if value is None or not str(value).strip():
+            value = nested.get(key)
+        if value is not None and str(value).strip():
+            result[key] = str(value).strip()
+    return result
+
+
+def meeting_bgm_spec(value: object, *, base_dir: pathlib.Path | None = None) -> dict:
     """Preserve an explicit worker BGM choice; strings never become random auto."""
     import importlib.util
     path = pathlib.Path(__file__).resolve().parents[2] / "doubao-jianying-orchestrator/orchestrator/audio/bgm_request.py"
     spec = importlib.util.spec_from_file_location("_queue_bgm_request", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module.normalize(value)
+    result = module.normalize(value)
+    if base_dir is not None and result.get("path"):
+        target = pathlib.Path(str(result["path"])).expanduser()
+        result["path"] = str((target if target.is_absolute() else base_dir / target).resolve())
+    return result
 
 
 def safe_manifest_stem(name: str) -> str:
@@ -97,6 +117,10 @@ def batch_result_contract(status: str, *, pipeline_version: str, run_id: str, fa
     failure_type = str(first.get("type") or "").lower()
     if first.get("preflight_only") is True and first.get("failure_code") == "ENVIRONMENT_PRECHECK_FAILED":
         failure_class, failure_code = "environment", "ENVIRONMENT_PRECHECK_FAILED"
+    elif any(marker in lower for marker in ("fixed_narration_", "selection_audio_changed",
+            "selection_recovery_audio_changed", "selection_recovery_bgm_", "bgm_changed_during_", "bgm_source_audio_invalid",
+            "material_source_list_", "file_changed_during_hash")):
+        failure_class, failure_code = "environment", "FIXED_INPUT_INVALID_OR_CHANGED"
     elif "voice_selection_required" in lower:
         failure_class, failure_code = "environment", "VOICE_SELECTION_REQUIRED"
     elif "bgm_required" in lower:
@@ -199,6 +223,8 @@ def classify_build_failure(text: str, *, transient_markers=TRANSIENT_BUILD_MARKE
         "DESKTOP_IMPORT_BLOCKED", "DRAFT_INVALID", "VOICE_SELECTION_REQUIRED",
         "BGM_REQUIRED", "SENTENCE_PLAN_REVIEW_REQUIRED",
         "SELECTION_STAGE_RETRY_EXHAUSTED", "SELECTION_RECOVERY_INPUT_CHANGED",
+        "FIXED_NARRATION_", "SELECTION_AUDIO_CHANGED", "SELECTION_RECOVERY_AUDIO_CHANGED",
+        "SELECTION_RECOVERY_BGM_", "BGM_CHANGED_DURING_", "BGM_SOURCE_AUDIO_INVALID", "MATERIAL_SOURCE_LIST_", "FILE_CHANGED_DURING_HASH",
     )) or credential_or_input_block or ("vision_call_failed" in lower_blob and not transient)
     vision_hard = ("draft_visual_qc_blocked" in lower_blob) or (
         "no auditable visual top1" in lower_blob) or (
