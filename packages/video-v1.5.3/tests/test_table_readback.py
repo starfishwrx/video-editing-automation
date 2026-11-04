@@ -86,6 +86,44 @@ class TableReadbackTests(unittest.TestCase):
         self.assertIn('+record-get', run.call_args.args[0])
         self.assertNotIn('secret-token', (self.root / 'table_update_receipt.json').read_text())
 
+    def test_ack_failure_notification_then_read_only_recovery(self):
+        candidate = self.done.read_bytes()
+        self.run_update([self.response({'ok': True})] +
+                        [subprocess.TimeoutExpired(['redacted'], 20)] * 3)
+        self.write(self.done, {'status': 'PARTIAL', 'failures': [
+            {'phase': 'closed_loop', 'type': 'delivery_or_table_gate', 'message': 'table pending'}]})
+        with patch.object(m.subprocess, 'run') as run:
+            deferred = m.failure_update(self.task, self.done, self.policy)
+        self.assertFalse(deferred['ok'])
+        self.assertEqual(deferred['reason'], 'DELIVERY_READBACK_PENDING')
+        run.assert_not_called()
+        self.done.write_bytes(candidate)
+        recovered, run = self.run_update([self.response(self.cells())])
+        self.assertTrue(recovered['ok'])
+        self.assertEqual(run.call_count, 1)
+        self.assertIn('+record-get', run.call_args.args[0])
+
+    def test_real_failure_and_stale_ack_still_notify(self):
+        self.run_update([self.response({'ok': True})] + [self.response({'ok': False})] * 3)
+        receipt_path = self.root / 'table_update_receipt.json'
+        original = receipt_path.read_bytes()
+        for kind in ('real_failure', 'task_identity', 'target_identity', 'record_id'):
+            with self.subTest(kind=kind):
+                receipt = json.loads(original)
+                failures = [{'phase': 'closed_loop', 'type': 'delivery_or_table_gate'}]
+                if kind == 'real_failure':
+                    failures.append({'phase': 'qc', 'type': 'visual'})
+                else:
+                    receipt[kind] = 'stale'
+                self.write(receipt_path, receipt)
+                self.write(self.done, {'status': 'PARTIAL', 'failures': failures})
+                with patch.object(m.subprocess, 'run', return_value=self.response({'ok': True})) as run:
+                    result = m.failure_update(self.task, self.done, self.policy)
+                self.assertTrue(result['ok'])
+                self.assertEqual(run.call_count, 1)
+                sent = json.loads(run.call_args.args[0][-1])
+                self.assertEqual(sent['update_records']['rec-test']['任务状态'], ['生成失败'])
+
     def test_readback_delayed_until_second_read(self):
         result, run = self.run_update([self.response({'ok': True}), self.response(self.cells(**{'任务状态': ['制作中']})),
                                       self.response(self.cells())])

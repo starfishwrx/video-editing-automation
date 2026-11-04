@@ -467,6 +467,25 @@ def failure_update(task_path: pathlib.Path, done_path: pathlib.Path,
         receipt["reason"] = "LARK_TABLE_ID_MISSING"
         write_json(done_path.parent / "failure_notification_receipt.json", receipt)
         return receipt
+    # An acknowledged delivery awaiting visibility is not a generation failure.
+    # Overwriting its status would make read-only ACK recovery impossible.
+    delivery = read_json(done_path.parent / 'table_update_receipt.json')
+    failures = done.get('failures') or []
+    only_delivery = (isinstance(failures, list) and bool(failures) and not done.get('error')
+                     and all(isinstance(row, dict) and row.get('phase') == 'closed_loop'
+                             and row.get('type') == 'delivery_or_table_gate' for row in failures))
+    target_identity = digest({'base': base_token, 'table': table_id, 'actor': lark_actor(),
+                              'profile': os.environ.get('LARK_PROFILE', '').strip()})
+    if (only_delivery and delivery.get('write_acknowledged') is True
+            and delivery.get('status') in {'TABLE_READBACK_FAILED', 'TABLE_READBACK_MISMATCH'}
+            and delivery.get('record_id') == record_id
+            and delivery.get('task_identity') == digest(task)
+            and delivery.get('target_identity') == target_identity):
+        deferred = {'ok': False, 'status': 'DEFERRED', 'reason': 'DELIVERY_READBACK_PENDING',
+                    'record_id': record_id, 'retryable': True, 'resume_stage': 'qc',
+                    'next_action': 'retry_table_readback', 'remote_write_skipped': True}
+        write_json(done_path.parent / 'failure_notification_receipt.json', deferred)
+        return deferred
     arguments = ["base", "+record-batch-update", "--base-token", base_token,
                "--table-id", table_id, "--as", lark_actor(), "--json",
                json.dumps({"update_records": {record_id: receipt["patch"]}}, ensure_ascii=False)]
