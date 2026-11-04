@@ -110,6 +110,68 @@ class ProductionPlaybackTests(unittest.TestCase):
         self.assertTrue(editor._assemble(self.manifest, self.analysis, self.plan,
             narration_timing=None, verify_sources=True)['ok'])
 
+    def display_duplicate_fixture(self):
+        self.manifest.update(head_trim_s=.3, tail_trim_s=.2)
+        self.analysis['shots'] = [self.shots[0], self.shots[2]]
+        self.plan['display_reviews'] = [
+            {**self.reviews[0], 'basis': 'product_display', 'supported_point_ids': [],
+             'evidence_intervals_us': [{'start': 1_000_000, 'end': 2_000_000}]},
+            {**self.reviews[2], 'basis': 'product_display', 'supported_point_ids': [],
+             'evidence_intervals_us': [{'start': 1_000_000, 'end': 10_000_000}]}]
+        for sentence, row in zip(self.plan['sentences'], self.plan['rows']):
+            sentence.update(kind='hook', selling_points=[], candidate_ids=['long', 'other'])
+            row['parts'] = [{'shot_id': 'long', 'audio_duration_us': 2_000_000}]
+        baseline = editor._assemble(self.manifest, self.analysis, self.plan,
+            narration_timing=None, verify_sources=True, validate_sequence=False)
+        return baseline, set(contract.sequence_conflict_details(baseline['segments']))
+
+    def test_display_duplicate_uses_new_guarded_original_speed_pixels_and_preserves_old_facts(self):
+        baseline, conflicts = self.display_duplicate_fixture()
+        before = copy.deepcopy(self.plan['display_reviews'])
+        def observe(_manifest, sentence, shot, directory, *, dense=False):
+            self.assertTrue(dense)
+            self.assertGreaterEqual(shot['source_start'], .3)
+            self.assertLessEqual(shot['source_end'], 11.8)
+            self.assertAlmostEqual(shot['source_end'] - shot['source_start'], 2)
+            lo, hi = round(shot['source_start'] * 1e6), round(shot['source_end'] * 1e6)
+            return {**self.reviews[2], 'supported_point_ids': [],
+                'review_window_us': {'start': lo, 'end': hi},
+                'evidence_intervals_us': [{'start': lo + 100_000, 'end': hi - 100_000}]}
+        with patch.object(editor, '_review', side_effect=observe) as review:
+            self.assertTrue(editor._repair_display_duplicate_window(self.manifest, self.analysis,
+                self.plan, self.root, None, 2, baseline, conflicts))
+        self.assertEqual(review.call_count, 1)
+        self.assertEqual(self.plan['display_reviews'], before)
+        self.assertEqual(sum(r['index'] == 2 for r in self.plan['window_repair_attempts'].values()), 1)
+        result = editor._assemble(self.manifest, self.analysis, self.plan, narration_timing=None, verify_sources=True)
+        self.assertEqual(result['segments'][1]['video_speed'], 1)
+        self.assertEqual(contract.sequence_errors_all(result['segments']), [])
+
+    def test_display_duplicate_rejection_does_not_change_rows(self):
+        baseline, conflicts = self.display_duplicate_fixture()
+        self.manifest['qc_rejected_shots'] = {'2': ['long']}
+        before = copy.deepcopy(self.plan['rows'])
+        with patch.object(editor, '_review', return_value={'verdict': 'uncertain'}) as review:
+            self.assertFalse(editor._repair_display_duplicate_window(self.manifest, self.analysis,
+                self.plan, self.root, None, 2, baseline, conflicts))
+        self.assertEqual(review.call_count, 1)
+        self.assertEqual(self.plan['rows'], before)
+        self.assertFalse(self.plan.get('window_reviews'))
+
+    def test_display_duplicate_honours_shared_budget_and_qc_rejections(self):
+        baseline, conflicts = self.display_duplicate_fixture()
+        self.plan['window_repair_attempts'] = {str(i): {'index': 2, 'status': 'failed'} for i in range(3)}
+        before = copy.deepcopy(self.plan['rows'])
+        with patch.object(editor, '_review', side_effect=AssertionError('Budget exhausted')):
+            self.assertFalse(editor._repair_display_duplicate_window(self.manifest, self.analysis,
+                self.plan, self.root, None, 2, baseline, conflicts))
+        self.plan['window_repair_attempts'] = {}
+        self.manifest['qc_rejected_shots'] = {'2': ['long', 'other']}
+        with patch.object(editor, '_review', side_effect=AssertionError('Rejected candidate')):
+            self.assertFalse(editor._repair_display_duplicate_window(self.manifest, self.analysis,
+                self.plan, self.root, None, 2, baseline, conflicts))
+        self.assertEqual(self.plan['rows'], before)
+
     def test_analysis_identity_retains_semantics_and_rejects_unmigrated_legacy_hash(self):
         self.analysis['vision_analysis'] = {'model': 'fixture', 'cache_wait_s': 0.1, 'partial': False}
         stable = editor._analysis_digest(self.analysis)

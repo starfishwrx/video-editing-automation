@@ -93,6 +93,46 @@ class SentenceContinuityTests(unittest.TestCase):
         self.assertEqual(self.plan['rows'], before)
         self.assertFalse(self.plan.get('continuity_reviews'))
 
+    def outside_duplicates(self, hidden_group_conflict=False):
+        self.plan['ok'] = False
+        self.analysis['shots'].append(self.shots[2])
+        for index in (3, 4):
+            text = 'outside ' + str(index)
+            self.manifest['segments'].append({'text': text, 'audio_duration_us': 2_000_000})
+            self.plan['sentences'].append({'index': index, 'text': text, 'kind': 'selling_point',
+                'selling_points': [{'id': 'p1', 'text': text}], 'candidate_ids': ['other']})
+            self.plan['rows'].append({'index': index, 'parts': [{'shot_id': 'other', 'audio_duration_us': 2_000_000}]})
+            self.plan['reviews'][str(index)] = [copy.deepcopy(self.reviews[2])]
+        if hidden_group_conflict:
+            text = 'hidden repeat'
+            self.manifest['segments'].append({'text': text, 'audio_duration_us': 2_000_000})
+            self.plan['sentences'].append({'index': 5, 'text': text, 'kind': 'selling_point',
+                'selling_points': [{'id': 'p1', 'text': text}], 'candidate_ids': ['long']})
+            self.plan['rows'].append({'index': 5, 'parts': [{'shot_id': 'long', 'audio_duration_us': 2_000_000}]})
+            self.plan['reviews']['5'] = [{**self.original_review,
+                'evidence_intervals_us': [{'start': 0, 'end': 1_000_000}]}]
+        self.identity()
+
+    def test_validated_group_can_wait_for_entirely_external_duplicates(self):
+        self.outside_duplicates()
+        outside = copy.deepcopy(self.plan['rows'][2:])
+        with patch.object(sharing, 'review_group', side_effect=lambda m, context, s, d:self.group(context)):
+            self.assertTrue(sharing.repair(self.manifest, self.analysis, self.plan, self.root,
+                WindowFailure(1, 'long', 'EVIDENCE_SPAN_TOO_LONG'), None))
+        self.assertFalse(self.plan['ok'])
+        self.assertEqual(self.plan['rows'][2:], outside)
+        with self.assertRaisesRegex(ValueError, 'REPEATED_SOURCE_WINDOW:3:4'):
+            editor._assemble(self.manifest, self.analysis, self.plan, narration_timing=None, verify_sources=True)
+
+    def test_external_first_error_cannot_hide_later_conflict_touching_group(self):
+        self.outside_duplicates(hidden_group_conflict=True)
+        before = copy.deepcopy(self.plan['rows'])
+        with patch.object(sharing, 'review_group', side_effect=lambda m, context, s, d:self.group(context)):
+            self.assertFalse(sharing.repair(self.manifest, self.analysis, self.plan, self.root,
+                WindowFailure(1, 'long', 'EVIDENCE_SPAN_TOO_LONG'), None))
+        self.assertEqual(self.plan['rows'], before)
+        self.assertFalse(self.plan['ok'])
+
     def group(self, context=None):
         context = context or next(sharing.proposals(self.manifest, self.analysis, self.plan, 1, None))
         observations = [{'index': m['index'], 'verdict': 'matched', 'same_product': True,
