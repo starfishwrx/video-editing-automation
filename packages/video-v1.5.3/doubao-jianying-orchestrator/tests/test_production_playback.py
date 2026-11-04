@@ -87,6 +87,29 @@ class ProductionPlaybackTests(unittest.TestCase):
         self.assertEqual(prepared['ai_editor_plan']['reviews'], original_reviews)
         self.assertEqual(self.analysis, before)
 
+    def test_duplicate_expansion_really_reviews_fresh_candidates_despite_feasible_old_pool(self):
+        aliases = ['long', 'alias_a', 'alias_b']
+        self.analysis['shots'] = [{**self.shots[0], 'shot_id': sid} for sid in aliases] + [self.shots[2]]
+        old_reviews = [{**self.reviews[0], 'shot_id': sid, 'supported_point_ids': [],
+            'evidence_intervals_us': [{'start': 0, 'end': 1_000_000}]} for sid in aliases]
+        self.plan['display_reviews'] = old_reviews
+        for sentence, row in zip(self.plan['sentences'], self.plan['rows']):
+            sentence.update(kind='product_intro', selling_points=[], candidate_ids=aliases + ['other'])
+            row['parts'] = [{'shot_id': 'long', 'audio_duration_us': 2_000_000}]
+        fresh = {**self.reviews[2], 'supported_point_ids': []}
+        def round_results(ids, _shots, _directory, review, **kwargs):
+            return iter((sid, review(sid)) for sid in ids)
+        with patch.object(editor, '_iter_review_round', side_effect=round_results), \
+             patch.object(editor, '_review', return_value=fresh) as observe:
+            repaired = editor._repair_repeated_window(self.manifest, self.analysis, self.plan,
+                self.root, None, 2, set())
+        self.assertTrue(repaired)
+        self.assertEqual(observe.call_count, 1)
+        self.assertEqual(self.plan['display_reviews'][:3], old_reviews)
+        self.assertEqual(self.plan['duplicate_repair_reviews'][-1]['reviewed_candidates'], ['other'])
+        self.assertTrue(editor._assemble(self.manifest, self.analysis, self.plan,
+            narration_timing=None, verify_sources=True)['ok'])
+
     def test_analysis_identity_retains_semantics_and_rejects_unmigrated_legacy_hash(self):
         self.analysis['vision_analysis'] = {'model': 'fixture', 'cache_wait_s': 0.1, 'partial': False}
         stable = editor._analysis_digest(self.analysis)

@@ -674,6 +674,13 @@ def _assemble(manifest: dict, analysis: dict, plan: dict, *, narration_timing: d
             raise ValueError(f"AI_EDITOR_AUDIO_ALLOCATION_INVALID:{index}")
         reviews = plan["reviews"].get(str(index), []) if sentence["kind"] == "selling_point" else plan["display_reviews"]
         good = {r["shot_id"]: r for r in reviews if r["verdict"] == "matched"}
+        group = continuity_groups.get(row.get("continuity_key"))
+        if group:
+            # Joint pixels may establish a previously unreviewed member phase.
+            # Keep that permission scoped to this validated complete group.
+            member_review = next(r for r in group["review"]["members"] if r["index"] == index)
+            good[group["input"]["shot_id"]] = {**member_review,
+                "source_identity": group["input"]["source_identity"]}
         reuse_reason = str(row.get("scarce_reuse_reason") or "").strip()
         coverage = plan.get("coverage", {}).get(str(index), {})
         if reuse_reason and (sentence["kind"] != "selling_point" or len(good) != 1
@@ -950,24 +957,23 @@ def _repair_repeated_window(manifest: dict, analysis: dict, plan: dict, director
     # Keep all previous observations, and cap newly reviewed candidates to one round.
     retained = [r for r in reviews if isinstance(r, dict)
                 and not failure_fields(str(r.get("error", ""))).get("retryable")]
-    retained_ids = {r.get("shot_id") for r in retained}
-    subset = [sid for sid in all_ids if sid in retained_ids] + new_ids
-    target_sentence = {**sentence, "candidate_ids": subset,
+    target_sentence = {**sentence, "candidate_ids": new_ids,
                        "audio_durations_us": [part["audio_duration_us"]]}
     if display:
         target_sentence.update(index=0, text="同商品通用产品展示池", kind="product_intro", selling_points=[])
     shots = {str(shot["shot_id"]): shot for shot in analysis.get("shots", [])}
-    result, _coverage = _review_pool(manifest, target_sentence, shots, directory,
-                                     narration_timing or {}, existing_reviews=retained,
+    fresh, _coverage = _review_pool(manifest, target_sentence, shots, directory,
+                                     narration_timing or {}, existing_reviews=[],
                                      excluded_ids=qc_rejected_shots(manifest).get(index, set()))
     historical_failures = [r for r in reviews if isinstance(r, dict)
                            and failure_fields(str(r.get("error", ""))).get("retryable")]
-    result = result + historical_failures
+    result = retained + fresh + historical_failures
     if display:
         plan["display_reviews"] = result
     else:
         plan.setdefault("reviews", {})[str(index)] = result
-    plan.setdefault("duplicate_repair_reviews", []).append({"index": index, "new_candidates": new_ids})
+    plan.setdefault("duplicate_repair_reviews", []).append({"index": index, "new_candidates": new_ids,
+        "reviewed_candidates": [r["shot_id"] for r in fresh]})
     _save(directory / "plan.json", plan)
     return try_reviewed()
 

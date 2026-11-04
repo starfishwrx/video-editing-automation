@@ -9,6 +9,46 @@ from ..policy import continuity
 from . import timing_contract as timing
 
 
+def _anchors(plan, members, index, shots, rejected):
+    """Retrieve joint-review windows; these anchors never certify a member."""
+    histories = {s["index"]: list(plan["reviews"].get(str(s["index"]), [])) + [
+        r for r in plan.get("window_reviews", {}).values()
+        if r.get("sentence_index") == s["index"] and not r.get("continuity_key")] for s in members}
+    reviewed = [{r["shot_id"]: r for r in plan["reviews"].get(str(s["index"]), [])
+        if r.get("verdict") == "matched" and r.get("same_product") is True
+        and r["shot_id"] not in rejected.get(s["index"], set())} for s in members]
+    shared = sorted(set.intersection(*(set(r) for r in reviewed)) & shots.keys())
+    seen = set()
+    def novel(sid, windows):
+        key = (sid, min(e["start"] for e in windows), max(e["end"] for e in windows))
+        if key in seen:
+            return False
+        seen.add(key)
+        return True
+    for sid in shared:
+        source = contract.source_identity(shots[sid]["video"])
+        if all(r[sid].get("source_identity") == source for r in reviewed):
+            windows = [ev for r in reviewed for ev in r[sid]["evidence_intervals_us"]]
+            if novel(sid, windows):
+                yield sid, windows
+    # A failed sentence can supply an already observed compact anchor while a
+    # neighbour has never seen that source. Only a NEW full joint pixel review
+    # may establish the neighbour's phase; known negative observations still bar it.
+    anchors = [r for r in plan.get("window_reviews", {}).values()
+        if r.get("sentence_index") == index and not r.get("continuity_key")] + list(
+            plan["reviews"].get(str(index), []))
+    for anchor in anchors:
+        sid = anchor.get("shot_id")
+        if (sid not in shots or anchor.get("verdict") != "matched" or anchor.get("same_product") is not True
+                or any(sid in rejected.get(s["index"], set()) for s in members)
+                or any(r.get("shot_id") == sid and r.get("verdict") in {"mismatch", "uncertain"}
+                       for rows in histories.values() for r in rows)):
+            continue
+        source = contract.source_identity(shots[sid]["video"])
+        if anchor.get("source_identity") == source and novel(sid, anchor["evidence_intervals_us"]):
+            yield sid, anchor["evidence_intervals_us"]
+
+
 def proposals(manifest, analysis, plan, index, narration_timing):
     """Shared candidate IDs retrieve possibilities; only joint pixels certify them."""
     from .ai_editor import qc_rejected_shots
@@ -24,15 +64,9 @@ def proposals(manifest, analysis, plan, index, narration_timing):
                 continue
             if any(r.get("continuity_key") for r in plan["rows"] if first <= r["index"] < first + length):
                 continue
-            reviewed = [{r["shot_id"]: r for r in plan["reviews"].get(str(s["index"]), [])
-                         if r.get("verdict") == "matched" and r.get("same_product") is True
-                         and r["shot_id"] not in rejected.get(s["index"], set())} for s in members]
-            for sid in sorted(set.intersection(*(set(r) for r in reviewed)) & shots.keys()):
+            for sid, windows in _anchors(plan, members, index, shots, rejected):
                 shot = shots[sid]
                 source = contract.source_identity(shot["video"])
-                if any(r[sid].get("source_identity") != source for r in reviewed):
-                    continue
-                windows = [ev for r in reviewed for ev in r[sid]["evidence_intervals_us"]]
                 durations = [timing.duration_for(narration_timing, s["index"], segment=originals[s["index"] - 1]) for s in members]
                 if any(certainty == "estimated" or duration <= 0 for duration, certainty in durations):
                     continue
