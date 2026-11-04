@@ -17,7 +17,7 @@ flowchart TD
     E --> F[GLM-5.3-Flash 画面复审与整稿编排]
     F --> G[程序核验音频分配、证据、源窗和重复区间]
     G --> H[OrchestrationEngine 与无头后端写原生草稿]
-    H --> I[最终切片重新抽帧: 独立视觉 QC v4]
+    H --> I[最终切片重新抽帧: 独立视觉 QC v5]
     I --> J[Windows 四项自动验收与配置的闭环交付]
 ```
 

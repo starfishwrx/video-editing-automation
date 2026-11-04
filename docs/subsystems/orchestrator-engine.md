@@ -31,7 +31,7 @@
 
 ## 4. 输入/输出（字段与状态）
 - 输入 manifest（默认 AI 模式见 `ai_editor.match_manifest`，legacy 见旧 matcher；共同由 `shot_analyzer.match_manifest` 路由）：
-  - AI 模式：`selection_mode=ai_editor`、逐段 `ai_selection` 收据、实际源内容与窗口；引擎保存 `ai_selection_identity.json`，最终 QC v4 重新核对当前切片。
+  - AI 模式：`selection_mode=ai_editor`、逐段 `ai_selection` 收据、实际源内容与窗口；引擎保存 `ai_selection_identity.json`，最终 QC v5 重新核对当前切片。
   - 全局：`delivery_mode`（formal/preview）、`temporary_material_analysis`、`preview_unresolved[]`、`visual_missing_matches[]`、`max_source_reuse`、`avoid_adjacent_source_repeat`
   - 段落 `segments[*]`（选镜产物会补齐）
     - 基本：`video` `source_start` `source_end` `duration` `text` `claim_text` `intent/intents`

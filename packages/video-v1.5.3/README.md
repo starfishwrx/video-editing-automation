@@ -1,6 +1,6 @@
 # Video automation candidate v1.6.0
 
-默认视觉模型为 **GLM-5.3-Flash**（`glm-5.3-flash`），通过火山 Ark 直接发送图片；请保留完整型号，不与 GLM-5.3 或 ChatGLM3 混写。运行时只支持 GLM（`volc_glm` / `glm` / `volc`）与 Qwen（`qwen` / `qwen_compatible`）直连；Codex CLI、Anthropic 和 CCSwitch 调用已移除，旧通道和未知值明确拒绝。默认 `ai_editor` 复审候选并整稿编排，最终 QC 为 v4；`rule_then_ai` 与显式 `legacy` 算法继续通过上述直连通道执行。文字复核与 `JY_AI_EDITOR_QWEN` 路由保留，详见 [ENVIRONMENT.md](ENVIRONMENT.md)。
+默认视觉模型为 **GLM-5.3-Flash**（`glm-5.3-flash`），通过火山 Ark 直接发送图片；请保留完整型号，不与 GLM-5.3 或 ChatGLM3 混写。运行时只支持 GLM（`volc_glm` / `glm` / `volc`）与 Qwen（`qwen` / `qwen_compatible`）直连；Codex CLI、Anthropic 和 CCSwitch 调用已移除，旧通道和未知值明确拒绝。默认 `ai_editor` 复审候选并整稿编排，最终 QC 为 v5；`rule_then_ai` 与显式 `legacy` 算法继续通过上述直连通道执行。文字复核与 `JY_AI_EDITOR_QWEN` 路由保留，详见 [ENVIRONMENT.md](ENVIRONMENT.md)。
 
 1.6.0 默认无头建稿，BGM 为空自动选曲，显式曲目优先；独立QC、NAS分发与归档读取原生活动时间轴，正式四项门禁保留。见 [ENVIRONMENT.md](ENVIRONMENT.md) 的后端、字体与草稿库配置。
 
