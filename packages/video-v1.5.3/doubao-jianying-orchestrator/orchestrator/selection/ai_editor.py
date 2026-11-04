@@ -598,12 +598,12 @@ def _assemble(manifest: dict, analysis: dict, plan: dict, *, narration_timing: d
                     raise ValueError("AI_EDITOR_INPOINT_INVALID")
                 observed["source_start"] = max(float(shot["source_start"]), part["source_start_us"] / 1e6)
             cfg = {**manifest, "tail_pad_s": manifest.get("tail_pad_s", 0) if n == len(parts) - 1 else 0}
-            if "source_start_us" in part:
+            if "source_start_us" in part or window_key:
                 # The guard belongs to the original scene, not the requested in-point.
                 guard = max(0.0, shot_analyzer._number(manifest.get("head_trim_s"), shot_analyzer.DEFAULT_HEAD_TRIM_S))
                 offset = observed["source_start"] - float(original_shot["source_start"])
                 cfg["head_trim_s"] = max(0.0, guard - offset)
-                cfg["tail_trim_s"] = max(0.0, float(manifest.get("tail_trim_s", 0) or 0)
+                cfg["tail_trim_s"] = max(0.0, shot_analyzer._number(manifest.get("tail_trim_s"), shot_analyzer.DEFAULT_TAIL_TRIM_S)
                                           - (float(original_shot["source_end"]) - float(shot["source_end"])))
             solution = shot_analyzer.candidate_window(observed, audio_duration_us=part["audio_duration_us"],
                 manifest=cfg, time_sensitive=review["time_sensitive"])
@@ -617,6 +617,8 @@ def _assemble(manifest: dict, analysis: dict, plan: dict, *, narration_timing: d
                     "preferred_speed": observed["preferred_speed"],
                     "time_sensitive": review["time_sensitive"],
                     "scene_source_start": shot["source_start"], "scene_source_end": shot["source_end"],
+                    "guard_source_start": original_shot["source_start"],
+                    "guard_source_end": original_shot["source_end"],
                     "evidence_intervals": observed["evidence_intervals"], "text": sentence["text"]}
             part_sentence = {**sentence, "selling_points": [p for p in sentence["selling_points"] if p["id"] in review.get("supported_point_ids", [])]}
             item["ai_selection"] = contract.make_receipt(item, index=index, sentence=part_sentence,

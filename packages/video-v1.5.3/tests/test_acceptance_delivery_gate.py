@@ -195,12 +195,16 @@ class FinalizationContextTests(unittest.TestCase):
                 closed_loop_policy=ROOT / "WINDOWS_VIDEO_CLOSED_LOOP_RULES_20260930.json", python=sys.executable)
             before_environment = dict(worker.os.environ)
             with patch.object(worker, "DRAFTS", root / "incorrect-global"), \
+                 patch.dict(worker.os.environ, {"JY_TABLE_UPDATE_TIMEOUT_S": "900"}), \
                  patch.object(worker, "ship_one") as ship, \
-                 patch.object(worker.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, '{"ok":true}', '')):
+                 patch.object(worker.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, '{"ok":true}', '')) as external:
                 result = worker.finalize_closed_loop(task_dir, fixture["task"], ["draft"], fixture["qc_reports"],
                                                      context=context)
                 ship.assert_not_called()
                 self.assertEqual(worker.DRAFTS, root / "incorrect-global")
+                updates = [call for call in external.call_args_list if "table-update" in call.args[0]]
+                self.assertEqual(len(updates), 1)
+                self.assertEqual(updates[0].kwargs["timeout"], 900)
             self.assertTrue(result["ok"], result)
             self.assertEqual(dict(worker.os.environ), before_environment)
             done = pe.read(task_dir / "done.json")

@@ -303,6 +303,47 @@ class AIEditorTests(unittest.TestCase):
         plan["rows"][0]["parts"][0]["source_start_us"] = 100_000
         self.assertFalse(self.result(plan)["ok"])
 
+    def test_reviewed_subwindow_keeps_guard_origin_through_engine(self):
+        from orchestrator.application.engine import OrchestrationEngine
+        from orchestrator.domain.clips import Clip
+        from orchestrator import timing_contract
+        self.manifest.update(head_trim_s=.3, tail_trim_s=.2)
+        plan = self.plan()
+        plan["window_reviews"] = {"narrow": {**self.review, "sentence_index": 1,
+            "review_window_us": {"start": 2_000_000, "end": 4_000_000}}}
+        plan["rows"][0]["parts"][0]["window_review_key"] = "narrow"
+        result = self.result(plan)
+        self.assertTrue(result["ok"], result)
+        item = result["segments"][0]
+        self.assertEqual((item["scene_source_start"], item["scene_source_end"]), (2, 4))
+        self.assertEqual((item["guard_source_start"], item["guard_source_end"]), (0, 6))
+        engine = OrchestrationEngine.__new__(OrchestrationEngine)
+        engine.m, engine._raw_segments = self.manifest, [item]
+        clip = Clip(str(self.video), item["source_start"], 2, source_end=item["source_end"],
+            video_duration=6, raw_index=0, visual_role="product_display",
+            evidence_intervals=item["evidence_intervals"],
+            speed_range_override=item["speed_range_override"])
+        request = engine._timing_request(clip, 2_000_000)
+        self.assertEqual((request.lo_bound_us, request.hi_bound_us), (2_000_000, 4_000_000))
+        self.assertEqual((request.evidence_start_us, request.evidence_end_us), (2_000_000, 3_000_000))
+        self.assertTrue(timing_contract.solve_window(request).ok)
+        # Invalid origins cannot consume the original scene's safety guard.
+        item["guard_source_start"] = 3
+        self.assertEqual(engine._timing_request(clip, 2_000_000).lo_bound_us, 2_300_000)
+        # A reviewed subwindow still cannot include the original head waste.
+        plan["window_reviews"]["narrow"]["review_window_us"] = {"start": 100_000, "end": 4_000_000}
+        plan["window_reviews"]["narrow"]["evidence_intervals_us"] = [{"start": 100_000, "end": 1_000_000}]
+        self.assertFalse(self.result(plan)["ok"])
+
+    def test_reviewed_subwindow_keeps_default_tail_guard(self):
+        self.manifest.pop("tail_trim_s")
+        plan = self.plan()
+        plan["window_reviews"] = {"narrow": {**self.review, "sentence_index": 1,
+            "review_window_us": {"start": 4_000_000, "end": 5_900_000},
+            "evidence_intervals_us": [{"start": 4_000_000, "end": 5_850_000}]}}
+        plan["rows"][0]["parts"][0]["window_review_key"] = "narrow"
+        self.assertFalse(self.result(plan)["ok"])
+
     def test_editor_receives_actual_speed_and_content_identity(self):
         plan = self.plan()
         with mock.patch.object(editor, "_call", return_value={"rows": plan["rows"]}) as call:

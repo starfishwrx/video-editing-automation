@@ -7,6 +7,14 @@
 
 ## 新增条目
 
+### L-20261104-01 复核子窗与原始保护区必须保留不同边界
+- status: OPEN
+- hits: 1
+- 模块: selection/ai_editor、application/engine
+- 现象: 规划已扣除原始场景的头废料，复核窄窗却覆盖了scene起点，写稿再次扣头保护，造成证据起点恰好早300毫秒的伪越界。
+- 以后怎么做: 保留实际复核场景边界，另带原始guard原点；验证包含关系后仅扣剩余保护，头尾默认值与求解器一致。回归要串起规划到engine请求并传入真实证据，另保留废料区和复核范围外证据的拒绝反例；恢复旧缓存重新assemble，不直接篡改匹配报告。
+- 证据: test_ai_editor.py 的reviewed_subwindow正负例和test_paper_production.py既有连续取段覆盖。
+
 ### L-20261103-13 自动选曲回退必须区分坏素材和环境故障
 - status: OPEN
 - hits: 1
