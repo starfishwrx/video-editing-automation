@@ -813,7 +813,7 @@ class EngineInvariantItemTests(unittest.TestCase):
         """端点上取到的最慢速度不得被自己的防线误判 SPEED_OUT_OF_RANGE。"""
         from orchestrator.engine import Clip
         eng = self._engine()
-        lo, hi = tc.speed_range_for_role("product_display")
+        lo, hi = tc.effective_speed_range("product_display")
         c = Clip(video="a.mov", source_start=0.0, duration=4.28, audio_mode="tts",
                  visual_role="product_display")
         c.video_duration = 12.0

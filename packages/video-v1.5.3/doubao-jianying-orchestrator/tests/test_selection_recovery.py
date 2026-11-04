@@ -132,7 +132,8 @@ class SelectionRecoveryTests(unittest.TestCase):
                     ValueError("AI_EDITOR_PLAN_COVERAGE:missing=[1]"), {}]
         with patch.object(editor, "_call", side_effect=proposals) as call, \
                 patch.object(editor, "_repair_selected_window", return_value=False), \
-                patch.object(editor, "_assemble", side_effect=failures):
+                patch.object(editor.sentence_continuity, "repair", return_value=False), \
+                patch.object(editor, "_revalidate_rows", side_effect=failures):
             editor._edit_plan(self.manifest, self.analysis, plan, self.root)
         self.assertTrue(plan["ok"])
         self.assertEqual([row["index"] for row in plan["rows"]], [1, 2])

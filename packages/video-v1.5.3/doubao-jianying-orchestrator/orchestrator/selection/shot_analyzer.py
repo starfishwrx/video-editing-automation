@@ -74,7 +74,7 @@ EVIDENCE_HALF_WINDOW = 0.6
 # 正式稿：已审核的证据比这句口播长时，加速播完这段证据，不再报装不下。
 # 只加速、不慢放；上限与卫品吸水实验吸收段一致（weipin absorb_max_speed=20）。
 # 预览仍收窄证据。
-EVIDENCE_FIT_SPEED_MAX = 20.0
+EVIDENCE_FIT_SPEED_MAX = timing_contract.playback.PROCESS_MAX
 # 一句话最多跨几个镜头（定案第 6 条的多镜组合）。
 # 上限存在的目的是**防走捷径**：不设限的话，任何长句都能靠「把素材库切碎拼上去」
 # 过关，成片会变成一堆闪帧。超过这个数仍无解就如实报 MATERIAL_GAP，让运营补素材。
@@ -164,15 +164,10 @@ def _preview_delivery(manifest: dict[str, Any] | None) -> bool:
 
 def _fit_speed_range(shot: dict[str, Any], *, manifest: dict[str, Any] | None,
                      time_sensitive: bool) -> tuple[float, float]:
-    """画面角色的变速范围。正式稿的时间相关证据允许加速到 20 倍以罩住整段证据。"""
-    speed_min, speed_max = timing_contract.speed_range_for_role(
-        demo_actions.visual_role(shot), time_sensitive=time_sensitive)
-    if shot.get("selection_mode") == "ai_editor":
-        return timing_contract.effective_speed_range(demo_actions.visual_role(shot),
-            time_sensitive=time_sensitive, override=shot.get("speed_range_override"))
-    if time_sensitive and not _preview_delivery(manifest):
-        speed_max = max(speed_max, EVIDENCE_FIT_SPEED_MAX)
-    return speed_min, speed_max
+    """Use the shared production policy; role labels cannot grant acceleration."""
+    return timing_contract.effective_speed_range(demo_actions.visual_role(shot),
+        time_sensitive=time_sensitive, override=shot.get("speed_range_override"),
+        playback_observation=shot.get("playback_observation"))
 
 
 def _absorb_text_role(manifest: dict[str, Any], text: str) -> str:
@@ -197,9 +192,8 @@ def candidate_window(shot: dict[str, Any], *, audio_duration_us: int,
 
     用户定案（2026-09-16）：
     - 每个候选都要跑求解，不能再用「2 秒占位探针 / 字符数估算」短路；
-    - 变速范围由画面角色决定（``speed_range_for_role``）。时间相关的直接证据
-      不慢放；正式稿证据比口播长时加速到最多 20 倍（与吸水吸收段一致），
-      把已审核的那一段播完。预览仍锁 1.0，由调用方收窄证据。
+    - 变速范围由共享播放策略决定。只有已复看的纯过程可在 1–3 倍内求解；
+      未知阶段、关键动作、结果与计时证明保持原速，证据不得为凑句长裁短。
     - 无解返回结构化原因码，**引擎不得静默换镜**，由规划层决定换镜/多镜/缺口。
 
     返回 `timing_contract.WindowSolution`；`audio_duration_us<=0` 时同样返回失败解

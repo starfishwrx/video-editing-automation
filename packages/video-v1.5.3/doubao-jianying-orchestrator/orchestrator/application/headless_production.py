@@ -252,7 +252,8 @@ def write_draft(engine, clips, bgm_path):
                 'schema': 'production-audio-v1', 'bgm_choice': getattr(engine, '_bgm_choice', None),
                 'bgm_asset_sha256': hashlib.sha256(Path(bgm_path).read_bytes()).hexdigest(),
                 'event_duration_us': engine.total_us}, ensure_ascii=False, indent=2), encoding='utf-8')
-        result = engine._draft_result(clips, bgm_path, name, draft_dir, root, built, source, caption, engine.total_us)
+        result = engine._draft_result(clips, bgm_path, name, draft_dir, root, built, source, caption, engine.total_us,
+                                      source_overrides=video_overrides)
         result.update(draft_backend='headless', headless_build=str(work / 'build'),
                       home_index_modified=False, native_ui_acceptance='pending')
         result['draft_open_guidance'] = ['使用交付草稿目录打开工程；素材引用已绑定交付位置。']

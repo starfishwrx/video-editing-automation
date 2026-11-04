@@ -52,6 +52,8 @@ class Clip:
     # v1.5.2 场景规则（卫品指令）显式给出的变速范围，优先于画面角色的范围。
     speed_range_override: Any = None
     preferred_speed: float = 1.0
+    playback_observation: Any = None
+    continuity_group: Any = None
     # 场景规则按动作相位定窗时的头尾保护区（秒），优先于 manifest 的 head/tail_trim_s。
     guard_override: Any = None
     # 转场把手（定案第 5 条：与首尾废料保护区**分开**扣）。转场会吃掉紧邻切点的

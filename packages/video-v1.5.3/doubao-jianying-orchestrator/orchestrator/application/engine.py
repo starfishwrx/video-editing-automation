@@ -481,6 +481,8 @@ class OrchestrationEngine:
                     time_sensitive=bool(it.get("time_sensitive")),
                     speed_range_override=it.get("speed_range_override"),
                     preferred_speed=it.get("preferred_speed", 1.0),
+                    playback_observation=it.get("playback_observation"),
+                    continuity_group=it.get("continuity_group"),
                     guard_override=it.get("guard_override"),
                     raw_index=i - 1,
                 )
@@ -839,6 +841,7 @@ class OrchestrationEngine:
                 speed_range_override=(part.get("speed_range_override")
                                       or raw.get("speed_range_override")),
                 preferred_speed=part.get("preferred_speed", raw.get("preferred_speed", 1.0)),
+                playback_observation=part.get("playback_observation"),
                 raw_index=c.raw_index,
             )
             if sub.audio_mode == "file":
@@ -1402,7 +1405,8 @@ class OrchestrationEngine:
         speed_min, speed_max = timing_contract.effective_speed_range(
             self._clip_role(clip),
             time_sensitive=bool(getattr(clip, "time_sensitive", False)),
-            override=getattr(clip, "speed_range_override", None))
+            override=getattr(clip, "speed_range_override", None),
+            playback_observation=getattr(clip, "playback_observation", None))
         # 可用源区间 = **被分析过的场景窗口**，不是整条素材。规划阶段抽帧、AI 打
         # 标签都只覆盖这一段；窗口越过 scene_source_end 会播到没分析过的画面，
         # 会被 final_visual_evidence_gate 拦下。段落没写 source_end 时才退回整条素材。
@@ -1886,7 +1890,8 @@ class OrchestrationEngine:
             row = by_index.get(index, {})
             speed_min, speed_max = timing_contract.effective_speed_range(
                 self._clip_role(c), time_sensitive=bool(c.time_sensitive),
-                override=getattr(c, "speed_range_override", None))
+                override=getattr(c, "speed_range_override", None),
+                playback_observation=getattr(c, "playback_observation", None))
             speed = float(c.video_speed or 1.0)
             # 源出点优先取**求解器给的那个数**（`solved_window`），拿不到才按
             # 「入点 + 输出时长 × 速度」回算。回算本身没错，但它是用吸附后的速度
@@ -2095,7 +2100,7 @@ class OrchestrationEngine:
         # 源侧真实出点：切片消耗的素材长度 = 输出时长 × 速度
         prev_end = prev.source_start + prev.duration * prev_speed
         peak = (cur.stability or {}).get("peak_motion")
-        if cut_inside_span:
+        if cut_inside_span or prev.continuity_group or cur.continuity_group:
             # 兄弟缝：一句话被拆成几段画面，中间**不得**有转场，也就**不得**有把手。
             # 求解器是拿 `handles=(0,0)` 解的这几段（规划层按 `solve_span` 逐段解），
             # 这里若留着上一轮/上一段写下的陈旧把手，等于事后偷偷把素材可用区间
@@ -2318,7 +2323,44 @@ class OrchestrationEngine:
         return None
 
     # ---------- 需求6/7：构建并安全写入草稿 ----------
+    def _playback_gate(self, clips: list[Clip]) -> Optional[dict]:
+        from ..policy import playback
+        conflicts = []
+        for index, clip in enumerate(clips):
+            solved = clip.solved_window if isinstance(clip.solved_window, dict) else {}
+            try:
+                start = to_us(clip.source_start)
+                target = to_us(clip.duration)
+                # Both writers consume this exact integer source length. A
+                # stale solution must never substitute a shorter approved end.
+                end = start + round(target * clip.video_speed)
+                if "source_end" in solved and abs(to_us(float(solved["source_end"])) - end) > 2:
+                    conflicts.append({"code": "PLAYBACK_SOLVED_WINDOW_CHANGED",
+                                      "index": clip.raw_index + 1 if clip.raw_index >= 0 else index + 1,
+                                      "actual_end_us": end, "solved_end_us": to_us(float(solved["source_end"]))})
+            except (ValueError, TypeError, OverflowError):
+                start = end = target = None
+            conflicts.extend(playback.conflicts(start_us=start, end_us=end, target_us=target,
+                speed=clip.video_speed, time_sensitive=clip.time_sensitive,
+                observation=clip.playback_observation,
+                index=clip.raw_index + 1 if clip.raw_index >= 0 else index + 1))
+        if conflicts:
+            return {"status": "TIMING_INFEASIBLE", "failure_class": "timing",
+                    "failure_code": "PLAYBACK_POLICY_CONFLICT", "retryable": False,
+                    "resume_stage": "semantic_match", "draft_path": None,
+                    "formal_delivery_allowed": False, "playback_policy_version": playback.VERSION,
+                    "conflicts": conflicts}
+        return None
+
     def write_draft(self, clips: list[Clip], bgm_path: Optional[str]) -> dict:
+        from ..quality.continuity import runtime_errors
+        errors = runtime_errors(clips, self.m.get("segments", []))
+        if errors:
+            return {"status": "TIMING_INFEASIBLE", "failure_code": "CONTINUITY_CONFLICT",
+                    "issues": errors, "resume_stage": "semantic_match", "formal_delivery_allowed": False}
+        gate = self._playback_gate(clips)
+        if gate:
+            return gate
         backend = str(self.m.get("draft_backend") or os.environ.get("JY_DRAFT_BACKEND") or "headless")
         if backend == "headless":
             from .headless_production import write_draft
@@ -2652,7 +2694,19 @@ class OrchestrationEngine:
                                   caption_source, caption_result, actual_total_us)
 
     def _draft_result(self, clips, bgm_path, name, draft_dir, expected_root, built,
-                      caption_source, caption_result, actual_total_us):
+                      caption_source, caption_result, actual_total_us, *, source_overrides=None):
+        from ..quality.continuity import draft_errors
+        errors = draft_errors(draft_dir, clips, source_overrides=source_overrides)
+        groups = list({str(c.continuity_group["input"]["members"][0]["index"]): c.continuity_group
+                       for c in clips if c.continuity_group}.values())
+        if groups:
+            (Path(draft_dir) / "continuity_review.json").write_text(json.dumps({
+                "schema": "sentence-continuity-readback-v1", "groups": groups,
+                "status": "PARAMETERS_VERIFIED" if not errors else "READBACK_FAILED", "issues": errors,
+                "visual_acceptance": "independent_output_qc_required"}, ensure_ascii=False, indent=2), encoding="utf-8")
+        if errors:
+            return {"status": "DRAFT_INVALID", "draft_path": str(draft_dir), "issues": errors,
+                    "formal_delivery_allowed": False}
         intelligent = self.intelligent_mode_authorized()
         voice_rec = getattr(self, "_voice_rec", None)
         selected_voice = getattr(self, "_global_voice", self.m.get('voice') or self.DEFAULT_VOICE_KEY)
