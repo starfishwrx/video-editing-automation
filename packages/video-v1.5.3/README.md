@@ -18,7 +18,7 @@
 
 草稿交付修复已合入候选源码：默认 UNC 分发新增实际媒体路径验收；历史加密稿可在用户确认后恢复原始生成版。
 用法与验收边界见 [草稿分发与生成版恢复](doubao-jianying-orchestrator/references/draft_delivery_and_recovery.md)。
-源码合包不等于安装：部署前回读实际运行版本，保留正在运行的队列。历史 JyPoll/JyRun 执行链已退役，`jy_poll.ps1` 与 `run_task.template.ps1` 调用即失败；整体任务使用 `scripts/run_pipeline.ps1`；单任务也可使用 manifest CLI。源码更新不修改本机计划任务和既有生产生成脚本，也不自动启用队列。
+源码合包不等于安装：部署前回读实际运行版本，保留正在运行的队列。历史 JyPoll/JyRun 执行链已退役，`jy_poll.ps1` 与 `run_task.template.ps1` 调用即失败；单任务、批量和定时使用 `scripts/run_pipeline.ps1`；单任务指定 `-RecordId`。底层 manifest CLI 不单独承担独立 QC 和交付闭环。源码更新不修改本机计划任务和既有生产生成脚本，也不自动启用队列。
 
 [已验证修复合包技能](doubao-jianying-orchestrator/references/validated_fix_to_release.md) 与
 `tools.release_package` 一起随包提供。局部迭代用 `--checks delivery`，发版用 `--checks full`；

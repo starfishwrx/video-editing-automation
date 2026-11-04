@@ -67,45 +67,41 @@ if ($LASTEXITCODE -ne 0) { throw '抽帧失败；检查输出中的素材或探�
 
 合成图案只用于验证文件路径、解码、抽帧和 JSON。它不提供商品卖点或识图效果的验证素材。再次演示时使用新的 report 目录以保留之前的结果。
 
-## 4. 真实素材的视觉分析与预览建稿
+## 4. 真实素材的单任务预览
 
-先把 `work/quickstart/manifest.json` 的 `product`、`category`、`material_sources`、逐句 `narration` 替换成真实同 SKU 任务。相对素材路径以 manifest 所在目录为基准；保留 `selection_mode=ai_editor`。需要指定音色时按[音频说明](subsystems/audio-voice.md)填写 `voice`，并准备对应 TTS 运行环境。
-
-通过本机安全配置为进程提供 Ark 凭据：优先 `ARK_API_KEY`，其次 `JY_VOLC_API_KEY`。本地环境检查不验证云端密钥。下面的视觉分析/建稿会发送实际帧与脚本文字并使用所配置服务的额度。
+从队列示例创建独立副本，填写真实同 SKU 素材目录、逐句口播、商品信息及需要的音色；完整字段见 [Windows 脚本流水线](windows-pipeline.md)。保留 `delivery_mode=preview`。默认选镜策略为 `ai_editor`，无需额外开关；任务或旧环境变量显式覆盖策略时，以运行报告中的实际来源和警告为准。
 
 ```powershell
-uv run --frozen python -X utf8 doubao-jianying-orchestrator/run.py env --profile base
-# 此处仅分析素材；base检查通用工具链，不声明无头建稿已就绪。
-uv run --frozen python -X utf8 doubao-jianying-orchestrator/run.py analyze-shots `
-  --input work/quickstart/manifest.json --report-dir work/quickstart/vision-report
+if (-not (Test-Path work/quickstart/queue.json)) {
+    Copy-Item examples/queue.example.json work/quickstart/queue.json
+}
+# 编辑 queue.json，示例记录的 record_id 为 example-product-a。
 ```
 
-核对 `shot_candidates.json` 的 `vision_analysis.errors`、模型摘要和各镜头观察。命令退出码或 `SHOT_ANALYSIS_READY` 本身不保证视觉成功，未知项需要先处理。
+通过本机安全配置为进程提供模型凭据。默认 GLM 优先读取 `ARK_API_KEY`，其次 `JY_VOLC_API_KEY`；使用 Qwen 时提供上文所列 Qwen 配置。本地预检只检查配置是否齐全，不验证云端凭据。后续完整流程会发送实际素材帧和脚本文字，并使用模型与配音服务的额度。
 
-建稿前，按环境合同准备已授权的独立无头后端，配置 `JIANYING_HEADLESS_ROOT`、匹配的 `JIANYING_INSTALL_DIR` 和静态字体 `JY_HEADLESS_FONT`（或任务的 `subtitle_font_path`）；草稿库放在剪映首页库之外。
+建稿前，按环境合同准备已授权的无头后端，配置 `JIANYING_HEADLESS_ROOT`、匹配的 `JIANYING_INSTALL_DIR` 和静态字体 `JY_HEADLESS_FONT`（或任务的 `subtitle_font_path`）；草稿库放在剪映首页库之外。
 
-新机器或新的 Windows 运行账号还需要完成剪映首次初始化：用实际运行流水线的同一用户启动已安装的剪映，完成首次设置，让剪映自行建立默认本地草稿目录和首页索引。仅创建独立输出目录不能替代这一步。若预检返回 `HEADLESS_HOST_NOT_INITIALIZED`，先完成初始化再重跑；不要手工创建、复制或覆盖 `root_meta_info.json`，也不要借用其他账号的索引。此要求来自当前原生后端的宿主检查，不代表流水线会向首页登记草稿。
+新机器或新的 Windows 运行账号还需要完成剪映首次初始化：用实际运行流水线的同一用户启动已安装的剪映，完成首次设置，让剪映自行建立默认本地草稿目录和首页索引。仅创建独立输出目录不能替代这一步。若预检返回 `HEADLESS_HOST_NOT_INITIALIZED`，先完成初始化再重跑；不要手工创建、复制或覆盖 `root_meta_info.json`，也不要借用其他账号的索引。
 
-先运行默认生产环境检查，确认通过后再调用配音或视觉服务：
+先检查默认生产环境，再从同一个入口运行队列中的单条任务：
 
 ```powershell
 New-Item -ItemType Directory -Force $env:JY_DRAFT_ROOT | Out-Null
-uv run --frozen python -X utf8 doubao-jianying-orchestrator/run.py env --input work/quickstart/manifest.json
+uv run --frozen python -X utf8 doubao-jianying-orchestrator/run.py env
 if ($LASTEXITCODE -ne 0) { throw '请先处理生产环境报告中的阻断项。' }
+# 查看计划；不调用模型，也不建稿。
+powershell -NoProfile -File scripts/run_pipeline.ps1 `
+  -QueuePath work/quickstart/queue.json -RecordId example-product-a -DryRun
+# 完整执行将调用已配置的模型及配音服务。
+powershell -NoProfile -File scripts/run_pipeline.ps1 `
+  -QueuePath work/quickstart/queue.json -RecordId example-product-a
 ```
 
-`env` 默认检查基础工具链、实际所选写稿后端及视觉服务配置是否齐全，未就绪返回非零退出码；它只检查密钥是否存在，不连接云端验证有效性。正式 build 也会在配音/视觉开销前复验。
+入口还会按任务配置在素材分析或配音之前检查建稿环境、媒体工具及模型配置。根据运行结果、`work/pipeline_runs/` 与 `work/<record_id>/done.json` 处理阻断；草稿写出后独立视觉 QC 会读取实际草稿。预览仅保留本地，不会自动变成正式交付。真实剪映打开、编辑保存重开以及人工音画审阅仍需另外验收。
 
-```powershell
-uv run --frozen python -X utf8 doubao-jianying-orchestrator/run.py build `
-  --input work/quickstart/manifest.json --report-dir work/quickstart/build-attempt-01 `
-  --delivery-mode preview
-```
-
-`build` 先使用显式 `--delivery-mode`，否则使用 manifest 的 `delivery_mode`；两者均未指定时是 preview。正式任务须明确声明 formal。根据输出的 `status` / `next_action` 处理音色确认、环境、模型或素材阻断。成功时按返回路径打开草稿，并查看 `shot_match_report.json`、`ai_editor/plan.json` 和任务结果。每次尝试使用新 report 目录。
-
-独立视觉 QC、真实剪映打开与人工审阅分别执行，见[视觉子系统](subsystems/visual-matching.md)和[运行时合同](../packages/video-v1.5.3/doubao-jianying-orchestrator/references/runtime_contract.md)。预览保持未认证，不会因为生成了草稿就成为正式交付。
+`run.py analyze-shots` 和 `run.py build` 是诊断与嵌入用的底层命令，不单独构成从任务到独立质检和交付的完整入口。不要把只运行底层命令的结果当作整条流程验收。
 
 ## 5. 接入生产前
 
-整个项目的手动与定时运行入口见 [Windows 脚本流水线](windows-pipeline.md)。生产队列、NAS 和飞书使用本机配置；Mac 交接已删除。历史 JyPoll/JyRun 入口（`jy_poll.ps1` / `run_task.template.ps1`）已退役，调用会立即失败；单条任务继续使用上述 manifest CLI，已有批队列使用 `scripts/run_pipeline.ps1` 运行一轮，内部直接调用 dispatcher。源码更新不会自动启用队列、修改计划任务或替换已有生产生成脚本。按照[发布流程](release-process.md)和既定真实任务观察完成验收后再部署，保留当前队列和回滚依据。
+单任务、批量和定时使用 [Windows 脚本流水线](windows-pipeline.md) 的同一入口；单条任务指定 `-RecordId`。生产队列、NAS 和飞书使用本机配置；历史 JyPoll/JyRun 入口（`jy_poll.ps1` / `run_task.template.ps1`）已退役，调用会立即失败。源码更新不会自动启用队列、修改计划任务或替换已有生产生成脚本。按照[发布流程](release-process.md)和既定真实任务观察完成验收后再部署，保留当前队列和回滚依据。

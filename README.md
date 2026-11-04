@@ -110,13 +110,13 @@ powershell -NoProfile -File scripts/run_pipeline.ps1
 
 手动与定时运行使用同一入口。注册任务计划程序是单独操作，路径参数、队列字段、重试预算及状态文件见[Windows 脚本流水线](docs/windows-pipeline.md)。
 
-单任务也可使用 manifest CLI；准备好输入后，显式选择预览模式并使用新的报告目录：
+只处理队列中的一条时，仍使用同一个入口，指定该任务的 `record_id`：
 
 ```powershell
-uv run --frozen python -X utf8 doubao-jianying-orchestrator/run.py build `
-  --input work/task/manifest.json --report-dir work/task/preview-01 `
-  --delivery-mode preview
+powershell -NoProfile -File scripts/run_pipeline.ps1 -RecordId example-product-a
 ```
+
+此路径与批量及定时运行共用素材准备、选镜、建稿、独立质检和交付门禁。`run.py build` 是用于诊断或嵌入的底层建稿命令，不单独完成队列的独立质检和交付。
 
 ## 验收与恢复
 
