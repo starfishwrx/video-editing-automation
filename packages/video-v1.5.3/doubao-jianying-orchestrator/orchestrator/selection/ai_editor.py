@@ -26,6 +26,15 @@ ROUND_SIZE = 8
 ALTERNATIVE_REVIEW_LIMIT = 2 * ROUND_SIZE
 
 
+def _analysis_digest(analysis: dict) -> str:
+    """Bind all analysis facts, excluding embedded plans and lock telemetry."""
+    payload = {k: v for k, v in analysis.items() if k != "ai_editor_plan"}
+    vision = payload.get("vision_analysis")
+    if isinstance(vision, dict):
+        payload["vision_analysis"] = {k: v for k, v in vision.items() if k != "cache_wait_s"}
+    return contract.digest(payload)
+
+
 def _save(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8")
@@ -38,8 +47,9 @@ def snapshot_previous_analysis(analysis: dict, report_dir: Path) -> None:
     try:
         previous = json.loads((directory / "plan.json").read_text(encoding="utf-8"))
         payload = {k: v for k, v in analysis.items() if k != "ai_editor_plan"}
-        digest = contract.digest(payload)
-        if previous.get("identity", {}).get("analysis_sha256") != digest:
+        digest = previous.get("identity", {}).get("analysis_sha256")
+        if (digest != previous.get("resume_identity", {}).get("analysis_sha256")
+                or digest not in {contract.digest(payload), _analysis_digest(payload)}):
             return
         path = directory / f"previous_analysis_{digest}.json"
         if path.exists():
@@ -52,23 +62,16 @@ def snapshot_previous_analysis(analysis: dict, report_dir: Path) -> None:
 
 
 def _duration_migration_equivalent(previous: dict, current: dict) -> bool:
-    """Compare all facts, excluding only duration ruler and cache hit counters."""
+    """Compare all facts, excluding only duration ruler and lock telemetry."""
     def normalize(analysis):
         result = copy.deepcopy({k: v for k, v in analysis.items() if k != "ai_editor_plan"})
         for row in result.get("shots", []):
             for key in ("material_duration_us", "material_duration_source",
-                        "material_duration_confidence", "analysis_cache_hit"):
+                        "material_duration_confidence"):
                 row.pop(key, None)
-        cache = result.get("material_cache")
-        if isinstance(cache, dict):
-            for key in ("sources_hit", "sources_prepared"):
-                cache.pop(key, None)
         vision = result.get("vision_analysis")
         if isinstance(vision, dict):
-            for key in ("batch_count", "responses", "cache_hits", "prior_model_cache_hits",
-                        "text_cache_hits", "rejected_cache_hits", "cache_misses", "stale_local",
-                        "rule_rechecked", "rule_recheck_reused", "text_resumed", "stage_seconds", "cache_wait_s"):
-                vision.pop(key, None)
+            vision.pop("cache_wait_s", None)
         return result
     return normalize(previous) == normalize(current)
 
@@ -83,15 +86,26 @@ def _duration_resume_safe(previous: dict, resume_identity: dict, analysis: dict,
         if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
             return False
         snapshot = json.loads((directory / f"previous_analysis_{digest}.json").read_text(encoding="utf-8"))
-        if (old_identity.get("analysis_sha256") != contract.digest(snapshot)
+        if (old_identity.get("analysis_sha256") != previous.get("identity", {}).get("analysis_sha256")
+                or old_identity.get("analysis_sha256") not in {contract.digest(snapshot), _analysis_digest(snapshot)}
                 or not _duration_migration_equivalent(snapshot, analysis)):
             return False
+        # A legacy raw digest can differ solely because the newer digest omits
+        # lock-wait telemetry. Its full snapshot proves no material bound moved.
+        identity_only = _analysis_digest(snapshot) == _analysis_digest(analysis)
         # Joint groups and reviewed subwindows must be rebuilt if their reviewed
         # range crosses a new physical boundary; old facts stay in the snapshot.
         shots = {str(s["shot_id"]): s for s in analysis.get("shots", [])}
-        if any(row.get("continuity_key") for row in previous.get("rows", [])):
-            return False
         for row in previous.get("rows", []):
+            group_key = row.get("continuity_key")
+            if group_key:
+                if not identity_only:
+                    return False
+                context = previous["continuity_reviews"][group_key]["input"]
+                limit = shots[context["shot_id"]].get("material_duration_us")
+                end = context["window_us"]["end"]
+                if type(limit) is not int or type(end) is not int or end > limit:
+                    return False
             for part in row.get("parts", []):
                 key = part.get("window_review_key")
                 if key:
@@ -555,7 +569,8 @@ def qc_rejected_shots(manifest: dict) -> dict[int, set[str]]:
 def _review_pool(manifest: dict, sentence: dict, shots: dict, directory: Path, audio: dict, *,
                  exhaustive: bool = False,
                  existing_reviews: list[dict] | None = None,
-                 excluded_ids: set[str] | None = None) -> tuple[list[dict], dict]:
+                 excluded_ids: set[str] | None = None,
+                 early_window_repair: bool = False) -> tuple[list[dict], dict]:
     from . import shot_analyzer
     def feasible(good: list[dict]) -> bool:
         return _cached_reviews_feasible(manifest, sentence, shots, good, audio)
@@ -571,6 +586,15 @@ def _review_pool(manifest: dict, sentence: dict, shots: dict, directory: Path, a
                    or len(reviewed_by_id) >= min(ALTERNATIVE_REVIEW_LIMIT, len(ids))))
                   or (not required and len(existing_good) >= min(3, len(ids))))
         if not exhaustive and enough and feasible(existing_good):
+            break
+        existing_points = {p for r in existing_good for p in r.get("supported_point_ids", [])}
+        # Try real short-window/continuity repair before paying to review the
+        # entire pool. Infeasible evidence is not promoted to a valid window;
+        # failed local repair falls back to the full pool in prepare().
+        if (early_window_repair and not exhaustive and required
+                and len(reviewed_by_id) >= ALTERNATIVE_REVIEW_LIMIT and len(existing_good) >= 2
+                and not any(failure_fields(str(r.get('error', ''))) for r in reviewed_by_id.values())
+                and contract.points_supported(required, existing_points)):
             break
         chunk = [sid for sid in ids[offset:offset + ROUND_SIZE] if sid not in reviewed_by_id]
         if not chunk:
@@ -653,6 +677,11 @@ def _review_pool(manifest: dict, sentence: dict, shots: dict, directory: Path, a
             if (len(good) >= 2 or len(reviewed) >= min(ALTERNATIVE_REVIEW_LIMIT, len(ids))
                     or len(reviewed) == len(ids)):
                 break
+        if (early_window_repair and not exhaustive and required
+                and len(reviewed) >= ALTERNATIVE_REVIEW_LIMIT and len(good) >= 2
+                and not any(failure_fields(str(r.get('error', ''))) for r in reviewed)
+                and contract.points_supported(required, covered)):
+            break
         if not exhaustive and not required and len(good) >= min(3, len(ids)) and feasible(good):
             break
     reviewed = [reviewed_by_id[sid] for sid in ids if sid in reviewed_by_id]
@@ -739,6 +768,13 @@ def _assemble(manifest: dict, analysis: dict, plan: dict, *, narration_timing: d
             raise ValueError(f"AI_EDITOR_AUDIO_ALLOCATION_INVALID:{index}")
         reviews = plan["reviews"].get(str(index), []) if sentence["kind"] == "selling_point" else plan["display_reviews"]
         good = {r["shot_id"]: r for r in reviews if r["verdict"] == "matched"}
+        group = continuity_groups.get(row.get("continuity_key"))
+        if group:
+            # Joint pixels may establish a previously unreviewed member phase.
+            # Keep that permission scoped to this validated complete group.
+            member_review = next(r for r in group["review"]["members"] if r["index"] == index)
+            good[group["input"]["shot_id"]] = {**member_review,
+                "source_identity": group["input"]["source_identity"]}
         reuse_reason = str(row.get("scarce_reuse_reason") or "").strip()
         coverage = plan.get("coverage", {}).get(str(index), {})
         if reuse_reason and (sentence["kind"] != "selling_point" or len(good) != 1
@@ -847,6 +883,11 @@ def _assemble(manifest: dict, analysis: dict, plan: dict, *, narration_timing: d
             observation=overall_review, source_identity=good[first["shot_id"]]["source_identity"], identity=plan["identity"])
         check = contract.validate_segment_receipt(segment, index=index, manifest=manifest)
         if not check["ok"]:
+            # A single-shot playback conflict belongs to this sentence. Keep
+            # its identity so a separately reviewed continuity group is not
+            # discarded when a later sentence needs its own timing repair.
+            if check["reasons"] == ["PLAYBACK_SPEED_CONFLICT"] and len(parts) == 1:
+                raise WindowFailure(index, first["shot_id"], "PLAYBACK_SPEED_CONFLICT")
             raise ValueError(";".join(check["reasons"]))
         output.append(segment)
     out_manifest = {**manifest, "selection_mode": "ai_editor", "segments": output,
@@ -908,6 +949,77 @@ def _build_edit_inventory(manifest: dict, analysis: dict, plan: dict,
     return inventory
 
 
+def _review_proposed_window(manifest, plan, directory, sentence, shot, window, *, attempt_metadata=None):
+    """Spend the persistent sentence budget only on new, actual window pixels."""
+    index = sentence["index"]
+    limit = shot.get("material_duration_us")
+    if type(limit) is int and limit > 0 and window[1] > limit:
+        return None
+    source = contract.source_identity(shot["video"])
+    key = contract.digest([sentence, shot["shot_id"], source, window])[:24]
+    attempts = plan.setdefault("window_repair_attempts", {})
+    if key in attempts:
+        # A process may stop after saving a valid review but before attaching
+        # it to the selected part. Resume only the exact persisted evidence.
+        attempt = attempts[key]
+        saved = plan.get("window_reviews", {}).get(key) or {}
+        if not isinstance(attempt, dict) or not isinstance(saved, dict):
+            return None
+        intervals = saved.get("evidence_intervals_us")
+        confidence = saved.get("confidence")
+        supported = saved.get("supported_point_ids")
+        allowed = {p["id"] for p in sentence["selling_points"]}
+        playback = saved.get("playback_observation")
+        process = contract.playback.process_window(playback) if playback is not None else None
+        if (attempt.get("status") == "reviewed" and attempt.get("index") == index
+                and attempt.get("shot_id") == shot["shot_id"]
+                and attempt.get("window_us") == {"start": window[0], "end": window[1]}
+                and saved.get("sentence_index") == index and saved.get("shot_id") == shot["shot_id"]
+                and saved.get("verdict") == "matched" and saved.get("same_product") is True
+                and saved.get("source_identity") == source and not saved.get("continuity_key")
+                and saved.get("review_window_us") == {"start": window[0], "end": window[1]}
+                and isinstance(confidence, (int, float)) and not isinstance(confidence, bool)
+                and math.isfinite(confidence) and .6 <= confidence <= 1
+                and saved.get("basis") in contract.BASES and type(saved.get("time_sensitive")) is bool
+                and all(isinstance(saved.get(k), str) and saved[k].strip() for k in ("observation", "reason"))
+                and isinstance(intervals, list) and intervals
+                and all(isinstance(ev, dict) and type(ev.get("start")) is int and type(ev.get("end")) is int
+                        and window[0] <= ev["start"] < ev["end"] <= window[1] for ev in intervals)
+                and (playback is None or (process is not None and window[0] <= process[0] < process[1] <= window[1]))
+                and isinstance(supported, list) and all(isinstance(p, str) and p in allowed for p in supported)
+                and contract.points_supported(allowed, set(supported))):
+            return key
+        return None
+    if sum(v.get("index") == index for v in attempts.values()) >= 3:
+        return None
+    attempts[key] = {"index": index, "shot_id": shot["shot_id"],
+                     "window_us": {"start": window[0], "end": window[1]}, "status": "reviewing"}
+    if attempt_metadata:
+        attempts[key].update(attempt_metadata)
+    _save(directory / "plan.json", plan)
+    try:
+        reviewed = _review(manifest, sentence,
+            {**shot, "source_start": window[0] / 1e6, "source_end": window[1] / 1e6}, directory, dense=True)
+    except (ValueError, OSError, TypeError, KeyError) as exc:
+        attempts[key].update(status="failed", reason=str(exc))
+        _save(directory / "plan.json", plan)
+        if failure_fields(str(exc)):
+            raise
+        return None
+    if (reviewed.get("verdict") != "matched" or reviewed.get("same_product") is not True
+            or reviewed.get("source_identity") != source
+            or reviewed.get("review_window_us") != {"start": window[0], "end": window[1]}
+            or not contract.points_supported({p["id"] for p in sentence["selling_points"]},
+                                             set(reviewed.get("supported_point_ids", [])))):
+        attempts[key].update(status="rejected", reason=reviewed.get("reason", "WINDOW_NOT_SUPPORTED"))
+        _save(directory / "plan.json", plan)
+        return None
+    plan.setdefault("window_reviews", {})[key] = {**reviewed, "sentence_index": index}
+    attempts[key]["status"] = "reviewed"
+    _save(directory / "plan.json", plan)
+    return key
+
+
 def _repair_selected_window(manifest: dict, analysis: dict, plan: dict, directory: Path,
                             failure: WindowFailure) -> bool:
     sentence = next(s for s in plan["sentences"] if s["index"] == failure.index)
@@ -947,37 +1059,104 @@ def _repair_selected_window(manifest: dict, analysis: dict, plan: dict, director
     window = proposed_window(shot, proposal, max_speed=contract.playback.PROCESS_PREFERRED_MAX)
     if window is None:
         return False
-    source = contract.source_identity(shot["video"])
-    key = contract.digest([sentence, shot["shot_id"], source, window])[:24]
-    attempts = plan.setdefault("window_repair_attempts", {})
-    if key in attempts or sum(v.get("index") == failure.index for v in attempts.values()) >= 3:
+    metadata = {"original_source_start_us": part.get("source_start_us")} if adjusted_start else None
+    key = _review_proposed_window(manifest, plan, directory, sentence, shot, window, attempt_metadata=metadata)
+    if key is None:
         return False
-    attempts[key] = {"index": failure.index, "shot_id": failure.shot_id,
-                     "window_us": {"start": window[0], "end": window[1]}, "status": "reviewing"}
-    if adjusted_start:
-        attempts[key]["original_source_start_us"] = part.get("source_start_us")
-    _save(directory / "plan.json", plan)
-    try:
-        reviewed = _review(manifest, sentence,
-            {**shot, "source_start": window[0] / 1e6, "source_end": window[1] / 1e6}, directory, dense=True)
-    except (ValueError, OSError, TypeError, KeyError) as exc:
-        attempts[key].update(status="failed", reason=str(exc))
-        if failure_fields(str(exc)):
-            raise
-        return False
-    if (reviewed.get("verdict") != "matched" or reviewed.get("source_identity") != source
-            or reviewed.get("review_window_us") != {"start": window[0], "end": window[1]}
-            or not contract.points_supported({p["id"] for p in sentence["selling_points"]},
-                                             set(reviewed.get("supported_point_ids", [])))):
-        attempts[key].update(status="rejected", reason=reviewed.get("reason", "WINDOW_NOT_SUPPORTED"))
-        return False
-    plan.setdefault("window_reviews", {})[key] = {**reviewed, "sentence_index": failure.index}
     part["window_review_key"] = key
     if adjusted_start:
         part["source_start_us"] = window[0]
-    attempts[key]["status"] = "reviewed"
     _save(directory / "plan.json", plan)
     return True
+
+
+def _repair_display_duplicate_window(manifest, analysis, plan, directory, narration_timing, index, baseline, before):
+    """New original-speed display pixels may resolve an otherwise repeated cut."""
+    from . import shot_analyzer
+    sentence = next(s for s in plan["sentences"] if s["index"] == index)
+    if sentence["kind"] not in {"hook", "product_intro"} or sentence.get("selling_points"):
+        return False
+    row = next(r for r in plan["rows"] if r["index"] == index)
+    def accept(candidate):
+        trial = copy.deepcopy(plan)
+        trial["rows"] = [candidate if r["index"] == index else r for r in trial["rows"]]
+        try:
+            checked = _assemble(manifest, analysis, trial, narration_timing=narration_timing,
+                                verify_sources=True, validate_sequence=False)
+            if any(p["video_speed"] != 1 for p in checked["segments"][index - 1].get("span_parts") or [checked["segments"][index - 1]]):
+                return False
+            if not set(contract.sequence_conflict_details(checked["segments"])) < before:
+                return False
+        except (ValueError, KeyError, OSError, TypeError):
+            return False
+        row.clear()
+        row.update(copy.deepcopy(candidate))
+        _save(directory / "plan.json", plan)
+        return True
+    for candidate in _short_complete_rows(manifest, analysis, plan, index, narration_timing):
+        if accept(candidate):
+            return True
+    attempts = plan.setdefault("window_repair_attempts", {})
+    if sum(r.get("index") == index for r in attempts.values()) >= 3:
+        return False
+    shots = {s["shot_id"]: s for s in analysis["shots"]}
+    excluded = qc_rejected_shots(manifest).get(index, set())
+    used = {}
+    for i, segment in enumerate(baseline["segments"], 1):
+        if i == index:
+            continue
+        for part in segment.get("span_parts") or [segment]:
+            source_key = os.path.normcase(contract.source_identity(part["video"])["path"])
+            used.setdefault(source_key, []).append((round(part["source_start"] * 1e6), round(part["source_end"] * 1e6)))
+    reviews = [r for r in plan.get("display_reviews", []) if r.get("verdict") == "matched"
+        and r.get("same_product") is True and r.get("shot_id") in shots and r["shot_id"] not in excluded]
+    reviews.sort(key=lambda r: (os.path.normcase((r.get("source_identity") or {}).get("path", "")) in used,
+        r.get("basis") not in {"product_display", "readable_label"},
+        max(e["end"] for e in r["evidence_intervals_us"]) - min(e["start"] for e in r["evidence_intervals_us"]), r["shot_id"]))
+    duration = row["parts"][0]["audio_duration_us"] + timing_contract.us_of(manifest.get("tail_pad_s"), 0)
+    seen_sources = set()
+    for review in reviews:
+        shot = shots[review["shot_id"]]
+        source = contract.source_identity(shot["video"])
+        source_key = os.path.normcase(source["path"])
+        if source_key in seen_sources or review.get("source_identity") != source:
+            continue
+        lo = round(shot["source_start"] * 1e6) + timing_contract.us_of(
+            manifest.get("head_trim_s"), round(shot_analyzer.DEFAULT_HEAD_TRIM_S * 1e6))
+        scene_end = round(shot["source_end"] * 1e6)
+        limit = shot.get("material_duration_us")
+        if type(limit) is int and limit > 0:
+            scene_end = min(scene_end, limit)
+        hi = scene_end - timing_contract.us_of(
+            manifest.get("tail_trim_s"), round(shot_analyzer.DEFAULT_TAIL_TRIM_S * 1e6))
+        if hi - lo < duration:
+            continue
+        evlo = min(e["start"] for e in review["evidence_intervals_us"])
+        evhi = max(e["end"] for e in review["evidence_intervals_us"])
+        starts = [evhi - duration, (evlo + evhi - duration) // 2, evlo]
+        starts += [end for _start, end in used.get(source_key, [])]
+        for start in dict.fromkeys(max(lo, min(start, hi - duration)) for start in starts):
+            window = (start, start + duration)
+            if any(min(window[1], end) - max(window[0], begin) > 40_000 for begin, end in used.get(source_key, [])):
+                continue
+            checked_before = len(attempts)
+            key = _review_proposed_window(manifest, plan, directory, sentence, shot, window)
+            if len(attempts) > checked_before:
+                seen_sources.add(source_key)
+            if key is None:
+                if len(attempts) > checked_before:
+                    break  # Diversify sources after a real negative observation.
+                continue
+            candidate = {"index": index, "parts": [{"shot_id": shot["shot_id"],
+                "audio_duration_us": row["parts"][0]["audio_duration_us"],
+                "source_start_us": start, "window_review_key": key}],
+                "reason": "新原速展示短窗经真实像素复核后消除重复区间。"}
+            if accept(candidate):
+                return True
+            break
+        if sum(r.get("index") == index for r in attempts.values()) >= 3:
+            return False
+    return False
 
 
 def _repair_repeated_window(manifest: dict, analysis: dict, plan: dict, directory: Path,
@@ -985,7 +1164,7 @@ def _repair_repeated_window(manifest: dict, analysis: dict, plan: dict, director
     """Try already pixel-reviewed single-shot alternatives; add at most one review round."""
     row = next((r for r in plan.get("rows", []) if isinstance(r, dict) and r.get("index") == index), None)
     sentence = next((s for s in plan.get("sentences", []) if s.get("index") == index), None)
-    if not row or not sentence or len(row.get("parts") or []) != 1:
+    if not row or row.get("continuity_key") or not sentence or len(row.get("parts") or []) != 1:
         return False
     part = row["parts"][0]
     if not isinstance(part, dict) or type(part.get("audio_duration_us")) is not int:
@@ -1027,8 +1206,10 @@ def _repair_repeated_window(manifest: dict, analysis: dict, plan: dict, director
 
     if try_reviewed():
         return True
+    if any(r.get("index") == index and r.get("reviewed_candidates") for r in plan.get("duplicate_repair_reviews", [])):
+        expanded.add(index)
     if index in expanded:
-        return False
+        return _repair_display_duplicate_window(manifest, analysis, plan, directory, narration_timing, index, baseline, before)
     expanded.add(index)
     display = sentence["kind"] != "selling_point"
     reviews = plan.get("display_reviews", []) if display else plan.get("reviews", {}).get(str(index), [])
@@ -1036,30 +1217,30 @@ def _repair_repeated_window(manifest: dict, analysis: dict, plan: dict, director
     all_ids = list(dict.fromkeys(sentence.get("candidate_ids") or []))
     new_ids = [sid for sid in all_ids if sid not in seen][:ROUND_SIZE]
     if not new_ids:
-        return False
+        return _repair_display_duplicate_window(manifest, analysis, plan, directory, narration_timing, index, baseline, before)
     # Keep all previous observations, and cap newly reviewed candidates to one round.
     retained = [r for r in reviews if isinstance(r, dict)
                 and not failure_fields(str(r.get("error", ""))).get("retryable")]
-    retained_ids = {r.get("shot_id") for r in retained}
-    subset = [sid for sid in all_ids if sid in retained_ids] + new_ids
-    target_sentence = {**sentence, "candidate_ids": subset,
+    target_sentence = {**sentence, "candidate_ids": new_ids,
                        "audio_durations_us": [part["audio_duration_us"]]}
     if display:
         target_sentence.update(index=0, text="同商品通用产品展示池", kind="product_intro", selling_points=[])
     shots = {str(shot["shot_id"]): shot for shot in analysis.get("shots", [])}
-    result, _coverage = _review_pool(manifest, target_sentence, shots, directory,
-                                     narration_timing or {}, existing_reviews=retained,
+    fresh, _coverage = _review_pool(manifest, target_sentence, shots, directory,
+                                     narration_timing or {}, existing_reviews=[],
                                      excluded_ids=qc_rejected_shots(manifest).get(index, set()))
     historical_failures = [r for r in reviews if isinstance(r, dict)
                            and failure_fields(str(r.get("error", ""))).get("retryable")]
-    result = result + historical_failures
+    result = retained + fresh + historical_failures
     if display:
         plan["display_reviews"] = result
     else:
         plan.setdefault("reviews", {})[str(index)] = result
-    plan.setdefault("duplicate_repair_reviews", []).append({"index": index, "new_candidates": new_ids})
+    plan.setdefault("duplicate_repair_reviews", []).append({"index": index, "new_candidates": new_ids,
+        "reviewed_candidates": [r["shot_id"] for r in fresh]})
     _save(directory / "plan.json", plan)
-    return try_reviewed()
+    return try_reviewed() or _repair_display_duplicate_window(
+        manifest, analysis, plan, directory, narration_timing, index, baseline, before)
 
 
 def _short_complete_rows(manifest, analysis, plan, index, narration_timing):
@@ -1198,6 +1379,17 @@ def _retrieve_empty_selection(manifest, analysis, plan, failure, narration_timin
     return True
 
 
+def _duplicate_repair_focus(plan, failure):
+    match = re.fullmatch(r'AI_EDITOR_REPEATED_SOURCE_WINDOW:(\d+):(\d+)', str(failure))
+    if not match:
+        return None
+    first, second = map(int, match.groups())
+    rows = {r.get('index'): r for r in plan.get('rows', []) if isinstance(r, dict)}
+    if rows.get(second, {}).get('continuity_key') and not rows.get(first, {}).get('continuity_key'):
+        return first
+    return second
+
+
 def _repair_reviewed_rows(manifest, analysis, plan, directory, narration_timing, duplicate_expanded):
     """Drain useful local repairs without spending text-editor retry rounds.
 
@@ -1224,9 +1416,9 @@ def _repair_reviewed_rows(manifest, analysis, plan, directory, narration_timing,
                 failure = ValueError(f"AI_EDITOR_NO_SELECTION:{index}")
         if _retrieve_empty_selection(manifest, analysis, plan, failure, narration_timing):
             continue
-        repeated = re.fullmatch(r"AI_EDITOR_REPEATED_SOURCE_WINDOW:\d+:(\d+)", str(failure))
-        if repeated and _repair_repeated_window(manifest, analysis, plan, directory,
-                narration_timing, int(repeated[1]), duplicate_expanded):
+        repeated_index = _duplicate_repair_focus(plan, failure)
+        if repeated_index is not None and _repair_repeated_window(manifest, analysis, plan, directory,
+                narration_timing, repeated_index, duplicate_expanded):
             continue
         if isinstance(failure, WindowFailure):
             if _repair_selected_window(manifest, analysis, plan, directory, failure):
@@ -1235,6 +1427,66 @@ def _repair_reviewed_rows(manifest, analysis, plan, directory, narration_timing,
                 continue
         raise failure
     raise ValueError("AI_EDITOR_REPAIR_PROGRESS_LIMIT")
+
+
+def _clear_incomplete_groups(plan):
+    """Unselect orphaned group members; never promote old group observations."""
+    rows = plan.get('rows') or []
+    keys = {r.get('continuity_key') for r in rows if isinstance(r, dict) and r.get('continuity_key')}
+    for key in keys:
+        group = plan.get('continuity_reviews', {}).get(key) or {}
+        members = (group.get('input') or {}).get('members') or []
+        expected = {m.get('index') for m in members if isinstance(m, dict)}
+        actual = {r.get('index') for r in rows if r.get('continuity_key') == key}
+        if not expected or actual != expected:
+            rows = [{'index': r['index'], 'parts': [], 'reason': 'incomplete continuous group; reselect'}
+                    if r.get('continuity_key') == key else r for r in rows]
+    plan['rows'] = rows
+
+
+def _restore_interrupted_groups(manifest, analysis, plan, previous, narration_timing):
+    """Recover a validated group split by an unsuccessful partial edit."""
+    if not any(row.get('message') == 'CONTINUITY_INPUT_CHANGED'
+               for row in previous.get('issues', []) if isinstance(row, dict)):
+        return
+    rejected = qc_rejected_shots(manifest)
+    rows = plan.get('rows') or []
+    keys = {r.get('continuity_key') for r in rows if isinstance(r, dict) and r.get('continuity_key')}
+    for key in keys:
+        group = plan.get('continuity_reviews', {}).get(key) or {}
+        context = group.get('input') or {}
+        members = {m.get('index') for m in context.get('members', []) if isinstance(m, dict)}
+        selected = {r.get('index') for r in rows if r.get('continuity_key') == key}
+        if not members or selected == members or any(context.get('shot_id') in rejected.get(i, set()) for i in members):
+            continue
+        trial = copy.deepcopy(plan)
+        try:
+            sentence_continuity.install(trial, key, group)
+            sentence_continuity.validate_plan(manifest, analysis, trial, narration_timing)
+        except (ValueError, KeyError, TypeError, OSError, StopIteration):
+            continue
+        trial['ok'] = False
+        plan.update(trial)
+        rows = plan['rows']
+
+
+def _replace_focused_row(plan, index, revised):
+    """A partial edit dissolves the old group and reselects other members."""
+    old = next((r for r in plan['rows'] if r.get('index') == index), None)
+    key = old.get('continuity_key') if old else None
+    if key:
+        group = plan.get('continuity_reviews', {}).get(key)
+        if not group:
+            raise ValueError('CONTINUITY_INPUT_CHANGED')
+        members = {m['index'] for m in group['input']['members']}
+        if index not in members or any(not any(r.get('index') == i and r.get('continuity_key') == key
+                                                for r in plan['rows']) for i in members):
+            raise ValueError('CONTINUITY_INPUT_CHANGED')
+        plan['rows'] = [revised if r.get('index') == index else
+            {'index': r['index'], 'parts': [], 'reason': 'continuous group changed; reselect from reviewed candidates'}
+            if r.get('index') in members else r for r in plan['rows']]
+    else:
+        plan['rows'] = [revised if r.get('index') == index else r for r in plan['rows']]
 
 
 def _edit_plan(manifest: dict, analysis: dict, plan: dict, directory: Path,
@@ -1272,7 +1524,7 @@ technical_option是按本句完整配音求出的实际可行窗口；分配多�
             revised = [r for r in response.get("rows", []) if isinstance(r, dict) and r.get("index") == focus]
             if len(revised) != 1:
                 raise ValueError(f"AI_EDITOR_NO_SELECTION:{focus}")
-            plan["rows"] = [revised[0] if r["index"] == focus else r for r in plan["rows"]]
+            _replace_focused_row(plan, focus, revised[0])
         else:
             plan["rows"] = response.get("rows")
         if attempt == 0:
@@ -1309,7 +1561,9 @@ technical_option是按本句完整配音求出的实际可行窗口；分配多�
             _save(directory / "plan.json", plan)
             if attempt == 2:
                 raise failure
-            focus = failed_index(failure)
+            focus = _duplicate_repair_focus(plan, failure)
+            if focus is None:
+                focus = failed_index(failure)
             repair_instruction = "\n上一版技术检查失败：" + str(failure) + "。"
             if focus is not None:
                 repair_instruction += f"只返回index={focus}的一行rows，更换无效候选或起点；其他句由程序原样保留。"
@@ -1322,6 +1576,38 @@ technical_option是按本句完整配音求出的实际可行窗口；分配多�
                 for row in plan.get("rows", []) if isinstance(row, dict)]
             repair_instruction += "\n当前选择（仅供修复，不作为视觉证据）：" + json.dumps(current, ensure_ascii=False)
             repair_instruction += "\n已检查窗口（不可把被拒窗口重标为通过）：" + json.dumps(plan.get("window_repair_attempts", {}), ensure_ascii=False)
+
+
+def _edit_with_review_fallback(manifest, analysis, plan, directory, narration_timing):
+    """Try scoped repair first, then exhaust only a failed sentence's pool."""
+    shots = {str(s['shot_id']): s for s in analysis['shots']}
+    rejected = qc_rejected_shots(manifest)
+    expanded_indices = set()
+    while True:
+        try:
+            _edit_plan(manifest, analysis, plan, directory, narration_timing)
+            return
+        except (ValueError, KeyError, TypeError, OSError) as exc:
+            index = failed_index(exc)
+            coverage = plan.get('coverage', {}).get(str(index), {})
+            sentence = next((s for s in plan['sentences'] if s.get('index') == index), None)
+            if (not sentence or index in expanded_indices or coverage.get('exhausted')
+                    or coverage.get('reason') != 'KNOWN_WINDOWS_INFEASIBLE'):
+                raise
+            expanded_indices.add(index)
+            reviews, coverage = _review_pool(manifest, sentence, shots, directory, narration_timing or {},
+                exhaustive=True, existing_reviews=plan['reviews'].get(str(index), []),
+                excluded_ids=rejected.get(index, set()))
+            plan['reviews'][str(index)] = reviews
+            plan['coverage'][str(index)] = coverage
+            plan.setdefault('review_expansions', []).append({'index': index, 'reason': str(exc),
+                                                            'checked': coverage['checked']})
+            plan['_resume_rows'] = bool(plan.get('rows'))
+            _save(directory / 'plan.json', plan)
+            if not coverage.get('feasible'):
+                for review in reviews + plan.get('display_reviews', []):
+                    if failure_fields(str(review.get('error', ''))):
+                        raise ValueError(review['error'])
 
 
 def prepare(manifest: dict, analysis: dict, report_dir: Path, *, narration_timing: dict | None = None) -> dict:
@@ -1338,7 +1624,7 @@ def prepare(manifest: dict, analysis: dict, report_dir: Path, *, narration_timin
         editor_model = _editor_model()
         plan["identity"] = {"model": editor_model,
             "manifest_sha256": contract.digest(manifest), "timing_sha256": contract.digest(narration_timing),
-            "analysis_sha256": contract.digest({k: v for k, v in analysis.items() if k != "ai_editor_plan"}),
+            "analysis_sha256": _analysis_digest(analysis),
             "policy_version": contract.POLICY_VERSION,
             "editorial_rules": contract.rules_identity(manifest)}
         # Output naming and recovery controls do not alter observed pixels.
@@ -1352,18 +1638,28 @@ def prepare(manifest: dict, analysis: dict, report_dir: Path, *, narration_timin
             previous = {}
         duration_resume = (previous.get("resume_identity") != plan["resume_identity"]
                            and _duration_resume_safe(previous, plan["resume_identity"], analysis, directory))
+        identity_only_resume = False
+        if duration_resume:
+            old_digest = previous["resume_identity"]["analysis_sha256"]
+            snapshot = json.loads((directory / f"previous_analysis_{old_digest}.json").read_text(encoding="utf-8"))
+            identity_only_resume = _analysis_digest(snapshot) == _analysis_digest(analysis)
         if previous.get("resume_identity") == plan["resume_identity"] or duration_resume:
             for key in ("sentences", "reviews", "display_reviews", "coverage", "rows", "window_reviews",
                         "duration_migration", "duration_migrations",
-                        "window_repair_attempts", "repair_history", "continuity_reviews", "continuity_attempts", "continuity_repairs"):
+                        "window_repair_attempts", "repair_history", "duplicate_repair_reviews", "continuity_reviews", "continuity_attempts", "continuity_repairs"):
                 if key in previous:
                     plan[key] = copy.deepcopy(previous[key])
+            if not duration_resume or identity_only_resume:
+                _restore_interrupted_groups(manifest, analysis, plan, previous, narration_timing)
+            _clear_incomplete_groups(plan)
             plan["_resume_rows"] = bool(plan.get("rows"))
             if duration_resume:
                 old_digest = previous["resume_identity"]["analysis_sha256"]
                 migration = {"previous_analysis_sha256": old_digest,
                              "current_analysis_sha256": plan["resume_identity"]["analysis_sha256"],
-                             "snapshot": f"previous_analysis_{old_digest}.json"}
+                             "kind": "analysis_identity" if identity_only_resume else "material_duration",
+                             "snapshot": f"previous_analysis_{old_digest}.json",
+                             "snapshot_content_sha256": contract.digest(snapshot)}
                 plan["duration_migrations"] = [*plan.get("duration_migrations", []), migration]
                 plan["duration_migration"] = migration
             groups = {**plan["reviews"], "display_pool": plan["display_reviews"]}
@@ -1404,7 +1700,8 @@ def prepare(manifest: dict, analysis: dict, report_dir: Path, *, narration_timin
                     continue
                 plan["phase"] = "selection_candidate_review"
                 reviews, coverage = _review_pool(manifest, sentence, by_id, directory, narration_timing or {},
-                                                 existing_reviews=plan["reviews"].get(key, []), excluded_ids=excluded)
+                                                 existing_reviews=plan["reviews"].get(key, []), excluded_ids=excluded,
+                                                 early_window_repair=True)
                 plan["reviews"][str(sentence["index"])] = reviews
                 plan["coverage"][str(sentence["index"])] = coverage
                 supported = {p for r in reviews if r["verdict"] == "matched" for p in r.get("supported_point_ids", [])}
@@ -1451,7 +1748,10 @@ def prepare(manifest: dict, analysis: dict, report_dir: Path, *, narration_timin
                     continue
                 raise ValueError(f"AI_EDITOR_OBSERVATION_OR_WINDOW_PENDING:{row['index']}:{coverage.get('reason', 'UNKNOWN')}")
         plan["phase"] = "selection_edit"
-        _edit_plan(manifest, analysis, plan, directory, narration_timing)
+        # An early short-window attempt must not silently discard a viable
+        # later candidate: on a scoped failure exhaust only that sentence and
+        # retry with its actual observations, preserving other cached work.
+        _edit_with_review_fallback(manifest, analysis, plan, directory, narration_timing)
     except (ValueError, KeyError, TypeError, OSError) as exc:
         plan["ok"] = False
         plan["failure"] = failure_fields(str(exc), stage=plan.get("phase", "semantic_match"))
@@ -1470,7 +1770,7 @@ def match_manifest(manifest: dict, analysis: dict, *, narration_timing: dict | N
             raise ValueError("AI_EDITOR_POLICY_CHANGED")
         if identity.get("manifest_sha256") != contract.digest(manifest) or identity.get("timing_sha256") != contract.digest(narration_timing):
             raise ValueError("AI_EDITOR_INPUT_CHANGED")
-        if identity.get("analysis_sha256") != contract.digest({k: v for k, v in analysis.items() if k != "ai_editor_plan"}):
+        if identity.get("analysis_sha256") != _analysis_digest(analysis):
             raise ValueError("AI_EDITOR_ANALYSIS_CHANGED")
         current = copy.deepcopy(plan)
         result = _revalidate_rows(manifest, analysis, current, narration_timing=narration_timing)

@@ -67,9 +67,161 @@ class ProductionPlaybackTests(unittest.TestCase):
         self.assertEqual(self.plan, before)
         self.assertTrue(all(s['video_speed'] == 1 for s in result['segments']))
 
+    def test_lock_wait_change_preserves_observations_through_prepare_and_match(self):
+        self.analysis['vision_analysis'] = {'model': 'fixture', 'cache_wait_s': 0.0, 'partial': False}
+        for key in ('identity', 'resume_identity'):
+            self.plan[key]['analysis_sha256'] = editor._analysis_digest(self.analysis)
+        folder = self.root / 'ai_editor'
+        folder.mkdir()
+        (folder / 'plan.json').write_text(json.dumps(self.plan), encoding='utf-8')
+        original_reviews = copy.deepcopy(self.plan['reviews'])
+        self.analysis['vision_analysis']['cache_wait_s'] = 0.047
+        before = copy.deepcopy(self.analysis)
+        with patch.object(editor, '_editor_model', return_value='fixture'), \
+             patch.object(editor, '_call', side_effect=AssertionError('API forbidden')), \
+             patch.object(editor, '_review', side_effect=AssertionError('pixel re-review forbidden')):
+            prepared = editor.prepare(self.manifest, self.analysis, self.root)
+            result = editor.match_manifest(self.manifest, prepared)
+        self.assertTrue(result['ok'], result)
+        self.assertEqual([r['shot_id'] for r in result['segments']], ['short', 'other'])
+        self.assertEqual(prepared['ai_editor_plan']['reviews'], original_reviews)
+        self.assertEqual(self.analysis, before)
+
+    def test_duplicate_expansion_really_reviews_fresh_candidates_despite_feasible_old_pool(self):
+        aliases = ['long', 'alias_a', 'alias_b']
+        self.analysis['shots'] = [{**self.shots[0], 'shot_id': sid} for sid in aliases] + [self.shots[2]]
+        old_reviews = [{**self.reviews[0], 'shot_id': sid, 'supported_point_ids': [],
+            'evidence_intervals_us': [{'start': 0, 'end': 1_000_000}]} for sid in aliases]
+        self.plan['display_reviews'] = old_reviews
+        for sentence, row in zip(self.plan['sentences'], self.plan['rows']):
+            sentence.update(kind='product_intro', selling_points=[], candidate_ids=aliases + ['other'])
+            row['parts'] = [{'shot_id': 'long', 'audio_duration_us': 2_000_000}]
+        fresh = {**self.reviews[2], 'supported_point_ids': []}
+        def round_results(ids, _shots, _directory, review, **kwargs):
+            return iter((sid, review(sid)) for sid in ids)
+        with patch.object(editor, '_iter_review_round', side_effect=round_results), \
+             patch.object(editor, '_review', return_value=fresh) as observe:
+            repaired = editor._repair_repeated_window(self.manifest, self.analysis, self.plan,
+                self.root, None, 2, set())
+        self.assertTrue(repaired)
+        self.assertEqual(observe.call_count, 1)
+        self.assertEqual(self.plan['display_reviews'][:3], old_reviews)
+        self.assertEqual(self.plan['duplicate_repair_reviews'][-1]['reviewed_candidates'], ['other'])
+        self.assertTrue(editor._assemble(self.manifest, self.analysis, self.plan,
+            narration_timing=None, verify_sources=True)['ok'])
+
+    def display_duplicate_fixture(self):
+        self.manifest.update(head_trim_s=.3, tail_trim_s=.2)
+        self.analysis['shots'] = [self.shots[0], self.shots[2]]
+        self.plan['display_reviews'] = [
+            {**self.reviews[0], 'basis': 'product_display', 'supported_point_ids': [],
+             'evidence_intervals_us': [{'start': 1_000_000, 'end': 2_000_000}]},
+            {**self.reviews[2], 'basis': 'product_display', 'supported_point_ids': [],
+             'evidence_intervals_us': [{'start': 1_000_000, 'end': 10_000_000}]}]
+        for sentence, row in zip(self.plan['sentences'], self.plan['rows']):
+            sentence.update(kind='hook', selling_points=[], candidate_ids=['long', 'other'])
+            row['parts'] = [{'shot_id': 'long', 'audio_duration_us': 2_000_000}]
+        baseline = editor._assemble(self.manifest, self.analysis, self.plan,
+            narration_timing=None, verify_sources=True, validate_sequence=False)
+        return baseline, set(contract.sequence_conflict_details(baseline['segments']))
+
+    def test_display_duplicate_uses_new_guarded_original_speed_pixels_and_preserves_old_facts(self):
+        baseline, conflicts = self.display_duplicate_fixture()
+        before = copy.deepcopy(self.plan['display_reviews'])
+        def observe(_manifest, sentence, shot, directory, *, dense=False):
+            self.assertTrue(dense)
+            self.assertGreaterEqual(shot['source_start'], .3)
+            self.assertLessEqual(shot['source_end'], 11.8)
+            self.assertAlmostEqual(shot['source_end'] - shot['source_start'], 2)
+            lo, hi = round(shot['source_start'] * 1e6), round(shot['source_end'] * 1e6)
+            return {**self.reviews[2], 'supported_point_ids': [],
+                'review_window_us': {'start': lo, 'end': hi},
+                'evidence_intervals_us': [{'start': lo + 100_000, 'end': hi - 100_000}]}
+        with patch.object(editor, '_review', side_effect=observe) as review:
+            self.assertTrue(editor._repair_display_duplicate_window(self.manifest, self.analysis,
+                self.plan, self.root, None, 2, baseline, conflicts))
+        self.assertEqual(review.call_count, 1)
+        self.assertEqual(self.plan['display_reviews'], before)
+        self.assertEqual(sum(r['index'] == 2 for r in self.plan['window_repair_attempts'].values()), 1)
+        result = editor._assemble(self.manifest, self.analysis, self.plan, narration_timing=None, verify_sources=True)
+        self.assertEqual(result['segments'][1]['video_speed'], 1)
+        self.assertEqual(contract.sequence_errors_all(result['segments']), [])
+
+    def test_display_duplicate_rejection_does_not_change_rows(self):
+        baseline, conflicts = self.display_duplicate_fixture()
+        self.manifest['qc_rejected_shots'] = {'2': ['long']}
+        before = copy.deepcopy(self.plan['rows'])
+        with patch.object(editor, '_review', return_value={'verdict': 'uncertain'}) as review:
+            self.assertFalse(editor._repair_display_duplicate_window(self.manifest, self.analysis,
+                self.plan, self.root, None, 2, baseline, conflicts))
+        self.assertEqual(review.call_count, 1)
+        self.assertEqual(self.plan['rows'], before)
+        self.assertFalse(self.plan.get('window_reviews'))
+
+    def test_display_duplicate_review_respects_physical_video_boundary(self):
+        baseline, conflicts = self.display_duplicate_fixture()
+        self.manifest['qc_rejected_shots'] = {'2': ['long']}
+        self.shots[2]['material_duration_us'] = 9_000_000
+        def observe(_manifest, _sentence, shot, _directory, *, dense=False):
+            self.assertTrue(dense)
+            self.assertLessEqual(round(shot['source_end'] * 1e6), 8_800_000)
+            return {'verdict': 'uncertain'}
+        with patch.object(editor, '_review', side_effect=observe) as review:
+            self.assertFalse(editor._repair_display_duplicate_window(self.manifest, self.analysis,
+                self.plan, self.root, None, 2, baseline, conflicts))
+        self.assertEqual(review.call_count, 1)
+
+    def test_display_duplicate_honours_shared_budget_and_qc_rejections(self):
+        baseline, conflicts = self.display_duplicate_fixture()
+        self.plan['window_repair_attempts'] = {str(i): {'index': 2, 'status': 'failed'} for i in range(3)}
+        before = copy.deepcopy(self.plan['rows'])
+        with patch.object(editor, '_review', side_effect=AssertionError('Budget exhausted')):
+            self.assertFalse(editor._repair_display_duplicate_window(self.manifest, self.analysis,
+                self.plan, self.root, None, 2, baseline, conflicts))
+        self.plan['window_repair_attempts'] = {}
+        self.manifest['qc_rejected_shots'] = {'2': ['long', 'other']}
+        with patch.object(editor, '_review', side_effect=AssertionError('Rejected candidate')):
+            self.assertFalse(editor._repair_display_duplicate_window(self.manifest, self.analysis,
+                self.plan, self.root, None, 2, baseline, conflicts))
+        self.assertEqual(self.plan['rows'], before)
+
+    def test_unusable_short_shot_does_not_hide_longer_shot_of_same_source(self):
+        baseline, conflicts = self.display_duplicate_fixture()
+        self.manifest['qc_rejected_shots'] = {'2': ['long']}
+        self.analysis['shots'].insert(1, {**self.shots[2], 'shot_id': 'short_alias', 'source_end': 1})
+        self.plan['display_reviews'].insert(1, {**self.reviews[2], 'shot_id': 'short_alias',
+            'basis': 'product_display', 'supported_point_ids': [],
+            'evidence_intervals_us': [{'start': 0, 'end': 500_000}]})
+        def observe(_manifest, sentence, shot, directory, *, dense=False):
+            lo, hi = round(shot['source_start'] * 1e6), round(shot['source_end'] * 1e6)
+            return {**self.reviews[2], 'supported_point_ids': [],
+                'review_window_us': {'start': lo, 'end': hi},
+                'evidence_intervals_us': [{'start': lo + 100_000, 'end': hi - 100_000}]}
+        with patch.object(editor, '_review', side_effect=observe) as review:
+            self.assertTrue(editor._repair_display_duplicate_window(self.manifest, self.analysis,
+                self.plan, self.root, None, 2, baseline, conflicts))
+        self.assertEqual(review.call_count, 1)
+        self.assertEqual(self.plan['rows'][1]['parts'][0]['shot_id'], 'other')
+
+    def test_analysis_identity_retains_semantics_and_rejects_unmigrated_legacy_hash(self):
+        self.analysis['vision_analysis'] = {'model': 'fixture', 'cache_wait_s': 0.1, 'partial': False}
+        stable = editor._analysis_digest(self.analysis)
+        for field, value in (('model', 'changed'), ('partial', True), ('errors', ['decode failed'])):
+            changed = copy.deepcopy(self.analysis)
+            changed['vision_analysis'][field] = value
+            self.assertNotEqual(editor._analysis_digest(changed), stable, field)
+        changed = copy.deepcopy(self.analysis)
+        changed['shots'][0]['source_end'] = 11
+        self.assertNotEqual(editor._analysis_digest(changed), stable)
+        self.plan['identity']['analysis_sha256'] = contract.digest(self.analysis)
+        result = editor.match_manifest(self.manifest, {**self.analysis, 'ai_editor_plan': self.plan})
+        self.assertFalse(result['ok'])
+        self.assertIn('AI_EDITOR_ANALYSIS_CHANGED', str(result))
+
     def test_prepare_rechecks_old_feasible_flag_and_reuses_observations(self):
         folder = self.root / 'ai_editor'
         folder.mkdir()
+        self.plan['duplicate_repair_reviews'] = [{'index': 1, 'reviewed_candidates': ['long']}]
         (folder / 'plan.json').write_text(json.dumps(self.plan), encoding='utf-8')
         before = copy.deepcopy(self.plan['reviews'])
         with patch.object(editor, '_editor_model', return_value='fixture'), \
@@ -79,6 +231,7 @@ class ProductionPlaybackTests(unittest.TestCase):
         plan = result['ai_editor_plan']
         self.assertTrue(plan['ok'], plan)
         self.assertEqual(plan['reviews'], before)
+        self.assertEqual(plan['duplicate_repair_reviews'], self.plan['duplicate_repair_reviews'])
         self.assertEqual(plan['rows'][0]['parts'][0]['shot_id'], 'short')
         self.assertEqual(plan['rows'][1], self.plan['rows'][1])
         self.assertEqual(plan['playback_policy_version'], playback.VERSION)
