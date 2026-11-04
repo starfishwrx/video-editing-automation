@@ -133,6 +133,37 @@ class SentenceContinuityTests(unittest.TestCase):
         self.assertEqual(self.plan['rows'], before)
         self.assertFalse(self.plan['ok'])
 
+    def test_group_survives_external_single_shot_speed_failure_but_is_not_certified(self):
+        self.outside_duplicates()
+        original_check = contract.validate_segment_receipt
+        def fail_outside(segment, *, index, manifest):
+            if index == 3:
+                return {'ok': False, 'reasons': ['PLAYBACK_SPEED_CONFLICT']}
+            return original_check(segment, index=index, manifest=manifest)
+        with patch.object(contract, 'validate_segment_receipt', side_effect=fail_outside), \
+             patch.object(sharing, 'review_group', side_effect=lambda m, context, s, d:self.group(context)):
+            self.assertTrue(sharing.repair(self.manifest, self.analysis, self.plan, self.root,
+                WindowFailure(1, 'long', 'EVIDENCE_SPAN_TOO_LONG'), None))
+            self.assertFalse(self.plan['ok'])
+            self.assertEqual(self.plan['rows'][0]['continuity_key'], self.plan['rows'][1]['continuity_key'])
+            with self.assertRaises(WindowFailure) as caught:
+                editor._assemble(self.manifest, self.analysis, self.plan, narration_timing=None, verify_sources=True)
+            self.assertEqual(caught.exception.index, 3)
+            self.assertEqual(caught.exception.reason, 'PLAYBACK_SPEED_CONFLICT')
+
+    def test_group_member_speed_failure_still_rejects_group(self):
+        original_check = contract.validate_segment_receipt
+        def fail_member(segment, *, index, manifest):
+            if index == 2:
+                return {'ok': False, 'reasons': ['PLAYBACK_SPEED_CONFLICT']}
+            return original_check(segment, index=index, manifest=manifest)
+        before = copy.deepcopy(self.plan['rows'])
+        with patch.object(contract, 'validate_segment_receipt', side_effect=fail_member), \
+             patch.object(sharing, 'review_group', side_effect=lambda m, context, s, d:self.group(context)):
+            self.assertFalse(sharing.repair(self.manifest, self.analysis, self.plan, self.root,
+                WindowFailure(1, 'long', 'EVIDENCE_SPAN_TOO_LONG'), None))
+        self.assertEqual(self.plan['rows'], before)
+
     def group(self, context=None):
         context = context or next(sharing.proposals(self.manifest, self.analysis, self.plan, 1, None))
         observations = [{'index': m['index'], 'verdict': 'matched', 'same_product': True,

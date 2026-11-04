@@ -789,6 +789,11 @@ def _assemble(manifest: dict, analysis: dict, plan: dict, *, narration_timing: d
             observation=overall_review, source_identity=good[first["shot_id"]]["source_identity"], identity=plan["identity"])
         check = contract.validate_segment_receipt(segment, index=index, manifest=manifest)
         if not check["ok"]:
+            # A single-shot playback conflict belongs to this sentence. Keep
+            # its identity so a separately reviewed continuity group is not
+            # discarded when a later sentence needs its own timing repair.
+            if check["reasons"] == ["PLAYBACK_SPEED_CONFLICT"] and len(parts) == 1:
+                raise WindowFailure(index, first["shot_id"], "PLAYBACK_SPEED_CONFLICT")
             raise ValueError(";".join(check["reasons"]))
         output.append(segment)
     out_manifest = {**manifest, "selection_mode": "ai_editor", "segments": output,
