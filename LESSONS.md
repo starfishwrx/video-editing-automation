@@ -7,6 +7,22 @@
 
 ## 新增条目
 
+### L-20261104-08 全范围旋转源需要保留真实色阶
+- status: OPEN
+- hits: 1
+- 模块: media / source normalization
+- 现象: 全范围 `yuvj420p` 素材需要旋转，但硬件编码器不直接支持该输入格式。
+- 以后怎么做: 仅在源元数据明确为全范围时使用 `yuv420p` 并显式标明 `pc`；读回色彩元数据和时间戳，不能借此放宽HDR/Dolby Vision元数据保护。
+- 证据: `test_headless_media.py` 的全范围正例和未知／受限色阶负例，以及实际源的帧时钟、色阶和抽样像素核验。
+
+### L-20261104-07 后续句失败不能误拆已验证连续组
+- status: OPEN
+- hits: 1
+- 模块: selection / sentence continuity
+- 现象: 后续单句超出时长、或组外句重复使用素材，被归因到无关连续组，导致已验证组丢失。
+- 以后怎么做: 错误携带实际句号与镜头身份，重复冲突优先处理组外句；恢复孤立组前检查原联合观察、源身份、各成员及QC拒绝，恢复只代表待验收，不代表整稿通过。
+- 证据: `test_sentence_continuity.py` 和 `test_production_playback.py` 的相关正负例与真实缓存离线重放。
+
 ### L-20261104-06 有效局部组不能因无关重复被丢弃
 - status: OPEN
 - hits: 1
