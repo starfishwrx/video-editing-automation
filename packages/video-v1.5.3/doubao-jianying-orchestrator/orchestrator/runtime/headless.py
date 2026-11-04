@@ -73,7 +73,16 @@ def preflight(manifest=None):
         if not shutil.which(tool):
             raise ValueError('HEADLESS_EXECUTABLE_MISSING:' + tool)
     native.j.fonts.collect_plan({'tracks': [{'type': 'text', 'segments': [{'font_path': font}]}]})
-    runtime = native.j.nd.doctor()
+    try:
+        runtime = native.j.nd.doctor()
+    except ValueError as exc:
+        if str(exc) != '剪映默认本地草稿目录尚未初始化':
+            raise
+        raise ValueError(
+            'HEADLESS_HOST_NOT_INITIALIZED: 剪映默认本地草稿目录尚未初始化；'
+            '请使用运行流水线的同一 Windows 用户启动剪映并完成首次初始化，'
+            '随后重新运行生产 env 检查。不要手工创建或覆盖 root_meta_info.json。'
+        ) from exc
     return {'status': 'READY', 'backend': 'headless', 'runtime_profile': runtime['runtime_profile'],
             'install_dir': runtime.get('install_dir'), 'font': str(Path(font).resolve()),
             'backend_root': str(Path(native.__file__).resolve().parent.parent)}
