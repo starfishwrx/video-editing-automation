@@ -40,6 +40,14 @@
 - 以后怎么做: 保留实际复核场景边界，另带原始guard原点；验证包含关系后仅扣剩余保护，头尾默认值与求解器一致。回归要串起规划到engine请求并传入真实证据，另保留废料区和复核范围外证据的拒绝反例；恢复旧缓存重新assemble，不直接篡改匹配报告。
 - 证据: test_ai_editor.py 的reviewed_subwindow正负例和test_paper_production.py既有连续取段覆盖。
 
+### L-20261104-delivery-readback 写入确认必须对应实际业务字段
+- status: OPEN
+- hits: 1
+- 模块: tools/workflow/closed_loop.table_update
+- 现象: CLI返回成功不能证明全部状态已落入目标记录；旧首次成片值不在真实字段选项中。
+- 以后怎么做: 用实际字段选项配置状态，成功后按record_id与字段名读回全部本次patch；容许有界可见性延迟。先保存写入ACK，恢复校验目标、记录、任务输入与patch身份后仅继续读回。原始提供方输出不得进入收据，防止凭据回显。一次成片不是人工验收。
+- 证据: test_table_readback.py，覆盖漏字段、错状态、暂不可见、超时后只读恢复及旧ACK失效。
+
 ### L-20261103-16 修复入口和进展预算必须由程序掌握
 - status: OPEN
 - hits: 1

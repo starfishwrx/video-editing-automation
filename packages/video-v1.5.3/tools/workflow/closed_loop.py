@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import time
@@ -283,6 +284,32 @@ def archive_parent(task_path: pathlib.Path, done_path: pathlib.Path, policy_path
     return receipt
 
 
+def _table_readback_cells(response: dict[str, Any], record_id: str) -> dict[str, Any]:
+    """Decode the existing lark-cli +record-get matrix without positional guesses."""
+    data = response.get('data')
+    if not isinstance(data, dict) or data.get('has_more'):
+        return {}
+    ids, fields, rows = data.get('record_id_list'), data.get('fields'), data.get('data')
+    if (ids != [record_id] or not isinstance(fields, list) or len(set(fields)) != len(fields)
+            or not isinstance(rows, list) or len(rows) != 1
+            or not isinstance(rows[0], list) or len(rows[0]) != len(fields)):
+        return {}
+    return dict(zip(fields, rows[0]))
+
+
+def _table_cell_matches(field: str, actual: Any, expected: Any) -> bool:
+    if field == '草稿文件' and isinstance(actual, str):
+        # Lark text cells render a UNC path as a Markdown link. Require both
+        # label and target to identify the intended path, not just its label.
+        match = re.fullmatch(r'\[([^\]]+)\]\(([^)]+)\)', actual)
+        if match:
+            target = match[2]
+            if target.startswith('http://\\\\'):
+                target = target[7:]
+            return match[1] == expected and target == expected
+    return actual == expected
+
+
 def table_update(task_path: pathlib.Path, done_path: pathlib.Path, policy_path: pathlib.Path) -> dict[str, Any]:
     rules = policy(policy_path)
     task = read_json(task_path)
@@ -323,15 +350,58 @@ def table_update(task_path: pathlib.Path, done_path: pathlib.Path, policy_path: 
         command = lark_command(arguments, executable=lark_cli_executable(), profile=profile)
     except RuntimeError as exc:
         return {'ok': False, 'status': 'BLOCKED', 'reason': str(exc), 'record_id': record_id, 'task_id': task_id}
-    result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
-    raw = (result.stdout or "")[-4000:]
-    try:
-        response = json.loads(raw)
-    except (ValueError, TypeError):
-        response = {}
-    ok = result.returncode == 0 and response.get("ok") is True
-    receipt = {"ok": ok, "record_id": record_id, "task_id": task_id, "patch": patch, "returncode": result.returncode, "response": response if response else raw, "created_at": time.strftime("%Y-%m-%d %H:%M:%S")}
-    write_json(done_path.parent / "table_update_receipt.json", receipt)
+    receipt_path = done_path.parent / 'table_update_receipt.json'
+    target_identity = digest({'base': base_token, 'table': table_id, 'actor': lark_actor(), 'profile': profile})
+    task_identity = digest(task)
+    previous = read_json(receipt_path)
+    ack = (previous.get('write_acknowledged') is True and previous.get('record_id') == record_id
+           and previous.get('patch') == patch and previous.get('target_identity') == target_identity
+           and previous.get('task_identity') == task_identity)
+    receipt = {'ok': False, 'record_id': record_id, 'task_id': task_id, 'patch': patch,
+               'target_identity': target_identity, 'task_identity': task_identity, 'write_acknowledged': ack,
+               'readback_verified': False, 'retryable': True, 'resume_stage': 'qc', 'phase': 'delivery',
+               'next_action': 'retry_table_readback', 'created_at': time.strftime('%Y-%m-%d %H:%M:%S')}
+    if not ack:
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=60)
+            response = json.loads(result.stdout or '{}')
+            ack = result.returncode == 0 and isinstance(response, dict) and response.get('ok') is True
+            receipt['returncode'] = result.returncode
+        except (OSError, subprocess.TimeoutExpired, ValueError, TypeError):
+            ack = False
+        receipt['write_acknowledged'] = ack
+        if not ack:
+            receipt.update(status='TABLE_UPDATE_FAILED', next_action='retry_table_update')
+            write_json(receipt_path, receipt)
+            return receipt
+        # Persist ACK before any read so an interrupted recovery need not write twice.
+        write_json(receipt_path, receipt)
+    read_args = ['base', '+record-get', '--base-token', base_token, '--table-id', table_id,
+                 '--as', lark_actor(), '--format', 'json', '--record-id', record_id]
+    for field in patch:
+        read_args.extend(['--field-id', field])
+    read_command = lark_command(read_args, executable=lark_cli_executable(), profile=profile)
+    for attempt in range(3):
+        receipt['readback_attempts'] = attempt + 1
+        try:
+            result = subprocess.run(read_command, capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=20)
+            response = json.loads(result.stdout or '{}')
+            valid = result.returncode == 0 and isinstance(response, dict) and response.get('ok') is True
+            cells = _table_readback_cells(response, record_id) if valid else {}
+            mismatches = [field for field, value in patch.items()
+                          if field not in cells or not _table_cell_matches(field, cells[field], value)]
+            receipt.update(status='TABLE_READBACK_MISMATCH' if valid else 'TABLE_READBACK_FAILED',
+                           mismatched_fields=mismatches)
+            if valid and not mismatches:
+                receipt.update(ok=True, status='TABLE_UPDATE_VERIFIED', readback_verified=True,
+                               retryable=False, next_action='none')
+                break
+        except (OSError, subprocess.TimeoutExpired, ValueError, TypeError):
+            receipt.update(status='TABLE_READBACK_FAILED', mismatched_fields=list(patch))
+        if attempt < 2:
+            time.sleep(1)
+    # Do not retain provider output or exception text: either can echo credentials.
+    write_json(receipt_path, receipt)
     return receipt
 
 
