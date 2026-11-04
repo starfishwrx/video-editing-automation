@@ -475,18 +475,19 @@ def failure_update(task_path: pathlib.Path, done_path: pathlib.Path,
         if (not isinstance(row, dict) or row.get('phase') != 'closed_loop'
                 or row.get('type') != 'delivery_or_table_gate'):
             return False
-        # Worker persists str(closed) in message; do not infer the current
-        # failing gate from an older pending receipt in the same directory.
+        # New workers preserve structured detail. Only legacy records need
+        # message parsing; malformed current detail must not use stale evidence.
         import ast
         try:
-            detail = ast.literal_eval(row.get('message', ''))
+            detail = (row['detail'] if 'detail' in row
+                      else ast.literal_eval(row.get('message', '')))
             if not isinstance(detail, dict) or detail.get('reason') != 'TABLE_UPDATE_FAILED':
                 return False
-            current = json.loads(detail.get('output', ''))
+            current = (detail['table_update_receipt'] if 'table_update_receipt' in detail
+                       else json.loads(detail.get('output', '')))
             return (isinstance(current, dict) and current.get('write_acknowledged') is True
                     and current.get('status') in {'TABLE_READBACK_FAILED', 'TABLE_READBACK_MISMATCH'}
-                    and all(current.get(key) == delivery.get(key) for key in
-                            ('record_id', 'task_identity', 'target_identity', 'patch', 'created_at')))
+                    and current == delivery)
         except (ValueError, SyntaxError, TypeError, RecursionError):
             return False
     only_delivery = (isinstance(failures, list) and bool(failures) and not done.get('error')

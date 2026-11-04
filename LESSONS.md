@@ -25,14 +25,16 @@
 
 ### L-20261104-02 QC拒绝约束不能丢失像素缓存或绕回候选
 - status: OPEN
-- hits: 1
+- hits: 2
 - 模块: selection / recovery
 - 现象: 新增逐句QC拒绝源后整批观察缓存失效，短窗和跨句恢复还可能重复生成最终装配必拒的旧镜头。
 - 根因: 可用性约束混入像素观察身份，且次级恢复入口未统一过滤拒绝源。
 - 以后怎么做: 完整manifest继续绑定拒绝约束；观察缓存身份只绑定实际像素/语义输入。所有候选生产入口先按句排除拒绝源，共享池只为受影响句有界补充，最终装配保留独立硬闸。
+- 补充: 拒绝集合必须在下次build覆盖报告之前原子累计保存，恢复按文案、商品、编辑输入及素材路径/大小/修改时间绑定。不能只从最后一次QC恢复；改稿或换源不能继承旧句号黑名单。补取未落checkpoint的QC时同时核对原input_manifest和源收据，不能只比两个旧报告的文案。
 - 证据: `test_ai_editor.py`、`test_production_playback.py`、`test_sentence_continuity.py`；独立冻结fixture复审与全量回归。
+- 恢复证据: `test_queue_contracts.py`覆盖累计A/B拒绝、QC后中断、后续报告覆盖、改稿换源、缺失来源与非法缓存。
 
-### L-20261104-01 复核子窗与原始保护区必须保留不同边界
+### L-20261104-guard-origin 复核子窗与原始保护区必须保留不同边界
 - status: OPEN
 - hits: 1
 - 模块: selection/ai_editor、application/engine
@@ -42,14 +44,22 @@
 
 ### L-20261104-delivery-readback 写入确认必须对应实际业务字段
 - status: OPEN
-- hits: 1
+- hits: 2
 - 模块: tools/workflow/closed_loop.table_update
 - 现象: CLI返回成功不能证明全部状态已落入目标记录；旧首次成片值不在真实字段选项中。
 - 以后怎么做: 用实际字段选项配置状态，成功后按record_id与字段名读回全部本次patch；容许有界可见性延迟。先保存写入ACK，恢复校验目标、记录、任务输入与patch身份后仅继续读回。原始提供方输出不得进入收据，防止凭据回显。一次成片不是人工验收。
 - 补充: closed_loop/delivery_or_table_gate包含真实评估、分发与包损坏，延后通知必须绑定本轮具体table读回结果；未知消息不延后。
 - 补充: 同目标记录发生任何中间状态写入前必须撤销delivery ACK，连未知写入结果也不可复用旧ACK。
 - 补充: ACK后的可见性恢复不能被通用failure-update写成生成失败；仅同任务与目标的交付故障延后通知，真正生产失败仍通知。
+- 补充: 截断日志只用于展示，不能再解析为恢复控制证据。finalization完整传递本次结构化table收据，worker保留结构化detail；通知延期必须与当前持久收据完全一致，长BGM字段不能导致误写失败状态。
 - 证据: test_table_readback.py，覆盖漏字段、错状态、暂不可见、超时后只读恢复及旧ACK失效。
+### L-20261104-01 集合语义的证据字段不能用序列顺序作一致性门禁
+- status: OPEN
+- hits: 1
+- 模块: policy/continuity、selection/ai_editor
+- 现象: 联合观察合法返回多个支持点，装配收据排序后却被成员门禁误报证据变化；单支持点夹具无法暴露问题。
+- 以后怎么做: 明确字段是集合还是序列；仅对支持点ID按集合比较，保留原始观察，其他证据继续严格对齐。回归覆盖正反顺序、真实少点/多点、非法结构、装配和无付费复看的恢复，不仅调用单个校验函数。
+- 证据: test_sentence_continuity.py 新增六项行为回归；docs/production-playback.md。
 
 ### L-20261103-16 修复入口和进展预算必须由程序掌握
 - status: OPEN

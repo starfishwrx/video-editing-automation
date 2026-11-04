@@ -83,6 +83,95 @@ class SentenceContinuityTests(unittest.TestCase):
             cursor += round(clip.duration * 1e6)
         return engine, clips
 
+    def multipoint_group(self, order):
+        for sentence in self.plan['sentences']:
+            sentence['selling_points'].append({'id': 'p2', 'text': 'second visible benefit'})
+        self.identity()
+        group = self.group()
+        for observed in group['review']['members']:
+            observed['supported_point_ids'] = list(order)
+        return group
+
+    def assemble_group(self, group):
+        sharing.install(self.plan, contract.digest(group['input'])[:24], group)
+        return editor._assemble(self.manifest, self.analysis, self.plan,
+                                narration_timing=None, verify_sources=True)
+
+    def test_multiple_supported_points_assemble_in_either_review_order(self):
+        original_plan = copy.deepcopy(self.plan)
+        for order in (['p1', 'p2'], ['p2', 'p1']):
+            with self.subTest(order=order):
+                self.plan = copy.deepcopy(original_plan)
+                group = self.multipoint_group(order)
+                frozen = copy.deepcopy(group)
+                result = self.assemble_group(group)
+                self.assertTrue(result['ok'])
+                self.assertEqual(group, frozen)
+                self.assertEqual(contract.sequence_errors(result['segments']), [])
+                for index, segment in enumerate(result['segments'], 1):
+                    self.assertEqual(segment['ai_selection']['supported_point_ids'], ['p1', 'p2'])
+                    self.assertEqual(continuity.member_errors(segment, index), [])
+                    segment['ai_selection']['supported_point_ids'] = list(reversed(order))
+                    self.assertEqual(continuity.member_errors(segment, index), [])
+
+    def test_supported_point_membership_changes_still_block(self):
+        result = self.assemble_group(self.multipoint_group(['p1', 'p2']))
+        for ids in (['p1'], ['p2'], [], ['p1', 'p2', 'invented'], ['p1', 'invented']):
+            with self.subTest(ids=ids):
+                segment = copy.deepcopy(result['segments'][0])
+                segment['ai_selection']['supported_point_ids'] = ids
+                self.assertIn('CONTINUITY_MEMBER_OBSERVATION_CHANGED',
+                              continuity.member_errors(segment, 1))
+
+    def test_malformed_supported_point_receipts_still_block(self):
+        result = self.assemble_group(self.multipoint_group(['p1', 'p2']))
+        for ids in (None, 'p1', {'p1': True, 'p2': True}, [['p1'], 'p2']):
+            with self.subTest(ids=ids):
+                segment = copy.deepcopy(result['segments'][0])
+                segment['ai_selection']['supported_point_ids'] = ids
+                self.assertTrue(continuity.member_errors(segment, 1))
+
+    def test_other_member_observation_changes_still_block(self):
+        result = self.assemble_group(self.multipoint_group(['p1', 'p2']))
+        changes = {'observation': 'different pixels', 'reason': 'different reason',
+                   'basis': 'visible_result', 'time_sensitive': True,
+                   'evidence_intervals_us': [{'start': 0, 'end': 1_000_000}]}
+        for field, value in changes.items():
+            with self.subTest(field=field):
+                segment = copy.deepcopy(result['segments'][0])
+                segment['ai_selection'][field] = value
+                self.assertIn('CONTINUITY_MEMBER_OBSERVATION_CHANGED',
+                              continuity.member_errors(segment, 1))
+
+    def test_reversed_point_group_repair_keeps_original_observations(self):
+        group = self.multipoint_group(['p2', 'p1'])
+        frozen = copy.deepcopy(self.plan['reviews'])
+        with patch.object(sharing, 'review_group', return_value=group) as review:
+            self.assertTrue(sharing.repair(self.manifest, self.analysis, self.plan, self.root,
+                            WindowFailure(1, 'long', 'TOO_LONG'), None))
+        review.assert_called_once()
+        self.assertEqual(self.plan['reviews'], frozen)
+        self.assertEqual(self.plan['continuity_repairs'][0]['indices'], [1, 2])
+        self.assertTrue(editor._assemble(self.manifest, self.analysis, self.plan,
+                                        narration_timing=None)['ok'])
+
+    def test_reversed_point_cached_group_recovers_without_paid_review(self):
+        group = self.multipoint_group(['p2', 'p1'])
+        self.assemble_group(group)
+        frozen = copy.deepcopy(self.plan)
+        folder = self.root / 'ai_editor'
+        folder.mkdir()
+        (folder / 'plan.json').write_text(json.dumps(self.plan), encoding='utf-8')
+        with patch.object(editor, '_editor_model', return_value='fixture'), \
+                patch.object(editor, '_call', side_effect=AssertionError('API forbidden')), \
+                patch.object(editor, '_review_pool', side_effect=AssertionError('paid rereview forbidden')), \
+                patch.object(sharing, 'review_group', side_effect=AssertionError('joint rereview forbidden')):
+            analysis = editor.prepare(self.manifest, self.analysis, self.root)
+            result = editor.match_manifest(self.manifest, analysis)
+        self.assertTrue(result['ok'], result)
+        self.assertEqual(analysis['ai_editor_plan']['reviews'], frozen['reviews'])
+        self.assertEqual(analysis['ai_editor_plan']['continuity_reviews'], frozen['continuity_reviews'])
+
     def test_default_edit_path_tries_short_review_before_joint_group(self):
         frozen = copy.deepcopy(self.plan['reviews'])
         calls = []

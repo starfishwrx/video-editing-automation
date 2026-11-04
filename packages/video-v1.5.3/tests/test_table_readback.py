@@ -130,17 +130,29 @@ class TableReadbackTests(unittest.TestCase):
         receipt_path = self.root / 'table_update_receipt.json'
         original = receipt_path.read_bytes()
         for kind in ('real_failure', 'task_identity', 'target_identity', 'record_id',
-                     'EVAL_DELIVERY_GATE', 'DISTRIBUTION_READBACK_DRIFT', 'PACKAGE_INCOMPLETE'):
+                     'EVAL_DELIVERY_GATE', 'DISTRIBUTION_READBACK_DRIFT', 'PACKAGE_INCOMPLETE',
+                     'changed_receipt', 'malformed_detail', 'malformed_receipt', 'top_level_error'):
             with self.subTest(kind=kind):
                 receipt = json.loads(original)
+                if kind in ('task_identity', 'target_identity', 'record_id'):
+                    receipt[kind] = 'stale'
+                detail = {'reason': 'TABLE_UPDATE_FAILED', 'table_update_receipt': dict(receipt)}
                 failures = [{'phase': 'closed_loop', 'type': 'delivery_or_table_gate',
-                             'message': str({'reason': kind, 'output': original.decode()})}]
+                             'detail': detail, 'message': str({
+                                 'reason': 'TABLE_UPDATE_FAILED', 'output': original.decode()})}]
                 if kind == 'real_failure':
                     failures.append({'phase': 'qc', 'type': 'visual'})
-                elif kind in ('task_identity', 'target_identity', 'record_id'):
-                    receipt[kind] = 'stale'
+                elif kind in ('EVAL_DELIVERY_GATE', 'DISTRIBUTION_READBACK_DRIFT', 'PACKAGE_INCOMPLETE'):
+                    detail['reason'] = kind
+                elif kind == 'changed_receipt':
+                    receipt['readback_attempts'] += 1
+                elif kind == 'malformed_detail':
+                    failures[0]['detail'] = None
+                elif kind == 'malformed_receipt':
+                    detail['table_update_receipt'] = None
                 self.write(receipt_path, receipt)
-                self.write(self.done, {'status': 'PARTIAL', 'failures': failures})
+                self.write(self.done, {'status': 'PARTIAL', 'failures': failures,
+                                      'error': 'outer failure' if kind == 'top_level_error' else ''})
                 with patch.object(m.subprocess, 'run', return_value=self.response({'ok': True})) as run:
                     result = m.failure_update(self.task, self.done, self.policy)
                 self.assertTrue(result['ok'])
