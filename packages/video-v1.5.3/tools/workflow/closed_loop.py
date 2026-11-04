@@ -497,6 +497,16 @@ def failure_update(task_path: pathlib.Path, done_path: pathlib.Path,
         receipt['reason'] = str(exc)
         write_json(done_path.parent / 'failure_notification_receipt.json', receipt)
         return receipt
+    # Any intervening status write invalidates the earlier delivery ACK, even
+    # if this notification times out after the server applies it. Invalidate
+    # before the request so the next delivery retry may restore its own patch.
+    if (delivery.get('write_acknowledged') is True
+            and delivery.get('record_id') == record_id
+            and delivery.get('target_identity') == target_identity):
+        delivery.update(write_acknowledged=False, readback_verified=False,
+                        status='TABLE_ACK_INVALIDATED_BY_FAILURE_UPDATE', ok=False,
+                        retryable=True, next_action='retry_table_update')
+        write_json(done_path.parent / 'table_update_receipt.json', delivery)
     try:
         result = subprocess.run(command, capture_output=True, text=True,
                                 encoding="utf-8", errors="replace", timeout=60)

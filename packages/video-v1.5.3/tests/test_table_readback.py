@@ -103,6 +103,27 @@ class TableReadbackTests(unittest.TestCase):
         self.assertEqual(run.call_count, 1)
         self.assertIn('+record-get', run.call_args.args[0])
 
+    def test_interrupted_checkpoint_then_failure_write_invalidates_ack(self):
+        candidate = self.done.read_bytes()
+        self.run_update([self.response({'ok': True})] + [self.response({'ok': False})] * 3)
+        receipt_path = self.root / 'table_update_receipt.json'
+        receipt = json.loads(receipt_path.read_text())
+        receipt.pop('status')  # ACK persisted, child interrupted before first read.
+        self.write(receipt_path, receipt)
+        self.write(self.done, {'status': 'ERROR', 'error': 'outer timeout',
+                              'failures': [{'phase': 'preflight', 'type': 'error'}]})
+        def interrupted_write(*args, **kwargs):
+            saved = json.loads(receipt_path.read_text())
+            self.assertFalse(saved['write_acknowledged'])
+            raise subprocess.TimeoutExpired(['redacted'], 60)
+        with patch.object(m.subprocess, 'run', side_effect=interrupted_write):
+            m.failure_update(self.task, self.done, self.policy)
+        self.done.write_bytes(candidate)
+        result, run = self.run_update([self.response({'ok': True}), self.response(self.cells())])
+        self.assertTrue(result['ok'])
+        self.assertEqual(run.call_count, 2)
+        self.assertIn('+record-batch-update', run.call_args_list[0].args[0])
+
     def test_real_failure_and_stale_ack_still_notify(self):
         self.run_update([self.response({'ok': True})] + [self.response({'ok': False})] * 3)
         receipt_path = self.root / 'table_update_receipt.json'
