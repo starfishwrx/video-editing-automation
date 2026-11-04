@@ -272,6 +272,8 @@ class AIEditorTests(unittest.TestCase):
         self.assertFalse(self.result(plan)["ok"])
 
     def test_microsecond_evidence_is_not_rounded_inward_by_candidate_solver(self):
+        self.review["playback_observation"] = {"schema": contract.playback.OBSERVATION_SCHEMA,
+            "kind": "process", "start_us": 0, "end_us": 6_000_000, "observed": "reviewed pure process"}
         self.manifest["segments"][0]["audio_duration_us"] = 842083
         self.review["evidence_intervals_us"] = [{"start": 1363687, "end": 2300917}]
         plan = self.plan()
@@ -311,7 +313,7 @@ class AIEditorTests(unittest.TestCase):
         self.assertIn('"within_preferred_speed": true', prompt)
         self.assertIn('"source_identity": "source1"', prompt)
         self.assertNotIn(str(self.video), prompt)
-        self.assertIn("最高20倍", prompt)
+        self.assertIn("硬上限3倍", prompt)
 
     def test_editor_repairs_duplicate_rows_without_silently_selecting_one(self):
         plan = self.plan()
@@ -332,15 +334,17 @@ class AIEditorTests(unittest.TestCase):
         self.review["evidence_intervals_us"] = [{"start": 0, "end": 1_000_000}]
         self.assertTrue(self.result()["ok"])
 
-    def test_long_required_evidence_can_exceed_two_but_not_twenty(self):
+    def test_long_required_evidence_is_blocked_without_cutting_it(self):
         self.shot.update(source_end=12, material_duration_us=12_000_000)
         self.review["evidence_intervals_us"] = [{"start": 0, "end": 10_000_000}]
-        segment = self.result()["segments"][0]
-        self.assertGreater(segment["video_speed"], 2)
-        self.assertLessEqual(segment["video_speed"], 20)
-        self.assertGreaterEqual(segment["source_end"], 10)
+        result = self.result()
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "TIMING_INFEASIBLE")
+        self.assertEqual(self.review["evidence_intervals_us"][0]["end"], 10_000_000)
 
     def test_correct_visual_can_speed_up_beyond_legacy_display_limit(self):
+        self.review["playback_observation"] = {"schema": contract.playback.OBSERVATION_SCHEMA,
+            "kind": "process", "start_us": 0, "end_us": 6_000_000, "observed": "reviewed pure process"}
         self.review["evidence_intervals_us"] = [{"start": 2000000, "end": 4500000}]
         result = self.result()
         self.assertTrue(result["ok"], result)
@@ -349,12 +353,14 @@ class AIEditorTests(unittest.TestCase):
         self.assertLessEqual(segment["source_start"], 2)
         self.assertGreaterEqual(segment["source_end"], 4.5)
         self.assertEqual(shot_analyzer._fit_speed_range({"visual_role": "product_display"},
-            manifest={"selection_mode": "legacy"}, time_sensitive=False), (.85, 1.2))
+            manifest={"selection_mode": "legacy"}, time_sensitive=False), (1, 1))
         changed = copy.deepcopy(segment)
         changed["video_speed"] = 1
         self.assertIn("AI_SELECTION_SPEED_CHANGED", contract.validate_segment_receipt(changed)["reasons"])
 
     def test_qc_checks_actual_speed_and_timeline_duration(self):
+        self.review["playback_observation"] = {"schema": contract.playback.OBSERVATION_SCHEMA,
+            "kind": "process", "start_us": 0, "end_us": 6_000_000, "observed": "reviewed pure process"}
         self.review["evidence_intervals_us"] = [{"start": 2000000, "end": 4500000}]
         segment = self.result()["segments"][0]
         claim = {"index": 1, "ai_segment": segment}

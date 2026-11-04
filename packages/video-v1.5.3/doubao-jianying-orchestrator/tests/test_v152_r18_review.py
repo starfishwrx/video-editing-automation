@@ -173,19 +173,16 @@ class PreviewNarrowTests(unittest.TestCase):
         self.assertTrue(seg["preview_unresolved"])
         self.assertIn("NARROWED_FOR_PREVIEW", seg["preview_reason"])
 
-    def test_formal_speeds_up_long_evidence(self):
+    def test_formal_blocks_long_evidence_without_phase_permission(self):
         manifest = _manifest("亲肤舒适", audio_s=1.0, category="weipin", product="萌睡裤",
                              product_name="萌睡裤", delivery_mode="formal")
         window = shot_analyzer.candidate_window(
             self.SOFT, audio_duration_us=US, manifest=manifest, time_sensitive=True)
-        self.assertTrue(window.ok, window.reason)
-        self.assertGreater(window.speed, 1.0)
-        self.assertLessEqual(window.speed, shot_analyzer.EVIDENCE_FIT_SPEED_MAX)
-        self.assertLessEqual(window.source_start_us, 1_272_000)
-        self.assertGreaterEqual(window.source_end_us, 3_770_000)
+        self.assertFalse(window.ok)
+        self.assertEqual(window.reason, "EVIDENCE_SPAN_TOO_LONG")
         matched = self._match("formal")
-        self.assertNotIn("SHOT_TIMING_INFEASIBLE",
-                         [p.get("type") for p in matched.get("pending_items") or []])
+        self.assertFalse(matched["ok"])
+        self.assertTrue(matched.get("pending_items"))
 
 
 class AbsorbGroupShareTests(unittest.TestCase):

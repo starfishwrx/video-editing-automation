@@ -38,6 +38,8 @@ class PreferredSpeedTests(unittest.TestCase):
                 "role": "product_display", "selection_mode": "ai_editor",
                 "speed_range_override": [0.8, 1.5], "preferred_speed": 1.3,
                 "frame_time": 5, "duration": 10}
+        shot["playback_observation"] = {"schema": tc.playback.OBSERVATION_SCHEMA,
+            "kind": "process", "start_us": 0, "end_us": 10_000_000, "observed": "reviewed pure process"}
         manifest = {"head_trim_s": 0, "tail_trim_s": 0, "tail_pad_s": 0, "fps": 30}
         single = shot_analyzer.candidate_window(shot, audio_duration_us=2_000_000,
                                                manifest=manifest, cover_evidence=False)

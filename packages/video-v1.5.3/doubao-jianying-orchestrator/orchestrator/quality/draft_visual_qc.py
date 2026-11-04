@@ -660,13 +660,14 @@ def main() -> int:
                 # semantic batches so one large prompt cannot block all QC.
                 batch_size = max(1, int(os.environ.get("JY_POST_QC_BATCH_CLAIMS", "2" if ai_mode else "4")))
                 visual_rows = []
-                batch_count = (len(active_claims) + batch_size - 1) // batch_size
+                batches = (ai_editor_qc.claim_batches(active_claims, batch_size) if ai_mode else
+                           [active_claims[start:start + batch_size] for start in range(0, len(active_claims), batch_size)])
+                batch_count = len(batches)
                 bindings = {}
                 checkpoints = {}
                 request_errors = {}
                 def prepare_batch(job):
-                    batch_no, start = job
-                    claims = active_claims[start:start + batch_size]
+                    batch_no, claims = job
                     items = [dict(item, label=(f"S{local:02d} {item['suffix']} @{item['timestamp']:.3f}s" if ai_mode else f"S{local:02d} {item['suffix']}"))
                              for local, claim in enumerate(claims, 1)
                              for item in claim_frames.get(claim["index"], [])]
@@ -700,7 +701,7 @@ def main() -> int:
                     return batch_no, (claims, chunk_sheet, prompt, response)
 
                 prepared = vision_analyzer._prepare_indexed(
-                    list(enumerate(range(0, len(active_claims), batch_size), 1)), prepare_batch)
+                    list(enumerate(batches, 1)), prepare_batch)
                 jobs = []
                 for batch_no in sorted(prepared):
                     if prepared[batch_no] is None:

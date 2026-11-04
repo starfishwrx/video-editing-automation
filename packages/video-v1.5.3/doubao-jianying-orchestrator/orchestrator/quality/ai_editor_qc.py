@@ -38,6 +38,21 @@ def prompt(claims: list[dict], frame_count: int) -> str:
     contexts = {contract.digest(contract.rules_identity({"category": c.get("category"), "product": c.get("product")})):
         {"category": c.get("category"), "product": c.get("product")} for c in claims}
     policy = "\n".join(contract.policy_prompt(manifest) for manifest in contexts.values())
+    local = {c["index"]: i for i, c in enumerate(claims, 1) if "index" in c}
+    groups = set()
+    for claim in claims:
+        group = (claim.get("ai_segment") or {}).get("continuity_group")
+        if group:
+            indices = tuple(m["index"] for m in group["input"]["members"])
+            if not all(i in local for i in indices):
+                raise ValueError("CONTINUITY_QC_GROUP_INCOMPLETE")
+            groups.add(tuple(local[i] for i in indices))
+    if groups:
+        mapping += "\n待独立检查的连续画面句组：" + str(sorted(groups))
+        mapping += ("。这只是时间线分组，不是通过结论。联合查看本批所有实际切片，独立确认同商品、"
+                    "同次演示、同一具体卖点、动作和结果完整且可读；仍逐句检查其口播与画面阶段、节奏是否吻合。"
+                    "无需每句重播完整实验，但不能借无关句，也不能把后句结果说成前句已出现。"
+                    "组内任一必要阶段缺失、不连贯或无法确认时，受影响各句标为INSUFFICIENT_EVIDENCE，不得整体放行。")
     return policy + f"""
 你是独立成片审稿人，这是全新调用，不知道选镜器的结论。仅根据最终切片中新抽出的实际画面判断。
 每个物理片段依时间顺序提供开始、过程、结束帧，并补充关键动作/结果帧，总共{frame_count}张。
@@ -58,6 +73,26 @@ DIRECT表示本句按其用途正常匹配：贴切的轻薄/柔软展示和普�
 """
 
 
+def claim_batches(claims, size):
+    """Keep a reviewed group together, without sending selector judgments to QC."""
+    batches, batch, cursor = [], [], 0
+    while cursor < len(claims):
+        group = (claims[cursor].get("ai_segment") or {}).get("continuity_group")
+        count = len(group["input"]["members"]) if group else 1
+        unit = claims[cursor:cursor + count]
+        if group and ([c["index"] for c in unit] != [m["index"] for m in group["input"]["members"]]
+                      or any((c.get("ai_segment") or {}).get("continuity_group") != group for c in unit)):
+            raise ValueError("CONTINUITY_QC_GROUP_INCOMPLETE")
+        if batch and len(batch) + count > size:
+            batches.append(batch)
+            batch = []
+        batch.extend(unit)
+        cursor += count
+    if batch:
+        batches.append(batch)
+    return batches
+
+
 def validate_cut(claim: dict, rows: list[dict], prepared_sources=None) -> list[str]:
     item = claim["ai_segment"]
     check = contract.validate_segment_receipt(item, index=claim["index"], manifest={
@@ -74,6 +109,9 @@ def validate_cut(claim: dict, rows: list[dict], prepared_sources=None) -> list[s
         start = round(actual["source_start"] * 1e6)
         end = round((actual["source_start"] + actual["source_duration"]) * 1e6)
         planned = receipt.get("window_us") or {}
+        if item.get("continuity_group") and (start != planned.get("start") or end != planned.get("end")
+                or round(actual.get("target_duration", 0) * 1e6) != end - start):
+            issues.append("CONTINUITY_QC_ALLOCATION_CHANGED")
         # One output frame of rounding is allowed; evidence itself cannot be cut.
         if abs(start - planned.get("start", -1000000)) > 40000 or abs(end - planned.get("end", -1000000)) > 40000:
             issues.append("AI_QC_FINAL_WINDOW_CHANGED")

@@ -148,8 +148,8 @@ class WasteTrimTests(unittest.TestCase):
         self.assertEqual(tc.effective_speed_range("direct_evidence", time_sensitive=True),
                          (1.0, 1.0))
         self.assertEqual(tc.effective_speed_range("direct_evidence", time_sensitive=True,
-                                                  override=[1.6, 1.0]), (1.0, 1.6))
-        self.assertEqual(tc.effective_speed_range("usage_demo", override=None), (0.92, 1.15))
+                                                  override=[1.6, 1.0]), (1.0, 1.0))
+        self.assertEqual(tc.effective_speed_range("usage_demo", override=None), (1.0, 1.0))
 
 
 class ShotNotesTests(unittest.TestCase):
@@ -1276,11 +1276,11 @@ class ExperimentGroupChainTests(unittest.TestCase):
                                        locate=locate)
         return report["rows"][0], matched["manifest"]["segments"]
 
-    def test_too_short_group_borrows_the_next_sentence(self):
+    def test_over_cap_group_cannot_be_rescued_by_short_neighbour(self):
         row, segments = self._borrow(3.6, 1.0)
         self.assertEqual((row["indices"], row.get("borrowed"), row["status"]),
-                         ([1, 2], [2], "partial"))
-        self.assertEqual({s["video"] for s in segments}, {"D:/m/absorb.mp4"})
+                         ([1], None, "unmet"))
+        self.assertEqual(segments[1]["video"], "D:/m/other.mp4")
 
     def test_borrowing_that_still_fails_keeps_the_neighbour(self):
         row, segments = self._borrow(3.6, 0.2)

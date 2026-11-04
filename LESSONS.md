@@ -7,6 +7,30 @@
 
 ## 新增条目
 
+### L-20261103-16 修复入口和进展预算必须由程序掌握
+- status: OPEN
+- hits: 1
+- 模块: selection/ai_editor、selection/sentence_continuity、selection/ai_editor_recovery
+- 现象: 模型遵守时长约束而返回空选镜，反而进不了跨句修复；每轮只修一组时，四组合法连续演示被三轮文字纠错预算截断。
+- 以后怎么做: 空选择先检查真实候选，区分证据缺失和有证据但时长无解。已复核长窗只是修复提案，必须重新通过装配和像素观察才能认证。局部修复取得进展后继续求解，与模型纠错轮次分离；逐句付费复核预算持久化，重复状态和总步骤均有限。测试多组、全部空选择、末组不确定及无进展情形，不只测一组成功。
+- 证据: test_sentence_continuity.py 的7项复审回归；docs/production-playback.md。
+
+### L-20261103-15 跨句预算不等于跨句证据成立
+- status: OPEN
+- hits: 1
+- 模块: selection/sentence_continuity、policy/continuity、quality/continuity
+- 现象: 两句分别求完整动作会无解；简单合并时长却可能借用无关卖点、同文件的另一实验，或让结果与口播阶段错位。
+- 以后怎么做: 先短完整窗口，再对相邻同商品同卖点同演示进行联合实际画面复核；固定逐句配音字幕预算，只共享连续画面。逐句阶段是新的观察，原宽证据保留；所有组员、时序、源身份都要重验，不能单独复用一个片段冒称动作完整。写稿前按后端实际消费的源长度检查，写稿后独立解析活动文档；参数正确与观看质量分别验收。
+- 证据: test_sentence_continuity.py；docs/production-playback.md。
+
+### L-20261103-14 限速必须贯穿生产入口并区分观察与规划缓存
+- status: OPEN
+- hits: 1
+- 模块: policy/playback、selection/ai_editor、selection/timing_contract、application/engine
+- 现象: 实验有2/3倍规则，默认AI和旧成功计划仍可产生9–13倍；后台技术上限被误当成剪辑许可。
+- 以后怎么做: 共享版本化生产政策，实际源窗/输出时长在写稿前重新计算；关键/结果及未知相位原速。旧成功标志和旧速度覆盖不构成许可，保留像素事实，仅重解或重选失败句；完整证据装不下报告冲突，不裁短证据伪造可行。实验配对、阶段与跨句预算必须先适配证据合同再接默认入口。
+- 证据: test_production_playback.py；从冻结计划匿名提取的 production_speed_failures.json；docs/production-playback.md 中分别记录源码能力、未接入组件和部署状态。
+
 ### L-20261103-13 自动选曲回退必须区分坏素材和环境故障
 - status: OPEN
 - hits: 1
@@ -22,6 +46,7 @@
 - 现象: 原 48kHz 配音转 44.1kHz AAC 后与计划差几微秒，严格写稿拒绝；iPhone 显示矩阵旋转素材也被无头后端拒绝。仅放宽容差或删除旋转标签会掩盖真实缺音或改变显示画面。
 - 以后怎么做: 最终旁白使用 48kHz PCM 的整数采样边界，检查实际 PCM 数据而不只读 WAV 头；处理缓存独立版本化、加锁并原子发布，不失效原 TTS。恢复保留生成来源并覆盖旧 file 绑定迁移。旋转通过完整无损工作副本解决，核对位深、解码像素、原声和帧 PTS；10bit x264 使用 qp=0，crf=0 并不保证逐像素相同。独立 QC 必须检查实际副本，同时绑定原证据和映射；另补空 profile 冷启动与真实缓存写出回读。
 - 证据: test_headless_media.py、test_headless_media_coldstart.py、test_ai_editor_qc.py；四条隔离缓存恢复的本机验证收据另存，不随源码交付。
+- 后续整合: #42 将新转正副本改为 v5 高画质限码率编码，兼容旧 v4 收据；无损全源副本会放大体积和并发磁盘 IO。压缩质量与证据时钟分别检查：保持分辨率/位深/原声/帧时钟和零偏移映射，允许副本像素压缩差异；跨句回读仍须核对实际副本内容和原素材绑定，不能按原文件字节直接拒绝合法转正，也不能放过换源。新增回归见 test_sentence_continuity.py。
 
 ### L-20261103-11 字幕居中、安全行宽与多行高度必须共同验证
 - status: OPEN
