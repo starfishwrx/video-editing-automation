@@ -72,7 +72,7 @@ class AIEditorQCIntegrationTests(unittest.TestCase):
         actual.write_bytes(b"synthetic transformed pixels with different bytes")
         receipt = {"schema": prepared.VERSION, "source": contract.source_identity(source),
             "prepared": prepared.identity(actual), "prepared_sha256": prepared.file_digest(actual),
-            "lossless": True, "rotation_degrees": 90, "frame_clock": {"count": 60},
+            "lossless": False, "quality": {"mode": prepared.QUALITY_MODE}, "rotation_degrees": 90, "frame_clock": {"count": 60},
             "time_mapping": {"offset_us": 0, "rate_num": 1, "rate_den": 1}}
         path = self.draft / prepared.RECEIPT_FILE
         path.write_text(json.dumps({"schema": prepared.VERSION, "sources": [receipt]}), encoding="utf-8")

@@ -407,6 +407,38 @@ class SentenceContinuityTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'CONTINUITY_QC_GROUP_INCOMPLETE'):
             ai_editor_qc.prompt(claims[1:], 8)
 
+    def test_normalized_group_copy_keeps_clock_and_original_evidence_binding(self):
+        from orchestrator.media import source_normalization as normalization
+        result = self.install()
+        _, clips = self.clips(result)
+        prepared = self.root / 'upright-working.mp4'
+        prepared.write_bytes(b'encoded upright pixels differ from original source')
+        folder = self.root / 'normalized-editable-draft'
+        folder.mkdir()
+        owned = folder / 'video.mp4'
+        owned.write_bytes(prepared.read_bytes())
+        source = result['segments'][0]['continuity_group']['input']['source_identity']
+        receipt = {'schema': normalization.VERSION, 'source': source,
+            'prepared': normalization.identity(prepared), 'prepared_sha256': normalization.file_digest(prepared),
+            'lossless': False, 'quality': {'mode': normalization.QUALITY_MODE}, 'rotation_degrees': 90,
+            'frame_clock': {'count': 120}, 'time_mapping': {'offset_us': 0, 'rate_num': 1, 'rate_den': 1}}
+        draft = {'materials': {'videos': [{'id': 'v', 'path': 'video.mp4'}]},
+                 'tracks': [{'type': 'video', 'segments': [{'material_id': 'v', 'speed': 1,
+                    'source_timerange': {'start': round(c.source_start * 1e6), 'duration': 2_000_000},
+                    'target_timerange': {'start': c.start_us, 'duration': 2_000_000}} for c in clips]}]}
+        (folder / 'draft_info.json').write_text(json.dumps(draft), encoding='utf-8')
+        overrides = {str(Path(clips[0].video).resolve()): str(prepared)}
+        self.assertEqual(qc.runtime_errors(clips, result['segments']), [])
+        self.assertEqual(qc.draft_errors(folder, clips, source_overrides=overrides), [])
+        self.assertTrue(ai_editor_qc.source_matches_receipt(str(owned), source, [receipt]))
+        self.assertIn('CONTINUITY_DRAFT_SOURCE_CHANGED', qc.draft_errors(folder, clips))
+        shifted = copy.deepcopy(receipt)
+        shifted['time_mapping']['offset_us'] = 1
+        self.assertFalse(ai_editor_qc.source_matches_receipt(str(owned), source, [shifted]))
+        owned.write_bytes(b'unrelated replacement')
+        self.assertIn('CONTINUITY_DRAFT_SOURCE_CHANGED', qc.draft_errors(folder, clips, source_overrides=overrides))
+        self.assertFalse(ai_editor_qc.source_matches_receipt(str(owned), source, [receipt]))
+
 
 class ReviewRegressionTests(unittest.TestCase):
     setUp = baseline.ProductionPlaybackTests.setUp

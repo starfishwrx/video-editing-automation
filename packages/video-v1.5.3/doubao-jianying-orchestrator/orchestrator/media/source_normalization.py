@@ -1,4 +1,10 @@
-"""Upright lossless working copies with an unchanged relative source clock."""
+"""Upright high-quality working copies with an unchanged relative source clock.
+
+v4 encoded the whole source losslessly (QP 0), which inflated typical 15-20 Mbps
+phone footage to ~165 Mbps and made draft write, NAS ship and archive hashing
+IO-bound. v5 encodes at visually transparent quality capped near the source
+bitrate. v4 receipts in already-built drafts stay readable and verifiable.
+"""
 from __future__ import annotations
 
 from fractions import Fraction
@@ -13,7 +19,13 @@ from .probe import probe_media
 from .video_encode import run_h264_encode
 from ..runtime.file_safety import atomic_write_text, file_lock
 
-VERSION = "upright-source-v4"
+VERSION = "upright-source-v5"
+LEGACY_VERSIONS = ("upright-source-v4",)
+ACCEPTED_VERSIONS = (VERSION, *LEGACY_VERSIONS)
+QUALITY_MODE = "high_quality"
+# Average target and hard peak relative to the source video bitrate.
+TARGET_RATIO, PEAK_RATIO = 1.2, 1.5
+MIN_SOURCE_BITRATE = 2_000_000
 RECEIPT_FILE = "prepared_sources.json"
 
 
@@ -43,6 +55,17 @@ def rotation(facts) -> int:
     if not math.isfinite(value) or value % 90:
         raise ValueError("SOURCE_ROTATION_UNSUPPORTED")
     return round(value) % 360
+
+
+def source_video_bitrate(facts) -> int:
+    """Video bitrate of the camera original (bps), falling back to file size."""
+    try:
+        value = int(_video(facts).get("bit_rate") or 0)
+    except (TypeError, ValueError):
+        value = 0
+    if value <= 0:
+        value = int(facts["size"] * 8 * 1_000_000 / max(1, facts["duration_us"]))
+    return max(MIN_SOURCE_BITRATE, value)
 
 
 def _clock(path, ffprobe) -> list[int]:
@@ -93,11 +116,14 @@ def normalize_video(source, directory, *, ffmpeg="ffmpeg", ffprobe="ffprobe") ->
         try:
             # FFmpeg applies the input display matrix to pixels. Keep frame
             # timestamps and native audio; do not resize, trim or resample video.
+            source_rate = source_video_bitrate(facts)
+            target_rate, peak_rate = round(source_rate * TARGET_RATIO), round(source_rate * PEAK_RATIO)
             encoder, _ = run_h264_encode(str(ffmpeg), ["-y", "-hide_banner", "-loglevel", "error",
                 "-i", str(source), "-map", "0:v:0", "-map", "0:a:0?", "-fps_mode", "passthrough",
                 "-enc_time_base:v", "demux"],
                 temporary, trailing=["-c:a", "copy", "-metadata:s:v:0", "rotate=0"],
-                lossless=True, lossless_pixel_format=pixel_format, timeout=1200)
+                quality_bitrate=target_rate, quality_maxrate=peak_rate,
+                pixel_format=pixel_format, timeout=1200)
             actual = probe_media(temporary, ffprobe=ffprobe)
             width, height = facts["width"], facts["height"]
             if angle in {90, 270}:
@@ -117,7 +143,10 @@ def normalize_video(source, directory, *, ffmpeg="ffmpeg", ffprobe="ffprobe") ->
             temporary.replace(target)
             record = {"schema": VERSION, "changed": True, "source": before,
                 "prepared": identity(target), "prepared_sha256": file_digest(target),
-                "rotation_degrees": angle, "encoder": encoder, "lossless": True,
+                "rotation_degrees": angle, "encoder": encoder, "lossless": False,
+                "quality": {"mode": QUALITY_MODE, "source_video_bitrate": source_rate,
+                            "target_bitrate": target_rate, "max_bitrate": peak_rate,
+                            "prepared_video_bitrate": source_video_bitrate(actual)},
                 "pixel_format": pixel_format, "color_metadata": colors,
                 "time_mapping": {"offset_us": 0, "rate_num": 1, "rate_den": 1},
                 "frame_clock": {"count": len(final_clock), "last_us": final_clock[-1]},
@@ -129,15 +158,22 @@ def normalize_video(source, directory, *, ffmpeg="ffmpeg", ffprobe="ffprobe") ->
             temporary.unlink(missing_ok=True)
 
 
+def _encoding_contract_ok(row) -> bool:
+    if row.get("schema") in LEGACY_VERSIONS:
+        return row.get("lossless") is True
+    return (row.get("schema") == VERSION and row.get("lossless") is False
+            and (row.get("quality") or {}).get("mode") == QUALITY_MODE)
+
+
 def matches_prepared_source(actual_path, expected: dict, records: list[dict]) -> bool:
     """Recognize draft-owned byte copies of an explicitly normalized source."""
     try:
         before = identity(actual_path)
         for row in records:
-            if (row.get("schema") != VERSION or row.get("source") != expected
+            if (not _encoding_contract_ok(row) or row.get("source") != expected
                     or row.get("time_mapping") != {"offset_us": 0, "rate_num": 1, "rate_den": 1}
                     or row.get("rotation_degrees") not in {90, 180, 270}
-                    or row.get("lossless") is not True or row.get("frame_clock", {}).get("count", 0) < 1
+                    or row.get("frame_clock", {}).get("count", 0) < 1
                     or before["size"] != row.get("prepared", {}).get("size")):
                 continue
             if (identity(expected["path"]) == expected and file_digest(actual_path) == row["prepared_sha256"]
@@ -153,6 +189,6 @@ def read_prepared_sources(draft) -> list[dict]:
     if not path.is_file():
         return []
     value = json.loads(path.read_text(encoding="utf-8"))
-    if value.get("schema") != VERSION or not isinstance(value.get("sources"), list):
+    if value.get("schema") not in ACCEPTED_VERSIONS or not isinstance(value.get("sources"), list):
         raise ValueError("PREPARED_SOURCE_RECEIPT_INVALID")
     return value["sources"]
