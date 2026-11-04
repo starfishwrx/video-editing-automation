@@ -59,6 +59,7 @@ uv run --frozen python -X utf8 -m tools.check_architecture
 | 选镜阶段续跑 | 包级 `test_selection_stage_resume.py`、`test_queue_contracts.py`；原配音/句长不变，输入变化、过程打断和预算耗尽不回到完整build，选镜后超时保留匹配 |
 | 时间窗求解 | `test_timing_contract.py`；纸品动作另加 `test_paper_action_windows.py` |
 | 草稿交付 / 媒体路径 | `test_draft_delivery.py` |
+| 安装面诊断 | `test_delivery_runtime.py`；覆盖默认交付范围兼容、全库存同版本漂移、缺候选文件、坏库存及解析后路径逃逸；不加载生产模块 |
 | NAS 往返 | `test_nas_portable.py` |
 | 单一闸门 | 对应 `test_*gate*` / 模块测试，且必须含「该拦的输入被拦住」 |
 
