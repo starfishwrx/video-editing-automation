@@ -49,6 +49,38 @@ class AIEditorTests(unittest.TestCase):
     def result(self, plan=None):
         return editor.match_manifest(self.manifest, {"shots": [self.shot], "ai_editor_plan": plan or self.plan()})
 
+    def test_qc_rejected_shot_cannot_be_reselected_for_that_sentence(self):
+        alt_video = self.root / "alt.mp4"
+        alt_video.write_bytes(b"alternative source identity")
+        alt = {**self.shot, "shot_id": "alt", "video": str(alt_video)}
+        alt_review = {**self.review, "shot_id": "alt", "source_identity": contract.source_identity(alt_video)}
+        plan = self.plan()
+        plan["reviews"] = {"1": [self.review, alt_review]}
+        self.manifest["qc_rejected_shots"] = {"1": ["handfeel"]}
+        analysis = {"shots": [self.shot, alt]}
+        with self.assertRaisesRegex(ValueError, "AI_EDITOR_UNREVIEWED_SELECTION:1"):
+            editor._assemble(self.manifest, analysis, plan, narration_timing=None)
+        inventory = editor._build_edit_inventory(self.manifest, analysis, plan, None)
+        self.assertEqual([c["shot_id"] for c in inventory[0]["candidates"]], ["alt"])
+        plan["rows"][0]["parts"][0]["shot_id"] = "alt"
+        self.assertTrue(editor._assemble(self.manifest, analysis, plan, narration_timing=None)["ok"])
+        # The rejection is sentence-scoped and never applies to other sentences.
+        self.assertEqual(editor.qc_rejected_shots({"qc_rejected_shots": {"1": ["handfeel"]}}), {1: {"handfeel"}})
+
+    def test_review_pool_skips_qc_rejected_candidates(self):
+        sentence = {**self.sentence, "candidate_ids": ["handfeel", "alt"], "audio_durations_us": [2_000_000]}
+        alt = {**self.shot, "shot_id": "alt"}
+        seen = []
+        def review(manifest, sentence, shot, directory, dense=False):
+            seen.append(shot["shot_id"])
+            return {**self.review, "shot_id": shot["shot_id"]}
+        with mock.patch.object(editor, "_review", side_effect=review):
+            rows, coverage = editor._review_pool(self.manifest, sentence, {"handfeel": self.shot, "alt": alt},
+                                                 self.root, {}, excluded_ids={"handfeel"})
+        self.assertNotIn("handfeel", seen)
+        self.assertEqual([r["shot_id"] for r in rows], ["alt"])
+        self.assertTrue(coverage["feasible"])
+
     def test_inventory_discards_unknown_ids_without_promoting_them(self):
         model = {"sentences": [{**self.sentence, "candidate_ids": ["invented", "handfeel"]}],
                  "display_pool_ids": ["invented-display", "handfeel"]}
@@ -304,6 +336,49 @@ class AIEditorTests(unittest.TestCase):
         plan = self.plan()
         plan["rows"][0]["parts"][0]["source_start_us"] = 100_000
         self.assertFalse(self.result(plan)["ok"])
+
+    def test_reviewed_subwindow_keeps_guard_origin_through_engine(self):
+        from orchestrator.application.engine import OrchestrationEngine
+        from orchestrator.domain.clips import Clip
+        from orchestrator import timing_contract
+        self.manifest.update(head_trim_s=.3, tail_trim_s=.2)
+        plan = self.plan()
+        plan["window_reviews"] = {"narrow": {**self.review, "sentence_index": 1,
+            "review_window_us": {"start": 2_000_000, "end": 4_000_000}}}
+        plan["rows"][0]["parts"][0]["window_review_key"] = "narrow"
+        result = self.result(plan)
+        self.assertTrue(result["ok"], result)
+        item = result["segments"][0]
+        self.assertEqual((item["scene_source_start"], item["scene_source_end"]), (2, 4))
+        self.assertEqual((item["guard_source_start"], item["guard_source_end"]), (0, 6))
+        engine = OrchestrationEngine.__new__(OrchestrationEngine)
+        engine.m, engine._raw_segments = self.manifest, [item]
+        clip = Clip(str(self.video), item["source_start"], 2, source_end=item["source_end"],
+            video_duration=6, raw_index=0, visual_role="product_display",
+            evidence_intervals=item["evidence_intervals"],
+            speed_range_override=item["speed_range_override"])
+        request = engine._timing_request(clip, 2_000_000)
+        self.assertEqual((request.lo_bound_us, request.hi_bound_us), (2_000_000, 4_000_000))
+        self.assertEqual((request.evidence_start_us, request.evidence_end_us), (2_000_000, 3_000_000))
+        self.assertTrue(timing_contract.solve_window(request).ok)
+        # Invalid origins cannot consume the original scene's safety guard.
+        item["guard_source_start"] = 3
+        self.assertEqual(engine._timing_request(clip, 2_000_000).lo_bound_us, 2_300_000)
+        # A reviewed subwindow still cannot include the original head waste.
+        plan["window_reviews"]["narrow"]["review_window_us"] = {"start": 100_000, "end": 4_000_000}
+        plan["window_reviews"]["narrow"]["evidence_intervals_us"] = [{"start": 100_000, "end": 1_000_000}]
+        with self.assertRaises(editor.WindowFailure):
+            editor._assemble(self.manifest, {"shots": [self.shot]}, plan, narration_timing=None)
+
+    def test_reviewed_subwindow_keeps_default_tail_guard(self):
+        self.manifest.pop("tail_trim_s")
+        plan = self.plan()
+        plan["window_reviews"] = {"narrow": {**self.review, "sentence_index": 1,
+            "review_window_us": {"start": 4_000_000, "end": 5_900_000},
+            "evidence_intervals_us": [{"start": 4_000_000, "end": 5_850_000}]}}
+        plan["rows"][0]["parts"][0]["window_review_key"] = "narrow"
+        with self.assertRaises(editor.WindowFailure):
+            editor._assemble(self.manifest, {"shots": [self.shot]}, plan, narration_timing=None)
 
     def test_editor_receives_actual_speed_and_content_identity(self):
         plan = self.plan()

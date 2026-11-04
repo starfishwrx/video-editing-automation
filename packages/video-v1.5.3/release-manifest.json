@@ -6,7 +6,7 @@
     "machine-specific paths",
     "knowledge-base bodies"
   ],
-  "file_count": 443,
+  "file_count": 451,
   "files": [
     {
       "path": ".gitignore"
@@ -303,10 +303,16 @@
       "path": "doubao-jianying-orchestrator/orchestrator/policy/__init__.py"
     },
     {
+      "path": "doubao-jianying-orchestrator/orchestrator/policy/continuity.py"
+    },
+    {
       "path": "doubao-jianying-orchestrator/orchestrator/policy/demo_actions.py"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/policy/feedback_policy.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/policy/playback.py"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/policy/production_parameters.py"
@@ -334,6 +340,9 @@
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/quality/ai_editor_qc.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/quality/continuity.py"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/quality/diagnostics.py"
@@ -460,6 +469,9 @@
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/selection/purpose_selection.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/selection/sentence_continuity.py"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/selection/sentence_planner.py"
@@ -624,6 +636,9 @@
       "path": "doubao-jianying-orchestrator/run.py"
     },
     {
+      "path": "doubao-jianying-orchestrator/tests/fixtures/production_speed_failures.json"
+    },
+    {
       "path": "doubao-jianying-orchestrator/tests/test_ai_editor.py"
     },
     {
@@ -732,6 +747,9 @@
       "path": "doubao-jianying-orchestrator/tests/test_preferred_speed.py"
     },
     {
+      "path": "doubao-jianying-orchestrator/tests/test_production_playback.py"
+    },
+    {
       "path": "doubao-jianying-orchestrator/tests/test_production_timeline.py"
     },
     {
@@ -760,6 +778,9 @@
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_selection_recovery.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/tests/test_sentence_continuity.py"
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_sentence_matching.py"
@@ -802,6 +823,9 @@
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_timing_contract.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/tests/test_upright_quality_encode.py"
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_v152_meeting_rules.py"

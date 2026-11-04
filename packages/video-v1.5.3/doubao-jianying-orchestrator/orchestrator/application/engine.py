@@ -1416,10 +1416,12 @@ class OrchestrationEngine:
         raw = self._raw_segment_for(clip)
         if isinstance(raw.get("ai_selection"), dict) and not isinstance(guards, (list, tuple)):
             try:
-                original_in = float(raw["scene_source_start"])
-                original_out = float(raw["scene_source_end"])
+                scene_in = float(raw["scene_source_start"])
+                scene_out = float(raw["scene_source_end"])
+                original_in = float(raw.get("guard_source_start", scene_in))
+                original_out = float(raw.get("guard_source_end", scene_out))
                 if (math.isfinite(original_in) and math.isfinite(original_out)
-                        and 0 <= original_in <= source_in < source_out <= original_out):
+                        and 0 <= original_in <= scene_in <= source_in < source_out <= scene_out <= original_out):
                     head_guard = max(0, head_guard - int(round((source_in - original_in) * US)))
                     tail_guard = max(0, tail_guard - int(round((original_out - source_out) * US)))
             except (KeyError, TypeError, ValueError, OverflowError):

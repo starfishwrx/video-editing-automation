@@ -23,6 +23,23 @@
 - 避免: 区分包依赖可安装与宿主已初始化；生产预检保留具体原因和同账号首次初始化步骤。只重分类已知初始化错误，不把其它后端故障混为一谈，不手工伪造首页索引。
 - 证据: test_headless_host_initialization.py；docs/quickstart.md的首次使用说明。
 
+### L-20261104-02 QC拒绝约束不能丢失像素缓存或绕回候选
+- status: OPEN
+- hits: 1
+- 模块: selection / recovery
+- 现象: 新增逐句QC拒绝源后整批观察缓存失效，短窗和跨句恢复还可能重复生成最终装配必拒的旧镜头。
+- 根因: 可用性约束混入像素观察身份，且次级恢复入口未统一过滤拒绝源。
+- 以后怎么做: 完整manifest继续绑定拒绝约束；观察缓存身份只绑定实际像素/语义输入。所有候选生产入口先按句排除拒绝源，共享池只为受影响句有界补充，最终装配保留独立硬闸。
+- 证据: `test_ai_editor.py`、`test_production_playback.py`、`test_sentence_continuity.py`；独立冻结fixture复审与全量回归。
+
+### L-20261104-01 复核子窗与原始保护区必须保留不同边界
+- status: OPEN
+- hits: 1
+- 模块: selection/ai_editor、application/engine
+- 现象: 规划已扣除原始场景的头废料，复核窄窗却覆盖了scene起点，写稿再次扣头保护，造成证据起点恰好早300毫秒的伪越界。
+- 以后怎么做: 保留实际复核场景边界，另带原始guard原点；验证包含关系后仅扣剩余保护，头尾默认值与求解器一致。回归要串起规划到engine请求并传入真实证据，另保留废料区和复核范围外证据的拒绝反例；恢复旧缓存重新assemble，不直接篡改匹配报告。
+- 证据: test_ai_editor.py 的reviewed_subwindow正负例和test_paper_production.py既有连续取段覆盖。
+
 ### L-20261103-16 修复入口和进展预算必须由程序掌握
 - status: OPEN
 - hits: 1

@@ -396,6 +396,8 @@ def _cached_row_feasible(manifest, analysis, plan, sentence, narration_timing):
     try:
         index = sentence["index"]
         row = next(r for r in plan.get("rows", []) if r["index"] == index)
+        if any(p.get("shot_id") in qc_rejected_shots(manifest).get(index, set()) for p in row["parts"]):
+            return False
         groups = sentence_continuity.validate_plan(manifest, analysis, plan, narration_timing)
         group = groups.get(row.get("continuity_key"))
         shots = {s["shot_id"]: s for s in analysis["shots"]}
@@ -439,7 +441,9 @@ def _cached_reviews_feasible(manifest, sentence, shots, reviews, audio):
     """Validate timing using existing pixels; never invoke a model."""
     from . import shot_analyzer
     required = {p["id"] for p in sentence["selling_points"]}
-    good = [r for r in reviews if r.get("verdict") == "matched" and r.get("shot_id") in shots]
+    excluded = qc_rejected_shots(manifest).get(sentence["index"], set())
+    good = [r for r in reviews if r.get("verdict") == "matched" and r.get("shot_id") in shots
+            and r.get("shot_id") not in excluded]
     durations = sentence.get("audio_durations_us") or [timing_contract.duration_for(
         audio, sentence["index"], segment={"text": sentence["text"]})[0]]
     for duration in durations:
@@ -458,16 +462,34 @@ def _cached_reviews_feasible(manifest, sentence, shots, reviews, audio):
     return True
 
 
+def qc_rejected_shots(manifest: dict) -> dict[int, set[str]]:
+    """Keep post-draft pixel rejections scoped to their original sentence."""
+    out = {}
+    raw = manifest.get("qc_rejected_shots")
+    if not isinstance(raw, dict):
+        return out
+    for key, values in raw.items():
+        try:
+            index = int(key)
+        except (TypeError, ValueError):
+            continue
+        if index > 0 and isinstance(values, (list, tuple, set)):
+            out[index] = {str(value) for value in values if value}
+    return out
+
+
 def _review_pool(manifest: dict, sentence: dict, shots: dict, directory: Path, audio: dict, *,
                  exhaustive: bool = False,
-                 existing_reviews: list[dict] | None = None) -> tuple[list[dict], dict]:
+                 existing_reviews: list[dict] | None = None,
+                 excluded_ids: set[str] | None = None) -> tuple[list[dict], dict]:
     from . import shot_analyzer
     def feasible(good: list[dict]) -> bool:
         return _cached_reviews_feasible(manifest, sentence, shots, good, audio)
     reviewed_by_id = {str(row.get("shot_id")): row for row in (existing_reviews or [])
                       if isinstance(row, dict) and row.get("shot_id") in shots
+                      and row.get("shot_id") not in (excluded_ids or set())
                       and not failure_fields(str(row.get("error", ""))).get("retryable")}
-    ids = sentence["candidate_ids"]
+    ids = [sid for sid in sentence["candidate_ids"] if sid not in (excluded_ids or set())]
     required = {p["id"] for p in sentence["selling_points"]}
     for offset in range(0, len(ids), ROUND_SIZE):
         existing_good = [r for r in reviewed_by_id.values() if r.get("verdict") == "matched"]
@@ -630,6 +652,7 @@ def _assemble(manifest: dict, analysis: dict, plan: dict, *, narration_timing: d
     output = []
     partial_preview = manifest.get("delivery_mode") == "preview" and manifest.get("allow_partial_selling_points") is True
     unresolved = []
+    rejected = qc_rejected_shots(manifest)
     original = timing_contract.split_sentences(manifest)
     for sentence in sentences:
         index = sentence["index"]
@@ -656,7 +679,7 @@ def _assemble(manifest: dict, analysis: dict, plan: dict, *, narration_timing: d
         used_reviews = []
         for n, part in enumerate(parts):
             sid = part.get("shot_id")
-            if sid not in good or sid not in shots:
+            if sid not in good or sid not in shots or sid in rejected.get(index, set()):
                 raise ValueError(f"AI_EDITOR_UNREVIEWED_SELECTION:{index}")
             original_shot = shots[sid]
             review, shot = {**good[sid], "scarce_reuse_reason": reuse_reason}, original_shot
@@ -684,12 +707,12 @@ def _assemble(manifest: dict, analysis: dict, plan: dict, *, narration_timing: d
                     raise ValueError("AI_EDITOR_INPOINT_INVALID")
                 observed["source_start"] = max(float(shot["source_start"]), part["source_start_us"] / 1e6)
             cfg = {**manifest, "tail_pad_s": manifest.get("tail_pad_s", 0) if n == len(parts) - 1 else 0}
-            if "source_start_us" in part:
+            if "source_start_us" in part or window_key:
                 # The guard belongs to the original scene, not the requested in-point.
                 guard = max(0.0, shot_analyzer._number(manifest.get("head_trim_s"), shot_analyzer.DEFAULT_HEAD_TRIM_S))
                 offset = observed["source_start"] - float(original_shot["source_start"])
                 cfg["head_trim_s"] = max(0.0, guard - offset)
-                cfg["tail_trim_s"] = max(0.0, float(manifest.get("tail_trim_s", 0) or 0)
+                cfg["tail_trim_s"] = max(0.0, shot_analyzer._number(manifest.get("tail_trim_s"), shot_analyzer.DEFAULT_TAIL_TRIM_S)
                                           - (float(original_shot["source_end"]) - float(shot["source_end"])))
             group = continuity_groups.get(row.get("continuity_key"))
             if group:
@@ -709,6 +732,8 @@ def _assemble(manifest: dict, analysis: dict, plan: dict, *, narration_timing: d
                     "playback_observation": observed.get("playback_observation"),
                     "time_sensitive": review["time_sensitive"],
                     "scene_source_start": shot["source_start"], "scene_source_end": shot["source_end"],
+                    "guard_source_start": original_shot["source_start"],
+                    "guard_source_end": original_shot["source_end"],
                     "evidence_intervals": observed["evidence_intervals"], "text": sentence["text"]}
             if group:
                 item.update(continuity_group=group, guard_override=[0, 0],
@@ -777,6 +802,7 @@ def _build_edit_inventory(manifest: dict, analysis: dict, plan: dict,
     from . import shot_analyzer
     original = timing_contract.split_sentences(manifest)
     shots = {str(s["shot_id"]): s for s in analysis.get("shots", [])}
+    rejected = qc_rejected_shots(manifest)
     inventory = []
     source_ids = {path: f"source{i}" for i, path in enumerate(dict.fromkeys(
         shot["video"] for shot in shots.values()), 1)}
@@ -787,7 +813,8 @@ def _build_edit_inventory(manifest: dict, analysis: dict, plan: dict,
             narration_timing, sentence["index"], segment=original[sentence["index"] - 1])[0]
         candidates = [{k: review[k] for k in ("shot_id", "basis", "observation", "reason", "confidence",
             "supported_point_ids", "evidence_intervals_us", "time_sensitive") if k in review}
-            for review in reviews if review["verdict"] == "matched"]
+            for review in reviews if review["verdict"] == "matched"
+            and review["shot_id"] not in rejected.get(sentence["index"], set())]
         for candidate in candidates:
             review = next(r for r in reviews if r["shot_id"] == candidate["shot_id"])
             shot = shots[candidate["shot_id"]]
@@ -922,7 +949,8 @@ def _repair_repeated_window(manifest: dict, analysis: dict, plan: dict, director
         target_sentence.update(index=0, text="同商品通用产品展示池", kind="product_intro", selling_points=[])
     shots = {str(shot["shot_id"]): shot for shot in analysis.get("shots", [])}
     result, _coverage = _review_pool(manifest, target_sentence, shots, directory,
-                                     narration_timing or {}, existing_reviews=retained)
+                                     narration_timing or {}, existing_reviews=retained,
+                                     excluded_ids=qc_rejected_shots(manifest).get(index, set()))
     historical_failures = [r for r in reviews if isinstance(r, dict)
                            and failure_fields(str(r.get("error", ""))).get("retryable")]
     result = result + historical_failures
@@ -950,6 +978,7 @@ def _short_complete_rows(manifest, analysis, plan, index, narration_timing):
         if r.get("sentence_index") == index and not r.get("continuity_key")]
     for review, window_key in variants:
         if (review.get("verdict") != "matched" or review.get("shot_id") not in shots
+                or review.get("shot_id") in qc_rejected_shots(manifest).get(index, set())
                 or not contract.points_supported(required, set(review.get("supported_point_ids", [])))):
             continue
         shot = shots[review["shot_id"]]
@@ -1034,7 +1063,9 @@ def _retrieve_empty_selection(manifest, analysis, plan, failure, narration_timin
     if index is None:
         return False
     row = next((r for r in plan.get("rows", []) if isinstance(r, dict) and r.get("index") == index), None)
-    if row is None or row.get("parts") != [] or row.get("continuity_key"):
+    excluded = qc_rejected_shots(manifest).get(index, set())
+    rejected_selection = row is not None and any(p.get("shot_id") in excluded for p in row.get("parts", []))
+    if row is None or (row.get("parts") != [] and not rejected_selection) or row.get("continuity_key"):
         return False
     candidate = next(_short_complete_rows(manifest, analysis, plan, index, narration_timing), None)
     if candidate is None:
@@ -1048,6 +1079,7 @@ def _retrieve_empty_selection(manifest, analysis, plan, failure, narration_timin
         for review in plan["reviews"].get(str(index), []):
             shot = shots.get(review.get("shot_id"))
             if (not shot or review.get("verdict") != "matched" or review.get("same_product") is not True
+                    or review.get("shot_id") in qc_rejected_shots(manifest).get(index, set())
                     or not contract.points_supported(required, set(review.get("supported_point_ids", [])))
                     or review.get("source_identity") != contract.source_identity(shot["video"])):
                 continue
@@ -1084,6 +1116,13 @@ def _repair_reviewed_rows(manifest, analysis, plan, directory, narration_timing,
         if state in seen:
             raise failure
         seen.add(state)
+        rejected_row = re.fullmatch(r"AI_EDITOR_UNREVIEWED_SELECTION:(\d+)", str(failure))
+        if rejected_row:
+            index = int(rejected_row[1])
+            excluded = qc_rejected_shots(manifest).get(index, set())
+            row = next((r for r in plan["rows"] if r["index"] == index), {})
+            if any(p.get("shot_id") in excluded for p in row.get("parts", [])):
+                failure = ValueError(f"AI_EDITOR_NO_SELECTION:{index}")
         if _retrieve_empty_selection(manifest, analysis, plan, failure, narration_timing):
             continue
         repeated = re.fullmatch(r"AI_EDITOR_REPEATED_SOURCE_WINDOW:\d+:(\d+)", str(failure))
@@ -1152,7 +1191,8 @@ technical_option是按本句完整配音求出的实际可行窗口；分配多�
                     continue
                 reviews, coverage = _review_pool(
                     manifest, sentence, shots, directory, narration_timing or {},
-                    exhaustive=True, existing_reviews=plan["reviews"].get(key, []))
+                    exhaustive=True, existing_reviews=plan["reviews"].get(key, []),
+                    excluded_ids=qc_rejected_shots(manifest).get(index, set()))
                 plan["reviews"][key] = reviews
                 plan.setdefault("coverage", {})[key] = coverage
                 expanded = True
@@ -1204,7 +1244,8 @@ def prepare(manifest: dict, analysis: dict, report_dir: Path, *, narration_timin
             "editorial_rules": contract.rules_identity(manifest)}
         # Output naming and recovery controls do not alter observed pixels.
         logical_input = {k: v for k, v in manifest.items() if k not in {
-            "draft_name", "force_overwrite", "parent_run_id", "recovery_stage", "shot_analysis_file", "_selection_attempt"}}
+            "draft_name", "force_overwrite", "parent_run_id", "recovery_stage", "shot_analysis_file", "_selection_attempt",
+            "qc_rejected_shots"}}
         plan["resume_identity"] = {**plan["identity"], "manifest_sha256": contract.digest(logical_input)}
         try:
             previous = json.loads((directory / "plan.json").read_text(encoding="utf-8"))
@@ -1233,26 +1274,28 @@ def prepare(manifest: dict, analysis: dict, report_dir: Path, *, narration_timin
         if not plan.get("sentences"):
             plan["sentences"] = _inventory(manifest, shots, directory)
         original = timing_contract.split_sentences(manifest)
+        rejected = qc_rejected_shots(manifest)
         for sentence in plan["sentences"]:
             sentence["audio_durations_us"] = [timing_contract.duration_for(narration_timing,
                 sentence["index"], segment=original[sentence["index"] - 1])[0]]
             if sentence["kind"] == "selling_point":
                 key = str(sentence["index"])
-                if (_cached_row_feasible(manifest, analysis, plan, sentence, narration_timing)
+                excluded = rejected.get(sentence["index"], set())
+                if not excluded and (_cached_row_feasible(manifest, analysis, plan, sentence, narration_timing)
                         or next(_short_complete_rows(manifest, analysis, plan, sentence["index"], narration_timing), None)):
                     plan.setdefault("coverage", {}).setdefault(key, {}).update(
                         feasible=True, playback_policy_version=contract.playback.VERSION)
                     continue
                 # Coverage is a timing decision, not a reusable visual fact.
                 # Recompute it even for old successful plans, preserving reviews.
-                if (plan.get("coverage", {}).get(key, {}).get("feasible")
+                if (not excluded and plan.get("coverage", {}).get(key, {}).get("feasible")
                         and _cached_reviews_feasible(manifest, sentence, by_id,
                                                      plan["reviews"].get(key, []), narration_timing or {})):
                     plan["coverage"][key]["playback_policy_version"] = contract.playback.VERSION
                     continue
                 plan["phase"] = "selection_candidate_review"
                 reviews, coverage = _review_pool(manifest, sentence, by_id, directory, narration_timing or {},
-                                                 existing_reviews=plan["reviews"].get(key, []))
+                                                 existing_reviews=plan["reviews"].get(key, []), excluded_ids=excluded)
                 plan["reviews"][str(sentence["index"])] = reviews
                 plan["coverage"][str(sentence["index"])] = coverage
                 supported = {p for r in reviews if r["verdict"] == "matched" for p in r.get("supported_point_ids", [])}
@@ -1268,13 +1311,25 @@ def prepare(manifest: dict, analysis: dict, report_dir: Path, *, narration_timin
                 segment=original[s["index"] - 1])[0] for s in displays]
             plan["display_reviews"], plan["coverage"]["display_pool"] = _review_pool(manifest, shared, by_id, directory, narration_timing or {},
                                                                                        existing_reviews=plan["display_reviews"])
+            for sentence in displays:
+                excluded = rejected.get(sentence["index"], set())
+                if not excluded or any(r.get("verdict") == "matched" and r.get("shot_id") not in excluded
+                                       for r in plan["display_reviews"]):
+                    continue
+                seen = {r.get("shot_id") for r in plan["display_reviews"]}
+                fresh = [sid for sid in sentence["candidate_ids"] if sid not in seen and sid not in excluded][:ROUND_SIZE]
+                if fresh:
+                    extra, _ = _review_pool(manifest, {**sentence, "candidate_ids": fresh}, by_id,
+                        directory, narration_timing or {}, excluded_ids=excluded)
+                    plan["display_reviews"].extend(extra)
         inventory = [{"index": s["index"], "text": s["text"], "kind": s["kind"],
             "selling_points": s["selling_points"], "audio_duration_us": timing_contract.duration_for(narration_timing, s["index"], segment=timing_contract.split_sentences(manifest)[s["index"] - 1])[0],
             "candidates": plan["reviews"].get(str(s["index"]), []) if s["kind"] == "selling_point" else plan["display_reviews"]} for s in plan["sentences"]]
         # Do not pass paths or old gate/score fields to the editor.
         for row in inventory:
             row["candidates"] = [{k: r[k] for k in ("shot_id", "basis", "observation", "reason", "confidence", "supported_point_ids", "evidence_intervals_us", "time_sensitive") if k in r}
-                                 for r in row["candidates"] if r["verdict"] == "matched"]
+                                 for r in row["candidates"] if r["verdict"] == "matched"
+                                 and r["shot_id"] not in rejected.get(row["index"], set())]
             coverage = plan["coverage"].get(str(row["index"]) if row["kind"] == "selling_point" else "display_pool", {})
             if not coverage.get("feasible"):
                 for review in plan["reviews"].get(str(row["index"]), []) + plan.get("display_reviews", []):
