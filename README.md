@@ -6,7 +6,7 @@
 
 ## 输入、流程与输出
 
-准备同一商品的素材、逐句口播，以及单任务 `manifest.json` 或本地批次队列。模型凭据、剪映环境和交付位置由本机配置提供。
+准备同一商品的素材、逐句口播和本地任务队列；单任务也使用队列入口。模型凭据、剪映环境和交付位置由本机配置提供。
 
 ```mermaid
 flowchart LR
@@ -30,7 +30,7 @@ flowchart LR
 | 独立时间线与渲染 | 显式开发入口，用于固定选镜后的工作预览；内容、观看效果和完整原生导出验收仍待完成 |
 | 纸品局部变速 | 独立诊断工具，保留已有未通过结论，尚未接入默认生产 |
 
-默认选镜为 `ai_editor`，最终视觉 QC 使用 v4 合同。`rule_then_ai` 和 `legacy` 是显式选择的选镜策略，与 GLM/Qwen 调用通道分别配置。模型完整名称、图片输入及覆盖顺序见[模型与视觉流程](docs/model-and-vision.md)。
+默认选镜为 `ai_editor`，默认 AI 选镜的最终视觉 QC 使用 v5 合同。`rule_then_ai` 和 `legacy` 是显式选择的选镜策略，与 GLM/Qwen 调用通道分别配置。模型完整名称、图片输入及覆盖顺序见[模型与视觉流程](docs/model-and-vision.md)。
 
 运行不依赖编码 Agent、Mac 交接或人工 prepare/collect。默认无头建稿不控制剪映界面；历史写稿方式仅能显式选择，不会自动回退。
 
@@ -110,13 +110,13 @@ powershell -NoProfile -File scripts/run_pipeline.ps1
 
 手动与定时运行使用同一入口。注册任务计划程序是单独操作，路径参数、队列字段、重试预算及状态文件见[Windows 脚本流水线](docs/windows-pipeline.md)。
 
-单任务也可使用 manifest CLI；准备好输入后，显式选择预览模式并使用新的报告目录：
+只处理队列中的一条时，仍使用同一个入口，指定该任务的 `record_id`：
 
 ```powershell
-uv run --frozen python -X utf8 doubao-jianying-orchestrator/run.py build `
-  --input work/task/manifest.json --report-dir work/task/preview-01 `
-  --delivery-mode preview
+powershell -NoProfile -File scripts/run_pipeline.ps1 -RecordId example-product-a
 ```
+
+此路径与批量及定时运行共用素材准备、选镜、建稿、独立质检和交付门禁。`run.py build` 是用于诊断或嵌入的底层建稿命令，不单独完成队列的独立质检和交付。
 
 ## 验收与恢复
 
