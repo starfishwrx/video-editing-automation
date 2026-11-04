@@ -46,7 +46,7 @@ TAIL_PAD = 0.12  # 每句口播尾部留白秒数，避免贴边
 # 硬上限只拦完全没拆开的长段，避免一整段文案压在一个镜头里。
 
 # 探测缓存世代戳（v1.3.27.1）：换探针口径时 +1，老缓存重新探测。
-PROBE_KIND = "material_us_v1"
+PROBE_KIND = "material_us_v2_two_writers"
 
 # 环境闸的版本下限。这是**地板不是等值**：只有出现真正不兼容的破坏性变更时才上调。
 # 1.3.14–1.3.22 期间这里被写成等值比较（`!= "v1.3.13"`），于是每次版本升级都会让
@@ -313,9 +313,8 @@ class OrchestrationEngine:
             if meta is None and self.ffprobe:
                 try:
                     # 1.3.27.1：素材总长统一走 probe_material_duration_us ——
-                    # 优先使用与写入层一致的视频素材时长（pymediainfo/ffprobe
-                    # 视频轨、末帧 PTS，HIGH）；只有容器时长时进入保守降级
-                    # （减一帧、LOW）。source/confidence 必须随缓存落盘。
+                    # 使用两个写入器共有的视频轨边界；视频轨不可用时的
+                    # 末帧 PTS 或容器值仅为 LOW。source/confidence 随缓存落盘。
                     probe_res = timing_contract.probe_material_duration_us(
                         key, ffprobe=self.ffprobe, ffmpeg=self.ffmpeg)
                     dur_us = int(probe_res.get("duration_us") or 0)

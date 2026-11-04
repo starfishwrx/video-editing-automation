@@ -344,6 +344,40 @@ class FixedNarrationTests(unittest.TestCase):
         delivery.assert_not_called()
         notification.assert_not_called()
 
+    def test_unconfirmed_material_duration_stops_worker_even_when_candidate_cache_appears(self):
+        source = self.root / "source.mp4"
+        source.write_bytes(b"fixture")
+        work, drafts = self.root / "work", self.root / "drafts"
+        drafts.mkdir()
+        (work / "fixed" / "eval").mkdir(parents=True)
+        calls = []
+        def build(manifest, report, *args, **kwargs):
+            calls.append(kwargs.get("reuse_analysis"))
+            report.mkdir(parents=True, exist_ok=True)
+            (report / "shot_candidates.json").write_text(json.dumps({"shots": [{"description": "observed product",
+                "visual_tags": ["product"], "evidence_tags": ["product"], "analysis_confidence": 0.9}]}), encoding="utf-8")
+            return {"rc": 1, "stdout": "", "stderr": "MATERIAL_DURATION_BOUND_UNCONFIRMED",
+                    "combined": "MATERIAL_DURATION_BOUND_UNCONFIRMED"}
+        with patch.object(worker, "WORK", work), patch.object(worker, "DRAFTS", drafts), \
+             patch.object(worker, "PIPE_ROOT", self.root), patch.object(worker, "_runtime_facts", return_value={}), \
+             patch.object(worker, "video_files", return_value=[str(source)]), \
+             patch.object(worker, "_save_frozen_task"), patch.object(worker, "restore_qc_rejections", return_value=({}, {})), \
+             patch.object(worker, "build_progress_inputs", side_effect=lambda _m, cache, _r: {"cached": bool(cache)}), \
+             patch.object(worker, "progress"), patch.object(worker, "log"), \
+             patch.object(worker, "publish_failure_notification", return_value={}), \
+             patch.object(worker.production_eval, "runtime_identity", return_value={}), \
+             patch.object(worker.production_eval, "freeze", return_value={"mode": "enforce"}), \
+             patch.object(worker.production_eval, "write_once"), \
+             patch.object(worker, "run_build", side_effect=build), \
+             patch.object(worker, "run_post_draft_qc") as qc:
+            worker.process_task(self.task, admitted=True)
+        self.assertEqual(calls, [None])
+        qc.assert_not_called()
+        done = json.loads((work / "fixed" / "done.json").read_text(encoding="utf-8"))
+        self.assertEqual((done["terminal_state"], done["failure_class"], done["failure_code"]),
+                         ("BLOCKED", "environment", "MATERIAL_DURATION_UNAVAILABLE"))
+        self.assertFalse(done["retryable"])
+
 
 if __name__ == "__main__":
     unittest.main()

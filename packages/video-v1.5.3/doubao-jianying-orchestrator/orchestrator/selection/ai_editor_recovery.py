@@ -5,8 +5,8 @@ import re
 
 
 class WindowFailure(ValueError):
-    def __init__(self, index: int, shot_id: str, reason: str):
-        self.index, self.shot_id, self.reason = index, shot_id, reason
+    def __init__(self, index: int, shot_id: str, reason: str, part_index: int | None = None):
+        self.index, self.shot_id, self.reason, self.part_index = index, shot_id, reason, part_index
         super().__init__(f"AI_EDITOR_WINDOW_INFEASIBLE:{index}:{shot_id}:{reason}")
 
 
@@ -60,6 +60,9 @@ def proposed_window(shot: dict, part: dict, *, max_speed: float = 2.0) -> tuple[
     if type(start) is not int or type(duration) is not int or duration <= 0:
         return None
     lo, hi = round(float(shot["source_start"]) * 1e6), round(float(shot["source_end"]) * 1e6)
+    actual_duration = shot.get("material_duration_us")
+    if type(actual_duration) is int and actual_duration > 0:
+        hi = min(hi, actual_duration)
     if not lo <= start < hi:
         return None
     end = min(hi, start + round(duration * max_speed))

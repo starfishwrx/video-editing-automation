@@ -1373,8 +1373,8 @@ class MaterialDurationProbeTests(unittest.TestCase):
     2026-09-17 实测：iPhone 实拍 MOV 音轨比视频轨长，容器 4.990000s / 视频轨
     4.983333s。规划层按容器摆窗、写入层按视频轨零容差校验 → write_draft 炸
     「变速切片越出素材范围：… > 素材时长 4984000µs」。这里钉住：
-    ① 探测**优先使用与写入层一致的视频素材时长**（pymediainfo / ffprobe 视频轨 /
-       末帧 PTS，HIGH）；② **只有容器时长时进入保守降级**（减一帧安全边界，
+    ① 探测两个写入器视频轨的共同安全边界（HIGH）；② 视频轨不可用时进入
+       保守降级（末帧 PTS 未知起始时钟，或容器时长减一帧，
        标记 LOW，不得用于生成「已认证」的候选窗口）；③ check_invariants 对
        `material_duration_us` 单列**零容差**硬边界，并按速度语义校验
        源窗口 ÷ video_speed ≈ segment_us（容差 1 帧）。
@@ -1388,6 +1388,28 @@ class MaterialDurationProbeTests(unittest.TestCase):
         self.assertEqual(got["duration_us"], 4_984_000)
         self.assertEqual(got["source"], "pymediainfo_video_track")
         self.assertEqual(got["confidence"], tc.PROBE_CONFIDENCE_HIGH)
+
+    def test_both_video_writers_use_the_smaller_measured_bound(self):
+        for mediainfo_ms, stream_s, expected, source in (
+                (4167, "4.166667", 4_166_667, "ffprobe_video_stream"),
+                (4166, "4.166667", 4_166_000, "pymediainfo_video_track")):
+            with self.subTest(source=source), \
+                    mock.patch.dict(sys.modules, {"pymediainfo": _fake_pymediainfo(video_ms=mediainfo_ms)}), \
+                    mock.patch.object(tc.subprocess, "run", return_value=mock.Mock(stdout=stream_s)):
+                got = tc.probe_material_duration_us("source.mp4", ffprobe="ffprobe")
+            self.assertEqual(got, {"duration_us": expected, "source": source, "confidence": "HIGH"})
+
+    def test_unavailable_video_stream_does_not_certify_mediainfo_alone(self):
+        with mock.patch.dict(sys.modules, {"pymediainfo": _fake_pymediainfo(video_ms=4167)}), \
+                mock.patch.object(tc.subprocess, "run", return_value=mock.Mock(stdout="")):
+            got = tc.probe_material_duration_us("source.mp4", ffprobe="ffprobe")
+        self.assertEqual(got, {"duration_us": 4_167_000, "source": "pymediainfo_video_track", "confidence": "LOW"})
+
+    def test_nonfinite_stream_duration_is_not_certified(self):
+        with mock.patch.dict(sys.modules, {"pymediainfo": _fake_pymediainfo(video_ms=4167)}), \
+                mock.patch.object(tc.subprocess, "run", return_value=mock.Mock(stdout="inf")):
+            got = tc.probe_material_duration_us("source.mp4", ffprobe="ffprobe")
+        self.assertEqual(got["confidence"], "LOW")
 
     def test_ffprobe_video_stream_fallback_truncates(self):
         """无 pymediainfo 时退 ffprobe v:0：4.983333s → 4983333µs（截断），HIGH。"""
@@ -1408,8 +1430,8 @@ class MaterialDurationProbeTests(unittest.TestCase):
         self.assertEqual(got["confidence"], tc.PROBE_CONFIDENCE_HIGH)
         self.assertEqual(len(runs), 1, "视频轨命中即返，不再问容器/末帧 PTS")
 
-    def test_last_video_pts_upgrades_to_high(self):
-        """视频轨时长取不到但能读到末帧 PTS → HIGH（末帧起播点，天然 ≤ 真值）。"""
+    def test_last_video_pts_without_stream_duration_is_low_confidence(self):
+        """末 packet PTS 的起始时钟未经核对，不能认证为视频轨总长。"""
         fake = _fake_pymediainfo(video_ms=None, have_video=False)
 
         def fake_run(cmd, **kwargs):
@@ -1425,7 +1447,17 @@ class MaterialDurationProbeTests(unittest.TestCase):
             got = tc.probe_material_duration_us(r"\\nas\a.MOV", ffprobe="ffprobe", ffmpeg=None)
         self.assertEqual(got["duration_us"], 4_950_000)
         self.assertEqual(got["source"], "last_video_pts")
-        self.assertEqual(got["confidence"], tc.PROBE_CONFIDENCE_HIGH)
+        self.assertEqual(got["confidence"], tc.PROBE_CONFIDENCE_LOW)
+
+    def test_nonzero_pts_and_rounded_mediainfo_never_certify_missing_stream_duration(self):
+        fake = _fake_pymediainfo(video_ms=4167)
+        def run(cmd, **kwargs):
+            return mock.Mock(stdout="10.000000\n14.150000\n" if "packet=pts_time" in cmd else "N/A")
+        with mock.patch.dict(sys.modules, {"pymediainfo": fake}), \
+                mock.patch.object(tc.subprocess, "run", side_effect=run):
+            got = tc.probe_material_duration_us("source.mp4", ffprobe="ffprobe")
+        self.assertEqual(got["duration_us"], 4_167_000)
+        self.assertEqual(got["confidence"], tc.PROBE_CONFIDENCE_LOW)
 
     def test_container_duration_degrades_low_with_frame_margin(self):
         """只剩容器时长 → 保守降级：减一帧安全边界、标记 LOW、来源如实落盘。

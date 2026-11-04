@@ -45,6 +45,13 @@ class SentenceContinuityTests(unittest.TestCase):
         self.manifest['qc_rejected_shots'] = {'3': ['long']}
         self.assertTrue(list(sharing.proposals(self.manifest, self.analysis, self.plan, 1, None)))
 
+    def test_joint_review_never_proposes_evidence_past_physical_end(self):
+        self.shot['source_end'] = 4.167
+        self.shot['material_duration_us'] = 4_166_667
+        for reviews in self.plan['reviews'].values():
+            reviews[0]['evidence_intervals_us'] = [{'start': 0, 'end': 4_167_000}]
+        self.assertEqual(list(sharing.proposals(self.manifest, self.analysis, self.plan, 1, None)), [])
+
     def group(self, context=None):
         context = context or next(sharing.proposals(self.manifest, self.analysis, self.plan, 1, None))
         observations = [{'index': m['index'], 'verdict': 'matched', 'same_product': True,

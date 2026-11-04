@@ -301,7 +301,8 @@ class CliReuseTest(unittest.TestCase):
                                                  "text_pass": "pending"}]}
             (root / "cand.json").write_text(json.dumps(candidates), encoding="utf-8")
             manifest = {"shot_analysis_file": str(root / "cand.json")}
-            with mock.patch.object(cli, "environment_report", return_value={}), \
+            with mock.patch.object(cli, "environment_report", return_value={"ffprobe": "ffprobe"}), \
+                    mock.patch("orchestrator.vision.material_cache.refresh_external_analysis", side_effect=lambda a, *args, **kw: a), \
                     mock.patch.object(vision_analyzer, "enrich_with_vision",
                                       return_value={"ok": False}) as enrich:
                 result = cli._run_shot_analysis(manifest, root / "manifest.json", root / "report")

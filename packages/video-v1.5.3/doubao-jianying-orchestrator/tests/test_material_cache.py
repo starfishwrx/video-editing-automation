@@ -8,12 +8,14 @@ from pathlib import Path
 import sys
 import tempfile
 import threading
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from orchestrator import ai_editor, ai_editor_contract as contract, material_cache, shot_analyzer
+from orchestrator import ai_editor, ai_editor_contract as contract, material_cache, shot_analyzer, timing_contract
 from orchestrator import vision_analyzer as vision
+from orchestrator.application import cli
 from test_v152_resume_integrity import SHOT_ID, _first_pass, _text
 
 
@@ -85,6 +87,128 @@ class MaterialCacheTests(unittest.TestCase):
         self.assertEqual(frames.call_count, 1)
         self.assertEqual(api.call_count, 3)
         self.assertTrue(first["material_cache"]["ready"] and warm["material_cache"]["ready"])
+
+    def test_duration_refresh_keeps_cached_frames_and_visual_observations(self):
+        def response(sheet, *args, **kwargs):
+            return _text(["80抽"]) if sheet.name.startswith("text_") else (True, _first_pass())
+        with mock.patch.object(shot_analyzer, "analyze_manifest", side_effect=self.raw) as prepare, \
+                mock.patch.object(vision, "_sample_frames", return_value=[{
+                    "path": str(self.frame), "timestamp": 7.4, "suffix": "t1"}]) as frames, \
+                mock.patch.object(vision, "_orientation", return_value="portrait"), \
+                mock.patch.object(vision, "_write_sheet", return_value=True), \
+                mock.patch.object(vision, "_run_vision_with_retry", side_effect=response) as api, \
+                mock.patch.object(timing_contract, "probe_material_duration_us", return_value={
+                    "duration_us": 9_399_667, "source": "ffprobe_video_stream", "confidence": "HIGH"}) as probe:
+            first = material_cache.analyze_product(self.manifest, self.root, self.root / "a")
+            warm = material_cache.analyze_product(self.manifest, self.root, self.root / "b", ffprobe="ffprobe")
+            again = material_cache.analyze_product(self.manifest, self.root, self.root / "c", ffprobe="ffprobe")
+        self.assertEqual((prepare.call_count, frames.call_count, api.call_count, probe.call_count), (1, 1, 3, 1))
+        self.assertEqual(first["shots"][0]["source_end"], warm["shots"][0]["source_end"])
+        self.assertEqual(warm["shots"][0]["material_duration_us"], 9_399_667)
+        self.assertEqual(warm["shots"][0]["analysis_cache_key"], first["shots"][0]["analysis_cache_key"])
+        self.assertEqual(again["material_cache"]["sources_hit"], 1)
+
+    def test_large_duration_change_reprepares_only_affected_source(self):
+        other = self.root / "other.mp4"
+        other.write_bytes(b"other source")
+        manifest = {**self.manifest, "material_sources": [str(self.video), str(other)]}
+        def fresh(*args, **kwargs):
+            result = self.raw(*args, **kwargs)
+            result["shots"][0].update(source_end=9.3, material_duration_us=9_300_000,
+                                      material_duration_confidence="HIGH")
+            return result
+        def probe(source, **kwargs):
+            return {"duration_us": 9_300_000 if Path(source).name == self.video.name else 9_399_667,
+                    "source": "ffprobe_video_stream", "confidence": "HIGH"}
+        with mock.patch.object(shot_analyzer, "analyze_manifest", side_effect=self.raw):
+            material_cache.analyze_product(manifest, self.root, self.root / "a", vision=False)
+        with mock.patch.object(shot_analyzer, "analyze_manifest", side_effect=fresh) as prepare, \
+                mock.patch.object(timing_contract, "probe_material_duration_us", side_effect=probe):
+            result = material_cache.analyze_product(manifest, self.root, self.root / "b", ffprobe="ffprobe", vision=False)
+        self.assertEqual(prepare.call_count, 1)
+        self.assertEqual(result["material_cache"]["sources_hit"], 1)
+        self.assertEqual([row["material_duration_us"] for row in result["shots"]], [9_300_000, 9_399_667])
+
+    def test_unconfirmed_duration_or_changed_source_cannot_refresh_cache(self):
+        with mock.patch.object(shot_analyzer, "analyze_manifest", side_effect=self.raw):
+            material_cache.analyze_product(self.manifest, self.root, self.root / "a", vision=False)
+        with mock.patch.object(timing_contract, "probe_material_duration_us", return_value={
+                "duration_us": 9_399_667, "source": "container_duration", "confidence": "LOW"}), \
+                self.assertRaisesRegex(ValueError, "MATERIAL_DURATION_BOUND_UNCONFIRMED"):
+            material_cache.analyze_product(self.manifest, self.root, self.root / "b", ffprobe="ffprobe", vision=False)
+        def changed(*args, **kwargs):
+            self.video.write_bytes(b"source changed during probing")
+            return {"duration_us": 9_399_667, "source": "ffprobe_video_stream", "confidence": "HIGH"}
+        with mock.patch.object(timing_contract, "probe_material_duration_us", side_effect=changed), \
+                self.assertRaisesRegex(ValueError, "MATERIAL_SOURCE_CHANGED_DURING_PREPARATION"):
+            material_cache.analyze_product(self.manifest, self.root, self.root / "c", ffprobe="ffprobe", vision=False)
+
+    def test_low_duration_with_incomplete_preparation_never_calls_vision(self):
+        def incomplete(*args, **kwargs):
+            result = self.raw(*args, **kwargs)
+            result.update(ok=False, issues=[{"type": "source_frame_failed"}])
+            result["shots"][0]["material_duration_confidence"] = "LOW"
+            return result
+        with mock.patch.object(shot_analyzer, "analyze_manifest", side_effect=incomplete), \
+                mock.patch.object(vision, "enrich_with_vision") as api, \
+                self.assertRaisesRegex(ValueError, "MATERIAL_DURATION_BOUND_UNCONFIRMED"):
+            material_cache.analyze_product(self.manifest, self.root, self.root / "a", ffprobe="ffprobe")
+        api.assert_not_called()
+
+    def test_inline_and_recovery_file_both_refresh_exact_duration_before_selection(self):
+        old = {"ok": True, "shots": [{"shot_id": "s", "video": str(self.video),
+               "source_start": 0, "source_end": 4.167, "material_duration_us": 4_167_000}]}
+        file = self.root / "shot_candidates.json"
+        file.write_text(json.dumps(old), encoding="utf-8")
+        for manifest in ({"shot_analysis": old}, {"shot_analysis_file": str(file)}):
+            with self.subTest(source=list(manifest)), \
+                    mock.patch.object(cli, "environment_report", return_value={"ffprobe": "ffprobe"}), \
+                    mock.patch.object(timing_contract, "probe_material_duration_us", return_value={
+                        "duration_us": 4_166_667, "source": "ffprobe_video_stream", "confidence": "HIGH"}) as probe:
+                result = cli._run_shot_analysis({**manifest, "vision_analysis": False},
+                                                self.root / "manifest.json", self.root / "report")
+            self.assertEqual(probe.call_count, 1)
+            self.assertEqual(result["shots"][0]["material_duration_us"], 4_166_667)
+            self.assertEqual(result["shots"][0]["source_end"], 4.167)
+        self.assertEqual(old["shots"][0]["material_duration_us"], 4_167_000)
+        self.assertEqual(json.loads(file.read_text(encoding="utf-8")), old)
+
+    def test_external_analysis_blocks_unconfirmed_or_stale_geometry_before_vision(self):
+        analysis = {"ok": True, "shots": [{"shot_id": "s", "video": str(self.video),
+                    "source_start": 0, "source_end": 4.167, "material_duration_us": 4_167_000}]}
+        for result in ({"duration_us": 4_166_667, "source": "last_video_pts", "confidence": "LOW"},
+                       {"duration_us": 4_100_000, "source": "ffprobe_video_stream", "confidence": "HIGH"}):
+            with self.subTest(probe=result), mock.patch.object(cli, "environment_report", return_value={"ffprobe": "ffprobe"}), \
+                    mock.patch.object(timing_contract, "probe_material_duration_us", return_value=result), \
+                    mock.patch.object(vision, "enrich_with_vision") as api:
+                got = cli._run_shot_analysis({"shot_analysis": analysis}, self.root / "manifest.json", self.root / "report")
+            self.assertFalse(got["ok"])
+            self.assertEqual(got["pending_items"][0]["type"], "MATERIAL_DURATION_RECHECK_FAILED")
+            api.assert_not_called()
+
+    def test_match_shots_refreshes_external_analysis_and_blocks_low_before_model(self):
+        source = self.root / "manifest.json"
+        source.write_text(json.dumps({"selection_mode": "ai_editor"}), encoding="utf-8")
+        analysis = self.root / "analysis.json"
+        analysis.write_text(json.dumps({"shots": [{"shot_id": "s", "video": str(self.video),
+            "source_start": 0, "source_end": 4.167, "material_duration_us": 4_167_000}]}), encoding="utf-8")
+        args = SimpleNamespace(input=str(source), report_dir=str(self.root / "report"),
+                               analysis=str(analysis), topk=3, require_selection=False)
+        for confidence in ("HIGH", "LOW"):
+            with self.subTest(confidence=confidence), \
+                    mock.patch.object(cli, "environment_report", return_value={"ffprobe": "ffprobe"}), \
+                    mock.patch.object(timing_contract, "probe_material_duration_us", return_value={
+                        "duration_us": 4_166_667, "source": "ffprobe_video_stream", "confidence": confidence}), \
+                    mock.patch.object(ai_editor, "prepare", side_effect=lambda m, a, r: a) as prepare, \
+                    mock.patch.object(shot_analyzer, "match_manifest", return_value={"ok": True, "manifest": {}}), \
+                    mock.patch.object(cli, "_emit", side_effect=lambda value, code=0: code):
+                code = cli.cmd_match_shots(args)
+            if confidence == "HIGH":
+                self.assertEqual(code, 0)
+                self.assertEqual(prepare.call_args.args[1]["shots"][0]["material_duration_us"], 4_166_667)
+            else:
+                self.assertEqual(code, 1)
+                prepare.assert_not_called()
 
     def test_explicit_empty_evidence_rejection_is_cached_but_not_matchable(self):
         response = json.loads(_first_pass())

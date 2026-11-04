@@ -345,16 +345,31 @@ def _run_shot_analysis(manifest: dict, input_path: Path, report_dir: Path) -> di
             analysis = _read(path)
         except (OSError, ValueError) as exc:
             return {"ok": False, "pending_items": [{"type": "SHOT_ANALYSIS_FILE_INVALID", "message": str(exc)}]}
-        # 复用的候选一律交给 enrich 判定：输入签名对不上的整条重做，动作或文字复核
-        # 没做完的只补那一步；全部有效时 enrich 不调模型直接返回。
-        if not bool(manifest.get("vision_analysis", True)):
-            return analysis
+    # Keep the exact previous observations only if their digest is the one
+    # recorded by the task's old editor plan, before media metadata is refreshed.
+    prior = analysis
+    if prior is None and (report_dir / "shot_candidates.json").is_file():
+        try:
+            prior = _read(report_dir / "shot_candidates.json")
+        except (OSError, ValueError):
+            pass
+    if isinstance(prior, dict):
+        from ..selection import ai_editor
+        ai_editor.snapshot_previous_analysis(prior, report_dir)
     env = environment_report(refresh=True)
     if analysis is None:
         from ..vision import material_cache
         return material_cache.analyze_product(
             manifest, input_path.parent, report_dir, ffmpeg=env.get("ffmpeg"),
             ffprobe=env.get("ffprobe"), vision=bool(manifest.get("vision_analysis", True)))
+    from ..vision import material_cache
+    try:
+        analysis = material_cache.refresh_external_analysis(
+            analysis, input_path.parent, ffmpeg=env.get("ffmpeg"), ffprobe=env.get("ffprobe"))
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        return {"ok": False, "pending_items": [{"type": "MATERIAL_DURATION_RECHECK_FAILED", "message": str(exc)}]}
+    # Existing candidates still go through enrich for source/text validation;
+    # duration migration itself never upgrades their visual evidence.
     if not bool(manifest.get("vision_analysis", True)):
         return analysis
     from ..vision import vision_analyzer
@@ -1110,6 +1125,15 @@ def cmd_match_shots(args) -> int:
             return _emit({"status": "SHOT_ANALYSIS_FILE_INVALID", "message": str(exc)}, 1)
         from ..selection import ai_editor
         from .. import ai_editor_contract
+        from ..vision import material_cache
+        ai_editor.snapshot_previous_analysis(analysis, report_dir)
+        env = environment_report(refresh=True)
+        try:
+            analysis = material_cache.refresh_external_analysis(
+                analysis, input_path.parent, ffmpeg=env.get("ffmpeg"), ffprobe=env.get("ffprobe"))
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            return _emit({"status": "SHOT_MATCH_BLOCKED", "reason": "MATERIAL_DURATION_RECHECK_FAILED",
+                          "message": str(exc)}, 1)
         manifest = {**manifest, "selection_mode": ai_editor_contract.selection_mode(manifest)}
         if manifest["selection_mode"] == "ai_editor":
             analysis = ai_editor.prepare(manifest, analysis, report_dir)

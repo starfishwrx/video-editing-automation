@@ -117,6 +117,9 @@ def batch_result_contract(status: str, *, pipeline_version: str, run_id: str, fa
     failure_type = str(first.get("type") or "").lower()
     if first.get("preflight_only") is True and first.get("failure_code") == "ENVIRONMENT_PRECHECK_FAILED":
         failure_class, failure_code = "environment", "ENVIRONMENT_PRECHECK_FAILED"
+    elif any(marker in lower for marker in ("material_duration_", "material_geometry_requires_reanalysis",
+                                             "material_source_changed_during_preparation", "material_source_missing")):
+        failure_class, failure_code = "environment", "MATERIAL_DURATION_UNAVAILABLE"
     elif any(marker in lower for marker in ("fixed_narration_", "selection_audio_changed",
             "selection_recovery_audio_changed", "selection_recovery_bgm_", "bgm_changed_during_", "bgm_source_audio_invalid",
             "material_source_list_", "file_changed_during_hash")):
@@ -217,7 +220,10 @@ def classify_build_failure(text: str, *, transient_markers=TRANSIENT_BUILD_MARKE
         "insufficient balance", "401", "403", "invalid path", "path not found",
         "file not found", "no such file", "encoding error", "unicode decode",
     ))
-    deterministic_block = any(marker.lower() in lower_blob for marker in (
+    material_duration_block = any(marker in lower_blob for marker in (
+        "material_duration_", "material_geometry_requires_reanalysis",
+        "material_source_changed_during_preparation", "material_source_missing"))
+    deterministic_block = material_duration_block or any(marker.lower() in lower_blob for marker in (
         "VISUAL_MATCH_BLOCKED", "SHOT_MATCH_BLOCKED", "AUDIO_VIDEO_MISMATCH",
         "TASK_BUDGET", "Invalid argument", "INVALID_ARGUMENT",
         "DESKTOP_IMPORT_BLOCKED", "DRAFT_INVALID", "VOICE_SELECTION_REQUIRED",
@@ -230,7 +236,7 @@ def classify_build_failure(text: str, *, transient_markers=TRANSIENT_BUILD_MARKE
         "no auditable visual top1" in lower_blob) or (
         "visual_match_blocked" in lower_blob and not hits)
     return {
-        "transient": bool(hits and transient and not credential_or_input_block),
+        "transient": bool(hits and transient and not credential_or_input_block and not material_duration_block),
         "vision_hard": vision_hard,
         "deterministic_block": deterministic_block,
         "markers": hits,
