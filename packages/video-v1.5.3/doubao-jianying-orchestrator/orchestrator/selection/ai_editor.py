@@ -26,6 +26,15 @@ ROUND_SIZE = 8
 ALTERNATIVE_REVIEW_LIMIT = 2 * ROUND_SIZE
 
 
+def _analysis_digest(analysis: dict) -> str:
+    """Bind all analysis facts, excluding embedded plans and lock telemetry."""
+    payload = {k: v for k, v in analysis.items() if k != "ai_editor_plan"}
+    vision = payload.get("vision_analysis")
+    if isinstance(vision, dict):
+        payload["vision_analysis"] = {k: v for k, v in vision.items() if k != "cache_wait_s"}
+    return contract.digest(payload)
+
+
 def _save(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8")
@@ -1239,7 +1248,7 @@ def prepare(manifest: dict, analysis: dict, report_dir: Path, *, narration_timin
         editor_model = _editor_model()
         plan["identity"] = {"model": editor_model,
             "manifest_sha256": contract.digest(manifest), "timing_sha256": contract.digest(narration_timing),
-            "analysis_sha256": contract.digest({k: v for k, v in analysis.items() if k != "ai_editor_plan"}),
+            "analysis_sha256": _analysis_digest(analysis),
             "policy_version": contract.POLICY_VERSION,
             "editorial_rules": contract.rules_identity(manifest)}
         # Output naming and recovery controls do not alter observed pixels.
@@ -1361,7 +1370,7 @@ def match_manifest(manifest: dict, analysis: dict, *, narration_timing: dict | N
             raise ValueError("AI_EDITOR_POLICY_CHANGED")
         if identity.get("manifest_sha256") != contract.digest(manifest) or identity.get("timing_sha256") != contract.digest(narration_timing):
             raise ValueError("AI_EDITOR_INPUT_CHANGED")
-        if identity.get("analysis_sha256") != contract.digest({k: v for k, v in analysis.items() if k != "ai_editor_plan"}):
+        if identity.get("analysis_sha256") != _analysis_digest(analysis):
             raise ValueError("AI_EDITOR_ANALYSIS_CHANGED")
         current = copy.deepcopy(plan)
         result = _revalidate_rows(manifest, analysis, current, narration_timing=narration_timing)

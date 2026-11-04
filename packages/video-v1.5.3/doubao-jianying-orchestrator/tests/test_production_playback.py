@@ -67,6 +67,41 @@ class ProductionPlaybackTests(unittest.TestCase):
         self.assertEqual(self.plan, before)
         self.assertTrue(all(s['video_speed'] == 1 for s in result['segments']))
 
+    def test_lock_wait_change_preserves_observations_through_prepare_and_match(self):
+        self.analysis['vision_analysis'] = {'model': 'fixture', 'cache_wait_s': 0.0, 'partial': False}
+        for key in ('identity', 'resume_identity'):
+            self.plan[key]['analysis_sha256'] = editor._analysis_digest(self.analysis)
+        folder = self.root / 'ai_editor'
+        folder.mkdir()
+        (folder / 'plan.json').write_text(json.dumps(self.plan), encoding='utf-8')
+        original_reviews = copy.deepcopy(self.plan['reviews'])
+        self.analysis['vision_analysis']['cache_wait_s'] = 0.047
+        before = copy.deepcopy(self.analysis)
+        with patch.object(editor, '_editor_model', return_value='fixture'), \
+             patch.object(editor, '_call', side_effect=AssertionError('API forbidden')), \
+             patch.object(editor, '_review', side_effect=AssertionError('pixel re-review forbidden')):
+            prepared = editor.prepare(self.manifest, self.analysis, self.root)
+            result = editor.match_manifest(self.manifest, prepared)
+        self.assertTrue(result['ok'], result)
+        self.assertEqual([r['shot_id'] for r in result['segments']], ['short', 'other'])
+        self.assertEqual(prepared['ai_editor_plan']['reviews'], original_reviews)
+        self.assertEqual(self.analysis, before)
+
+    def test_analysis_identity_retains_semantics_and_rejects_unmigrated_legacy_hash(self):
+        self.analysis['vision_analysis'] = {'model': 'fixture', 'cache_wait_s': 0.1, 'partial': False}
+        stable = editor._analysis_digest(self.analysis)
+        for field, value in (('model', 'changed'), ('partial', True), ('errors', ['decode failed'])):
+            changed = copy.deepcopy(self.analysis)
+            changed['vision_analysis'][field] = value
+            self.assertNotEqual(editor._analysis_digest(changed), stable, field)
+        changed = copy.deepcopy(self.analysis)
+        changed['shots'][0]['source_end'] = 11
+        self.assertNotEqual(editor._analysis_digest(changed), stable)
+        self.plan['identity']['analysis_sha256'] = contract.digest(self.analysis)
+        result = editor.match_manifest(self.manifest, {**self.analysis, 'ai_editor_plan': self.plan})
+        self.assertFalse(result['ok'])
+        self.assertIn('AI_EDITOR_ANALYSIS_CHANGED', str(result))
+
     def test_prepare_rechecks_old_feasible_flag_and_reuses_observations(self):
         folder = self.root / 'ai_editor'
         folder.mkdir()
