@@ -38,6 +38,14 @@ verify 核对版本、必需文件、目录库存与路径边界，不证明真�
 
 部署是单独动作：先保留在用配置和任务结果、安排现有批次，再核对实际安装文件及 ACTIVE_VIDEO_RUNTIME.json；源码合并不会自动升级运行机器。日常开发不注册计划任务、不启动真实队列、不读写业务表或 NAS。
 
+安装后可显式核对候选库存中每个文件在两处执行面的实际字节：
+
+~~~powershell
+uv run --frozen python -X utf8 -m tools.delivery_runtime --package $candidatePackage --pipeline $pipelineRoot --skills $skillsRoot --all-declared
+~~~
+
+该命令只读，退出码0表示声明文件与候选一致，2表示阻断；相同VERSION不能掩盖源码差异。空/坏库存、重复路径、Windows路径别名及逃逸、候选缺文件均拒绝。默认不传`--all-declared`时仍只核对原有交付依赖范围。全量模式不扫描未声明的额外文件、不校验外置后端或私有配置，也不更新ACTIVE；候选库存完整性仍由上述release_package verify验证。已授权的宿主定制应先纳入明确的安装候选，不能通过忽略差异伪造一致。此检查不是成片质量门禁，不生成新逐文件哈希清单。
+
 正式任务交付仍需 tools/acceptance 的四项当前证据全部 PASS：INPUT-IDENTITY、RUNTIME-IDENTITY、DRAFT-PACKAGE、VISUAL-QC。独立 QC 必须绑定实际草稿和素材；preview、超时和旧报告不能转正。共享交付继续检查实际媒体引用及可读性。
 
 真实画面、口播、字幕与草稿可编辑性按实际观察单独记录。Windows 打开、编辑和播放结果不能由源码测试数量、包库存或 ZIP hash 推断。运行入口与恢复方式见 [Windows 流水线](windows-pipeline.md)。

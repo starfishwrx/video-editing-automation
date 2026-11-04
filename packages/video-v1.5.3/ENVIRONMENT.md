@@ -56,6 +56,15 @@ The backend is a separate licensed dependency and is not redistributed in this
 package. Use an authorized backend build providing `headless-production-library/v1`
 and its source-pinned entrypoint; an unextended checkout is rejected before paid work.
 
+The native runtime also requires Jianying's default local draft directory and
+home index to have been initialized by the application under the same Windows
+account that will run the pipeline. On a new machine/account, launch Jianying
+and complete first-run setup, then rerun the production `env` check before paid
+work. `HEADLESS_HOST_NOT_INITIALIZED` names this specific failure and retains
+the native cause. Do not create, copy, or overwrite `root_meta_info.json` by hand.
+An independent draft output directory alone does not satisfy this host check;
+the pipeline still keeps its drafts outside the home index.
+
 The private `JY_DRAFTS_ROOT` / `JY_PROJECTS_ROOT` library is outside the live
 Jianying home index. Creating new drafts does not require closing or controlling
 the editor. Old drafts are never overwritten; unsupported input/effects stop

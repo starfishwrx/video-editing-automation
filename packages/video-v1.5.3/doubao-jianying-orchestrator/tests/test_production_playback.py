@@ -83,6 +83,30 @@ class ProductionPlaybackTests(unittest.TestCase):
         self.assertEqual(plan['rows'][1], self.plan['rows'][1])
         self.assertEqual(plan['playback_policy_version'], playback.VERSION)
 
+    def test_qc_rejection_preserves_observations_and_skips_rejected_repair_paths(self):
+        folder = self.root / 'ai_editor'
+        folder.mkdir()
+        (folder / 'plan.json').write_text(json.dumps(self.plan), encoding='utf-8')
+        self.manifest['qc_rejected_shots'] = {'1': ['long']}
+        with patch.object(editor, '_editor_model', return_value='fixture'), \
+             patch.object(editor, '_call', side_effect=AssertionError('API forbidden')), \
+             patch.object(editor, '_review', side_effect=AssertionError('reidentification forbidden')):
+            prepared = editor.prepare(self.manifest, self.analysis, self.root)['ai_editor_plan']
+        self.assertTrue(prepared['ok'], prepared)
+        self.assertEqual(prepared['rows'][0]['parts'][0]['shot_id'], 'short')
+        self.assertEqual(prepared['rows'][1], self.plan['rows'][1])
+        self.assertEqual(prepared['reviews']['2'], self.plan['reviews']['2'])
+        # Neither a cached narrow observation nor the empty-selection fallback
+        # can spend a recovery attempt on the rejected shot.
+        self.manifest['qc_rejected_shots'] = {'1': ['short', 'long']}
+        self.plan['window_reviews'] = {'old': {**self.reviews[1], 'sentence_index': 1,
+            'review_window_us': {'start': 0, 'end': 2_000_000}}}
+        self.assertEqual(list(editor._short_complete_rows(self.manifest, self.analysis, self.plan, 1, None)), [])
+        before = copy.deepcopy(self.plan['rows'])
+        self.assertFalse(editor._retrieve_empty_selection(self.manifest, self.analysis, self.plan,
+            ValueError('AI_EDITOR_NO_SELECTION:1'), None))
+        self.assertEqual(self.plan['rows'], before)
+
     def test_no_short_window_is_structured_conflict_and_evidence_unchanged(self):
         self.plan['reviews']['1'] = self.reviews[:1]
         frozen = copy.deepcopy(self.plan)

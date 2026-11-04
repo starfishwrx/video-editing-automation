@@ -155,9 +155,18 @@ def finalize_closed_loop(task_dir: pathlib.Path, task: dict, drafts: list[str],
     archive = run(common[:2] + ["archive-parent"] + common[2:], cwd=str(context.workflow_root), env=delivery_env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=archive_timeout)
     if archive.returncode != 0:
         return {"delivery_started": delivery_started, "ok": False, "status": "BLOCKED", "reason": "ARCHIVE_PARENT_FAILED", "output": (archive.stdout or archive.stderr)[-2000:]}
-    update = run(common[:2] + ["table-update"] + common[2:], cwd=str(context.workflow_root), env=delivery_env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
+    update_timeout = float(os.environ.get("JY_TABLE_UPDATE_TIMEOUT_S", "1200"))
+    update = run(common[:2] + ["table-update"] + common[2:], cwd=str(context.workflow_root), env=delivery_env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=update_timeout)
     if update.returncode != 0:
-        return {"delivery_started": delivery_started, "ok": False, "status": "BLOCKED", "reason": "TABLE_UPDATE_FAILED", "output": (update.stdout or update.stderr)[-2000:]}
+        # Diagnostics are bounded, but recovery evidence must survive long BGM
+        # titles and paths. Parse this invocation's stdout, never an older file.
+        try:
+            table_receipt = json.loads(update.stdout)
+        except (ValueError, TypeError):
+            table_receipt = None
+        return {"delivery_started": delivery_started, "ok": False, "status": "BLOCKED",
+                "reason": "TABLE_UPDATE_FAILED", "output": (update.stdout or update.stderr or "")[-2000:],
+                "table_update_receipt": table_receipt if isinstance(table_receipt, dict) else None}
     try:
         receipt = json.loads(update.stdout)
     except (ValueError, TypeError):

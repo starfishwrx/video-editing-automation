@@ -38,6 +38,13 @@ class SentenceContinuityTests(unittest.TestCase):
                                      analysis_sha256=contract.digest(self.analysis))
         self.plan['resume_identity'] = copy.deepcopy(self.plan['identity'])
 
+    def test_qc_rejected_member_cannot_trigger_joint_review(self):
+        self.assertTrue(list(sharing.proposals(self.manifest, self.analysis, self.plan, 1, None)))
+        self.manifest['qc_rejected_shots'] = {'1': ['long']}
+        self.assertEqual(list(sharing.proposals(self.manifest, self.analysis, self.plan, 1, None)), [])
+        self.manifest['qc_rejected_shots'] = {'3': ['long']}
+        self.assertTrue(list(sharing.proposals(self.manifest, self.analysis, self.plan, 1, None)))
+
     def group(self, context=None):
         context = context or next(sharing.proposals(self.manifest, self.analysis, self.plan, 1, None))
         observations = [{'index': m['index'], 'verdict': 'matched', 'same_product': True,

@@ -9,6 +9,7 @@
 - 按阶段恢复：`python -m tools.batch_dispatch resume --queue <queue.json> --record-id <id> --stage qc|build|material`。QC 只补未完成批次，不重做 TTS、选镜或建稿；独立 PASS 后才进入既有交付闸门。
 - 每轮清空 `batch_dispatch_progress.jsonl`；完整观察保留在 `dispatch_runs/`。用 `python -m tools.throughput_calibration --run <run.json>` 比较真实批次，不清生产缓存或额外调用模型。只有已确认账户容量才使用 `--confirmed-account-capacity 40` / `80`。
 - 工作根：`work/batch_queue.json`（记录列表）；每条任务落 `work/<record_id>/`
+- 每个草稿report目录的`qc_rejected_shots.json`累计保存逐句QC拒绝源，并绑定当前文案/编辑输入及素材路径、大小和修改时间。恢复不会因最新报告被覆盖而遗忘较早拒绝，改稿或换源不继承旧黑名单；旧报告只有原输入、源收据、claim和时序均可核对时才补入。该文件不替代独立QC，也不清理像素/TTS缓存。
 - `done.json` 为权威终态收据；历史 start 事件/活跃进程都会被它覆盖
 - 环境变量控制：
   - `JY_TASK_SKIP_CURRENT=1`：跳过当前卡住的条目并选下一条
