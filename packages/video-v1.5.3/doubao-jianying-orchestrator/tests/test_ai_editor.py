@@ -49,6 +49,38 @@ class AIEditorTests(unittest.TestCase):
     def result(self, plan=None):
         return editor.match_manifest(self.manifest, {"shots": [self.shot], "ai_editor_plan": plan or self.plan()})
 
+    def test_qc_rejected_shot_cannot_be_reselected_for_that_sentence(self):
+        alt_video = self.root / "alt.mp4"
+        alt_video.write_bytes(b"alternative source identity")
+        alt = {**self.shot, "shot_id": "alt", "video": str(alt_video)}
+        alt_review = {**self.review, "shot_id": "alt", "source_identity": contract.source_identity(alt_video)}
+        plan = self.plan()
+        plan["reviews"] = {"1": [self.review, alt_review]}
+        self.manifest["qc_rejected_shots"] = {"1": ["handfeel"]}
+        analysis = {"shots": [self.shot, alt]}
+        with self.assertRaisesRegex(ValueError, "AI_EDITOR_UNREVIEWED_SELECTION:1"):
+            editor._assemble(self.manifest, analysis, plan, narration_timing=None)
+        inventory = editor._build_edit_inventory(self.manifest, analysis, plan, None)
+        self.assertEqual([c["shot_id"] for c in inventory[0]["candidates"]], ["alt"])
+        plan["rows"][0]["parts"][0]["shot_id"] = "alt"
+        self.assertTrue(editor._assemble(self.manifest, analysis, plan, narration_timing=None)["ok"])
+        # The rejection is sentence-scoped and never applies to other sentences.
+        self.assertEqual(editor.qc_rejected_shots({"qc_rejected_shots": {"1": ["handfeel"]}}), {1: {"handfeel"}})
+
+    def test_review_pool_skips_qc_rejected_candidates(self):
+        sentence = {**self.sentence, "candidate_ids": ["handfeel", "alt"], "audio_durations_us": [2_000_000]}
+        alt = {**self.shot, "shot_id": "alt"}
+        seen = []
+        def review(manifest, sentence, shot, directory, dense=False):
+            seen.append(shot["shot_id"])
+            return {**self.review, "shot_id": shot["shot_id"]}
+        with mock.patch.object(editor, "_review", side_effect=review):
+            rows, coverage = editor._review_pool(self.manifest, sentence, {"handfeel": self.shot, "alt": alt},
+                                                 self.root, {}, excluded_ids={"handfeel"})
+        self.assertNotIn("handfeel", seen)
+        self.assertEqual([r["shot_id"] for r in rows], ["alt"])
+        self.assertTrue(coverage["feasible"])
+
     def test_inventory_discards_unknown_ids_without_promoting_them(self):
         model = {"sentences": [{**self.sentence, "candidate_ids": ["invented", "handfeel"]}],
                  "display_pool_ids": ["invented-display", "handfeel"]}
@@ -335,7 +367,8 @@ class AIEditorTests(unittest.TestCase):
         # A reviewed subwindow still cannot include the original head waste.
         plan["window_reviews"]["narrow"]["review_window_us"] = {"start": 100_000, "end": 4_000_000}
         plan["window_reviews"]["narrow"]["evidence_intervals_us"] = [{"start": 100_000, "end": 1_000_000}]
-        self.assertFalse(self.result(plan)["ok"])
+        with self.assertRaises(editor.WindowFailure):
+            editor._assemble(self.manifest, {"shots": [self.shot]}, plan, narration_timing=None)
 
     def test_reviewed_subwindow_keeps_default_tail_guard(self):
         self.manifest.pop("tail_trim_s")
@@ -344,7 +377,8 @@ class AIEditorTests(unittest.TestCase):
             "review_window_us": {"start": 4_000_000, "end": 5_900_000},
             "evidence_intervals_us": [{"start": 4_000_000, "end": 5_850_000}]}}
         plan["rows"][0]["parts"][0]["window_review_key"] = "narrow"
-        self.assertFalse(self.result(plan)["ok"])
+        with self.assertRaises(editor.WindowFailure):
+            editor._assemble(self.manifest, {"shots": [self.shot]}, plan, narration_timing=None)
 
     def test_editor_receives_actual_speed_and_content_identity(self):
         plan = self.plan()

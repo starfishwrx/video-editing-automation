@@ -11,6 +11,8 @@ from . import timing_contract as timing
 
 def proposals(manifest, analysis, plan, index, narration_timing):
     """Shared candidate IDs retrieve possibilities; only joint pixels certify them."""
+    from .ai_editor import qc_rejected_shots
+    rejected = qc_rejected_shots(manifest)
     shots = {s["shot_id"]: s for s in analysis["shots"]}
     sentences = {s["index"]: s for s in plan["sentences"]}
     originals = timing.split_sentences(manifest)
@@ -23,7 +25,8 @@ def proposals(manifest, analysis, plan, index, narration_timing):
             if any(r.get("continuity_key") for r in plan["rows"] if first <= r["index"] < first + length):
                 continue
             reviewed = [{r["shot_id"]: r for r in plan["reviews"].get(str(s["index"]), [])
-                         if r.get("verdict") == "matched" and r.get("same_product") is True} for s in members]
+                         if r.get("verdict") == "matched" and r.get("same_product") is True
+                         and r["shot_id"] not in rejected.get(s["index"], set())} for s in members]
             for sid in sorted(set.intersection(*(set(r) for r in reviewed)) & shots.keys()):
                 shot = shots[sid]
                 source = contract.source_identity(shot["video"])

@@ -1031,6 +1031,38 @@ def prior_draft_requires_recheck(task_dir: pathlib.Path, index: int,
             or not production_eval.visual_qc_contract.report_matches_draft(payload, DRAFTS / draft_name))
 
 
+def qc_rejected_shots_from_report(rd: pathlib.Path, report: dict | None = None) -> dict:
+    """Map QC-failed sentences to the exact shot ids the draft used there.
+
+    Only rows whose QC claim text equals the match-report sentence are used;
+    an ambiguous mapping is skipped rather than guessed.
+    """
+    report = report if report is not None else _read_json(rd / "draft_visual_qc.json")
+    segments = _read_json(rd / "shot_match_report.json").get("segments") or []
+    out = {}
+    for row in (report or {}).get("model_review") or []:
+        if not isinstance(row, dict) or row.get("visual_ok") is not False:
+            continue
+        try:
+            index = int(row.get("index"))
+        except (TypeError, ValueError):
+            continue
+        if not 1 <= index <= len(segments) or not isinstance(segments[index - 1], dict):
+            continue
+        segment = segments[index - 1]
+        claim = str(row.get("claim") or "").strip()
+        text = str(segment.get("text") or "").strip()
+        if claim and text and claim != text:
+            continue
+        ids = {str(part.get("shot_id")) for part in (segment.get("span_parts") or [])
+               if isinstance(part, dict) and part.get("shot_id")}
+        if segment.get("shot_id"):
+            ids.add(str(segment["shot_id"]))
+        if ids:
+            out.setdefault(index, set()).update(ids)
+    return out
+
+
 def build_progress_inputs(manifest: dict, analysis_file: str | None, repair_indices) -> dict:
     """Track meaningful candidates/observations rather than output names or errors."""
     analysis = _read_json(pathlib.Path(analysis_file)) if analysis_file else {}
@@ -1321,8 +1353,26 @@ def process_task(task: dict, *, retry_partial: bool = False,
             rd = tdir / "report" / (name if i == 1 else "report_%d" % i)
             draft_ok = False
             last_failure = None
+            # A previous run's failed post-draft QC still identifies the
+            # sentence/shot pairs that do not match the narration. Carry them
+            # into this run only when the QC is newer than the match report.
+            qc_rejected = {}
+            previous_qc = _read_json(rd / "draft_visual_qc.json")
+            try:
+                qc_is_current = ((rd / "draft_visual_qc.json").stat().st_mtime
+                                 >= (rd / "shot_match_report.json").stat().st_mtime)
+            except OSError:
+                qc_is_current = False
+            if (qc_is_current and previous_qc.get("status")
+                    and str(previous_qc.get("status")) not in {"PASS", "PASS_WITH_DEGRADED", "PASS_WITH_GAPS"}):
+                for key, ids in qc_rejected_shots_from_report(rd, previous_qc).items():
+                    qc_rejected.setdefault(key, set()).update(ids)
+                if qc_rejected:
+                    log("seed post-draft QC rejections from previous run: %s" % {
+                        k: sorted(v) for k, v in sorted(qc_rejected.items())})
             for attempt in range(1, MAX_DRAFT_ATTEMPTS + 1):
                 applied_repair_indices = frozenset(repair_visual_missing_indices)
+                applied_rejections = frozenset((k, s) for k, v in qc_rejected.items() for s in v)
                 # Escalating strategies so one broken build never repeats
                 # identically.  The first draft may scan the pool once; all
                 # later drafts reuse that validated analysis, and retries
@@ -1370,11 +1420,13 @@ def process_task(task: dict, *, retry_partial: bool = False,
                     build_manifest["variant_count"] = count
                     build_manifest["variant_pool_size"] = min(5, max(3, count))
                     build_manifest["variant_score_tolerance"] = 8
-                    if repair_visual_missing_indices:
-                        build_manifest["forced_visual_missing_indices"] = sorted(
-                            repair_visual_missing_indices)
-                        log("post-draft visual repair: force blank segments=%s" %
-                            sorted(repair_visual_missing_indices))
+                    if qc_rejected:
+                        # Re-select a different pixel-reviewed shot for each
+                        # QC-rejected sentence; never blank or re-use it.
+                        build_manifest["qc_rejected_shots"] = {
+                            str(k): sorted(v) for k, v in sorted(qc_rejected.items())}
+                        log("post-draft visual repair: reselect sentences excluding rejected shots=%s" %
+                            build_manifest["qc_rejected_shots"])
                     attempt_state = rd / "build_attempt_state.json"
                     inputs = build_progress_inputs(build_manifest, analysis_cache,
                                                    repair_visual_missing_indices)
@@ -1456,6 +1508,9 @@ def process_task(task: dict, *, retry_partial: bool = False,
                                 match = re.search(r"POST_DRAFT_VISION_MISSING:S(\d+)", str(issue))
                                 if match:
                                     repair_visual_missing_indices.add(int(match.group(1)))
+                            for key, ids in qc_rejected_shots_from_report(
+                                    rd, qc_result.get("report") or {}).items():
+                                qc_rejected.setdefault(key, set()).update(ids)
                         log("DRAFT %d/%d attempt %d failed (%s): %s" % (
                             i, count, attempt,
                             "hard" if cls["vision_hard"] else "transient",
@@ -1468,8 +1523,9 @@ def process_task(task: dict, *, retry_partial: bool = False,
                         # and the next build will turn those exact segments
                         # into intentional gaps. Allow one final repair pass;
                         # do not keep retrying deterministic match failures.
-                        qc_repairable = bool(qc_result and
-                            repair_visual_missing_indices.difference(applied_repair_indices))
+                        qc_repairable = bool(qc_result and (
+                            repair_visual_missing_indices.difference(applied_repair_indices)
+                            or {(k, s) for k, v in qc_rejected.items() for s in v}.difference(applied_rejections)))
                         if qc_result and not qc_repairable:
                             last_failure.update(phase="post_draft_qc", resume_stage="qc",
                                                 failed_stage="qc", draft=a_name)
