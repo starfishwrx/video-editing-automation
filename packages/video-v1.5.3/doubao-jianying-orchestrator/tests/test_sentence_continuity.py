@@ -164,6 +164,54 @@ class SentenceContinuityTests(unittest.TestCase):
                 WindowFailure(1, 'long', 'EVIDENCE_SPAN_TOO_LONG'), None))
         self.assertEqual(self.plan['rows'], before)
 
+    def test_focused_edit_dissolves_entire_group_and_requires_reselection(self):
+        self.install()
+        original_observations = copy.deepcopy(self.plan['continuity_reviews'])
+        new_row = {'index': 1, 'parts': [{'shot_id': 'long', 'audio_duration_us': 2_000_000}]}
+        editor._replace_focused_row(self.plan, 1, new_row)
+        self.assertEqual(self.plan['rows'][0], new_row)
+        self.assertEqual(self.plan['rows'][1]['parts'], [])
+        self.assertNotIn('continuity_key', self.plan['rows'][1])
+        self.assertEqual(self.plan['continuity_reviews'], original_observations)
+        self.assertEqual(sharing.validate_plan(self.manifest, self.analysis, self.plan, None), {})
+
+    def test_focused_edit_refuses_already_orphaned_group(self):
+        self.install()
+        self.plan['rows'][1].pop('continuity_key')
+        before = copy.deepcopy(self.plan['rows'])
+        with self.assertRaisesRegex(ValueError, 'CONTINUITY_INPUT_CHANGED'):
+            editor._replace_focused_row(self.plan, 1, {'index': 1, 'parts': []})
+        self.assertEqual(self.plan['rows'], before)
+
+    def test_resume_deselects_only_orphaned_group_members(self):
+        self.install()
+        self.plan['rows'][0] = {'index': 1, 'parts': [{'shot_id': 'other', 'audio_duration_us': 2_000_000}]}
+        revised = copy.deepcopy(self.plan['rows'][0])
+        editor._clear_incomplete_groups(self.plan)
+        self.assertEqual(self.plan['rows'][0], revised)
+        self.assertEqual(self.plan['rows'][1]['parts'], [])
+        self.assertNotIn('continuity_key', self.plan['rows'][1])
+        self.assertEqual(sharing.validate_plan(self.manifest, self.analysis, self.plan, None), {})
+
+    def test_resume_restores_reviewed_group_split_by_failed_partial_edit(self):
+        self.install()
+        grouped = copy.deepcopy(self.plan['rows'])
+        self.plan['rows'][0] = {'index': 1, 'parts': [{'shot_id': 'other', 'audio_duration_us': 2_000_000}]}
+        previous = {'issues': [{'message': 'CONTINUITY_INPUT_CHANGED'}]}
+        editor._restore_interrupted_groups(self.manifest, self.analysis, self.plan, previous, None)
+        self.assertEqual(self.plan['rows'], grouped)
+        self.assertEqual(len(sharing.validate_plan(self.manifest, self.analysis, self.plan, None)), 1)
+        self.assertFalse(self.plan.get('ok', False))
+
+    def test_resume_never_restores_qc_rejected_group(self):
+        self.install()
+        self.plan['rows'][0] = {'index': 1, 'parts': []}
+        self.manifest['qc_rejected_shots'] = {'1': ['long']}
+        editor._restore_interrupted_groups(self.manifest, self.analysis, self.plan,
+                                          {'issues': [{'message': 'CONTINUITY_INPUT_CHANGED'}]}, None)
+        editor._clear_incomplete_groups(self.plan)
+        self.assertEqual([r['parts'] for r in self.plan['rows']], [[], []])
+
     def group(self, context=None):
         context = context or next(sharing.proposals(self.manifest, self.analysis, self.plan, 1, None))
         observations = [{'index': m['index'], 'verdict': 'matched', 'same_product': True,

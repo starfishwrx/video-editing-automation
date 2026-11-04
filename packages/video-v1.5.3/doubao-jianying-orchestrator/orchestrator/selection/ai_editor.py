@@ -490,7 +490,8 @@ def qc_rejected_shots(manifest: dict) -> dict[int, set[str]]:
 def _review_pool(manifest: dict, sentence: dict, shots: dict, directory: Path, audio: dict, *,
                  exhaustive: bool = False,
                  existing_reviews: list[dict] | None = None,
-                 excluded_ids: set[str] | None = None) -> tuple[list[dict], dict]:
+                 excluded_ids: set[str] | None = None,
+                 early_window_repair: bool = False) -> tuple[list[dict], dict]:
     from . import shot_analyzer
     def feasible(good: list[dict]) -> bool:
         return _cached_reviews_feasible(manifest, sentence, shots, good, audio)
@@ -506,6 +507,15 @@ def _review_pool(manifest: dict, sentence: dict, shots: dict, directory: Path, a
                    or len(reviewed_by_id) >= min(ALTERNATIVE_REVIEW_LIMIT, len(ids))))
                   or (not required and len(existing_good) >= min(3, len(ids))))
         if not exhaustive and enough and feasible(existing_good):
+            break
+        existing_points = {p for r in existing_good for p in r.get("supported_point_ids", [])}
+        # Try real short-window/continuity repair before paying to review the
+        # entire pool. Infeasible evidence is not promoted to a valid window;
+        # failed local repair falls back to the full pool in prepare().
+        if (early_window_repair and not exhaustive and required
+                and len(reviewed_by_id) >= ALTERNATIVE_REVIEW_LIMIT and len(existing_good) >= 2
+                and not any(failure_fields(str(r.get('error', ''))) for r in reviewed_by_id.values())
+                and contract.points_supported(required, existing_points)):
             break
         chunk = [sid for sid in ids[offset:offset + ROUND_SIZE] if sid not in reviewed_by_id]
         if not chunk:
@@ -588,6 +598,11 @@ def _review_pool(manifest: dict, sentence: dict, shots: dict, directory: Path, a
             if (len(good) >= 2 or len(reviewed) >= min(ALTERNATIVE_REVIEW_LIMIT, len(ids))
                     or len(reviewed) == len(ids)):
                 break
+        if (early_window_repair and not exhaustive and required
+                and len(reviewed) >= ALTERNATIVE_REVIEW_LIMIT and len(good) >= 2
+                and not any(failure_fields(str(r.get('error', ''))) for r in reviewed)
+                and contract.points_supported(required, covered)):
+            break
         if not exhaustive and not required and len(good) >= min(3, len(ids)) and feasible(good):
             break
     reviewed = [reviewed_by_id[sid] for sid in ids if sid in reviewed_by_id]
@@ -1005,7 +1020,7 @@ def _repair_repeated_window(manifest: dict, analysis: dict, plan: dict, director
     """Try already pixel-reviewed single-shot alternatives; add at most one review round."""
     row = next((r for r in plan.get("rows", []) if isinstance(r, dict) and r.get("index") == index), None)
     sentence = next((s for s in plan.get("sentences", []) if s.get("index") == index), None)
-    if not row or not sentence or len(row.get("parts") or []) != 1:
+    if not row or row.get("continuity_key") or not sentence or len(row.get("parts") or []) != 1:
         return False
     part = row["parts"][0]
     if not isinstance(part, dict) or type(part.get("audio_duration_us")) is not int:
@@ -1220,6 +1235,17 @@ def _retrieve_empty_selection(manifest, analysis, plan, failure, narration_timin
     return True
 
 
+def _duplicate_repair_focus(plan, failure):
+    match = re.fullmatch(r'AI_EDITOR_REPEATED_SOURCE_WINDOW:(\d+):(\d+)', str(failure))
+    if not match:
+        return None
+    first, second = map(int, match.groups())
+    rows = {r.get('index'): r for r in plan.get('rows', []) if isinstance(r, dict)}
+    if rows.get(second, {}).get('continuity_key') and not rows.get(first, {}).get('continuity_key'):
+        return first
+    return second
+
+
 def _repair_reviewed_rows(manifest, analysis, plan, directory, narration_timing, duplicate_expanded):
     """Drain useful local repairs without spending text-editor retry rounds.
 
@@ -1246,9 +1272,9 @@ def _repair_reviewed_rows(manifest, analysis, plan, directory, narration_timing,
                 failure = ValueError(f"AI_EDITOR_NO_SELECTION:{index}")
         if _retrieve_empty_selection(manifest, analysis, plan, failure, narration_timing):
             continue
-        repeated = re.fullmatch(r"AI_EDITOR_REPEATED_SOURCE_WINDOW:\d+:(\d+)", str(failure))
-        if repeated and _repair_repeated_window(manifest, analysis, plan, directory,
-                narration_timing, int(repeated[1]), duplicate_expanded):
+        repeated_index = _duplicate_repair_focus(plan, failure)
+        if repeated_index is not None and _repair_repeated_window(manifest, analysis, plan, directory,
+                narration_timing, repeated_index, duplicate_expanded):
             continue
         if isinstance(failure, WindowFailure):
             if _repair_selected_window(manifest, analysis, plan, directory, failure):
@@ -1257,6 +1283,66 @@ def _repair_reviewed_rows(manifest, analysis, plan, directory, narration_timing,
                 continue
         raise failure
     raise ValueError("AI_EDITOR_REPAIR_PROGRESS_LIMIT")
+
+
+def _clear_incomplete_groups(plan):
+    """Unselect orphaned group members; never promote old group observations."""
+    rows = plan.get('rows') or []
+    keys = {r.get('continuity_key') for r in rows if isinstance(r, dict) and r.get('continuity_key')}
+    for key in keys:
+        group = plan.get('continuity_reviews', {}).get(key) or {}
+        members = (group.get('input') or {}).get('members') or []
+        expected = {m.get('index') for m in members if isinstance(m, dict)}
+        actual = {r.get('index') for r in rows if r.get('continuity_key') == key}
+        if not expected or actual != expected:
+            rows = [{'index': r['index'], 'parts': [], 'reason': 'incomplete continuous group; reselect'}
+                    if r.get('continuity_key') == key else r for r in rows]
+    plan['rows'] = rows
+
+
+def _restore_interrupted_groups(manifest, analysis, plan, previous, narration_timing):
+    """Recover a validated group split by an unsuccessful partial edit."""
+    if not any(row.get('message') == 'CONTINUITY_INPUT_CHANGED'
+               for row in previous.get('issues', []) if isinstance(row, dict)):
+        return
+    rejected = qc_rejected_shots(manifest)
+    rows = plan.get('rows') or []
+    keys = {r.get('continuity_key') for r in rows if isinstance(r, dict) and r.get('continuity_key')}
+    for key in keys:
+        group = plan.get('continuity_reviews', {}).get(key) or {}
+        context = group.get('input') or {}
+        members = {m.get('index') for m in context.get('members', []) if isinstance(m, dict)}
+        selected = {r.get('index') for r in rows if r.get('continuity_key') == key}
+        if not members or selected == members or any(context.get('shot_id') in rejected.get(i, set()) for i in members):
+            continue
+        trial = copy.deepcopy(plan)
+        try:
+            sentence_continuity.install(trial, key, group)
+            sentence_continuity.validate_plan(manifest, analysis, trial, narration_timing)
+        except (ValueError, KeyError, TypeError, OSError, StopIteration):
+            continue
+        trial['ok'] = False
+        plan.update(trial)
+        rows = plan['rows']
+
+
+def _replace_focused_row(plan, index, revised):
+    """A partial edit dissolves the old group and reselects other members."""
+    old = next((r for r in plan['rows'] if r.get('index') == index), None)
+    key = old.get('continuity_key') if old else None
+    if key:
+        group = plan.get('continuity_reviews', {}).get(key)
+        if not group:
+            raise ValueError('CONTINUITY_INPUT_CHANGED')
+        members = {m['index'] for m in group['input']['members']}
+        if index not in members or any(not any(r.get('index') == i and r.get('continuity_key') == key
+                                                for r in plan['rows']) for i in members):
+            raise ValueError('CONTINUITY_INPUT_CHANGED')
+        plan['rows'] = [revised if r.get('index') == index else
+            {'index': r['index'], 'parts': [], 'reason': 'continuous group changed; reselect from reviewed candidates'}
+            if r.get('index') in members else r for r in plan['rows']]
+    else:
+        plan['rows'] = [revised if r.get('index') == index else r for r in plan['rows']]
 
 
 def _edit_plan(manifest: dict, analysis: dict, plan: dict, directory: Path,
@@ -1294,7 +1380,7 @@ technical_option是按本句完整配音求出的实际可行窗口；分配多�
             revised = [r for r in response.get("rows", []) if isinstance(r, dict) and r.get("index") == focus]
             if len(revised) != 1:
                 raise ValueError(f"AI_EDITOR_NO_SELECTION:{focus}")
-            plan["rows"] = [revised[0] if r["index"] == focus else r for r in plan["rows"]]
+            _replace_focused_row(plan, focus, revised[0])
         else:
             plan["rows"] = response.get("rows")
         if attempt == 0:
@@ -1331,7 +1417,9 @@ technical_option是按本句完整配音求出的实际可行窗口；分配多�
             _save(directory / "plan.json", plan)
             if attempt == 2:
                 raise failure
-            focus = failed_index(failure)
+            focus = _duplicate_repair_focus(plan, failure)
+            if focus is None:
+                focus = failed_index(failure)
             repair_instruction = "\n上一版技术检查失败：" + str(failure) + "。"
             if focus is not None:
                 repair_instruction += f"只返回index={focus}的一行rows，更换无效候选或起点；其他句由程序原样保留。"
@@ -1344,6 +1432,38 @@ technical_option是按本句完整配音求出的实际可行窗口；分配多�
                 for row in plan.get("rows", []) if isinstance(row, dict)]
             repair_instruction += "\n当前选择（仅供修复，不作为视觉证据）：" + json.dumps(current, ensure_ascii=False)
             repair_instruction += "\n已检查窗口（不可把被拒窗口重标为通过）：" + json.dumps(plan.get("window_repair_attempts", {}), ensure_ascii=False)
+
+
+def _edit_with_review_fallback(manifest, analysis, plan, directory, narration_timing):
+    """Try scoped repair first, then exhaust only a failed sentence's pool."""
+    shots = {str(s['shot_id']): s for s in analysis['shots']}
+    rejected = qc_rejected_shots(manifest)
+    expanded_indices = set()
+    while True:
+        try:
+            _edit_plan(manifest, analysis, plan, directory, narration_timing)
+            return
+        except (ValueError, KeyError, TypeError, OSError) as exc:
+            index = failed_index(exc)
+            coverage = plan.get('coverage', {}).get(str(index), {})
+            sentence = next((s for s in plan['sentences'] if s.get('index') == index), None)
+            if (not sentence or index in expanded_indices or coverage.get('exhausted')
+                    or coverage.get('reason') != 'KNOWN_WINDOWS_INFEASIBLE'):
+                raise
+            expanded_indices.add(index)
+            reviews, coverage = _review_pool(manifest, sentence, shots, directory, narration_timing or {},
+                exhaustive=True, existing_reviews=plan['reviews'].get(str(index), []),
+                excluded_ids=rejected.get(index, set()))
+            plan['reviews'][str(index)] = reviews
+            plan['coverage'][str(index)] = coverage
+            plan.setdefault('review_expansions', []).append({'index': index, 'reason': str(exc),
+                                                            'checked': coverage['checked']})
+            plan['_resume_rows'] = bool(plan.get('rows'))
+            _save(directory / 'plan.json', plan)
+            if not coverage.get('feasible'):
+                for review in reviews + plan.get('display_reviews', []):
+                    if failure_fields(str(review.get('error', ''))):
+                        raise ValueError(review['error'])
 
 
 def prepare(manifest: dict, analysis: dict, report_dir: Path, *, narration_timing: dict | None = None) -> dict:
@@ -1377,6 +1497,8 @@ def prepare(manifest: dict, analysis: dict, report_dir: Path, *, narration_timin
                         "window_repair_attempts", "repair_history", "duplicate_repair_reviews", "continuity_reviews", "continuity_attempts", "continuity_repairs"):
                 if key in previous:
                     plan[key] = copy.deepcopy(previous[key])
+            _restore_interrupted_groups(manifest, analysis, plan, previous, narration_timing)
+            _clear_incomplete_groups(plan)
             plan["_resume_rows"] = bool(plan.get("rows"))
             groups = {**plan["reviews"], "display_pool": plan["display_reviews"]}
             for key, reviews in groups.items():
@@ -1416,7 +1538,8 @@ def prepare(manifest: dict, analysis: dict, report_dir: Path, *, narration_timin
                     continue
                 plan["phase"] = "selection_candidate_review"
                 reviews, coverage = _review_pool(manifest, sentence, by_id, directory, narration_timing or {},
-                                                 existing_reviews=plan["reviews"].get(key, []), excluded_ids=excluded)
+                                                 existing_reviews=plan["reviews"].get(key, []), excluded_ids=excluded,
+                                                 early_window_repair=True)
                 plan["reviews"][str(sentence["index"])] = reviews
                 plan["coverage"][str(sentence["index"])] = coverage
                 supported = {p for r in reviews if r["verdict"] == "matched" for p in r.get("supported_point_ids", [])}
@@ -1463,7 +1586,10 @@ def prepare(manifest: dict, analysis: dict, report_dir: Path, *, narration_timin
                     continue
                 raise ValueError(f"AI_EDITOR_OBSERVATION_OR_WINDOW_PENDING:{row['index']}:{coverage.get('reason', 'UNKNOWN')}")
         plan["phase"] = "selection_edit"
-        _edit_plan(manifest, analysis, plan, directory, narration_timing)
+        # An early short-window attempt must not silently discard a viable
+        # later candidate: on a scoped failure exhaust only that sentence and
+        # retry with its actual observations, preserving other cached work.
+        _edit_with_review_fallback(manifest, analysis, plan, directory, narration_timing)
     except (ValueError, KeyError, TypeError, OSError) as exc:
         plan["ok"] = False
         plan["failure"] = failure_fields(str(exc), stage=plan.get("phase", "semantic_match"))
