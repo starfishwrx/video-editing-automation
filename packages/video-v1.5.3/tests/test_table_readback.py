@@ -91,7 +91,8 @@ class TableReadbackTests(unittest.TestCase):
         self.run_update([self.response({'ok': True})] +
                         [subprocess.TimeoutExpired(['redacted'], 20)] * 3)
         self.write(self.done, {'status': 'PARTIAL', 'failures': [
-            {'phase': 'closed_loop', 'type': 'delivery_or_table_gate', 'message': 'table pending'}]})
+            {'phase': 'closed_loop', 'type': 'delivery_or_table_gate', 'message': str({
+                'reason': 'TABLE_UPDATE_FAILED', 'output': (self.root / 'table_update_receipt.json').read_text()})}]})
         with patch.object(m.subprocess, 'run') as run:
             deferred = m.failure_update(self.task, self.done, self.policy)
         self.assertFalse(deferred['ok'])
@@ -128,13 +129,15 @@ class TableReadbackTests(unittest.TestCase):
         self.run_update([self.response({'ok': True})] + [self.response({'ok': False})] * 3)
         receipt_path = self.root / 'table_update_receipt.json'
         original = receipt_path.read_bytes()
-        for kind in ('real_failure', 'task_identity', 'target_identity', 'record_id'):
+        for kind in ('real_failure', 'task_identity', 'target_identity', 'record_id',
+                     'EVAL_DELIVERY_GATE', 'DISTRIBUTION_READBACK_DRIFT', 'PACKAGE_INCOMPLETE'):
             with self.subTest(kind=kind):
                 receipt = json.loads(original)
-                failures = [{'phase': 'closed_loop', 'type': 'delivery_or_table_gate'}]
+                failures = [{'phase': 'closed_loop', 'type': 'delivery_or_table_gate',
+                             'message': str({'reason': kind, 'output': original.decode()})}]
                 if kind == 'real_failure':
                     failures.append({'phase': 'qc', 'type': 'visual'})
-                else:
+                elif kind in ('task_identity', 'target_identity', 'record_id'):
                     receipt[kind] = 'stale'
                 self.write(receipt_path, receipt)
                 self.write(self.done, {'status': 'PARTIAL', 'failures': failures})

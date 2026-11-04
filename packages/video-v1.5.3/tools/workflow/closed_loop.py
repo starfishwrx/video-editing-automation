@@ -471,9 +471,26 @@ def failure_update(task_path: pathlib.Path, done_path: pathlib.Path,
     # Overwriting its status would make read-only ACK recovery impossible.
     delivery = read_json(done_path.parent / 'table_update_receipt.json')
     failures = done.get('failures') or []
+    def pending_table_failure(row):
+        if (not isinstance(row, dict) or row.get('phase') != 'closed_loop'
+                or row.get('type') != 'delivery_or_table_gate'):
+            return False
+        # Worker persists str(closed) in message; do not infer the current
+        # failing gate from an older pending receipt in the same directory.
+        import ast
+        try:
+            detail = ast.literal_eval(row.get('message', ''))
+            if not isinstance(detail, dict) or detail.get('reason') != 'TABLE_UPDATE_FAILED':
+                return False
+            current = json.loads(detail.get('output', ''))
+            return (isinstance(current, dict) and current.get('write_acknowledged') is True
+                    and current.get('status') in {'TABLE_READBACK_FAILED', 'TABLE_READBACK_MISMATCH'}
+                    and all(current.get(key) == delivery.get(key) for key in
+                            ('record_id', 'task_identity', 'target_identity', 'patch', 'created_at')))
+        except (ValueError, SyntaxError, TypeError, RecursionError):
+            return False
     only_delivery = (isinstance(failures, list) and bool(failures) and not done.get('error')
-                     and all(isinstance(row, dict) and row.get('phase') == 'closed_loop'
-                             and row.get('type') == 'delivery_or_table_gate' for row in failures))
+                     and all(pending_table_failure(row) for row in failures))
     target_identity = digest({'base': base_token, 'table': table_id, 'actor': lark_actor(),
                               'profile': os.environ.get('LARK_PROFILE', '').strip()})
     if (only_delivery and delivery.get('write_acknowledged') is True

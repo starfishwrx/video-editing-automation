@@ -16,6 +16,8 @@
 - 修复复核子窗的保护区原点交接：保留实际复核的scene边界，另传原始shot的guard边界，规划与写稿仅扣剩余保护；缺省尾保护统一，真实越界继续拒绝。旧匹配报告须从保留观察重新semantic_match后写稿，不能手填字段或裁短证据。
 - table-update包含实际输出audit，外层执行预算默认扩至1200秒并允许JY_TABLE_UPDATE_TIMEOUT_S配置，内部飞书请求仍有独立超时。包级248、编排器1273项（1项既有跳过）、定向回归和独立审阅通过；实际任务恢复证据另存，不将离线通过称为成片交付。
 
+- 收窄failure-update延后条件到本轮worker message中的TABLE_UPDATE_FAILED且携带同一pending读回收据；旧ACK不再屏蔽EVAL_DELIVERY_GATE、DISTRIBUTION_READBACK_DRIFT或PACKAGE_INCOMPLETE。不能解析/被截断的消息按正常失败处理并先撤销ACK。13项含三种门禁反例及7项通知回归通过。
+
 - 补齐ACK checkpoint后外层中断路径：failure-update确需向同目标记录写失败前先持久撤销旧delivery ACK；即使通知本身超时，下次交付也重新写入并读回。正常只读恢复保持；13项readback及7项原失败通知回归通过。
 
 - 修复交付ACK后读回暂不可见被failure-update覆盖为生成失败的问题：仅同任务/记录/目标且只有闭环交付失败时延后远程失败通知，保留只读恢复；真实QC失败及过期ACK仍写失败。真实函数链与负例定向12项通过，无真实表写入。
