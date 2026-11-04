@@ -82,7 +82,11 @@ uv run --frozen python -X utf8 doubao-jianying-orchestrator/run.py analyze-shots
 
 核对 `shot_candidates.json` 的 `vision_analysis.errors`、模型摘要和各镜头观察。命令退出码或 `SHOT_ANALYSIS_READY` 本身不保证视觉成功，未知项需要先处理。
 
-建稿前，按环境合同准备已授权的独立无头后端，配置 `JIANYING_HEADLESS_ROOT`、匹配的 `JIANYING_INSTALL_DIR` 和静态字体 `JY_HEADLESS_FONT`（或任务的 `subtitle_font_path`）；草稿库放在剪映首页库之外。先运行默认生产环境检查：
+建稿前，按环境合同准备已授权的独立无头后端，配置 `JIANYING_HEADLESS_ROOT`、匹配的 `JIANYING_INSTALL_DIR` 和静态字体 `JY_HEADLESS_FONT`（或任务的 `subtitle_font_path`）；草稿库放在剪映首页库之外。
+
+新机器或新的 Windows 运行账号还需要完成剪映首次初始化：用实际运行流水线的同一用户启动已安装的剪映，完成首次设置，让剪映自行建立默认本地草稿目录和首页索引。仅创建独立输出目录不能替代这一步。若预检返回 `HEADLESS_HOST_NOT_INITIALIZED`，先完成初始化再重跑；不要手工创建、复制或覆盖 `root_meta_info.json`，也不要借用其他账号的索引。此要求来自当前原生后端的宿主检查，不代表流水线会向首页登记草稿。
+
+先运行默认生产环境检查，确认通过后再调用配音或视觉服务：
 
 ```powershell
 New-Item -ItemType Directory -Force $env:JY_DRAFT_ROOT | Out-Null

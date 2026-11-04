@@ -218,6 +218,74 @@ class FinalizationContextTests(unittest.TestCase):
                 audit = closed_loop.audit(task_dir / "task.json", task_dir / "done.json", context.closed_loop_policy)
             self.assertTrue(audit["eligible"], audit)
 
+    def test_table_ack_survives_finalization_and_failure_notification(self):
+        for long_receipt in (False, True):
+            with self.subTest(long_receipt=long_receipt), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                task_dir, drafts = root / "work/record", root / "drafts"
+                fixture = make_acceptance(task_dir, drafts, ["draft"], {
+                    "record_id": "record", "script": "Synthetic script", "delivery_mode": "formal"})
+                # BGM display titles are metadata, not filesystem basenames.
+                # A long license-bearing title must not break ACK recovery.
+                share, title = root / "share", "Track"
+                if long_receipt:
+                    title = "Licensed instrumental / " + "long credit and attribution; " * 80
+                receipts = make_distribution(fixture, drafts, ["draft"], share)
+                context = worker.DeliveryContext(
+                    draft_root=drafts, workflow_root=ROOT, skill_root=ROOT / "doubao-jianying-orchestrator",
+                    work_root=root / "work", runtime_root=fixture["runtime_root"],
+                    closed_loop_tool=ROOT / "tools/closed_loop.py",
+                    closed_loop_policy=ROOT / "WINDOWS_VIDEO_CLOSED_LOOP_RULES_20260930.json", python=sys.executable)
+                writes, reads = [], []
+                def external(command, **kwargs):
+                    if "archive-parent" in command or "table-update" in command:
+                        candidate = Path(command[command.index("--done-json") + 1])
+                        action = closed_loop.archive_parent if "archive-parent" in command else closed_loop.table_update
+                        result = action(task_dir / "task.json", candidate, context.closed_loop_policy)
+                        return subprocess.CompletedProcess(command, 0 if result.get("ok", True) else 2,
+                                                           json.dumps(result, ensure_ascii=False, indent=2), "")
+                    if "+record-batch-update" in command:
+                        writes.append(command)
+                        return subprocess.CompletedProcess(command, 0, '{"ok":true}', "")
+                    self.assertIn("+record-get", command)
+                    reads.append(command)
+                    raise subprocess.TimeoutExpired(["redacted"], 20)
+                with patch.object(closed_loop, "DRAFTS", drafts), \
+                     patch.dict(worker.os.environ, {"JY_EVAL_RUNTIME_ROOT": str(fixture["runtime_root"]),
+                         "LARK_BASE_TOKEN": "fixture-token", "LARK_TABLE_ID": "fixture-table", "LARK_ACTOR": "user"}), \
+                     patch.object(closed_loop, "lark_cli_executable", return_value="fake-lark"), \
+                     patch("tools.native_drafts.bgm_title", return_value=title), \
+                     patch.object(closed_loop.time, "sleep"), patch.object(worker.subprocess, "run", side_effect=external):
+                    result = worker.finalize_closed_loop(task_dir, fixture["task"], ["draft"],
+                                                        fixture["qc_reports"], receipts, context=context)
+                    self.assertEqual(result["reason"], "TABLE_UPDATE_FAILED", result)
+                    self.assertEqual(len(writes), 1)
+                    self.assertEqual(len(reads), 3)
+                    current = result["table_update_receipt"]
+                    self.assertTrue(current["write_acknowledged"])
+                    if long_receipt:
+                        self.assertGreater(len(json.dumps(current, ensure_ascii=False, indent=2)), 2000)
+                    self.assertLessEqual(len(result["output"]), 2000)
+                    AcceptanceDeliveryGateTests.write(task_dir / "done.json", {
+                        "status": "PARTIAL", "failures": [{"phase": "closed_loop",
+                            "type": "delivery_or_table_gate", "message": "bounded diagnostic",
+                            "detail": result}]})
+                    deferred = closed_loop.failure_update(task_dir / "task.json", task_dir / "done.json",
+                                                          context.closed_loop_policy)
+                    self.assertEqual(deferred["reason"], "DELIVERY_READBACK_PENDING")
+                    self.assertEqual(len(writes), 1)
+                    self.assertTrue(pe.read(task_dir / "table_update_receipt.json")["write_acknowledged"])
+                    fields = current["patch"]
+                    response = {"ok": True, "data": {"record_id_list": ["record"],
+                        "fields": list(fields), "data": [list(fields.values())], "has_more": False}}
+                    with patch.object(worker.subprocess, "run", return_value=subprocess.CompletedProcess(
+                            [], 0, json.dumps(response), "")) as recovered_run:
+                        recovered = closed_loop.table_update(task_dir / "task.json",
+                            task_dir / "closed_loop_candidate.json", context.closed_loop_policy)
+                    self.assertTrue(recovered["ok"], recovered)
+                    self.assertEqual(recovered_run.call_count, 1)
+                    self.assertIn("+record-get", recovered_run.call_args.args[0])
+
     def test_package_and_legacy_worker_skill_roots_resolve_current_orchestrator(self):
         skill = ROOT / "doubao-jianying-orchestrator"
         for legacy in (ROOT, skill, ROOT / "jianying-editor"):

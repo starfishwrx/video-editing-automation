@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -126,6 +127,136 @@ class QueueContractTests(unittest.TestCase):
                 [{"record_id": "first"}], record_id="first", force_rebuild=True)
         self.assertTrue(selected[0]["retry_deferred"])
         self.assertFalse(selected[0]["force_rebuild"])
+
+
+class QCRejectionRecoveryTests(unittest.TestCase):
+    def setUp(self):
+        paths = patch.object(sys, "path", [str(ROOT / "doubao-jianying-orchestrator"), *sys.path])
+        paths.start()
+        self.addCleanup(paths.stop)
+        import batch_worker
+        self.worker = batch_worker
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.source = self.root / "source.mp4"
+        self.source.write_bytes(b"fixture media identity")
+        self.manifest = {"record_id": "fixture-record", "full_script": "First sentence.",
+                         "product": "fixture", "category": "fixture",
+                         "material_sources": [str(self.source)]}
+        self.report_dir = self.root / "report"
+        self.report_dir.mkdir()
+
+    def latest_failure(self, shot, *, claim="First sentence.", manifest=None, source=None):
+        manifest = copy.deepcopy(self.manifest if manifest is None else manifest)
+        source = source or self.worker.qc_rejection_identity(manifest)["sources"][0]
+        match = {"input_manifest": manifest, "segments": [{
+            "text": "First sentence.", "shot_id": shot,
+            "ai_selection": {"source_identity": source}}]}
+        (self.report_dir / "shot_match_report.json").write_text(json.dumps(match), encoding="utf-8")
+        qc = {"status": "FAIL", "model_review": [{"index": 1, "claim": claim, "visual_ok": False}]}
+        (self.report_dir / "draft_visual_qc.json").write_text(json.dumps(qc), encoding="utf-8")
+        return qc
+
+    def test_restart_unions_history_and_latest_uncheckpointed_failure(self):
+        self.latest_failure("shot-A")
+        identity, rejected = self.worker.restore_qc_rejections(self.report_dir, self.manifest)
+        self.assertEqual(rejected, {1: {"shot-A"}})
+        # A later QC report replaces the first; a crash happens before checkpoint B.
+        self.latest_failure("shot-B")
+        result = subprocess.run([sys.executable, "-X", "utf8", "-c",
+            "import json,sys,pathlib; sys.path.insert(0, 'doubao-jianying-orchestrator'); "
+            "import batch_worker; "
+            "_, rows = batch_worker.restore_qc_rejections(pathlib.Path(sys.argv[1]), json.loads(sys.argv[2])); "
+            "print(json.dumps({str(k): sorted(v) for k,v in rows.items()}))",
+            str(self.report_dir), json.dumps(self.manifest)], cwd=ROOT,
+            text=True, encoding="utf-8", capture_output=True, check=True)
+        restored = {int(k): set(v) for k, v in json.loads(result.stdout).items()}
+        self.assertEqual(restored, {1: {"shot-A", "shot-B"}})
+        # The cumulative record survives even when another build overwrites both reports.
+        (self.report_dir / "draft_visual_qc.json").write_text("{}", encoding="utf-8")
+        (self.report_dir / "shot_match_report.json").write_text("{}", encoding="utf-8")
+        _, again = self.worker.restore_qc_rejections(self.report_dir, self.manifest)
+        self.assertEqual(again, restored)
+        self.assertEqual(json.loads((self.report_dir / "qc_rejected_shots.json").read_text())["identity"], identity)
+
+    def test_changed_script_discards_history_and_stale_report(self):
+        self.latest_failure("shot-A")
+        self.worker.restore_qc_rejections(self.report_dir, self.manifest)
+        for changed in ({"full_script": "A different sentence."}, {"product": "different"},
+                        {"revision_feedback": "Use a different demonstration"}):
+            with self.subTest(changed=changed):
+                _, rejected = self.worker.restore_qc_rejections(
+                    self.report_dir, {**self.manifest, **changed})
+                self.assertEqual(rejected, {})
+
+    def test_recovered_selection_crash_binds_exact_enriched_input_to_original(self):
+        identity = self.worker.qc_rejection_identity(self.manifest)
+        self.worker.save_qc_rejections(self.report_dir, identity, {1: {"shot-A"}})
+        prepared = {**self.manifest, "voice_selected": "fixture", "planned_sentences": [{"text": "First sentence."}]}
+        frozen = {"run_id": "fixture-run", "input_manifest": self.manifest, "manifest": prepared}
+        state = {"status": "SUCCESS", "source_run_id": "fixture-run"}
+        for name, value in (("selection_resume.json", frozen), ("selection_recovery_state.json", state)):
+            (self.report_dir / name).write_text(json.dumps(value), encoding="utf-8")
+        enriched = {**prepared, "parent_run_id": "fixture-run", "draft_name": "recovered",
+                    "narration_timing_file": str(self.report_dir / "narration_timing.json")}
+        self.latest_failure("shot-B", manifest=enriched)
+        _, rejected = self.worker.restore_qc_rejections(self.report_dir, self.manifest)
+        self.assertEqual(rejected, {1: {"shot-A", "shot-B"}})
+        # An enriched input with changed editorial fields cannot borrow that lineage.
+        self.worker.save_qc_rejections(self.report_dir, identity, {1: {"shot-A"}})
+        self.latest_failure("shot-C", manifest={**enriched, "voice_selected": "different"})
+        _, rejected = self.worker.restore_qc_rejections(self.report_dir, self.manifest)
+        self.assertEqual(rejected, {1: {"shot-A"}})
+
+    def test_replaced_source_discards_history_and_old_source_receipt(self):
+        self.latest_failure("shot-A")
+        self.worker.restore_qc_rejections(self.report_dir, self.manifest)
+        self.source.write_bytes(b"new fixture media, different pixels and length")
+        _, rejected = self.worker.restore_qc_rejections(self.report_dir, self.manifest)
+        self.assertEqual(rejected, {})
+
+    def test_recovery_controls_do_not_discard_valid_history(self):
+        self.latest_failure("shot-A")
+        identity, rejected = self.worker.restore_qc_rejections(self.report_dir, self.manifest)
+        other = {**self.manifest, "draft_name": "another-output", "parent_run_id": "new-run",
+                 "recovery_stage": "build", "qc_rejected_shots": {"1": ["shot-A"]},
+                 "variant_index": 0, "shot_analysis": {"shots": []}}
+        new_identity, restored = self.worker.restore_qc_rejections(self.report_dir, other)
+        self.assertEqual(new_identity, identity)
+        self.assertEqual(restored, rejected)
+
+    def test_legacy_report_requires_input_and_source_binding(self):
+        for mutate in ("missing_input", "different_claim", "missing_claim", "missing_source", "old_qc"):
+            with self.subTest(mutate=mutate):
+                self.latest_failure("shot-A")
+                match_path = self.report_dir / "shot_match_report.json"
+                qc_path = self.report_dir / "draft_visual_qc.json"
+                match = json.loads(match_path.read_text())
+                if mutate == "missing_input":
+                    match.pop("input_manifest")
+                elif mutate == "missing_source":
+                    match["segments"][0].pop("ai_selection")
+                if mutate in {"missing_input", "missing_source"}:
+                    match_path.write_text(json.dumps(match), encoding="utf-8")
+                elif mutate in {"different_claim", "missing_claim"}:
+                    self.latest_failure("shot-A", claim="other" if mutate == "different_claim" else "")
+                else:
+                    os.utime(qc_path, ns=(1, 1))
+                # Control report freshness so missing identity, not timestamp ordering, is tested.
+                if mutate != "old_qc":
+                    stamp = max(qc_path.stat().st_mtime_ns, match_path.stat().st_mtime_ns) + 1
+                    os.utime(qc_path, ns=(stamp, stamp))
+                _, rejected = self.worker.restore_qc_rejections(self.report_dir, self.manifest)
+                self.assertEqual(rejected, {})
+
+    def test_malformed_checkpoint_is_ignored_without_inventing_ids(self):
+        identity = self.worker.qc_rejection_identity(self.manifest)
+        state = {"schema": "sentence-qc-rejections-v1", "identity": identity,
+                 "rejected_shots": {"1": ["valid"], "2": "not-a-list", "3": [None], "0": ["zero"]}}
+        (self.report_dir / "qc_rejected_shots.json").write_text(json.dumps(state), encoding="utf-8")
+        _, restored = self.worker.restore_qc_rejections(self.report_dir, self.manifest)
+        self.assertEqual(restored, {1: {"valid"}})
 
 
 if __name__ == "__main__":

@@ -6,7 +6,7 @@
     "machine-specific paths",
     "knowledge-base bodies"
   ],
-  "file_count": 451,
+  "file_count": 453,
   "files": [
     {
       "path": ".gitignore"
@@ -696,6 +696,9 @@
       "path": "doubao-jianying-orchestrator/tests/test_gpu_runtime.py"
     },
     {
+      "path": "doubao-jianying-orchestrator/tests/test_headless_host_initialization.py"
+    },
+    {
       "path": "doubao-jianying-orchestrator/tests/test_headless_media.py"
     },
     {
@@ -1216,6 +1219,9 @@
     },
     {
       "path": "tests/test_sentence_review.py"
+    },
+    {
+      "path": "tests/test_table_readback.py"
     },
     {
       "path": "tests/test_task_review_boundary.py"

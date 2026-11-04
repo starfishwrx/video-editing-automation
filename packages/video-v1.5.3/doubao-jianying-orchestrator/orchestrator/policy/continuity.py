@@ -86,7 +86,12 @@ def member_errors(item, index):
         _require(receipt.get("window_us") == {"start": member["start_us"], "end": member["end_us"]}
                  and item.get("audio_duration_us") == member["audio_duration_us"]
                  and item.get("video_speed") == 1, "ALLOCATION_CHANGED")
-        for key in ("evidence_intervals_us", "supported_point_ids", "observation", "reason", "basis", "time_sensitive"):
+        # Point IDs express coverage, not sequence; assembly canonicalizes their order.
+        # Compare only this field as a set, without rewriting the original observation.
+        supported = receipt.get("supported_point_ids")
+        _require(isinstance(supported, list)
+                 and set(supported) == set(observed["supported_point_ids"]), "MEMBER_OBSERVATION_CHANGED")
+        for key in ("evidence_intervals_us", "observation", "reason", "basis", "time_sensitive"):
             _require(receipt.get(key) == observed.get(key), "MEMBER_OBSERVATION_CHANGED")
         _require(item.get("selling_points") == member["selling_points"], "POINTS_CHANGED")
     except (ValueError, KeyError, TypeError, StopIteration, OverflowError) as exc:
