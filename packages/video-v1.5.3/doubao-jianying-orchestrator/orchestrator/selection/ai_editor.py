@@ -571,6 +571,13 @@ def _review_pool(manifest: dict, sentence: dict, shots: dict, directory: Path, a
                  existing_reviews: list[dict] | None = None,
                  excluded_ids: set[str] | None = None,
                  early_window_repair: bool = False) -> tuple[list[dict], dict]:
+    """Review candidates until selling-point evidence is matched or the pool ends.
+
+    ``early_window_repair`` is retained for call-site compatibility. Matched
+    evidence always stops further search so placement can try a short crop,
+    mild speed-up, or sentence group instead of scanning the rest of the pool.
+    """
+    _ = early_window_repair  # API compatibility only; evidence-stop is unconditional.
     from . import shot_analyzer
     def feasible(good: list[dict]) -> bool:
         return _cached_reviews_feasible(manifest, sentence, shots, good, audio)
@@ -582,19 +589,17 @@ def _review_pool(manifest: dict, sentence: dict, shots: dict, directory: Path, a
     required = {p["id"] for p in sentence["selling_points"]}
     for offset in range(0, len(ids), ROUND_SIZE):
         existing_good = [r for r in reviewed_by_id.values() if r.get("verdict") == "matched"]
+        existing_points = {p for r in existing_good for p in r.get("supported_point_ids", [])}
+        evidence_found = bool(required) and contract.points_supported(required, existing_points)
         enough = ((required and (len(existing_good) >= 2
                    or len(reviewed_by_id) >= min(ALTERNATIVE_REVIEW_LIMIT, len(ids))))
                   or (not required and len(existing_good) >= min(3, len(ids))))
         if not exhaustive and enough and feasible(existing_good):
             break
-        existing_points = {p for r in existing_good for p in r.get("supported_point_ids", [])}
-        # Try real short-window/continuity repair before paying to review the
-        # entire pool. Infeasible evidence is not promoted to a valid window;
-        # failed local repair falls back to the full pool in prepare().
-        if (early_window_repair and not exhaustive and required
-                and len(reviewed_by_id) >= ALTERNATIVE_REVIEW_LIMIT and len(existing_good) >= 2
-                and not any(failure_fields(str(r.get('error', ''))) for r in reviewed_by_id.values())
-                and contract.points_supported(required, existing_points)):
+        # Matched selling-point evidence ends the search. Timing fit is a
+        # separate placement path (short crop, mild speed, sentence group);
+        # do not keep paying to scan the rest of the pool for a shorter match.
+        if not exhaustive and evidence_found and not feasible(existing_good):
             break
         chunk = [sid for sid in ids[offset:offset + ROUND_SIZE] if sid not in reviewed_by_id]
         if not chunk:
@@ -673,14 +678,12 @@ def _review_pool(manifest: dict, sentence: dict, shots: dict, directory: Path, a
         reviewed = [reviewed_by_id[sid] for sid in ids if sid in reviewed_by_id]
         good = [r for r in reviewed if r["verdict"] == "matched"]
         covered = {p for r in good for p in r.get("supported_point_ids", [])}
-        if not exhaustive and required and contract.points_supported(required, covered) and feasible(good):
+        evidence_found = bool(required) and contract.points_supported(required, covered)
+        if not exhaustive and evidence_found and feasible(good):
             if (len(good) >= 2 or len(reviewed) >= min(ALTERNATIVE_REVIEW_LIMIT, len(ids))
                     or len(reviewed) == len(ids)):
                 break
-        if (early_window_repair and not exhaustive and required
-                and len(reviewed) >= ALTERNATIVE_REVIEW_LIMIT and len(good) >= 2
-                and not any(failure_fields(str(r.get('error', ''))) for r in reviewed)
-                and contract.points_supported(required, covered)):
+        if not exhaustive and evidence_found and not feasible(good):
             break
         if not exhaustive and not required and len(good) >= min(3, len(ids)) and feasible(good):
             break
@@ -688,6 +691,8 @@ def _review_pool(manifest: dict, sentence: dict, shots: dict, directory: Path, a
     good = [r for r in reviewed if r["verdict"] == "matched"]
     supported = {point for row in good for point in row.get("supported_point_ids", [])}
     is_feasible = feasible(good)
+    evidence_found = (bool(required) and contract.points_supported(required, supported)) or (
+        not required and bool(good))
     uncertain = sum(r["verdict"] == "uncertain" or r.get("guarded_review_status") == "unconfirmed"
                     for r in reviewed)
     exhausted = len(reviewed) == len(ids)
@@ -700,7 +705,7 @@ def _review_pool(manifest: dict, sentence: dict, shots: dict, directory: Path, a
     else:
         reason = "KNOWN_WINDOWS_INFEASIBLE"
     return reviewed, {"checked": len(reviewed), "total": len(ids), "exhausted": exhausted,
-                      "feasible": is_feasible, "reason": reason,
+                      "feasible": is_feasible, "evidence_found": evidence_found, "reason": reason,
                       "failed_calls": sum("error" in r for r in reviewed),
                       "uncertain": uncertain}
 
@@ -709,6 +714,29 @@ def _scene_preference(manifest: dict, sentence: dict, review: dict) -> float:
     common = set(sentence.get("scene_ids", [])) & set(review.get("scene_ids", []))
     return max((float(scene.get("preferred_speed", 1.0)) for scene in
         contract.editorial_context(manifest)["rules"].get("semantic_contracts", []) if scene["id"] in common), default=1.0)
+
+
+def _placement_fit_observation(review: dict) -> dict | None:
+    """Let a suitable short crop play up to 2x inside the pixels already reviewed.
+
+    The placement pass certifies the crop. It does not have to call the action a
+    pure process. Speed stays as close to 1x as the evidence span allows.
+    """
+    if review.get("placement_review") is not True or review.get("time_sensitive"):
+        return None
+    if contract.playback.process_window(review.get("playback_observation")):
+        return None
+    window = review.get("review_window_us") or {}
+    start, end = window.get("start"), window.get("end")
+    if type(start) is not int or type(end) is not int or not start < end:
+        return None
+    return {
+        "schema": contract.playback.OBSERVATION_SCHEMA,
+        "kind": "placement_fit",
+        "observed": "放置短窗已复核完整，仅在该裁切内加速以罩住证据",
+        "start_us": start,
+        "end_us": end,
+    }
 
 
 def _observed_shot(shot: dict, review: dict) -> dict:
@@ -807,6 +835,9 @@ def _assemble(manifest: dict, analysis: dict, plan: dict, *, narration_timing: d
                 review = {**revised, "scarce_reuse_reason": reuse_reason}
                 shot = {**shot, "source_start": window["start"] / 1e6, "source_end": window["end"] / 1e6}
             review = {**review, "preferred_speed": _scene_preference(manifest, sentence, review)}
+            fit = _placement_fit_observation(review)
+            if fit:
+                review = {**review, "playback_observation": fit}
             if verify_sources and review["source_identity"] != contract.source_identity(shot["video"]):
                 raise ValueError("AI_EDITOR_SOURCE_CONTENT_CHANGED")
             observed = _observed_shot(shot, review)
@@ -949,6 +980,113 @@ def _build_edit_inventory(manifest: dict, analysis: dict, plan: dict,
     return inventory
 
 
+def _matched_parent_review(plan: dict, sentence: dict, shot_id: str) -> dict | None:
+    """Return the sentence's already-matched observation for this shot, if any."""
+    rows = (plan.get("reviews", {}).get(str(sentence["index"]), [])
+            if sentence.get("kind") == "selling_point" else plan.get("display_reviews", []))
+    required = {p["id"] for p in sentence.get("selling_points", [])}
+    for row in rows:
+        if (isinstance(row, dict) and row.get("shot_id") == shot_id and row.get("verdict") == "matched"
+                and row.get("same_product") is True
+                and contract.points_supported(required, set(row.get("supported_point_ids", [])))):
+            return row
+    return None
+
+
+def _review_placement_window(manifest: dict, sentence: dict, shot: dict, directory: Path,
+                             *, parent: dict) -> dict:
+    """Judge only whether a crop is a complete, placeable clip.
+
+    Selling-point support is already certified by ``parent``. This pass must not
+    re-litigate instrument purpose, label claims, or other semantic gates.
+    """
+    media = _review_media(shot, directory, dense=True)
+    start, end, before, times, sheet = (media[k] for k in ("start", "end", "before", "times", "sheet"))
+    key = contract.digest(["placement", sentence["index"], shot["shot_id"], before, start, end,
+                           parent.get("evidence_intervals_us")])[:24]
+    durations = [v for v in (sentence.get("audio_durations_us") or []) if type(v) is int and v > 0]
+    prompt = (
+        contract.policy_prompt(manifest)
+        + "\n这是放置短窗复核，不是重新选镜。附图只对应拟定裁切窗口；卖点已被更长观察确认。\n"
+        + json.dumps({
+            "product": manifest.get("product"),
+            "category": manifest.get("category"),
+            "sentence_index": sentence.get("index"),
+            "sentence_text": sentence.get("text"),
+            "shot_id": shot["shot_id"],
+            "audio_durations_us": durations,
+            "scene_us": {"start": round(start * 1e6), "end": round(end * 1e6)},
+            "certified_selling_point": {
+                "supported_point_ids": parent.get("supported_point_ids"),
+                "basis": parent.get("basis"),
+                "observation": parent.get("observation"),
+                "evidence_intervals_us": parent.get("evidence_intervals_us"),
+            },
+        }, ensure_ascii=False)
+        + """
+只判断这个裁切窗口能不能作为一句完整可放入的镜头，不要重新判定卖点是否成立。
+禁止以“仪器用途不确定”“标称是否证明卖点”“是否荧光检测”等理由否定；那些已由 certified_selling_point 确认。
+输出JSON：{"verdict":"suitable|unsuitable|uncertain","same_product":true,
+"observation":"裁切内实际可见的完整片段事实","reason":"为什么这段裁切完整合适或不合适",
+"confidence":0.9,"evidence_intervals_us":[{"start":1000000,"end":1800000}],
+"playback_observation":null}。
+suitable=裁切内是一段完整、未拦腰切断关键动作/结果的可用镜头；unsuitable=明显切在动作中途或关键结果被裁掉；
+看不清完整性时uncertain。evidence_intervals_us必须落在scene_us内，选最短但完整的一段，优先能放进audio_durations_us。
+可选playback_observation仅当整段确认为纯过程窗口；否则省略。未标纯过程时，程序仍可在本裁切内用不超过2倍的速度罩住证据。
+"""
+    )
+    result = _call(prompt, directory / "reviews" / f"placement_{key}.json", sheet)
+    verdict = result.get("verdict")
+    if verdict not in {"suitable", "unsuitable", "uncertain"} or type(result.get("same_product")) is not bool:
+        raise ValueError("AI_EDITOR_PLACEMENT_REVIEW_INVALID")
+    confidence = result.get("confidence")
+    if (isinstance(confidence, bool) or not isinstance(confidence, (int, float))
+            or not math.isfinite(confidence) or not 0 <= confidence <= 1):
+        raise ValueError("AI_EDITOR_PLACEMENT_REVIEW_CONFIDENCE_INVALID")
+    if not all(isinstance(result.get(k), str) and result[k].strip() for k in ("observation", "reason")):
+        raise ValueError("AI_EDITOR_PLACEMENT_REVIEW_OBSERVATION_MISSING")
+    if not result["same_product"] or confidence < .6:
+        verdict = "uncertain" if result["same_product"] else "unsuitable"
+    intervals = result.get("evidence_intervals_us")
+    if (isinstance(intervals, list) and len(intervals) == 2
+            and all(type(value) is int for value in intervals)):
+        intervals = [{"start": intervals[0], "end": intervals[1]}]
+        result["evidence_intervals_us"] = intervals
+    if verdict == "suitable":
+        if not isinstance(intervals, list) or not intervals:
+            raise ValueError("AI_EDITOR_PLACEMENT_EVIDENCE_INVALID")
+        for ev in intervals:
+            if (not isinstance(ev, dict) or any(type(ev.get(k)) is not int for k in ("start", "end"))
+                    or not round(start * 1e6) <= ev["start"] < ev["end"] <= round(end * 1e6)):
+                raise ValueError("AI_EDITOR_PLACEMENT_EVIDENCE_INVALID")
+        playback_observation = result.get("playback_observation")
+        if playback_observation is not None:
+            process = contract.playback.process_window(playback_observation)
+            if process is None or not round(start * 1e6) <= process[0] < process[1] <= round(end * 1e6):
+                raise ValueError("AI_EDITOR_PLAYBACK_OBSERVATION_INVALID")
+    mapped = "matched" if verdict == "suitable" else ("mismatch" if verdict == "unsuitable" else "uncertain")
+    # Inherit certified selling-point identity; placement must not rewrite it.
+    return {
+        **result,
+        "verdict": mapped,
+        "placement_review": True,
+        "placement_verdict": verdict,
+        "same_product": True if mapped == "matched" else result["same_product"],
+        "basis": parent.get("basis"),
+        "supported_point_ids": list(parent.get("supported_point_ids") or []),
+        "time_sensitive": bool(parent.get("time_sensitive")),
+        "scene_ids": list(parent.get("scene_ids") or []),
+        "preferred_speed": parent.get("preferred_speed", 1.0),
+        "parent_evidence_intervals_us": copy.deepcopy(parent.get("evidence_intervals_us") or []),
+        "dense_required": False,
+        "review_window_us": {"start": round(start * 1e6), "end": round(end * 1e6)},
+        "shot_id": shot["shot_id"],
+        "source_identity": before,
+        "frame_times_us": [round(t * 1e6) for t in times],
+        "sheet": str(sheet),
+    }
+
+
 def _review_proposed_window(manifest, plan, directory, sentence, shot, window, *, attempt_metadata=None):
     """Spend the persistent sentence budget only on new, actual window pixels."""
     index = sentence["index"]
@@ -956,50 +1094,73 @@ def _review_proposed_window(manifest, plan, directory, sentence, shot, window, *
     if type(limit) is int and limit > 0 and window[1] > limit:
         return None
     source = contract.source_identity(shot["video"])
-    key = contract.digest([sentence, shot["shot_id"], source, window])[:24]
+    # Display and hook cuts still need a dense look at the new pixels. Placement
+    # review only inherits a selling point that was already matched.
+    parent = (_matched_parent_review(plan, sentence, shot["shot_id"])
+              if sentence.get("kind") == "selling_point" else None)
+    key = contract.digest([
+        "placement" if parent else "semantic", sentence, shot["shot_id"], source, window,
+        (parent or {}).get("evidence_intervals_us")])[:24]
     attempts = plan.setdefault("window_repair_attempts", {})
     if key in attempts:
         # A process may stop after saving a valid review but before attaching
         # it to the selected part. Resume only the exact persisted evidence.
         attempt = attempts[key]
         saved = plan.get("window_reviews", {}).get(key) or {}
-        if not isinstance(attempt, dict) or not isinstance(saved, dict):
+        if not isinstance(attempt, dict):
             return None
-        intervals = saved.get("evidence_intervals_us")
-        confidence = saved.get("confidence")
-        supported = saved.get("supported_point_ids")
-        allowed = {p["id"] for p in sentence["selling_points"]}
-        playback = saved.get("playback_observation")
-        process = contract.playback.process_window(playback) if playback is not None else None
-        if (attempt.get("status") == "reviewed" and attempt.get("index") == index
-                and attempt.get("shot_id") == shot["shot_id"]
-                and attempt.get("window_us") == {"start": window[0], "end": window[1]}
-                and saved.get("sentence_index") == index and saved.get("shot_id") == shot["shot_id"]
-                and saved.get("verdict") == "matched" and saved.get("same_product") is True
-                and saved.get("source_identity") == source and not saved.get("continuity_key")
-                and saved.get("review_window_us") == {"start": window[0], "end": window[1]}
-                and isinstance(confidence, (int, float)) and not isinstance(confidence, bool)
-                and math.isfinite(confidence) and .6 <= confidence <= 1
-                and saved.get("basis") in contract.BASES and type(saved.get("time_sensitive")) is bool
-                and all(isinstance(saved.get(k), str) and saved[k].strip() for k in ("observation", "reason"))
-                and isinstance(intervals, list) and intervals
-                and all(isinstance(ev, dict) and type(ev.get("start")) is int and type(ev.get("end")) is int
-                        and window[0] <= ev["start"] < ev["end"] <= window[1] for ev in intervals)
-                and (playback is None or (process is not None and window[0] <= process[0] < process[1] <= window[1]))
-                and isinstance(supported, list) and all(isinstance(p, str) and p in allowed for p in supported)
-                and contract.points_supported(allowed, set(supported))):
-            return key
-        return None
+        # Transient vision outages must not permanently burn this crop key.
+        if (attempt.get("status") == "failed"
+                and failure_fields(str(attempt.get("reason") or "")).get("retryable")):
+            del attempts[key]
+        else:
+            if not isinstance(saved, dict):
+                return None
+            intervals = saved.get("evidence_intervals_us")
+            confidence = saved.get("confidence")
+            supported = saved.get("supported_point_ids")
+            allowed = {p["id"] for p in sentence["selling_points"]}
+            playback = saved.get("playback_observation")
+            process = contract.playback.process_window(playback) if playback is not None else None
+            parent_ok = (not parent) or (
+                saved.get("placement_review") is True
+                and saved.get("supported_point_ids") == list(parent.get("supported_point_ids") or [])
+                and saved.get("basis") == parent.get("basis")
+                and saved.get("time_sensitive") == bool(parent.get("time_sensitive")))
+            if (attempt.get("status") == "reviewed" and attempt.get("index") == index
+                    and attempt.get("shot_id") == shot["shot_id"]
+                    and attempt.get("window_us") == {"start": window[0], "end": window[1]}
+                    and saved.get("sentence_index") == index and saved.get("shot_id") == shot["shot_id"]
+                    and saved.get("verdict") == "matched" and saved.get("same_product") is True
+                    and saved.get("source_identity") == source and not saved.get("continuity_key")
+                    and saved.get("review_window_us") == {"start": window[0], "end": window[1]}
+                    and isinstance(confidence, (int, float)) and not isinstance(confidence, bool)
+                    and math.isfinite(confidence) and .6 <= confidence <= 1
+                    and saved.get("basis") in contract.BASES and type(saved.get("time_sensitive")) is bool
+                    and all(isinstance(saved.get(k), str) and saved[k].strip() for k in ("observation", "reason"))
+                    and isinstance(intervals, list) and intervals
+                    and all(isinstance(ev, dict) and type(ev.get("start")) is int and type(ev.get("end")) is int
+                            and window[0] <= ev["start"] < ev["end"] <= window[1] for ev in intervals)
+                    and (playback is None or (process is not None and window[0] <= process[0] < process[1] <= window[1]))
+                    and isinstance(supported, list) and all(isinstance(p, str) and p in allowed for p in supported)
+                    and contract.points_supported(allowed, set(supported))
+                    and parent_ok):
+                return key
+            return None
     if sum(v.get("index") == index for v in attempts.values()) >= 3:
         return None
     attempts[key] = {"index": index, "shot_id": shot["shot_id"],
-                     "window_us": {"start": window[0], "end": window[1]}, "status": "reviewing"}
+                     "window_us": {"start": window[0], "end": window[1]}, "status": "reviewing",
+                     "mode": "placement" if parent else "semantic"}
     if attempt_metadata:
         attempts[key].update(attempt_metadata)
     _save(directory / "plan.json", plan)
+    cropped = {**shot, "source_start": window[0] / 1e6, "source_end": window[1] / 1e6}
     try:
-        reviewed = _review(manifest, sentence,
-            {**shot, "source_start": window[0] / 1e6, "source_end": window[1] / 1e6}, directory, dense=True)
+        if parent:
+            reviewed = _review_placement_window(manifest, sentence, cropped, directory, parent=parent)
+        else:
+            reviewed = _review(manifest, sentence, cropped, directory, dense=True)
     except (ValueError, OSError, TypeError, KeyError) as exc:
         attempts[key].update(status="failed", reason=str(exc))
         _save(directory / "plan.json", plan)
@@ -1365,10 +1526,19 @@ def _retrieve_empty_selection(manifest, analysis, plan, failure, narration_timin
                 continue
             solution = shot_analyzer.candidate_window(_observed_shot(shot, review),
                 audio_duration_us=duration, manifest=manifest, time_sensitive=review["time_sensitive"])
-            if solution.ok or solution.reason not in {timing_contract.REASON_EVIDENCE_SPAN_TOO_LONG,
-                                                      timing_contract.REASON_EVIDENCE_SPEED_CONFLICT}:
+            if solution.ok or solution.reason not in {
+                    timing_contract.REASON_EVIDENCE_SPAN_TOO_LONG,
+                    timing_contract.REASON_EVIDENCE_SPEED_CONFLICT,
+                    timing_contract.REASON_EVIDENCE_OUT_OF_RANGE}:
                 continue
-            candidate = {"index": index, "parts": [{"shot_id": shot["shot_id"], "audio_duration_us": duration}],
+            part = {"shot_id": shot["shot_id"], "audio_duration_us": duration}
+            # Evidence that starts inside the head/tail guard still needs a real
+            # short-window re-review; seed an in-guard start so placement can run.
+            if solution.reason == timing_contract.REASON_EVIDENCE_OUT_OF_RANGE:
+                head = timing_contract.us_of(manifest.get("head_trim_s"), 300_000)
+                scene_start = round(float(shot["source_start"]) * 1e6)
+                part["source_start_us"] = scene_start + head
+            candidate = {"index": index, "parts": [part],
                          "reason": "reviewed evidence requires window or continuity repair"}
             break
     if candidate is None:
@@ -1390,6 +1560,39 @@ def _duplicate_repair_focus(plan, failure):
     return second
 
 
+def _place_empty_matched_evidence(manifest, analysis, plan, directory, narration_timing) -> bool:
+    """Fill empty matched-evidence rows and run their short-window placement first.
+
+    Assemble walks sentences in order, so an earlier SPAN placement can burn the
+    vision budget before a later empty OUT_OF_RANGE row is ever retrieved.
+    """
+    changed = False
+    for sentence in plan.get("sentences") or []:
+        index = sentence.get("index")
+        if type(index) is not int:
+            continue
+        row = next((r for r in (plan.get("rows") or [])
+                    if isinstance(r, dict) and r.get("index") == index), None)
+        if row is None or row.get("parts"):
+            continue
+        if not _retrieve_empty_selection(
+                manifest, analysis, plan, ValueError(f"AI_EDITOR_NO_SELECTION:{index}"),
+                narration_timing):
+            continue
+        changed = True
+        row = next(r for r in plan["rows"] if r["index"] == index)
+        part = (row.get("parts") or [None])[0]
+        if not isinstance(part, dict) or not part.get("shot_id"):
+            continue
+        reason = (timing_contract.REASON_EVIDENCE_OUT_OF_RANGE if "source_start_us" in part
+                  else timing_contract.REASON_EVIDENCE_SPAN_TOO_LONG)
+        if _repair_selected_window(
+                manifest, analysis, plan, directory,
+                WindowFailure(index, part["shot_id"], reason)):
+            continue
+    return changed
+
+
 def _repair_reviewed_rows(manifest, analysis, plan, directory, narration_timing, duplicate_expanded):
     """Drain useful local repairs without spending text-editor retry rounds.
 
@@ -1397,6 +1600,9 @@ def _repair_reviewed_rows(manifest, analysis, plan, directory, narration_timing,
     pixel-review budgets still apply; a separate finite step ceiling is defensive
     against faulty repair helpers, while repeated states stop immediately.
     """
+    # Empty OUT_OF_RANGE / SPAN seeds must place before earlier sentences spend
+    # the vision budget on their own short-window repairs.
+    _place_empty_matched_evidence(manifest, analysis, plan, directory, narration_timing)
     seen = set()
     for _ in range(1 + 8 * len(plan.get("sentences", []))):
         try:
@@ -1579,7 +1785,13 @@ technical_option是按本句完整配音求出的实际可行窗口；分配多�
 
 
 def _edit_with_review_fallback(manifest, analysis, plan, directory, narration_timing):
-    """Try scoped repair first, then exhaust only a failed sentence's pool."""
+    """Place matched evidence first; only then exhaust for a shorter alternative.
+
+    Search already stopped once selling-point evidence was matched. Local short
+    crop, mild speed, and sentence groups run inside edit/repair. If those still
+    cannot fit the audio, exhaust only that sentence's remaining pool so a later
+    short complete match can replace the long one—never trim old evidence.
+    """
     shots = {str(s['shot_id']): s for s in analysis['shots']}
     rejected = qc_rejected_shots(manifest)
     expanded_indices = set()
@@ -1741,16 +1953,15 @@ def prepare(manifest: dict, analysis: dict, report_dir: Path, *, narration_timin
                 for review in plan["reviews"].get(str(row["index"]), []) + plan.get("display_reviews", []):
                     if failure_fields(str(review.get("error", ""))):
                         raise ValueError(review["error"])
-                # A known long observation may contain a shorter complete
-                # repetition. Let the bounded, pixel-reviewed window repair
-                # inspect it; never trim the original evidence to make it fit.
+                # Matched evidence that is currently too long still enters
+                # placement: short crop + mild speed, or a sentence group.
+                # Never trim the original evidence and relabel it as new.
                 if coverage.get("reason") == "KNOWN_WINDOWS_INFEASIBLE" and row["candidates"]:
                     continue
                 raise ValueError(f"AI_EDITOR_OBSERVATION_OR_WINDOW_PENDING:{row['index']}:{coverage.get('reason', 'UNKNOWN')}")
         plan["phase"] = "selection_edit"
-        # An early short-window attempt must not silently discard a viable
-        # later candidate: on a scoped failure exhaust only that sentence and
-        # retry with its actual observations, preserving other cached work.
+        # Evidence search already stopped on a matched selling point. Edit and
+        # local repair place it; timing conflict does not reopen the pool.
         _edit_with_review_fallback(manifest, analysis, plan, directory, narration_timing)
     except (ValueError, KeyError, TypeError, OSError) as exc:
         plan["ok"] = False

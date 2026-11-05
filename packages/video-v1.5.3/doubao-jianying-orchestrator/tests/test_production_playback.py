@@ -274,10 +274,11 @@ class ProductionPlaybackTests(unittest.TestCase):
         original = copy.deepcopy(self.reviews[0])
         # A separate real review can confirm a short complete repetition. The
         # test injects that observation; it never edits the broad observation.
-        reviewed = {**copy.deepcopy(original), 'evidence_intervals_us': [{'start': 0, 'end': 1_000_000}],
+        reviewed = {**copy.deepcopy(original), 'placement_review': True, 'placement_verdict': 'suitable',
+                    'evidence_intervals_us': [{'start': 0, 'end': 1_000_000}],
                     'review_window_us': {'start': 0, 'end': 4_000_000}}
         with patch.object(editor, '_call', return_value={'rows': copy.deepcopy(self.plan['rows'])}), \
-                patch.object(editor, '_review', return_value=reviewed) as review:
+                patch.object(editor, '_review_placement_window', return_value=reviewed) as review:
             editor._edit_plan(self.manifest, self.analysis, self.plan, self.root)
         self.assertTrue(self.plan['ok'])
         review.assert_called_once()

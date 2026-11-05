@@ -29,11 +29,28 @@ def process_window(value) -> tuple[int, int] | None:
     return a, b
 
 
+def placement_fit_window(value) -> tuple[int, int] | None:
+    """A reviewed short crop may speed up only inside that crop, and only to 2x."""
+    if not isinstance(value, dict) or value.get("schema") != OBSERVATION_SCHEMA:
+        return None
+    if value.get("kind") != "placement_fit" or not str(value.get("observed") or "").strip():
+        return None
+    a, b = value.get("start_us"), value.get("end_us")
+    if type(a) is not int or type(b) is not int or not 0 <= a < b:
+        return None
+    return a, b
+
+
 def speed_range(*, time_sensitive=False, observation=None, override=None) -> tuple[float, float]:
     """Overrides may narrow reviewed permissions; never grant new permissions."""
-    if time_sensitive or process_window(observation) is None:
+    if time_sensitive:
         return 1.0, 1.0
-    lo, hi = 1.0, PROCESS_MAX
+    if placement_fit_window(observation):
+        lo, hi = 1.0, PROCESS_PREFERRED_MAX
+    elif process_window(observation) is None:
+        return 1.0, 1.0
+    else:
+        lo, hi = 1.0, PROCESS_MAX
     if isinstance(override, (list, tuple)) and len(override) == 2:
         try:
             a, b = map(float, override)
@@ -55,7 +72,7 @@ def conflicts(*, start_us, end_us, target_us, speed, time_sensitive=False,
         return [{**base, "code": "PLAYBACK_TIMING_INVALID"}]
     actual = (end_us - start_us) / target_us
     lo, hi = speed_range(time_sensitive=time_sensitive, observation=observation)
-    window = process_window(observation)
+    window = process_window(observation) or placement_fit_window(observation)
     if window and not window[0] <= start_us < end_us <= window[1]:
         hi = lo = 1.0
     # Integer-microsecond rounding only. A whole frame must not authorize excess speed.
