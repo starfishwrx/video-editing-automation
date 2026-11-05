@@ -634,12 +634,34 @@ class AIEditorTests(unittest.TestCase):
         with mock.patch.object(editor, "_review", return_value={"shot_id": "handfeel", "verdict": "uncertain"}):
             _, coverage = editor._review_pool(self.manifest, sentence, {"handfeel": self.shot}, self.root, {})
         self.assertEqual(coverage["reason"], "EVIDENCE_UNKNOWN")
+        self.assertFalse(coverage["evidence_found"])
         shot = {**self.shot, "source_end": 60, "material_duration_us": 60_000_000}
         review = {**self.review, "evidence_intervals_us": [{"start": 0, "end": 50_000_000}]}
         with mock.patch.object(editor, "_review", return_value=review):
             _, coverage = editor._review_pool(self.manifest, sentence, {"handfeel": shot}, self.root, {})
         self.assertFalse(coverage["feasible"])
+        self.assertTrue(coverage["evidence_found"])
         self.assertEqual(coverage["reason"], "KNOWN_WINDOWS_INFEASIBLE")
+
+    def test_first_matched_infeasible_evidence_stops_pool_search(self):
+        ids = [f"candidate{i}" for i in range(24)]
+        sentence = {**self.sentence, "candidate_ids": ids, "audio_durations_us": [800_000]}
+        long_shot = {**self.shot, "source_end": 60, "material_duration_us": 60_000_000}
+        shots = {sid: {**long_shot, "shot_id": sid} for sid in ids}
+        def review(_m, _s, shot, _d):
+            sid = shot["shot_id"]
+            if sid != ids[3]:
+                return {"shot_id": sid, "verdict": "mismatch", "reason": "wrong action"}
+            return {**self.review, "shot_id": sid,
+                    "evidence_intervals_us": [{"start": 0, "end": 50_000_000}]}
+        with mock.patch.object(editor, "_review", side_effect=review):
+            reviews, coverage = editor._review_pool(self.manifest, sentence, shots, self.root, {})
+        self.assertEqual(coverage["checked"], 8)
+        self.assertFalse(coverage["exhausted"])
+        self.assertFalse(coverage["feasible"])
+        self.assertTrue(coverage["evidence_found"])
+        self.assertEqual(coverage["reason"], "KNOWN_WINDOWS_INFEASIBLE")
+        self.assertEqual([r["shot_id"] for r in reviews if r["verdict"] == "matched"], [ids[3]])
 
     def test_no_ai_plan_cannot_activate_legacy_matcher(self):
         result = shot_analyzer.match_manifest(self.manifest, {"shots": [self.shot]})
