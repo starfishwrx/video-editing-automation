@@ -6,7 +6,7 @@
     "machine-specific paths",
     "knowledge-base bodies"
   ],
-  "file_count": 453,
+  "file_count": 454,
   "files": [
     {
       "path": ".gitignore"
@@ -1168,6 +1168,9 @@
     },
     {
       "path": "tests/test_feedback_candidates.py"
+    },
+    {
+      "path": "tests/test_fixed_narration.py"
     },
     {
       "path": "tests/test_headless_media_coldstart.py"
