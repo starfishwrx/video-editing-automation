@@ -1584,11 +1584,18 @@ def _place_empty_matched_evidence(manifest, analysis, plan, directory, narration
         part = (row.get("parts") or [None])[0]
         if not isinstance(part, dict) or not part.get("shot_id"):
             continue
-        reason = (timing_contract.REASON_EVIDENCE_OUT_OF_RANGE if "source_start_us" in part
-                  else timing_contract.REASON_EVIDENCE_SPAN_TOO_LONG)
+        # A cached short window is already reviewed and feasible. Placement
+        # review is only for an out-of-range seed, and it must run before an
+        # earlier long crop spends the vision budget. A merely long crop stays
+        # in the normal repair order so one failed short review can still
+        # become a sentence group.
+        if str(row.get("reason") or "").startswith("short complete"):
+            continue
+        if "source_start_us" not in part:
+            continue
         if _repair_selected_window(
                 manifest, analysis, plan, directory,
-                WindowFailure(index, part["shot_id"], reason)):
+                WindowFailure(index, part["shot_id"], timing_contract.REASON_EVIDENCE_OUT_OF_RANGE)):
             continue
     return changed
 
