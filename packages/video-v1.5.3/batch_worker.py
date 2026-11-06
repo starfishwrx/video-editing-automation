@@ -1205,6 +1205,22 @@ def qc_refill_feedback_from_report(rd: pathlib.Path, report: dict, targets, *, e
     return out
 
 
+def qc_current_refill_feedback(rd: pathlib.Path, report: dict, *, expected_sources) -> dict | None:
+    """Return the current failed rows only after every sentence binds to this draft."""
+    segments = _read_json(rd / "shot_match_report.json").get("segments") or []
+    rows = report.get("model_review") or [] if isinstance(report, dict) else []
+    indices = [row.get("index") for row in rows if isinstance(row, dict)]
+    if (not segments or len(indices) != len(segments)
+            or any(type(i) is not int for i in indices)
+            or set(indices) != set(range(1, len(segments) + 1))):
+        return None
+    bound = qc_refill_feedback_from_report(rd, report, set(indices), expected_sources=expected_sources)
+    if set(bound) != {str(i) for i in indices}:
+        return None
+    failed = {"MISMATCH", "INSUFFICIENT_EVIDENCE", "ACCEPTABLE_DEGRADED", "MATERIAL_GAP"}
+    return {key: value for key, value in bound.items() if value.get("match_level") in failed}
+
+
 def qc_rejection_identity(manifest: dict) -> dict:
     """Bind retry exclusions to editing inputs and the actual local sources."""
     transient = {"draft_name", "force_overwrite", "parent_run_id", "recovery_stage",
@@ -1223,7 +1239,7 @@ def qc_rejection_identity(manifest: dict) -> dict:
     return {"manifest_sha256": _payload_sha256(logical), "sources": sources}
 
 
-def save_qc_rejections(rd: pathlib.Path, identity: dict, rejected: dict, repair_indices=None, feedback=None) -> None:
+def save_qc_rejections(rd: pathlib.Path, identity: dict, rejected: dict, repair_indices=None, feedback=None, active_feedback=None) -> None:
     """Checkpoint before another build can overwrite the latest QC evidence."""
     from orchestrator.file_safety import atomic_write_text
     atomic_write_text(rd / "qc_rejected_shots.json", json.dumps({
@@ -1231,6 +1247,7 @@ def save_qc_rejections(rd: pathlib.Path, identity: dict, rejected: dict, repair_
         "rejected_shots": {str(index): sorted(ids) for index, ids in sorted(rejected.items())},
         "repair_indices": sorted(repair_indices or []),
         "repair_feedback": feedback or {},
+        "active_repair_feedback": feedback if active_feedback is None else active_feedback,
     }, ensure_ascii=False, indent=2))
 
 
@@ -1240,7 +1257,10 @@ def restore_qc_rejections(rd: pathlib.Path, manifest: dict) -> tuple[dict, dict]
     rejected = {}
     repair_indices = set()
     feedback = {}
+    active_feedback = {}
     if saved.get("schema") == "sentence-qc-rejections-v1" and saved.get("identity") == identity:
+        if isinstance(saved.get("repair_feedback"), dict):
+            feedback.update(saved["repair_feedback"])
         repair_indices.update(i for i in saved.get("repair_indices") or [] if type(i) is int and i > 0)
         rows = saved.get("rejected_shots")
         for key, values in (rows.items() if isinstance(rows, dict) else []):
@@ -1293,9 +1313,19 @@ def restore_qc_rejections(rd: pathlib.Path, manifest: dict) -> tuple[dict, dict]
         for index, ids in qc_rejected_shots_from_report(
                 rd, report, expected_sources=identity["sources"]).items():
             rejected.setdefault(index, set()).update(ids)
-    if input_matches and repair_indices:
-        feedback.update(qc_refill_feedback_from_report(rd, report, repair_indices, expected_sources=identity["sources"]))
-    save_qc_rejections(rd, identity, rejected, repair_indices, feedback)
+    current_feedback = (qc_current_refill_feedback(rd, report, expected_sources=identity["sources"])
+                        if current and input_matches else None)
+    if current_feedback is not None:
+        repair_indices = {int(key) for key in current_feedback}
+        active_feedback.update(current_feedback)
+    elif input_matches and repair_indices:
+        active_feedback.update(qc_refill_feedback_from_report(rd, report, repair_indices, expected_sources=identity["sources"]))
+        active_feedback = {key: value for key, value in active_feedback.items()
+                           if value.get("match_level") in {"MISMATCH", "INSUFFICIENT_EVIDENCE", "ACCEPTABLE_DEGRADED", "MATERIAL_GAP"}}
+    feedback.update(active_feedback)
+    # Historical observations remain in the checkpoint, but only fresh bindings
+    # may guide another selection after the matched source has changed.
+    save_qc_rejections(rd, identity, rejected, repair_indices, feedback, active_feedback)
     return identity, rejected
 
 
@@ -1603,10 +1633,18 @@ def process_task(task: dict, *, retry_partial: bool = False,
             rd = tdir / "report" / (name if i == 1 else "report_%d" % i)
             draft_ok = False
             last_failure = None
-            rejection_identity, qc_rejected = restore_qc_rejections(rd, manifest)
+            from tools.workflow import selection_recovery
+            prior_repairs = _read_json(rd / "qc_rejected_shots.json")
+            draft_identity_changed = (selection_recovery.draft_pending(rd)
+                and prior_repairs.get("schema") == "sentence-qc-rejections-v1"
+                and prior_repairs.get("identity") != qc_rejection_identity(manifest))
+            if draft_identity_changed:
+                rejection_identity, qc_rejected = qc_rejection_identity(manifest), {}
+            else:
+                rejection_identity, qc_rejected = restore_qc_rejections(rd, manifest)
             saved_repairs = _read_json(rd / "qc_rejected_shots.json")
             repair_visual_missing_indices.update(saved_repairs.get("repair_indices") or [])
-            repair_feedback = saved_repairs.get("repair_feedback") or {}
+            repair_feedback = saved_repairs.get("active_repair_feedback") or {}
             if qc_rejected:
                 log("restore post-draft QC rejections: %s" % {
                     k: sorted(v) for k, v in sorted(qc_rejected.items())})
@@ -1656,7 +1694,13 @@ def process_task(task: dict, *, retry_partial: bool = False,
                     build_manifest["variant_count"] = count
                     build_manifest["variant_pool_size"] = min(5, max(3, count))
                     build_manifest["variant_score_tolerance"] = 8
-                    if repair_visual_missing_indices:
+                    draft_only = (not (force_rebuild and attempt == 1)
+                                  and selection_recovery.draft_pending(rd))
+                    if draft_only and draft_identity_changed:
+                        last_failure = {"index": i, "draft": name, "phase": "build",
+                            "type": "blocked", "message": "DRAFT_RECOVERY_IDENTITY_CHANGED"}
+                        break
+                    if repair_visual_missing_indices and not draft_only:
                         missing_feedback = sorted(i for i in repair_visual_missing_indices
                                                   if str(i) not in repair_feedback)
                         if missing_feedback:
@@ -1769,14 +1813,21 @@ def process_task(task: dict, *, retry_partial: bool = False,
                                 rd, qc_result.get("report") or {},
                                 expected_sources=rejection_identity["sources"], include_non_direct=True)
                             repair_visual_missing_indices.update(targets)
+                            current_feedback = qc_current_refill_feedback(
+                                rd, qc_result.get("report") or {}, expected_sources=rejection_identity["sources"])
+                            if current_feedback is not None:
+                                repair_visual_missing_indices = {int(key) for key in current_feedback}
+                                repair_feedback = current_feedback
                             for key, ids in qc_rejected_shots_from_report(
                                     rd, qc_result.get("report") or {},
                                     expected_sources=rejection_identity["sources"]).items():
-                                repair_visual_missing_indices.add(key)
                                 qc_rejected.setdefault(key, set()).update(ids)
-                            repair_feedback.update(qc_refill_feedback_from_report(
-                                rd, qc_result.get("report") or {}, repair_visual_missing_indices,
-                                expected_sources=rejection_identity["sources"]))
+                            if current_feedback is None:
+                                repair_feedback.update(qc_refill_feedback_from_report(
+                                    rd, qc_result.get("report") or {}, repair_visual_missing_indices,
+                                    expected_sources=rejection_identity["sources"]))
+                                repair_feedback = {key: value for key, value in repair_feedback.items()
+                                    if value.get("match_level") in {"MISMATCH", "INSUFFICIENT_EVIDENCE", "ACCEPTABLE_DEGRADED", "MATERIAL_GAP"}}
                             save_qc_rejections(rd, rejection_identity, qc_rejected,
                                                repair_visual_missing_indices, repair_feedback)
                         log("DRAFT %d/%d attempt %d failed (%s): %s" % (
