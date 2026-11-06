@@ -3028,8 +3028,12 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
         output_manifest.pop(key, None)
         if key in manifest:
             output_manifest[key] = copy.deepcopy(manifest[key])
-    output_manifest.update(selection_mode="rule_then_ai", segments=ordered)
-    result = {**matched, "selection_mode": "rule_then_ai", "selection_policy": "rule_then_ai_refill",
+    all_ai = bool(ordered) and all(isinstance(row, dict)
+        and row.get("selection_mode") == "ai_editor" and isinstance(row.get("ai_selection"), dict)
+        for row in ordered)
+    result_mode = "ai_editor" if all_ai else "rule_then_ai"
+    output_manifest.update(selection_mode=result_mode, segments=ordered)
+    result = {**matched, "selection_mode": result_mode, "selection_policy": result_mode + "_refill",
               "segments": ordered, "refill_indices": wanted, "refill_replaced": replaced,
               "refill_errors": errors, "manifest": output_manifest}
     for field in ("pending_items", "material_gaps", "degraded_matches", "visual_missing_matches", "preview_unresolved"):
@@ -3051,8 +3055,8 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
                        for row in result.get(field, []) if isinstance(row, dict)]
         original_coverage = matched.get("claim_gate_coverage") or {}
         outstanding.extend(str(reason) for reason in original_coverage.get("uncertified_reasons", []) if reason)
-        coverage = {"mode": "rule_then_ai",
-            "certification": "UNCERTIFIED" if outstanding else "MIXED_RULE_AND_AI_REFILL",
+        coverage = {"mode": result_mode,
+            "certification": "UNCERTIFIED" if outstanding else ("CERTIFIED" if all_ai else "MIXED_RULE_AND_AI_REFILL"),
             "validation_passed": not bool(outstanding), "uncertified_reasons": outstanding,
             "scope": "independent_qc_required"}
         result["claim_gate_coverage"] = coverage

@@ -219,6 +219,51 @@ class AIEditorTests(unittest.TestCase):
         self.assertEqual(row["ai_selection"]["index"], 2)
         self.assertTrue(contract.validate_segment_receipt(row, index=2, verify_source=True, manifest=manifest)["ok"])
 
+    def test_all_ai_refill_passes_real_worker_gate_but_mixed_does_not(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+        import batch_worker as worker
+        alt_video = self.root / 'alternative.mp4'
+        alt_video.write_bytes(b'alternative source')
+        alt = {**self.shot, 'shot_id': 'alternative', 'video': str(alt_video)}
+        alt_review = {**self.review, 'shot_id': 'alternative',
+                      'source_identity': contract.source_identity(alt_video)}
+        first = self.result()
+        self.assertTrue(first['ok'], first)
+        second = {'text': '柔和细腻的手感', 'audio_duration_us': 2000000}
+        manifest = {**self.manifest, 'delivery_mode': 'formal',
+                    'segments': [self.manifest['segments'][0], second]}
+        previous = {**first, 'segments': [first['segments'][0],
+                    {'index': 2, 'text': second['text']}], 'pending_items': []}
+        analysis = {'shots': [self.shot, alt]}
+        with mock.patch.object(editor, '_review_pool', return_value=([alt_review], {'feasible': True})):
+            result = editor.refill_indices(manifest, analysis, previous, [2], self.root)
+        self.assertTrue(result['ok'], result)
+        self.assertEqual(result['selection_mode'], 'ai_editor')
+        self.assertEqual(result['claim_gate_coverage']['certification'], 'CERTIFIED')
+        (self.root / 'shot_candidates.json').write_text(json.dumps(analysis), encoding='utf-8')
+        (self.root / 'shot_match_report.json').write_text(json.dumps(result), encoding='utf-8')
+        self.assertEqual(worker.validate_visual_match(self.root),
+                         (True, 'ai_visual_match_valid_independent_qc_required'))
+        # Source/receipt validation remains mandatory even for an all-AI report.
+        broken = copy.deepcopy(result)
+        broken['segments'][1]['ai_selection']['index'] = 1
+        broken['manifest']['segments'] = copy.deepcopy(broken['segments'])
+        (self.root / 'shot_match_report.json').write_text(json.dumps(broken), encoding='utf-8')
+        self.assertFalse(worker.validate_visual_match(self.root)[0])
+        # A genuine legacy + AI result retains the mixed contract and fails
+        # the legacy claim gate when no legacy certification was supplied.
+        kept = copy.deepcopy(first['segments'][0])
+        kept.pop('ai_selection', None)
+        kept['selection_mode'] = 'rule'
+        mixed_prior = {**previous, 'segments': [kept, previous['segments'][1]]}
+        with mock.patch.object(editor, '_review_pool', return_value=([alt_review], {'feasible': True})):
+            mixed = editor.refill_indices(manifest, analysis, mixed_prior, [2], self.root)
+        self.assertTrue(mixed['ok'], mixed)
+        self.assertEqual(mixed['selection_mode'], 'rule_then_ai')
+        self.assertEqual(mixed['claim_gate_coverage']['certification'], 'MIXED_RULE_AND_AI_REFILL')
+        (self.root / 'shot_match_report.json').write_text(json.dumps(mixed), encoding='utf-8')
+        self.assertFalse(worker.validate_visual_match(self.root)[0])
+
     def test_refill_does_not_reuse_rejected_shot_for_original_second_sentence(self):
         manifest = {**self.manifest, 'segments': [
             {'text': '保留原句', 'audio_duration_us': 2_000_000}, self.manifest['segments'][0]],

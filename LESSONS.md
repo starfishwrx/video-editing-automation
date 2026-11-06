@@ -729,3 +729,11 @@
 - 现象: 多镜头拼图的模型观察可能把邻镜头动作归错，或把无编号黑色填充看成素材帧。
 - 以后怎么做: 每条观察只对应其分配的编号；全黑等相关旧负面观察走现有增量视觉复核，画面不清仍保留不通过。
 - 证据: `packages/video-v1.5.3/doubao-jianying-orchestrator/tests/test_v152_vision_v3.py`。
+
+### L-20261106-06 局部重选的合同应反映最终镜头类型
+- status: OPEN
+- hits: 1
+- 模块: visual-matching / runtime-and-recovery
+- 现象: 全部句子已有 AI 像素复核凭据，但局部重选后被错误标成规则与 AI 混合，导致预质检门按错误合同阻断。
+- 以后怎么做: 根据最终每句实际类型保留对应的现有合同，逐句来源、证据和时序仍由消费端核验；真正混合结果不得跳过规则门。
+- 证据: `packages/video-v1.5.3/doubao-jianying-orchestrator/tests/test_ai_editor.py`。
