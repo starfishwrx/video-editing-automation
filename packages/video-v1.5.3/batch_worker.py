@@ -1992,7 +1992,7 @@ def process_task(task: dict, *, retry_partial: bool = False,
                     continue
             if not draft_ok and last_failure is not None:
                 failures.append(last_failure)
-                log("draft %d/%d unresolved after %d attempt(s); stop current task" % (i, count, MAX_DRAFT_ATTEMPTS))
+                log("draft %d/%d unresolved after %d attempt(s); stop current task" % (i, count, attempt))
                 break
 
         closed_loop_result = None
