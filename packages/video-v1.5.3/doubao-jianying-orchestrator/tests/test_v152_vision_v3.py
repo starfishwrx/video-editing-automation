@@ -306,6 +306,68 @@ class EnrichV3Test(unittest.TestCase):
         self.assertEqual(result["vision_analysis"]["cache_hits"], 1)
         self.assertEqual(result["shots"][0]["rule_checks"], ["r1"])
 
+    def test_sheet_boundary_rechecks_only_negative_rows_and_keeps_real_black_pending(self):
+        manifest = self.manifest
+        shots = []
+        cache = {}
+        for index, name in enumerate(('normal', 'ambiguous', 'black')):
+            source = self.root / f'{name}.mov'
+            source.write_bytes(name.encode())
+            shot = {'shot_id': name, 'video': str(source), 'source_start': 0.0, 'source_end': 3.0,
+                    'frame_exists': True, 'status': 'pending_analysis', 'description': ''}
+            shots.append(shot)
+            negative = name != 'normal'
+            row = {'description': '全黑画面' if negative else '手拿物品',
+                   'visual_description': '全黑画面' if negative else '手拿物品',
+                   'visual_tags': ['黑画面'] if negative else ['手拿物品'],
+                   'evidence_tags': [] if negative else ['手拿物品'],
+                   'status': 'pending_analysis' if negative else 'ready_for_matching',
+                   'action_complete': not negative, 'visual_observation_complete': True,
+                   'analysis_confidence': .9, 'text_pass': 'not_applicable'}
+            cache[vision_analyzer._vision_cache_key(manifest, shot)] = row
+        cache_path = self.root / 'cache' / 'material_vision.json'
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(json.dumps(cache, ensure_ascii=False), encoding='utf-8')
+        ambiguous = _portrait(self.root / 'ambiguous-frame.jpg', (220, 30, 30))
+        black = _portrait(self.root / 'black-frame.jpg', (0, 0, 0))
+        calls = []
+        def sample(shot, frame_dir, ffmpeg):
+            path = ambiguous if shot['shot_id'] == 'ambiguous' else black
+            return [{'path': path, 'timestamp': 1.0, 'suffix': 'mid'}]
+        def review(sheet, prompt, *_a, **_kw):
+            calls.append(prompt)
+            # Cached normal row is absent; each mapped tile is tied to the
+            # corresponding actual colored/black pixel, not an empty pad.
+            self.assertIn('#1: shot_id=ambiguous', prompt)
+            self.assertIn('#2: shot_id=black', prompt)
+            self.assertNotIn('shot_id=normal', prompt)
+            with Image.open(sheet).convert('RGB') as image:
+                self.assertGreater(image.getpixel((180, 300))[0], 150)
+                self.assertLess(sum(image.getpixel((540, 300))), 30)
+            rows = [
+                {'shot_id': 'ambiguous', 'description': '手拿物品',
+                 'visual_tags': ['手'], 'evidence_tags': ['手拿物品'],
+                 'action_complete': True, 'confidence': .9, 'action': '拿起',
+                 'object': '物品', 'result': '拿起物品', 'role': 'usage_demo',
+                 'evidence_strength': 'B', 'action_phase': 'perform',
+                 'has_subject': True, 'evidence_time': 1.0},
+                {'shot_id': 'black', 'description': '全黑画面',
+                 'visual_tags': ['黑画面'], 'evidence_tags': [],
+                 'action_complete': False, 'confidence': .9, 'has_subject': False,
+                 'action_segments': [], 'text_tiles': []}]
+            return True, json.dumps({'shots': rows}, ensure_ascii=False)
+        with mock.patch.dict(os.environ, {'JY_VISION_TEXT_PASS': '0', 'JY_VISION_RECHECK': 'reuse'}), \
+             mock.patch.object(vision_analyzer, '_sample_frames', side_effect=sample), \
+             mock.patch.object(vision_analyzer, '_run_vision_with_retry', side_effect=review):
+            result = vision_analyzer.enrich_with_vision(
+                manifest, {'shots': shots}, self.root / 'task' / 'report')
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(result['vision_analysis']['rule_rechecked'], 2)
+        self.assertEqual(result['vision_analysis']['cache_hits'], 1)
+        self.assertEqual(result['shots'][0]['status'], 'ready_for_matching')
+        self.assertEqual(result['shots'][2]['status'], 'pending_analysis')
+        self.assertFalse(result['shots'][2]['action_complete'])
+
     def test_observations_made_under_every_rule_are_adopted(self):
         rule = "新增：挂钩要写清挂的是哪种"
         with mock.patch.object(vision_analyzer, "_analysis_rules", return_value=[rule]), \

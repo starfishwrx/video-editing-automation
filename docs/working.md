@@ -391,3 +391,4 @@
 - 影响选镜的字段（如 `delivery_mode`）必须在 `cli.cmd_build` 侧先写入 manifest，引擎内归一化对 shot_analyzer 无效。
 - 气口等跨品类口径改 `global.json`；不要只改卫品包然后以为全品类生效。
 - 抽帧硬门全拒时外层 `ok` 必须为假；只看 `ok` 的调用方不得把坏帧送进接触表。逃生阀是 `JY_FRAME_QUALITY=0` / `JY_FRAME_BATCH=0`。判断目录里有没有输出要用 `any(path.glob(...))`，不要对 `Path.glob` 取布尔值。协议变更升 `FRAME_QUALITY_VERSION`，否则视觉 / 相位缓存会复用旧观察。
+- 多镜头拼图按编号隔离观察；未编号填充不是素材帧，相关旧负面观察走增量复看，不能仅凭描述提级。

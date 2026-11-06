@@ -721,3 +721,11 @@
 - 模块: orchestrator-cli / visual-matching
 - 现象: 选镜在引擎构造前就跑完，引擎里写回 manifest 的 `delivery_mode` 对它无效（engine.run 注释）。
 - 以后怎么做: 影响选镜的字段必须在 `cli.cmd_build` 侧先写入 manifest。
+
+### L-20261106-05 拼图负面观察要按镜头编号复看
+- status: OPEN
+- hits: 1
+- 模块: visual-matching
+- 现象: 多镜头拼图的模型观察可能把邻镜头动作归错，或把无编号黑色填充看成素材帧。
+- 以后怎么做: 每条观察只对应其分配的编号；全黑等相关旧负面观察走现有增量视觉复核，画面不清仍保留不通过。
+- 证据: `packages/video-v1.5.3/doubao-jianying-orchestrator/tests/test_v152_vision_v3.py`。

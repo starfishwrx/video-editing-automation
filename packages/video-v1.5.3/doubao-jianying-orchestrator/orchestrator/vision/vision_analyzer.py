@@ -523,12 +523,18 @@ def _seed_legacy_vision_cache(manifest: dict[str, Any], analysis: dict[str, Any]
         _save_vision_cache(cache_path, imported)
 
 
+_SHEET_BOUNDARY_RULE = ("每个 shot_id 只能依据映射给它的编号格子描述，不能把相邻镜头的动作或结果归到本镜头；"
+                        "没有编号的黑色填充格不是素材帧。判断全黑或无动作前逐格核对该镜头实际编号，"
+                        "只能报告该镜头的实际可见内容，不确定就保留不确定。")
+
+
 def _analysis_rules(manifest: dict[str, Any]) -> list[str]:
     try:
         from .. import rulepack
-        return list(rulepack.prompt_rules(manifest, "analysis"))
+        rules = list(rulepack.prompt_rules(manifest, "analysis"))
     except Exception:
-        return []
+        rules = []
+    return [*rules, _SHEET_BOUNDARY_RULE]
 
 
 def _keyed_rules(manifest: dict[str, Any]) -> list[str]:
@@ -544,7 +550,8 @@ def _rule_checks(manifest: dict[str, Any]) -> dict[str, list[str]]:
         from .. import rulepack
         pairs = rulepack.analysis_rechecks(manifest)
     except Exception:
-        return {}
+        pairs = []
+    pairs.append((_SHEET_BOUNDARY_RULE, ["全黑", "黑画面"]))
     return {hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]: words for text, words in pairs}
 
 
