@@ -79,13 +79,11 @@ def _clock(path, ffprobe) -> list[int]:
     return [p - points[0] for p in points]
 
 
-def normalize_video(source, directory, *, ffmpeg="ffmpeg", ffprobe="ffprobe") -> dict:
-    source = Path(source).resolve(strict=True)
-    before = identity(source)
-    facts = probe_media(source, ffprobe=ffprobe)
+def check_compatibility(facts) -> int:
+    """Reject known unsupported rotation metadata before any transcode begins."""
     angle = rotation(facts)
     if not angle:
-        return {"changed": False, "source": before, "prepared": before}
+        return 0
     stream = _video(facts)
     pixel_format = stream.get("pix_fmt")
     # 90-degree rotation must preserve the chroma sampling axes too. Do not
@@ -94,11 +92,23 @@ def normalize_video(source, directory, *, ffmpeg="ffmpeg", ffprobe="ffprobe") ->
         raise ValueError(f"SOURCE_ROTATION_PIXEL_FORMAT_UNSUPPORTED:{pixel_format}")
     if pixel_format == "yuvj420p" and stream.get("color_range") != "pc":
         raise ValueError("SOURCE_ROTATION_FULL_RANGE_UNCERTAIN")
-    colors = {key: stream[key] for key in
-              ("color_range", "color_space", "color_transfer", "color_primaries") if key in stream}
     if any(any(term in side.get("side_data_type", "").lower() for term in
                ("dovi", "mastering", "content light", "hdr")) for side in stream.get("side_data_list", [])):
         raise ValueError("SOURCE_ROTATION_HDR_METADATA_UNSUPPORTED")
+    return angle
+
+
+def normalize_video(source, directory, *, ffmpeg="ffmpeg", ffprobe="ffprobe") -> dict:
+    source = Path(source).resolve(strict=True)
+    before = identity(source)
+    facts = probe_media(source, ffprobe=ffprobe)
+    angle = check_compatibility(facts)
+    if not angle:
+        return {"changed": False, "source": before, "prepared": before}
+    stream = _video(facts)
+    pixel_format = stream.get("pix_fmt")
+    colors = {key: stream[key] for key in
+              ("color_range", "color_space", "color_transfer", "color_primaries") if key in stream}
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     key = hashlib.sha256(json.dumps([VERSION, before, angle], sort_keys=True).encode()).hexdigest()[:24]

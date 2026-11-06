@@ -24,3 +24,8 @@ $env:JY_VOLC_BASE_URL = 'https://ark.cn-beijing.volces.com/api/plan/v3'
 # Optional executable paths: FFMPEG_BIN and FFPROBE_BIN.
 # Vision worker/slot defaults are 20; use JY_VISION_BATCH_WORKERS and
 # JY_VISION_SLOTS to set limits suitable for your service and workstation.
+
+# Initial workstation limits; explicit concurrency policy, if set, takes precedence.
+$env:JY_TASK_WORKERS = '3'
+$env:JY_BUILD_TIMEOUT_S = '7200'
+$env:JY_TASK_BUDGET_S = '14400'

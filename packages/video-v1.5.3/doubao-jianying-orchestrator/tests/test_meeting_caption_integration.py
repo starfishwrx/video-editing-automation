@@ -14,6 +14,14 @@ from orchestrator import cli, draft_safety, engine, task_log
 
 
 class CaptionIntegrationTests(unittest.TestCase):
+    def test_retained_file_narration_uses_the_normalized_file(self):
+        retained = engine.Clip("video.mp4", 0, 1, audio_mode="file", audio=r"D:\voice\line.wav")
+        overrides = {r"D:\voice\line.wav": r"D:\voice\loudness\line.wav"}
+        self.assertEqual(engine.narration_playback_path(retained, overrides),
+                         r"D:\voice\loudness\line.wav")
+        operator = engine.Clip("video.mp4", 0, 1, audio_mode="file", audio=r"D:\voice\operator.wav")
+        self.assertEqual(engine.narration_playback_path(operator, {}), r"D:\voice\operator.wav")
+
     def test_long_narration_requires_readable_tts_sentences(self):
         instance = engine.OrchestrationEngine.__new__(engine.OrchestrationEngine)
         instance.m = {"selection_mode": "ai_editor"}

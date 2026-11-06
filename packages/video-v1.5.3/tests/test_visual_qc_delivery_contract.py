@@ -143,6 +143,7 @@ class VisualQcDeliveryContractTests(unittest.TestCase):
         report_dir = task_dir / "report" / "draft-a"
         report_dir.mkdir(parents=True)
         (report_dir / "qc_stage.json").write_text(json.dumps({"draft": str(self.draft), "resume_stage": "qc"}))
+        (task_dir / "done.json").write_text(json.dumps({"drafts": [self.draft.name]}))
         with mock.patch.object(worker, "WORK", self.root), \
                 mock.patch.object(worker, "DRAFTS", self.drafts), \
                 mock.patch.object(worker, "SKIP_SHIP", True), \
@@ -166,6 +167,7 @@ class VisualQcDeliveryContractTests(unittest.TestCase):
         report_dir = task_dir / "report" / "draft-a"
         report_dir.mkdir(parents=True)
         (report_dir / "qc_stage.json").write_text(json.dumps({"draft": str(self.draft)}))
+        (task_dir / "done.json").write_text(json.dumps({"drafts": [self.draft.name]}))
         with mock.patch.object(worker, "WORK", self.root), mock.patch.object(worker, "DRAFTS", self.drafts), \
              mock.patch.object(worker, "SKIP_SHIP", False), \
              mock.patch.object(worker, "run_post_draft_qc", return_value={"status": "PASS", "output": "qc.json"}), \
@@ -180,6 +182,7 @@ class VisualQcDeliveryContractTests(unittest.TestCase):
         report_dir = task_dir / "report" / "draft-a"
         report_dir.mkdir(parents=True)
         (report_dir / "qc_stage.json").write_text(json.dumps({"draft": str(self.draft)}))
+        (task_dir / "done.json").write_text(json.dumps({"drafts": [self.draft.name]}))
         for mode in ("preview", "formal"):
             with self.subTest(mode=mode), mock.patch.object(worker, "WORK", self.root), \
                  mock.patch.object(worker, "DRAFTS", self.drafts), mock.patch.object(worker, "SKIP_SHIP", False), \

@@ -349,8 +349,23 @@ class WorkerSelectionRecoveryTests(unittest.TestCase):
         with patch.object(worker, "log"), patch.object(worker.subprocess, "run", side_effect=timed_out):
             result = worker.run_build(self.manifest, self.report, "original", timeout=1)
         self.assertEqual(json.loads(result["stdout"])["resume_stage"], "draft_write")
-        self.assertFalse(json.loads(result["stdout"])["retryable"])
+        self.assertTrue(json.loads(result["stdout"])["retryable"])
         self.assertTrue(json.loads((self.report / "shot_match_report.json").read_text(encoding="utf-8"))["ok"])
+
+    def test_draft_timeout_recovery_uses_only_matched_draft_write(self):
+        self.write('last_result.json', {'retryable': True, 'resume_stage': 'draft_write'})
+        self.write('shot_match_report.json', {'ok': True, 'input_manifest': self.manifest})
+        self.drafts.mkdir(exist_ok=True)
+        draft = self.drafts / 'recovered'
+        draft.mkdir()
+        def completed(command, **kwargs):
+            self.assertEqual(command[-2:], ['--stage', 'draft_write'])
+            self.write('last_result.json', {'status': 'SUCCESS', 'draft_path': str(draft)})
+            return SimpleNamespace(returncode=0, stdout='ok', stderr='')
+        with patch.object(worker, 'DRAFTS', self.drafts), patch.object(worker.subprocess, 'run', side_effect=completed) as run:
+            result = worker.run_build(self.manifest, self.report, 'requested-name', timeout=60)
+        self.assertEqual(result['draft_name'], 'recovered')
+        self.assertEqual(run.call_count, 1)
 
     def test_retry_budget_belongs_to_the_selection_generation(self):
         self.write("selection_recovery_state.json", {"attempts": 1, "source_run_id": "old-generation", "status": "RUNNING"})

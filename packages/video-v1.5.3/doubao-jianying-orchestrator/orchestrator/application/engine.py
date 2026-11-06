@@ -109,6 +109,19 @@ BRIGHTNESS_MIN = -1.0
 BRIGHTNESS_MAX = 1.0
 
 
+def narration_playback_path(clip: Any, overrides: dict[str, str]) -> Optional[str]:
+    """File staged onto the legacy narration track.
+
+    Retained TTS is recovered as file mode and then loudness-normalized.
+    Staging and placement must both use that normalized file.
+    """
+    narration = clip.tts_path if getattr(clip, "audio_mode", "tts") == "tts" else (
+        clip.audio if getattr(clip, "audio_mode", "") == "file" else None)
+    if not narration:
+        return None
+    return overrides.get(str(Path(narration)), str(Path(narration)))
+
+
 def _parent_id(clip: Any, default: int = -1) -> int:
     """子段所属原段落下标。下标 0 是合法值，不能用 ``or default`` 兜底。"""
     value = getattr(clip, "parent_index", None)
@@ -2365,7 +2378,27 @@ class OrchestrationEngine:
         backend = str(self.m.get("draft_backend") or os.environ.get("JY_DRAFT_BACKEND") or "headless")
         if backend == "headless":
             from .headless_production import write_draft
-            return write_draft(self, clips, bgm_path)
+            result = write_draft(self, clips, bgm_path)
+            reason = str(result.get("reason") or "")
+            compatibility_errors = ("SOURCE_ROTATION_HDR_METADATA_UNSUPPORTED",
+                                    "SOURCE_ROTATION_PIXEL_FORMAT_UNSUPPORTED",
+                                    "SOURCE_ROTATION_FULL_RANGE_UNCERTAIN",
+                                    "SOURCE_ROTATION_UNSUPPORTED")
+            if (result.get("status") == "HEADLESS_BUILD_BLOCKED"
+                    and any(reason == code or reason.startswith(code + ":") for code in compatibility_errors)):
+                import uuid
+                original = self.m.get("draft_name")
+                self.m["draft_name"] = f"{original or '豆包剪映编排草稿'}-legacy-{uuid.uuid4().hex[:10]}"
+                try:
+                    fallback = self._write_legacy_draft(clips, bgm_path)
+                finally:
+                    if original is None:
+                        self.m.pop("draft_name", None)
+                    else:
+                        self.m["draft_name"] = original
+                fallback.update(draft_backend="legacy", fallback_reason=reason)
+                return fallback
+            return result
         if backend == "legacy":
             return self._write_legacy_draft(clips, bgm_path)
         return {"status": "DRAFT_BACKEND_INVALID", "formal_delivery_allowed": False}
@@ -2418,11 +2451,9 @@ class OrchestrationEngine:
         for c in clips:
             sources.append(Path(getattr(self, "_uploaded_videos", {}).get(
                 str(Path(c.video).resolve()), c.video)))
-            if c.tts_path:
-                sources.append(Path(loudness_overrides.get(
-                    str(Path(c.tts_path)), c.tts_path)))
-            if c.audio_mode == "file" and c.audio:
-                sources.append(Path(c.audio))
+            narration = narration_playback_path(c, loudness_overrides)
+            if narration:
+                sources.append(Path(narration))
         if bgm_path:
             sources.append(Path(bgm_path))
         unique_sources = list(dict.fromkeys(str(s) for s in sources))
@@ -2509,8 +2540,7 @@ class OrchestrationEngine:
                 project.add_transition_simple(
                     c.transition["type"], video_segment=prev_seg,
                     duration=to_us(c.transition["duration"]))
-            narration = c.tts_path if c.audio_mode == "tts" else (
-                c.audio if c.audio_mode == "file" else None)
+            narration = narration_playback_path(c, loudness_overrides)
             if narration:
                 # 用户定案第 7 条：**删除 min(...) 静默截断**。旁白该多长就多长，
                 # 画面短了是上游求解该发现的事（解不出会在 align_audio_video 就
@@ -2525,7 +2555,7 @@ class OrchestrationEngine:
                 # 归一后的成品替身进轨（`_audio_slice_us` 的偏移口径不变：归一
                 # 已把时长钉成与源等长，切片刻度与求解时用的一致）。
                 a = project.add_audio_safe(
-                    staged[loudness_overrides.get(str(Path(narration)), str(Path(narration)))],
+                    staged[str(Path(narration))],
                     start_time=c.start_us,
                     duration=to_us(c.duration),
                     source_start=self._audio_slice_us(c),

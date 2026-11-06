@@ -1,5 +1,5 @@
 {
-  "task_workers": 4,
+  "task_workers": 3,
   "prep_workers": 2,
   "prep_slots": 2,
   "api_workers": 20,

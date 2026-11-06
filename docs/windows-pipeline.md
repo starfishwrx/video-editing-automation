@@ -24,13 +24,13 @@ if (-not (Test-Path work/config.local.ps1)) { Copy-Item examples/config.example.
 if (-not (Test-Path work/batch_queue.json)) { Copy-Item examples/queue.example.json work/batch_queue.json }
 
 # 在私有队列中填写真实素材和任务后，先查看本轮计划。
-powershell -NoProfile -File scripts/run_pipeline.ps1 -DryRun
+pwsh -NoProfile -File scripts/run_pipeline.ps1 -DryRun
 
 # 执行完整一轮。
-powershell -NoProfile -File scripts/run_pipeline.ps1
+pwsh -NoProfile -File scripts/run_pipeline.ps1
 
 # 只处理队列中的一条；仍经过相同的调度、建稿、独立质检和交付门禁。
-powershell -NoProfile -File scripts/run_pipeline.ps1 -RecordId example-product-a
+pwsh -NoProfile -File scripts/run_pipeline.ps1 -RecordId example-product-a
 ```
 
 配置副本保存在忽略的 `work/config.local.ps1`。已有私有配置不要用示例覆盖。默认 Python 为包内 `.venv/Scripts/python.exe`，可用 `-PythonPath` 指定；`-WorkRoot`、`-DraftRoot`、`-QueuePath` 和 `-ConfigPath` 接受绝对路径，支持中文和空格。默认队列是 `<WorkRoot>/batch_queue.json`，默认配置是 `<WorkRoot>/config.local.ps1`。显式参数优先。
@@ -71,7 +71,7 @@ powershell -NoProfile -File scripts/run_pipeline.ps1 -RecordId example-product-a
 下面的安装脚本把同一个完整入口注册到 Windows 任务计划程序，默认每 5 分钟一轮，可用 `-IntervalMinutes` 修改。运行身份为当前登录用户，使用隐藏窗口，重复触发时忽略并发实例；需要用户保持登录。安装脚本不会立即启动任务。
 
 ```powershell
-powershell -NoProfile -File scripts/install_pipeline_task.ps1 -TaskName VideoAutomationPipeline -IntervalMinutes 5
+pwsh -NoProfile -File scripts/install_pipeline_task.ps1 -TaskName VideoAutomationPipeline -IntervalMinutes 5
 ```
 
 安装脚本支持与运行脚本相同的路径参数。执行它会注册或更新指定名称的任务；源码更新和离线测试不会修改本机计划任务。历史 JyPoll/JyRun 入口维持退役状态。

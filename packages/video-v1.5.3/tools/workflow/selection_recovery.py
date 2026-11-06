@@ -74,6 +74,47 @@ def completed(report_dir: Path, *, previous_run_id: str | None = None) -> bool:
         return False
 
 
+def draft_pending(report_dir: Path) -> bool:
+    try:
+        state = _read(Path(report_dir) / "last_result.json")
+        return state.get("retryable") is True and state.get("resume_stage") == "draft_write"
+    except (OSError, ValueError):
+        return False
+
+
+def recover_draft(manifest: dict, report_dir: Path, *, prefix: list[str], run, env: dict,
+                  cwd: str, deadline: float, drafts_root: Path) -> dict:
+    """Use the already matched input; the CLI independently checks audio and identity."""
+    report_dir = Path(report_dir)
+    try:
+        matched = _read(report_dir / "shot_match_report.json")
+        original = matched.get("input_manifest")
+        if matched.get("ok") is not True or not isinstance(original, dict) or _logical(original) != _logical(manifest):
+            raise ValueError("DRAFT_RECOVERY_MATCH_INPUT_MISMATCH")
+        input_path = report_dir / "draft_recovery_input.json"
+        input_path.write_text(json.dumps(original, ensure_ascii=False, indent=2), encoding="utf-8")
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            raise ValueError("DRAFT_RECOVERY_DEADLINE_EXCEEDED")
+        process = run([*prefix, "recover", "--input", str(input_path), "--report-dir", str(report_dir),
+                       "--stage", "draft_write"], cwd=cwd, env=env, capture_output=True,
+                      text=True, encoding="utf-8", errors="replace", timeout=remaining + 30)
+        if process.returncode:
+            return {"rc": process.returncode, "stdout": process.stdout or "", "stderr": process.stderr or "",
+                    "combined": (process.stdout or "") + "\n" + (process.stderr or ""),
+                    "stage_retry_exhausted": True}
+        result = _read(report_dir / "last_result.json")
+        draft = Path(str(result.get("draft_path") or ""))
+        if result.get("status") != "SUCCESS" or draft.resolve().parent != drafts_root.resolve() or not draft.is_dir():
+            raise ValueError("DRAFT_RECOVERY_DRAFT_INVALID")
+        return {"rc": 0, "stdout": process.stdout or "", "stderr": process.stderr or "",
+                "combined": process.stdout or "", "draft_name": draft.name, "selection_recovered": True}
+    except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError) as exc:
+        error = "DRAFT_RECOVERY_BLOCKED:" + str(exc)
+        return {"rc": 1, "stdout": error, "stderr": "", "combined": error,
+                "stage_retry_exhausted": True}
+
+
 def archive_state(report_dir: Path) -> None:
     path = Path(report_dir) / "selection_recovery_state.json"
     if path.is_file():

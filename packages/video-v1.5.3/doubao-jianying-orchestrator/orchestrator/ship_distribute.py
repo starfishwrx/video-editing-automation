@@ -80,11 +80,6 @@ def rewrite(root, style):
         raise RuntimeError('DRAFT_META_INFO_INVALID') from exc
     if not isinstance(md, dict):
         raise RuntimeError('DRAFT_META_INFO_INVALID')
-    md['draft_id'] = primary_info['id']
-    md['draft_name'] = base_name
-    md['draft_fold_path'] = root_prefix
-    md['draft_root_path'] = root_dir_prefix
-    md['draft_json_file'] = root_prefix + sep + 'draft_info.json'
 
     mapping = {}
     for reference, source in verified_references.items():
@@ -93,6 +88,12 @@ def rewrite(root, style):
         if not collected.is_file() or nas_portable.digest(collected) != nas_portable.digest(source):
             raise RuntimeError('MEDIA_NOT_COLLECTED_OR_DIFFERENT: ' + name)
         mapping[nas_portable.normalized(reference)] = prefix + name
+    md = nas_portable.map_values(md, mapping)
+    md['draft_id'] = primary_info['id']
+    md['draft_name'] = base_name
+    md['draft_fold_path'] = root_prefix
+    md['draft_root_path'] = root_dir_prefix
+    md['draft_json_file'] = root_prefix + sep + 'draft_info.json'
     planned = {name: nas_portable.map_values(payload, mapping)
                for name, payload in verified_documents.items()}
     planned['draft_meta_info.json'] = md
@@ -131,6 +132,10 @@ def mount_nas():
         raise RuntimeError(NAS_PASSWORD_ENV + '_MISSING')
     r = subprocess.run(['net', 'use', nas_share, password, '/user:' + nas_user],
                        capture_output=True, text=True, timeout=30)
+    # 1219 means this Windows session already has a connection to the server.
+    # An existing reachable share is the session we should use.
+    if r.returncode == 0 or os.path.isdir(nas_share):
+        return 0
     return r.returncode
 
 

@@ -12,7 +12,7 @@ $env:JY_CONCURRENCY_POLICY_FILE = (Resolve-Path work/concurrency-policy.json).Pa
 uv run --frozen python -m tools.batch_dispatch run --queue work/batch_queue.json --dry-run
 uv run --frozen python -m tools.batch_dispatch run --queue work/batch_queue.json
 # 单条任务仍通过同一条正式入口。
-powershell -NoProfile -File scripts/run_pipeline.ps1 -RecordId <record>
+pwsh -NoProfile -File scripts/run_pipeline.ps1 -RecordId <record>
 uv run --frozen python -m tools.batch_dispatch resume --record-id <record> --stage qc
 ```
 

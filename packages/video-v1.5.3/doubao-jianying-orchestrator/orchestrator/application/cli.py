@@ -609,11 +609,26 @@ def _match_temporary_input(manifest: dict, input_path: Path, report_dir: Path,
     refill_indices = sorted(set(i for i in refill_indices if i >= 1))
 
     if mode == "ai_editor":
-        analysis = ai_editor.prepare(manifest, analysis, report_dir, narration_timing=narration_timing)
-        matched = shot_analyzer.match_manifest(
-            manifest, analysis, topk=int(manifest.get("shot_topk", 3) or 3),
-            auto_accept_top1=bool(manifest.get("auto_accept_top1", True)),
-            narration_timing=narration_timing)
+        if refill_indices:
+            prior_path = report_dir / "shot_match_report.json"
+            try:
+                prior_match = json.loads(prior_path.read_text(encoding="utf-8-sig"))
+                reason = _validate_preserved_match(manifest, analysis, prior_match, refill_indices, narration_timing)
+                if prior_match.get("ok") is not True:
+                    reason = "PRIOR_SELECTION_NOT_COMPLETE"
+            except (OSError, ValueError, TypeError, KeyError):
+                reason = "PRIOR_SELECTION_IDENTITY_MISMATCH"
+            if reason:
+                return manifest, {"status": "SHOT_MATCH_BLOCKED", "message": reason,
+                                  "match_report": str(prior_path)}
+            matched = ai_editor.refill_indices(manifest, analysis, prior_match, refill_indices,
+                                                report_dir, narration_timing=narration_timing)
+        else:
+            analysis = ai_editor.prepare(manifest, analysis, report_dir, narration_timing=narration_timing)
+            matched = shot_analyzer.match_manifest(
+                manifest, analysis, topk=int(manifest.get("shot_topk", 3) or 3),
+                auto_accept_top1=bool(manifest.get("auto_accept_top1", True)),
+                narration_timing=narration_timing)
     elif mode == "rule_then_ai":
         from .. import ai_editor_contract
         # Keep prior AI-refill sentences across rebuilds. A fresh rule pass would

@@ -964,6 +964,27 @@ class AIEditorTests(unittest.TestCase):
         bad = {**prior, "manifest": {"segments": []}}
         self.assertEqual(cli._validate_preserved_match(manifest, analysis, bad, [2], None), "PRIOR_SELECTION_IDENTITY_MISMATCH")
 
+    def test_ai_editor_explicit_refill_only_rechecks_target_and_preserves_prior_rows(self):
+        from orchestrator import cli
+        rows = [{'index': 1, 'text': '第一句'}, {'index': 2, 'text': '第二句'}]
+        prior = {'ok': True, 'segments': rows, 'manifest': {'segments': rows}}
+        (self.root / 'shot_match_report.json').write_text(json.dumps(prior, ensure_ascii=False), encoding='utf-8')
+        manifest = {'selection_mode': 'ai_editor', 'segments': rows, 'ai_refill_indices': [2]}
+        analysis = {'shots': [{'shot_id': 'fixture'}]}
+        def refill(_m, _a, selected, indices, *_args, **_kwargs):
+            self.assertEqual(indices, [2])
+            self.assertEqual(selected['segments'][0], rows[0])
+            return selected
+        with mock.patch.object(cli, '_run_shot_analysis', return_value=analysis), \
+                mock.patch('orchestrator.material_corrections.apply', side_effect=lambda _m, a, _r: a), \
+                mock.patch.object(cli, '_validate_preserved_match', return_value=''), \
+                mock.patch.object(editor, 'prepare', side_effect=AssertionError('full selection repeated')), \
+                mock.patch.object(editor, 'refill_indices', side_effect=refill) as called:
+            result, blocker = cli._temporary_match(manifest, self.root / 'input.json', self.root)
+        self.assertIsNone(blocker)
+        self.assertEqual(result['segments'][0], rows[0])
+        called.assert_called_once()
+
     def test_multiple_shots_cover_distinct_points_and_bind_every_part(self):
         plan = self.plan()
         plan["sentences"][0]["selling_points"].append({"id": "p2", "text": "干爽"})

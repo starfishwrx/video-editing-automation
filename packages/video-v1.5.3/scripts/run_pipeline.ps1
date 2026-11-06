@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+#Requires -Version 7.0
 param(
     [string]$PythonPath,
     [string]$WorkRoot,

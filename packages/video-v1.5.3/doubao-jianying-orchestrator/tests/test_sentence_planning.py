@@ -16,6 +16,13 @@ class SentencePlanningTests(unittest.TestCase):
         return [s['text'] for s in timing_contract.split_sentences(
             {'full_script': text, 'selection_mode': 'ai_editor', **extra})]
 
+    def test_revision_feedback_reaches_planner_and_preserves_script(self):
+        captured = []
+        result = sentence_planner.plan({'full_script': '第一句，第二句。', 'revision_feedback': '按原文断句'}, Path('.'),
+            call=lambda prompt, path: captured.append(prompt) or {'segments': ['第一句，', '第二句。']})
+        self.assertIn('按原文断句', captured[0])
+        self.assertEqual(''.join(row['text'] for row in result['segments']), '第一句，第二句。')
+
     def test_separate_punctuated_selling_points_without_losing_text(self):
         text = '纸张厚实亲肤，4层加厚，随便揉搓不掉絮，湿水不破，一纸多用'
         pieces = self.split(text)

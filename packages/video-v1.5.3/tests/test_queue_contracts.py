@@ -180,9 +180,17 @@ class QCRejectionRecoveryTests(unittest.TestCase):
             "text": "First sentence.", "shot_id": shot,
             "ai_selection": {"source_identity": source}}]}
         (self.report_dir / "shot_match_report.json").write_text(json.dumps(match), encoding="utf-8")
-        qc = {"status": "FAIL", "model_review": [{"index": 1, "claim": claim, "visual_ok": False}]}
+        qc = {"status": "FAIL", "model_review": [{"index": 1, "claim": claim, "visual_ok": False, "match_level": "MISMATCH"}]}
         (self.report_dir / "draft_visual_qc.json").write_text(json.dumps(qc), encoding="utf-8")
         return qc
+
+    def test_nonsemantic_qc_issues_never_blacklist_a_source(self):
+        for level in ("INSUFFICIENT_EVIDENCE", "ACCEPTABLE_DEGRADED", "MATERIAL_GAP"):
+            with self.subTest(level=level):
+                report = self.latest_failure("shot-A")
+                report["status"] = "PASS_WITH_DEGRADED"
+                report["model_review"][0]["match_level"] = level
+                self.assertEqual(self.worker.qc_rejected_shots_from_report(self.report_dir, report), {})
 
     def test_restart_unions_history_and_latest_uncheckpointed_failure(self):
         self.latest_failure("shot-A")

@@ -16,7 +16,7 @@ class RuntimePolicyTests(unittest.TestCase):
         with patch.dict(os.environ, {"JY_VISION_SLOTS": "160", "JY_VISION_BATCH_WORKERS": "0",
                                       "JY_TASK_WORKERS": "99"}, clear=True):
             policy = rp.load_policy()
-            self.assertEqual((policy.vision_slots, policy.api_workers, policy.task_workers), (20, 20, 4))
+            self.assertEqual((policy.vision_slots, policy.api_workers, policy.task_workers), (20, 20, 3))
         with patch.dict(os.environ, {"JY_VISION_SLOTS": "3"}, clear=True):
             self.assertEqual(rp.load_policy().vision_slots, 3)
 

@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+#Requires -Version 7.0
 param(
     [string]$PythonPath,
     [string]$WorkRoot,
@@ -39,7 +39,11 @@ $arguments = @('-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Exec
     '-PythonPath', (Quote-TaskArgument $PythonPath), '-WorkRoot', (Quote-TaskArgument $WorkRoot),
     '-DraftRoot', (Quote-TaskArgument $DraftRoot), '-QueuePath', (Quote-TaskArgument $QueuePath))
 if (Test-Path -LiteralPath $ConfigPath -PathType Leaf) { $arguments += @('-ConfigPath', (Quote-TaskArgument $ConfigPath)) }
-$powershell = Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'
+$pwshCommand = Get-Command pwsh.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+if (-not $pwshCommand) { throw 'PIPELINE_POWERSHELL_7_REQUIRED: pwsh.exe not found on PATH' }
+$powershell = $pwshCommand.Source
+$pwshVersion = & $powershell -NoProfile -NonInteractive -Command '$PSVersionTable.PSVersion.Major'
+if ($LASTEXITCODE -ne 0 -or [int]$pwshVersion -lt 7) { throw 'PIPELINE_POWERSHELL_7_REQUIRED' }
 $action = New-ScheduledTaskAction -Execute $powershell -Argument ($arguments -join ' ') -WorkingDirectory $packageRoot
 $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes $IntervalMinutes)
 $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -StartWhenAvailable

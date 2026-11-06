@@ -91,10 +91,10 @@ New-Item -ItemType Directory -Force $env:JY_DRAFT_ROOT | Out-Null
 uv run --frozen python -X utf8 doubao-jianying-orchestrator/run.py env
 if ($LASTEXITCODE -ne 0) { throw '请先处理生产环境报告中的阻断项。' }
 # 查看计划；不调用模型，也不建稿。
-powershell -NoProfile -File scripts/run_pipeline.ps1 `
+pwsh -NoProfile -File scripts/run_pipeline.ps1 `
   -QueuePath work/quickstart/queue.json -RecordId example-product-a -DryRun
 # 完整执行将调用已配置的模型及配音服务。
-powershell -NoProfile -File scripts/run_pipeline.ps1 `
+pwsh -NoProfile -File scripts/run_pipeline.ps1 `
   -QueuePath work/quickstart/queue.json -RecordId example-product-a
 ```
 
