@@ -516,6 +516,75 @@ class WorkerSelectionRecoveryTests(unittest.TestCase):
         report = self.root / 'record' / 'report' / 'draft' / 'shot_match_report.json'
         self.assertEqual(json.loads(report.read_text())['segments'][1], fixed)
 
+    def test_cold_qc_refill_then_warm_force_rebuild_restores_feedback(self):
+        from orchestrator.runtime.file_safety import content_identity
+        task = {'record_id': 'record', 'title': 'draft', 'script': '一句',
+                'material_dir': str(self.root), 'delivery_mode': 'formal'}
+        source = self.root / 'source.mp4'; source.write_bytes(b'source')
+        (self.root / 'record' / 'eval').mkdir(parents=True)
+        calls = []
+        observation = {'1': {'claim': '一句', 'match_level': 'ACCEPTABLE_DEGRADED',
+                             'observed': 'package', 'reason': 'action absent', 'prior_shot_ids': ['A']}}
+        def build(manifest, report, name, **kwargs):
+            calls.append(copy.deepcopy(manifest))
+            report.mkdir(parents=True, exist_ok=True)
+            if len(calls) == 1:
+                original = {**manifest, 'draft_name': name, 'shot_analysis': {'shots': []}}
+                sentence = {'text': '一句'}
+                timing = {'rows': [{'key': timing_contract.sentence_key(sentence, 1), 'text': '一句',
+                         'tts_path': str(self.audio), 'audio_duration_us': 1_000_000,
+                         'timing_certainty': 'audio', 'estimated': False}]}
+                prepared = {**original, 'segments': [sentence], 'voice_tempo': 1.0,
+                            'narration_timing_file': str(report / 'narration_timing.json')}
+                (report / 'narration_timing.json').write_text(json.dumps(timing))
+                (report / 'selection_resume.json').write_text(json.dumps({'input_manifest': original,
+                    'manifest': prepared, 'timing': timing, 'audio_files': [content_identity(self.audio)], 'run_id': 'cold'}))
+                (report / 'shot_match_report.json').write_text(json.dumps({'ok': True,
+                    'input_manifest': original, 'segments': [{'text': '一句', 'shot_id': 'A'}]}))
+                return {'rc': 0, 'stdout': '', 'stderr': '', 'combined': ''}
+            frozen = selection_recovery.freeze_refill_input({**manifest, 'draft_name': name}, report)
+            self.assertEqual(frozen['segments'][0]['audio'], str(self.audio))
+            self.assertEqual(manifest['ai_refill_indices'], [1])
+            if len(calls) == 2:
+                (report / 'shot_match_report.json').write_text(json.dumps({'ok': True,
+                    'input_manifest': frozen, 'segments': [{'text': '一句', 'shot_id': 'A'}]}))
+                return {'rc': 1, 'stdout': '', 'stderr': 'HEADLESS_TARGET_EXISTS',
+                        'combined': 'HEADLESS_TARGET_EXISTS', 'stage_retry_exhausted': True}
+            self.assertEqual(manifest['ai_refill_feedback']['1']['reason'], 'action absent')
+            for field, value in (('variant_count', 2), ('variant_index', 1)):
+                with self.assertRaisesRegex(ValueError, 'REFILL_ORIGINAL_INPUT_CHANGED'):
+                    selection_recovery.freeze_refill_input({**manifest, field: value}, report)
+            return {'rc': 1, 'stdout': '', 'stderr': 'offline stop', 'combined': 'offline stop',
+                    'stage_retry_exhausted': True}
+        def qc(draft, report):
+            payload = {'status': 'PASS_WITH_DEGRADED', 'model_review': [{'index': 1,
+                'claim': '一句', 'match_level': 'ACCEPTABLE_DEGRADED'}]}
+            (report / 'draft_visual_qc.json').write_text(json.dumps(payload))
+            return {'status': 'PASS_WITH_DEGRADED', 'message': 'DRAFT_VISUAL_QC_BLOCKED',
+                    'report': payload, 'output': 'qc.json'}
+        def feedback(report, qc_report, targets, **kwargs):
+            return {key: value for key, value in observation.items() if int(key) in targets}
+        def rejected(report, qc_report, **kwargs):
+            return {1: {'A'}} if kwargs.get('include_non_direct') else {}
+        with ExitStack() as stack:
+            patches = [patch.object(worker, 'WORK', self.root), patch.object(worker, 'DRAFTS', self.drafts),
+                patch.object(worker, '_runtime_facts', return_value={}), patch.object(worker, 'video_files', return_value=[str(source)]),
+                patch.object(worker, '_save_frozen_task'), patch.object(worker, 'publish_failure_notification', return_value={}),
+                patch.object(worker, 'progress'), patch.object(worker, 'log'),
+                patch.object(worker.production_eval, 'runtime_identity', return_value={}),
+                patch.object(worker.production_eval, 'freeze', return_value={'mode': 'enforce'}),
+                patch.object(worker.production_eval, 'write_once'), patch.object(worker, 'run_build', side_effect=build),
+                patch.object(worker, 'validate_visual_match', return_value=(True, '')),
+                patch.object(worker, 'run_post_draft_qc', side_effect=qc),
+                patch.object(worker, 'qc_refill_feedback_from_report', side_effect=feedback),
+                patch.object(worker, 'qc_rejected_shots_from_report', side_effect=rejected)]
+            for item in patches: stack.enter_context(item)
+            worker.process_task(task, admitted=True)
+            self.assertEqual(len(calls), 2)
+            worker.process_task({**task, 'force_rebuild': True}, admitted=True, retry_error=True)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(calls[2]['ai_refill_indices'], [1])
+
     def test_worker_done_resumes_delivery_after_table_failure(self):
         task = {'record_id': 'record', 'title': 'draft', 'script': '一句',
                 'material_dir': str(self.root), 'delivery_mode': 'formal'}

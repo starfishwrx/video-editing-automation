@@ -1634,6 +1634,11 @@ def process_task(task: dict, *, retry_partial: bool = False,
             draft_ok = False
             last_failure = None
             from tools.workflow import selection_recovery
+            # Restore uses the same per-draft controls that the build freezes.
+            # They are part of the logical input, including on a warm worker.
+            variant_controls = {"variant_index": i - 1, "variant_count": count,
+                                "variant_pool_size": min(5, max(3, count)),
+                                "variant_score_tolerance": 8}
             prior_repairs = _read_json(rd / "qc_rejected_shots.json")
             draft_identity_changed = (selection_recovery.draft_pending(rd)
                 and prior_repairs.get("schema") == "sentence-qc-rejections-v1"
@@ -1641,7 +1646,7 @@ def process_task(task: dict, *, retry_partial: bool = False,
             if draft_identity_changed:
                 rejection_identity, qc_rejected = qc_rejection_identity(manifest), {}
             else:
-                rejection_identity, qc_rejected = restore_qc_rejections(rd, manifest)
+                rejection_identity, qc_rejected = restore_qc_rejections(rd, {**manifest, **variant_controls})
             saved_repairs = _read_json(rd / "qc_rejected_shots.json")
             repair_visual_missing_indices.update(saved_repairs.get("repair_indices") or [])
             repair_feedback = saved_repairs.get("active_repair_feedback") or {}
@@ -1690,10 +1695,7 @@ def process_task(task: dict, *, retry_partial: bool = False,
                     # Same-script variants must share one analysis cache but
                     # receive a deterministic rotation index. The allocator
                     # may rotate only within a near-tied, gate-valid pool.
-                    build_manifest["variant_index"] = i - 1
-                    build_manifest["variant_count"] = count
-                    build_manifest["variant_pool_size"] = min(5, max(3, count))
-                    build_manifest["variant_score_tolerance"] = 8
+                    build_manifest.update(variant_controls)
                     draft_only = (not (force_rebuild and attempt == 1)
                                   and selection_recovery.draft_pending(rd))
                     if draft_only and draft_identity_changed:
