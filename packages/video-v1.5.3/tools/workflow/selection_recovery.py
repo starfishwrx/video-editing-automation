@@ -1,7 +1,9 @@
 """Resume a transient selection failure from frozen audio and observations."""
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import time
@@ -66,6 +68,37 @@ def freeze_refill_input(manifest: dict, report_dir: Path) -> dict:
     return {**prepared, **controls, "segments": segments}
 
 
+def _invalidate_match_report(report_dir: Path, matching_input: dict, failure: dict) -> None:
+    """Archive prior matching evidence before recording this failed attempt."""
+    from orchestrator.runtime.file_safety import atomic_write_text
+    path = report_dir / "shot_match_report.json"
+    try:
+        current = _read(path)
+    except (OSError, ValueError):
+        current = {}
+    if current.get("ok") is not False or current.get("input_manifest") != matching_input:
+        if path.is_file():
+            raw = path.read_bytes()
+            if raw:
+                archive = report_dir / "match_history"
+                archive.mkdir(parents=True, exist_ok=True)
+                backup = archive / (hashlib.sha256(raw).hexdigest() + ".json")
+                try:
+                    with backup.open("xb") as stream:
+                        stream.write(raw)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                except FileExistsError:
+                    if backup.read_bytes() != raw:
+                        raise OSError("MATCH_REPORT_ARCHIVE_CONFLICT")
+        current = {}
+    current.update({"ok": False, "input_manifest": matching_input,
+                    "status": failure.get("status", "SHOT_MATCH_BLOCKED"),
+                    "message": failure.get("message", "本次匹配未完成，旧成功结果不可用于恢复。")})
+    report_dir.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(path, json.dumps(current, ensure_ascii=False, indent=2))
+
+
 def selection_timeout(report_dir: Path, *, previous_run_id: str | None = None) -> dict | None:
     """A killed CLI cannot finalize its own log; retain only a failed stage marker."""
     report_dir = Path(report_dir)
@@ -87,7 +120,6 @@ def selection_timeout(report_dir: Path, *, previous_run_id: str | None = None) -
     (report_dir / "last_result.json").write_text(json.dumps(failure, ensure_ascii=False), encoding="utf-8")
     # Use the existing report-history mechanism before replacing a prior
     # successful match needed to audit an earlier draft.
-    from orchestrator.application.cli import _invalidate_match_report
     _invalidate_match_report(report_dir, frozen["input_manifest"], failure)
     return {"rc": 1, "stdout": json.dumps(failure, ensure_ascii=False), "stderr": "",
             "combined": json.dumps(failure, ensure_ascii=False)}

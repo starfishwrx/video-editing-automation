@@ -405,6 +405,9 @@ class WorkerSelectionRecoveryTests(unittest.TestCase):
             result = worker.run_build(self.manifest, self.report, "original", timeout=1)
         self.assertEqual(json.loads(result["stdout"])["resume_stage"], "semantic_match")
         self.assertFalse(json.loads((self.report / "shot_match_report.json").read_text(encoding="utf-8"))["ok"])
+        archives = list((self.report / "match_history").glob("*.json"))
+        self.assertEqual(len(archives), 1)
+        self.assertEqual(json.loads(archives[0].read_text(encoding="utf-8"))["segments"], ["stale success"])
         self.write("ai_editor/plan.json", {"phase": "selection_edit", "attempt_run_id": "old-attempt"})
         self.assertIsNone(selection_recovery.selection_timeout(self.report))
 
