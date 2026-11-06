@@ -548,7 +548,17 @@ class AIEditorTests(unittest.TestCase):
         frames = ai_editor_qc.frame_plan(claim, [row])
         self.assertGreaterEqual(len(frames), 8)
         self.assertIn(0, [f[2] for f in frames])
+        shifted = {**row, "source_start": segment["source_start"] + .05}
+        self.assertEqual(ai_editor_qc.validate_cut(claim, [shifted]), [])
         row["source_duration"] = .2
+        self.assertIn("AI_QC_EVIDENCE_CUT_AWAY", ai_editor_qc.validate_cut(claim, [row]))
+
+    def test_small_cut_shift_cannot_remove_entire_evidence(self):
+        segment = self.result()["segments"][0]
+        start = round(segment["source_start"] * 1_000_000)
+        segment["ai_selection"]["evidence_intervals_us"] = [{"start": start, "end": start + 50_000}]
+        claim = {"index": 1, "ai_segment": segment}
+        row = {"source": str(self.video), "source_start": segment["source_start"] + .05, "source_duration": segment["duration"]}
         self.assertIn("AI_QC_EVIDENCE_CUT_AWAY", ai_editor_qc.validate_cut(claim, [row]))
 
     def test_round_expands_beyond_first_eight(self):
