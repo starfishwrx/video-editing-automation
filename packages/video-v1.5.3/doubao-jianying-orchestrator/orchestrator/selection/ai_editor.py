@@ -2038,8 +2038,52 @@ def _place_absorb_experiment(manifest, analysis, plan, directory, narration_timi
             for index in placed:
                 rows[index].clear()
                 rows[index].update(snapshot[index])
+            plan["rows"] = [copy.deepcopy(snapshot[r["index"]]) if r["index"] in placed else r for r in plan["rows"]]
+            rows = {r.get("index"): r for r in plan["rows"] if isinstance(r, dict)}
             notes.append({"indices": list(group_id), "shot_id": shot.get("shot_id"),
                           "reason": "实验相位无法完整配对，尝试其他已选素材"})
+            excluded_candidates.setdefault(group_id, set()).add(str(shot.get("shot_id")))
+            placed_any = (_place_absorb_experiment(manifest, analysis, plan, directory, narration_timing,
+                          excluded_candidates, group_id) or placed_any)
+            continue
+        # A source file may contain several unrelated demonstrations.  The
+        # existing continuity contract is the only certificate that links all
+        # selected windows to one observed demonstration; individual reviews
+        # and phase timestamps do not establish that relationship.
+        from ..policy import continuity
+        allocations = []
+        for sentence in members:
+            part = rows[sentence["index"]]["parts"][0]
+            start = part["source_start_us"]
+            audio = part["audio_duration_us"]
+            target = audio + timing_contract.us_of(manifest.get("tail_pad_s"), 0)
+            member = {k: copy.deepcopy(sentence[k]) for k in
+                      ("index", "text", "kind", "selling_points", "scene_ids") if k in sentence}
+            member.update(audio_duration_us=audio, target_us=target, start_us=start, end_us=start + target)
+            allocations.append(member)
+        valid_shape = (2 <= len(allocations) <= continuity.MAX_MEMBERS
+                       and all(m.get("kind") == "selling_point" and m.get("selling_points") for m in allocations)
+                       and all(a["end_us"] == b["start_us"] for a, b in zip(allocations, allocations[1:])))
+        try:
+            if not valid_shape:
+                raise ValueError("CONTINUITY_PAIRING_UNCERTAIN")
+            context = {"product": manifest.get("product"), "category": manifest.get("category"),
+                       "rules": contract.rules_identity(manifest), "shot_id": shot["shot_id"],
+                       "source_identity": contract.source_identity(shot["video"]),
+                       "scene_us": {"start": lo, "end": hi},
+                       "window_us": {"start": allocations[0]["start_us"], "end": allocations[-1]["end_us"]},
+                       "members": allocations}
+            group_review = sentence_continuity.review_group(manifest, context, shot, Path(directory))
+            group_key = contract.digest(context)[:24]
+            sentence_continuity.install(plan, group_key, group_review)
+        except (ValueError, KeyError, TypeError, OSError):
+            for index in placed:
+                rows[index].clear()
+                rows[index].update(snapshot[index])
+            plan["rows"] = [copy.deepcopy(snapshot[r["index"]]) if r["index"] in placed else r for r in plan["rows"]]
+            rows = {r.get("index"): r for r in plan["rows"] if isinstance(r, dict)}
+            notes.append({"indices": list(group_id), "shot_id": shot.get("shot_id"),
+                          "reason": "同次演示未经联合确认，保留原组"})
             excluded_candidates.setdefault(group_id, set()).add(str(shot.get("shot_id")))
             placed_any = (_place_absorb_experiment(manifest, analysis, plan, directory, narration_timing,
                           excluded_candidates, group_id) or placed_any)
@@ -2051,6 +2095,8 @@ def _place_absorb_experiment(manifest, analysis, plan, directory, narration_timi
                 for index in placed:
                     rows[index].clear()
                     rows[index].update(snapshot[index])
+                plan["rows"] = [copy.deepcopy(snapshot[r["index"]]) if r["index"] in placed else r for r in plan["rows"]]
+                rows = {r.get("index"): r for r in plan["rows"] if isinstance(r, dict)}
                 notes.append({"indices": placed, "shot_id": shot.get("shot_id"),
                               "reason": f"相位切开后排不开:{exc.reason}"})
                 excluded_candidates.setdefault(group_id, set()).add(str(shot.get("shot_id")))
@@ -2061,6 +2107,8 @@ def _place_absorb_experiment(manifest, analysis, plan, directory, narration_timi
             for index in placed:
                 rows[index].clear()
                 rows[index].update(snapshot[index])
+            plan["rows"] = [copy.deepcopy(snapshot[r["index"]]) if r["index"] in placed else r for r in plan["rows"]]
+            rows = {r.get("index"): r for r in plan["rows"] if isinstance(r, dict)}
             excluded_candidates.setdefault(group_id, set()).add(str(shot.get("shot_id")))
             placed_any = (_place_absorb_experiment(manifest, analysis, plan, directory, narration_timing,
                           excluded_candidates, group_id) or placed_any)
@@ -2072,7 +2120,7 @@ def _place_absorb_experiment(manifest, analysis, plan, directory, narration_timi
     return placed_any
 
 
-def _speed_fit_reviewed_evidence(manifest, analysis, plan, directory, failure) -> bool:
+def _speed_fit_reviewed_evidence(manifest, analysis, plan, directory, failure, narration_timing=None) -> bool:
     """Play matched evidence up to 2x when a shorter crop is not available.
 
     The short-window look runs first. If that look cannot be made, and the
@@ -2139,6 +2187,19 @@ def _speed_fit_reviewed_evidence(manifest, analysis, plan, directory, failure) -
                  playback_observation=None, review_window_us={"start": crop_start, "end": crop_end},
                  evidence_intervals_us=copy.deepcopy(intervals),
                  source_identity=review.get("source_identity"))
+    trial = copy.deepcopy(plan)
+    trial.setdefault("window_reviews", {})[key] = saved
+    trial_row = next(r for r in trial["rows"] if r["index"] == failure.index)
+    trial_part = trial_row["parts"][parts.index(part)]
+    trial_part["window_review_key"] = key
+    trial_part["source_start_us"] = crop_start
+    try:
+        _assemble(manifest, analysis, trial, narration_timing=narration_timing, verify_sources=True)
+    except WindowFailure as other:
+        if other.index <= failure.index:
+            return False
+    except (ValueError, KeyError, TypeError, OSError):
+        return False
     plan.setdefault("window_reviews", {})[key] = saved
     part["window_review_key"] = key
     part["source_start_us"] = crop_start
@@ -2199,10 +2260,8 @@ def _repair_reviewed_rows(manifest, analysis, plan, directory, narration_timing,
                 continue
             if sentence_continuity.repair(manifest, analysis, plan, directory, failure, narration_timing):
                 continue
-            group_uncertain = any(a.get("index") == failure.index and a.get("status") == "rejected"
-                                  for a in plan.get("continuity_attempts", {}).values() if isinstance(a, dict))
-            if not short_without_point and not group_uncertain and _speed_fit_reviewed_evidence(
-                    manifest, analysis, plan, directory, failure):
+            if not short_without_point and _speed_fit_reviewed_evidence(
+                    manifest, analysis, plan, directory, failure, narration_timing):
                 continue
             if not short_without_point and _extend_previous_action(
                     manifest, analysis, plan, directory, failure, narration_timing):
@@ -2878,7 +2937,29 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
                 raise ValueError(last_error)
         except (ValueError, KeyError, TypeError, OSError) as exc:
             errors.append(str(exc))
-    ordered = [by_index[i] for i in sorted(by_index)]
+    # First-run TTS selections may not carry an audio field. During a QC
+    # refill the frozen input supplies each sentence's original audio; bind it
+    # to every retained row as well as the newly selected rows.
+    ordered = []
+    for i in sorted(by_index):
+        row = by_index[i]
+        source = original[i - 1] if 1 <= i <= len(original) else None
+        audio = str(source.get("audio") or "") if isinstance(source, dict) else ""
+        if audio:
+            existing = str(row.get("audio") or "")
+            if existing and Path(existing).resolve() != Path(audio).resolve():
+                errors.append(f"AI_REFILL_AUDIO_BINDING_CHANGED:{i}")
+            else:
+                duration = source.get("audio_duration_us")
+                existing_duration = row.get("audio_duration_us")
+                if (type(duration) is not int or duration <= 0 or
+                        (existing_duration is not None and existing_duration != duration)):
+                    errors.append(f"AI_REFILL_AUDIO_TIMING_CHANGED:{i}")
+                else:
+                    row = {**row, "audio": audio, "audio_duration_us": duration}
+                    if source.get("timing_certainty"):
+                        row["timing_certainty"] = source["timing_certainty"]
+        ordered.append(row)
     def keep(row):
         return not isinstance(row, dict) or row.get("index") not in replaced
     result = {**matched, "selection_mode": "rule_then_ai", "selection_policy": "rule_then_ai_refill",

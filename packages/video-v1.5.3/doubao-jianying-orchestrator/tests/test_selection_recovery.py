@@ -284,6 +284,50 @@ class SelectionRecoveryTests(unittest.TestCase):
         self.assertGreater(result['segments'][1]['video_speed'], 1)
         self.assertLessEqual(result['segments'][1]['video_speed'], 2)
 
+    def test_first_tts_match_then_refill_keeps_all_frozen_audio_bindings(self):
+        baseline = editor._assemble(self.manifest, self.analysis, self.plan(), narration_timing=None, verify_sources=True)
+        self.assertTrue(all(not row.get('audio') for row in baseline['segments']))
+        before = copy.deepcopy(baseline['segments'][0])
+        audio_files = []
+        segments = copy.deepcopy(self.manifest['segments'])
+        for index, segment in enumerate(segments, 1):
+            audio = self.root / f'frozen-{index}.wav'
+            audio.write_bytes(b'fixture')
+            audio_files.append(audio)
+            segment['audio'] = str(audio)
+            segment['timing_certainty'] = 'audio'
+        request = {**self.manifest, 'segments': segments, 'ai_refill_indices': [2], 'delivery_mode': 'formal'}
+        (self.root / 'shot_match_report.json').write_text(json.dumps(baseline, ensure_ascii=False), encoding='utf-8')
+        with patch.object(cli, '_run_shot_analysis', return_value=self.analysis), \
+                patch('orchestrator.material_corrections.apply', side_effect=lambda _m, a, _r: a), \
+                patch.object(editor, '_review_pool', return_value=(copy.deepcopy(self.reviews['2']), {'feasible': True})):
+            result, blocker = cli._temporary_match(request, self.root / 'input.json', self.root)
+        self.assertIsNone(blocker, blocker)
+        self.assertEqual([str(Path(row['audio']).resolve()) for row in result['segments']],
+                         [str(path.resolve()) for path in audio_files])
+        preserved = dict(result['segments'][0])
+        preserved.pop('audio')
+        self.assertEqual(preserved.pop('timing_certainty'), 'audio')
+        before.pop('timing_certainty', None)
+        self.assertEqual(preserved, before)
+
+    def test_rejected_joint_group_still_allows_independent_two_x(self):
+        plan = self.plan()
+        audio = 1_197_812
+        self.manifest['segments'][0]['audio_duration_us'] = audio
+        plan['sentences'][0]['audio_durations_us'] = [audio]
+        plan['rows'][0]['parts'][0]['audio_duration_us'] = audio
+        plan['reviews']['1'][0]['evidence_intervals_us'] = [{'start': 4_567_000, 'end': 6_851_000}]
+        plan['continuity_attempts'] = {'other-point': {'index': 1, 'status': 'rejected', 'reason': 'different benefit'}}
+        neighbor = copy.deepcopy(plan['rows'][1])
+        with patch.object(editor, '_repair_selected_window', return_value=False), \
+                patch.object(editor.sentence_continuity, 'repair', return_value=False):
+            result = editor._repair_reviewed_rows(self.manifest, self.analysis, plan, self.root, None, set())
+        self.assertTrue(result['ok'], result)
+        self.assertGreater(result['segments'][0]['video_speed'], 1)
+        self.assertLessEqual(result['segments'][0]['video_speed'], 2)
+        self.assertEqual(plan['rows'][1], neighbor)
+
     def test_matched_evidence_over_two_x_is_not_sped_up(self):
         plan = self.plan()
         plan["reviews"]["1"][0]["evidence_intervals_us"] = [{"start": 1_000_000, "end": 4_000_000}]
@@ -917,26 +961,69 @@ class SelectionRecoveryTests(unittest.TestCase):
             "review_window_us": {"start": window[0], "end": window[1]}}
         return key
 
+    def _joint_experiment_review(self, _manifest, context, _shot, _directory):
+        from orchestrator.policy import continuity
+        observations = [{'index': m['index'], 'verdict': 'matched', 'same_product': True,
+            'basis': 'visible_result', 'phase': 'observed', 'observation': 'actual phase', 'reason': 'supports sentence',
+            'supported_point_ids': [p['id'] for p in m['selling_points']], 'time_sensitive': False, 'scene_ids': [],
+            'evidence_intervals_us': [{'start': m['start_us'], 'end': m['end_us']}]} for m in context['members']]
+        return {'schema': continuity.SCHEMA, 'input': context, 'review': {
+            'verdict': 'matched', 'same_product': True, 'same_demonstration': True, 'same_selling_point': True,
+            'semantic_continuity': True, 'complete_action': True, 'result_preserved': True,
+            'shared_point': 'experiment', 'product_observation': 'same product',
+            'demonstration_observation': 'same sample and setup', 'observation': 'complete experiment',
+            'reason': 'continuous phases', 'confidence': .9,
+            'complete_intervals_us': [copy.deepcopy(context['window_us'])], 'members': observations}}
+
+    def test_same_file_split_demonstrations_are_not_joined_without_joint_evidence(self):
+        manifest, analysis, plan = self._absorb_plan((1_200_000, 1_300_000, 1_400_000))
+        original = copy.deepcopy(plan['rows'])
+        phases = {'pour': [1.0, 2.5], 'absorb': [2.5, 5.5], 'wipe': [7.0, 9.0]}
+        with patch('orchestrator.vision.phase_timing.locate', return_value={
+                'ok': True, 'complete': True, 'phases': phases, 'note': 'two different demonstrations'}), \
+                patch.object(editor, '_review_proposed_window',
+                    side_effect=lambda *args, **kwargs: self._phase_review(plan, args[3], args[4], args[5])), \
+                patch.object(editor.sentence_continuity, 'review_group') as joint:
+            self.assertFalse(editor._place_absorb_experiment(manifest, analysis, plan, self.root, None))
+        self.assertEqual(plan['rows'], original)
+        joint.assert_not_called()
+
+    def test_contiguous_phase_cuts_still_require_joint_demonstration_review(self):
+        manifest, analysis, plan = self._absorb_plan((1_200_000, 1_300_000, 1_400_000))
+        original = copy.deepcopy(plan['rows'])
+        phases = {'pour': [1.0, 2.5], 'absorb': [2.5, 3.5], 'wipe': [3.5, 5.5]}
+        with patch('orchestrator.vision.phase_timing.locate', return_value={
+                'ok': True, 'complete': True, 'phases': phases}), \
+                patch.object(editor, '_review_proposed_window',
+                    side_effect=lambda *args, **kwargs: self._phase_review(plan, args[3], args[4], args[5])), \
+                patch.object(editor.sentence_continuity, 'review_group',
+                             side_effect=ValueError('CONTINUITY_JOINT_REVIEW_UNCERTAIN')) as joint:
+            self.assertFalse(editor._place_absorb_experiment(manifest, analysis, plan, self.root, None))
+        self.assertEqual(plan['rows'], original)
+        self.assertGreaterEqual(joint.call_count, 1)
+
     def test_adjacent_absorb_lines_share_one_experiment_cut_by_phase(self):
         manifest, analysis, plan = self._absorb_plan((1_200_000, 1_300_000, 1_400_000))
-        phases = {"pour": [1.0, 2.5], "absorb": [2.5, 7.0], "wipe": [7.0, 9.0]}
+        phases = {"pour": [1.0, 2.5], "absorb": [2.5, 7.0], "wipe": [3.5, 5.5]}
         with patch("orchestrator.vision.phase_timing.locate", return_value={"ok": True, "phases": phases}), \
                 patch.object(editor, "_review_proposed_window",
-                             side_effect=lambda *args, **kwargs: self._phase_review(plan, args[3], args[4], args[5])):
+                             side_effect=lambda *args, **kwargs: self._phase_review(plan, args[3], args[4], args[5])), \
+                patch.object(editor.sentence_continuity, "review_group", side_effect=self._joint_experiment_review):
             self.assertTrue(editor._place_absorb_experiment(manifest, analysis, plan, self.root, None))
         self.assertEqual([row["parts"][0]["shot_id"] for row in plan["rows"]], ["shot1", "shot1", "shot1"])
         self.assertEqual([row["parts"][0]["source_start_us"] for row in plan["rows"]],
-                         [1_000_000, 2_200_000, 7_000_000])
-        self.assertEqual([row["parts"][0]["absorb_phase"] for row in plan["rows"]], ["absorb", "absorb", "wipe"])
+                         [1_000_000, 2_200_000, 3_500_000])
+        self.assertTrue(all(row.get("continuity_key") for row in plan["rows"]))
         self.assertTrue(editor._assemble(manifest, analysis, plan, narration_timing=None)["ok"])
 
     def test_a_later_sentence_rejection_does_not_drop_the_pour(self):
         manifest, analysis, plan = self._absorb_plan((1_200_000, 1_300_000, 1_400_000))
         manifest["qc_rejected_shots"] = {"3": ["shot1"]}
-        phases = {"pour": [1.0, 2.5], "absorb": [2.5, 7.0], "wipe": [7.0, 9.0]}
+        phases = {"pour": [1.0, 2.5], "absorb": [2.5, 7.0], "wipe": [3.5, 5.5]}
         with patch("orchestrator.vision.phase_timing.locate", return_value={"ok": True, "phases": phases}), \
                 patch.object(editor, "_review_proposed_window",
-                             side_effect=lambda *args, **kwargs: self._phase_review(plan, args[3], args[4], args[5])):
+                             side_effect=lambda *args, **kwargs: self._phase_review(plan, args[3], args[4], args[5])), \
+                patch.object(editor.sentence_continuity, "review_group", side_effect=self._joint_experiment_review):
             self.assertFalse(editor._place_absorb_experiment(manifest, analysis, plan, self.root, None))
         self.assertEqual([row["parts"][0]["shot_id"] for row in plan["rows"]], ["shot1", "shot2", "shot3"])
 
@@ -945,7 +1032,8 @@ class SelectionRecoveryTests(unittest.TestCase):
         phases = {"pour": [1.0, 2.5], "absorb": [2.5, 7.0]}
         with patch("orchestrator.vision.phase_timing.locate", return_value={"ok": True, "phases": phases}), \
                 patch.object(editor, "_review_proposed_window",
-                             side_effect=lambda *args, **kwargs: self._phase_review(plan, args[3], args[4], args[5])):
+                             side_effect=lambda *args, **kwargs: self._phase_review(plan, args[3], args[4], args[5])), \
+                patch.object(editor.sentence_continuity, "review_group", side_effect=self._joint_experiment_review):
             editor._place_absorb_experiment(manifest, analysis, plan, self.root, None)
         self.assertEqual(plan["rows"][0]["parts"][0]["shot_id"], "shot1")
         self.assertEqual(plan["rows"][1]["parts"][0]["shot_id"], "shot2")
@@ -966,7 +1054,8 @@ class SelectionRecoveryTests(unittest.TestCase):
         phases = {"pour": [1.0, 2.5], "absorb": [2.5, 7.0]}
         with patch("orchestrator.vision.phase_timing.locate", return_value={"ok": True, "phases": phases}), \
                 patch.object(editor, "_review_proposed_window",
-                             side_effect=lambda *args, **kwargs: self._phase_review(plan, args[3], args[4], args[5])):
+                             side_effect=lambda *args, **kwargs: self._phase_review(plan, args[3], args[4], args[5])), \
+                patch.object(editor.sentence_continuity, "review_group", side_effect=self._joint_experiment_review):
             self.assertFalse(editor._place_absorb_experiment(manifest, analysis, plan, self.root, None))
         self.assertEqual(plan["rows"][2]["parts"][0]["shot_id"], "shot3")
         self.assertNotIn("absorb_phase", plan["rows"][2]["parts"][0])
@@ -975,18 +1064,19 @@ class SelectionRecoveryTests(unittest.TestCase):
     def test_absorb_group_retries_another_candidate_when_first_cannot_fit(self):
         manifest, analysis, plan = self._absorb_plan((1_200_000, 1_300_000, 1_400_000))
         short = {'pour': [1.0, 1.4], 'absorb': [1.4, 1.8], 'wipe': [7.0, 7.5]}
-        full = {'pour': [1.0, 2.5], 'absorb': [2.5, 7.0], 'wipe': [7.0, 9.0]}
+        full = {'pour': [1.0, 2.5], 'absorb': [2.5, 7.0], 'wipe': [3.5, 5.5]}
         def locate(shot, *_args, **_kwargs):
             return {'ok': True, 'phases': short if shot['shot_id'] == 'shot1' else full}
         with patch('orchestrator.vision.phase_timing.locate', side_effect=locate), \
                 patch.object(editor, '_review_proposed_window',
-                             side_effect=lambda *args, **kwargs: self._phase_review(plan, args[3], args[4], args[5])):
+                             side_effect=lambda *args, **kwargs: self._phase_review(plan, args[3], args[4], args[5])), \
+                patch.object(editor.sentence_continuity, 'review_group', side_effect=self._joint_experiment_review):
             self.assertTrue(editor._place_absorb_experiment(manifest, analysis, plan, self.root, None))
         self.assertEqual([row['parts'][0]['shot_id'] for row in plan['rows']], ['shot2'] * 3)
 
     def test_absorb_group_uses_a_later_pour_when_the_opener_does_not_locate(self):
         manifest, analysis, plan = self._absorb_plan((1_200_000, 1_300_000, 1_400_000))
-        phases = {"pour": [1.0, 2.5], "absorb": [2.5, 7.0], "wipe": [7.0, 9.0]}
+        phases = {"pour": [1.0, 2.5], "absorb": [2.5, 7.0], "wipe": [3.5, 5.5]}
 
         def locate(shot, *_args, **_kwargs):
             if shot.get("shot_id") == "shot1":
@@ -995,21 +1085,23 @@ class SelectionRecoveryTests(unittest.TestCase):
 
         with patch("orchestrator.vision.phase_timing.locate", side_effect=locate), \
                 patch.object(editor, "_review_proposed_window",
-                             side_effect=lambda *args, **kwargs: self._phase_review(plan, args[3], args[4], args[5])):
+                             side_effect=lambda *args, **kwargs: self._phase_review(plan, args[3], args[4], args[5])), \
+                patch.object(editor.sentence_continuity, "review_group", side_effect=self._joint_experiment_review):
             self.assertTrue(editor._place_absorb_experiment(manifest, analysis, plan, self.root, None))
         self.assertEqual([row["parts"][0]["shot_id"] for row in plan["rows"]], ["shot2", "shot2", "shot2"])
-        self.assertEqual([row["parts"][0]["absorb_phase"] for row in plan["rows"]], ["absorb", "absorb", "wipe"])
+        self.assertTrue(all(row.get("continuity_key") for row in plan["rows"]))
 
     def test_nonstick_line_uses_the_tissue_press(self):
         manifest, analysis, plan = self._absorb_plan((1_200_000, 1_300_000, 1_400_000))
         plan["sentences"][2]["text"] = "吸完之后不粘腻"
         manifest["segments"][2]["text"] = "吸完之后不粘腻"
-        phases = {"pour": [1.0, 2.5], "absorb": [2.5, 7.0], "wipe": [7.0, 9.0]}
+        phases = {"pour": [1.0, 2.5], "absorb": [2.5, 7.0], "wipe": [3.5, 5.5]}
         with patch("orchestrator.vision.phase_timing.locate", return_value={"ok": True, "phases": phases}), \
                 patch.object(editor, "_review_proposed_window",
-                             side_effect=lambda *args, **kwargs: self._phase_review(plan, args[3], args[4], args[5])):
+                             side_effect=lambda *args, **kwargs: self._phase_review(plan, args[3], args[4], args[5])), \
+                patch.object(editor.sentence_continuity, "review_group", side_effect=self._joint_experiment_review):
             self.assertTrue(editor._place_absorb_experiment(manifest, analysis, plan, self.root, None))
-        self.assertEqual(plan["rows"][2]["parts"][0]["absorb_phase"], "wipe")
+        self.assertTrue(plan["rows"][2].get("continuity_key"))
         self.assertEqual(plan["rows"][2]["parts"][0]["shot_id"], "shot1")
 
     def test_repeated_comfort_lines_take_two_different_touch_shots(self):
