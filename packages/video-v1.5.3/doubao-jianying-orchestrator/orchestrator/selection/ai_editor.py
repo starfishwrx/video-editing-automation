@@ -214,6 +214,7 @@ def _inventory(manifest: dict, shots: list[dict], directory: Path) -> list[dict]
     rows = timing_contract.split_sentences(manifest)
     catalog = [{"shot_id": s["shot_id"], "description": s.get("visual_description") or s.get("description"),
                 "action": s.get("action"), "object": s.get("object"), "result": s.get("result"),
+                **({"action_segments": s.get("action_segments") or []} if manifest.get("ai_refill_feedback") else {}),
                 "duration_us": round((float(s["source_end"]) - float(s["source_start"])) * 1e6)} for s in shots]
     def inventory_prompt(sentence_rows):
         return contract.policy_prompt(manifest) + "\n你负责整稿用途分类和宽召回，本轮描述只是索引，不是画面证据。\n" + json.dumps({
@@ -231,6 +232,9 @@ def _inventory(manifest: dict, shots: list[dict], directory: Path) -> list[dict]
 纸品scene_ids必须给出本句语义适用的semantic_contracts场景id，不适用时为空；不能只因某候选有擦拭就把包装抽数句判为清洁。
 每句candidate_ids只返回最相关的前8个，display_pool_ids也只返回前8个，避免响应被整库ID挤满。
 程序会把未列出的镜头加入后续逐轮扩展。不能因描述不确定就宣布无素材，不用A/B强度或旧合同词表淘汰。
+如提供action_segments，允许每句返回candidate_windows=[{"shot_id":"候选ID","start":0.0,"end":1.0}]，
+start/end使用原素材秒数，选择与该素材action_segments重叠且最可能体现旧稿缺口的时间段；
+它仅作定位线索，实际画面必须另行复核。
 """
     def inventory_part(sentence_rows, path, *, split_allowed=True):
         try:
@@ -386,7 +390,10 @@ def _review(manifest: dict, sentence: dict, shot: dict, directory: Path, *, dens
     media = _review_media(shot, directory, dense=dense)
     start, end, before, times, sheet = (media[k] for k in ("start", "end", "before", "times", "sheet"))
     key = contract.digest([sentence["index"], shot["shot_id"], before, start, end, dense])[:24]
-    prompt = contract.policy_prompt(manifest) + "\n只根据附图判断，所有时间戳均为原素材秒数。\n" + json.dumps({
+    feedback_instruction = ("\n本句旧稿质检反馈仅作定位和待核查缺口线索，不是当前素材证据，也可能有误。"
+        "判断必须遵守生效业务规则；反馈与规则冲突时不得把反馈中的额外要求变成新规则。"
+        "对实际适用的缺口复看当前像素，不得凭反馈或素材描述补造动作与结果。\n") if sentence.get("qc_feedback") else ""
+    prompt = contract.policy_prompt(manifest) + feedback_instruction + "\n只根据附图判断，所有时间戳均为原素材秒数。\n" + json.dumps({
         "product": manifest.get("product"), "category": manifest.get("category"),
         "sentence": sentence, "shot_id": shot["shot_id"],
         "whole_script": [timing_contract.sentence_text(s) for s in timing_contract.split_sentences(manifest)],
@@ -2822,16 +2829,61 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
             errors.append(f"AI_REFILL_INDEX_OOB:{index}")
             continue
         sentence = _heuristic_sentence(index, timing_contract.sentence_text(original[index - 1]))
+        audio_us, certainty = timing_contract.duration_for(narration_timing, index,
+                                                          segment=original[index - 1])
         excluded = qc_rejected_shots(manifest).get(index, set())
         allowed = {sid: shot for sid, shot in shots.items() if sid not in reserved and sid not in excluded}
         preferred = [sid for sid in _rule_shortlist_ids(matched, analysis, index, limit=max(ROUND_SIZE, 16))
                      if sid in allowed]
         observed = _observed_text_shortlist(sentence["text"], allowed)
-        sentence["candidate_ids"] = [sid for sid in dict.fromkeys(
-            [*preferred[:ROUND_SIZE], *observed, *preferred[ROUND_SIZE:], *shots])
-                                     if sid in allowed]
-        audio_us, certainty = timing_contract.duration_for(narration_timing, index,
-                                                          segment=original[index - 1])
+        feedbacks = manifest.get("ai_refill_feedback")
+        feedback = feedbacks.get(str(index)) if isinstance(feedbacks, dict) else None
+        recalled, previous, window_hints = [], set(), {}
+        if (allowed and isinstance(feedback, dict) and feedback.get("claim") == sentence["text"]
+                and all(isinstance(feedback.get(k), str) and feedback[k].strip() for k in ("observed", "reason"))):
+            sentence["qc_feedback"] = copy.deepcopy(feedback)
+            previous = {str(sid) for sid in feedback.get("prior_shot_ids") or []}
+            # Existing catalog inventory is retrieval only; all returned IDs
+            # still pass independent image review and the usual evidence gates.
+            hint = json.dumps({"old_qc_observed": feedback["observed"], "old_qc_reason": feedback["reason"]}, ensure_ascii=False)
+            retrieval_manifest = {**manifest, "full_script": sentence["text"],
+                "segments": [{"text": sentence["text"], "visual_requirements": hint}],
+                "revision_feedback": (str(manifest.get("revision_feedback") or "") +
+                    "\n本句旧稿质检仅供定位待核查缺口，可能有误；与生效业务规则冲突时不要采纳额外要求：" + hint)}
+            inventory = _inventory(retrieval_manifest, list(allowed.values()), directory / f"qc_recall_{index:02d}")
+            recalled = inventory[0].get("candidate_ids") or []
+            for hint in inventory[0].get("candidate_windows") or []:
+                if not isinstance(hint, dict) or hint.get("shot_id") not in allowed:
+                    continue
+                sid = hint["shot_id"]
+                shot = allowed[sid]
+                try:
+                    start, end = float(hint["start"]), float(hint["end"])
+                    lo, hi = float(shot["source_start"]), float(shot["source_end"])
+                    segments = shot.get("action_segments") or []
+                    overlaps = any(isinstance(a, dict) and float(a["start"]) < end and float(a["end"]) > start
+                                   for a in segments)
+                    if not (math.isfinite(start) and math.isfinite(end) and lo <= start < end <= hi and overlaps):
+                        continue
+                    # A hint identifies the action, not the editable source
+                    # boundary. Include enough surrounding footage for the
+                    # frozen narration and normal head/tail guards when possible.
+                    from . import shot_analyzer
+                    head = max(0.0, shot_analyzer._number(manifest.get("head_trim_s"), shot_analyzer.DEFAULT_HEAD_TRIM_S))
+                    tail = max(0.0, shot_analyzer._number(manifest.get("tail_trim_s"), shot_analyzer.DEFAULT_TAIL_TRIM_S))
+                    pad = max(0.0, shot_analyzer._number(manifest.get("tail_pad_s"), 0.0))
+                    desired = max(end - start + .5, audio_us / 1_000_000 + head + tail + pad)
+                    window_end = min(hi, end + .15)
+                    window_start = max(lo, min(start - .35, window_end - desired))
+                    window_end = min(hi, max(window_end, window_start + desired))
+                    window_hints[sid] = {**shot, "source_start": window_start, "source_end": window_end}
+                except (ValueError, TypeError, KeyError, OverflowError):
+                    continue
+        ranked = [sid for sid in dict.fromkeys(
+            [*recalled, *preferred[:ROUND_SIZE], *observed, *preferred[ROUND_SIZE:], *shots]) if sid in allowed]
+        first, rest = ranked[:ROUND_SIZE], ranked[ROUND_SIZE:]
+        sentence["candidate_ids"] = ([sid for sid in first if sid not in previous] +
+                                     [sid for sid in first if sid in previous] + rest)
         sentence["audio_durations_us"] = [audio_us]
         try:
             if not sentence["candidate_ids"]:
@@ -2841,7 +2893,8 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
             explicit = any(str(raw).strip() == str(index) for raw in (manifest.get("ai_refill_indices") or []))
             review_manifest = ({**manifest, "allow_partial_selling_points": False}
                                if explicit and len(sentence["selling_points"]) > 1 else manifest)
-            reviews, coverage = _review_pool(review_manifest, sentence, shots, directory, narration_timing or {})
+            review_shots = {**shots, **window_hints}
+            reviews, coverage = _review_pool(review_manifest, sentence, review_shots, directory, narration_timing or {})
             good = [r for r in reviews if r.get("verdict") == "matched"
                     and r.get("shot_id") in allowed]
             partial = manifest.get("delivery_mode") == "preview" and manifest.get("allow_partial_selling_points") is True
@@ -2962,10 +3015,19 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
         ordered.append(row)
     def keep(row):
         return not isinstance(row, dict) or row.get("index") not in replaced
+    output_manifest = dict(matched.get("manifest") or manifest)
+    # Reuse the selected visual rows, not the prior run's writer controls.
+    # In particular a refill must never write into the previous draft name.
+    for key in ("draft_name", "force_overwrite", "delivery_mode", "parent_run_id",
+                "recovery_stage", "run_id", "task_id", "_selection_attempt",
+                "variant_index", "variant_count", "ai_refill_indices", "ai_refill_feedback", "qc_rejected_shots"):
+        output_manifest.pop(key, None)
+        if key in manifest:
+            output_manifest[key] = copy.deepcopy(manifest[key])
+    output_manifest.update(selection_mode="rule_then_ai", segments=ordered)
     result = {**matched, "selection_mode": "rule_then_ai", "selection_policy": "rule_then_ai_refill",
               "segments": ordered, "refill_indices": wanted, "refill_replaced": replaced,
-              "refill_errors": errors, "manifest": {**(matched.get("manifest") or manifest),
-                  "selection_mode": "rule_then_ai", "segments": ordered}}
+              "refill_errors": errors, "manifest": output_manifest}
     for field in ("pending_items", "material_gaps", "degraded_matches", "visual_missing_matches", "preview_unresolved"):
         result[field] = [row for row in matched.get(field, []) if keep(row)]
     result["preview_unresolved"].extend(refill_unresolved)

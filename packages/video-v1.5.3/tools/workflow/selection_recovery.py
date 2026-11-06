@@ -35,8 +35,8 @@ def pending(report_dir: Path) -> bool:
 
 def _logical(manifest: dict) -> dict:
     return {k: v for k, v in manifest.items() if k not in {
-        "draft_name", "parent_run_id", "force_overwrite", "shot_analysis", "shot_analysis_file",
-        "qc_rejected_shots", "ai_refill_indices"}}
+        "draft_name", "parent_run_id", "force_overwrite", "shot_analysis", "shot_analysis_file", "_selection_attempt",
+        "qc_rejected_shots", "ai_refill_indices", "ai_refill_feedback"}}
 
 
 def freeze_refill_input(manifest: dict, report_dir: Path) -> dict:
@@ -64,8 +64,15 @@ def freeze_refill_input(manifest: dict, report_dir: Path) -> dict:
         segment = dict(sentence) if isinstance(sentence, dict) else {"text": str(sentence)}
         segment.update(audio=path, audio_duration_us=int(row["audio_duration_us"]), timing_certainty="audio")
         segments.append(segment)
-    controls = {key: manifest[key] for key in ("draft_name", "qc_rejected_shots", "ai_refill_indices") if key in manifest}
-    return {**prepared, **controls, "segments": segments}
+    resumed = dict(prepared)
+    for key in ("draft_name", "force_overwrite", "delivery_mode", "parent_run_id",
+                "recovery_stage", "run_id", "task_id", "_selection_attempt", "variant_index",
+                "variant_count", "qc_rejected_shots", "ai_refill_indices", "ai_refill_feedback"):
+        resumed.pop(key, None)
+        if key in manifest:
+            resumed[key] = manifest[key]
+    resumed["segments"] = segments
+    return resumed
 
 
 def _invalidate_match_report(report_dir: Path, matching_input: dict, failure: dict) -> None:

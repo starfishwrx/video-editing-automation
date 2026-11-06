@@ -81,6 +81,28 @@ class AIEditorTests(unittest.TestCase):
         self.assertEqual([r["shot_id"] for r in rows], ["alt"])
         self.assertTrue(coverage["feasible"])
 
+    def test_qc_inventory_exposes_action_windows_only_as_retrieval_hints(self):
+        shot = {**self.shot, 'action_segments': [
+            {'start': 0.5, 'end': 3.0, 'action': 'early action'},
+            {'start': 5.7, 'end': 5.9, 'action': 'later action'}]}
+        manifest = {**self.manifest, 'category': 'general',
+                    'ai_refill_feedback': {'1': {'reason': 'later action missing'}}}
+        response = {'sentences': [{'index': 1, 'kind': 'selling_point',
+            'selling_points': [{'id': 'p1', 'text': 'visible action'}],
+            'candidate_ids': ['handfeel'], 'scene_ids': [],
+            'candidate_windows': [{'shot_id': 'handfeel', 'start': 5.7, 'end': 5.9}]}],
+            'display_pool_ids': []}
+        captured = []
+        def call(prompt, path):
+            captured.append(prompt)
+            return response
+        with mock.patch.object(editor, '_call', side_effect=call):
+            result = editor._inventory(manifest, [shot], self.root)
+        self.assertIn('action_segments', captured[0])
+        self.assertIn('later action', captured[0])
+        self.assertEqual(result[0]['candidate_windows'][0]['start'], 5.7)
+        self.assertIn('仅作定位线索', captured[0])
+
     def test_inventory_discards_unknown_ids_without_promoting_them(self):
         model = {"sentences": [{**self.sentence, "candidate_ids": ["invented", "handfeel"]}],
                  "display_pool_ids": ["invented-display", "handfeel"]}

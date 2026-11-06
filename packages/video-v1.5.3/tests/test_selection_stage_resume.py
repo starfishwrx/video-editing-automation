@@ -80,6 +80,47 @@ class WorkerSelectionRecoveryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'REFILL_FROZEN_AUDIO_CHANGED'):
             selection_recovery.freeze_refill_input(request, self.report)
 
+    def test_explicit_force_build_refill_reuses_frozen_audio_and_feedback(self):
+        from orchestrator.runtime.file_safety import content_identity
+        self.snapshot['audio_files'] = [content_identity(self.audio)]
+        self.snapshot['manifest']['force_overwrite'] = True
+        self.snapshot['manifest']['_selection_attempt'] = 'old-run'
+        self.write('selection_resume.json', self.snapshot)
+        self.write('selection_recovery_state.json', {'status': 'SUCCESS', 'source_run_id': 'current-attempt'})
+        feedback = {'1': {'claim': '保持原句。', 'observed': 'prior display', 'reason': 'action missing',
+                          'match_level': 'ACCEPTABLE_DEGRADED', 'prior_shot_ids': ['old-shot']}}
+        request = {**self.manifest, 'force_overwrite': False, '_selection_attempt': 'new-run',
+                   'ai_refill_indices': [1], 'ai_refill_feedback': feedback}
+        def subprocess_build(command, **kwargs):
+            input_path = Path(command[command.index('--input') + 1])
+            actual = json.loads(input_path.read_text(encoding='utf-8'))
+            self.assertEqual(actual['draft_name'], 'new-draft')
+            self.assertFalse(actual['force_overwrite'])
+            self.assertEqual(actual['_selection_attempt'], 'new-run')
+            self.assertEqual(actual['segments'][0]['audio'], str(self.audio))
+            self.assertEqual(actual['segments'][0]['audio_duration_us'], 1_000_000)
+            self.assertEqual(actual['ai_refill_feedback'], feedback)
+            return SimpleNamespace(returncode=0, stdout='fixture success', stderr='')
+        with patch.object(worker, 'log'), patch.object(worker.subprocess, 'run', side_effect=subprocess_build) as run:
+            result = worker.run_build(request, self.report, 'new-draft', timeout=60, force_rebuild=True)
+        self.assertEqual(result['rc'], 0)
+        run.assert_called_once()
+        self.assertTrue(list(self.report.glob('selection_recovery_state.*.json')))
+        self.assertEqual(self.audio.read_bytes(), b'retained audio fixture')
+
+    def test_existing_dispatcher_resume_build_forwards_explicit_force(self):
+        from tools import batch_dispatch
+        queue = self.root / 'queue.json'
+        queue.write_text(json.dumps([{'record_id': 'one', 'force_rebuild': True},
+                                     {'record_id': 'other'}]), encoding='utf-8')
+        with patch.object(batch_dispatch, 'dispatch', return_value=[]) as dispatched, \
+                patch('builtins.print'):
+            code = batch_dispatch.main(['resume', '--queue', str(queue), '--work-root', str(self.root),
+                                        '--record-id', 'one', '--stage', 'build'])
+        self.assertEqual(code, 0)
+        self.assertEqual(dispatched.call_args.args[0], [{'record_id': 'one', 'force_rebuild': True}])
+        self.assertEqual(dispatched.call_args.kwargs['resume_stage'], 'build')
+
     def test_default_worker_runs_recovery_stages_and_keeps_original_audio_and_timing(self):
         before = self.audio.read_bytes()
         with patch.object(worker, "DRAFTS", self.drafts), patch.object(worker, "log"), \

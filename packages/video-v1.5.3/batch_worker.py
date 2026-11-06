@@ -1142,11 +1142,74 @@ def qc_rejected_shots_from_report(rd: pathlib.Path, report: dict | None = None, 
     return out
 
 
+def qc_refill_feedback_from_report(rd: pathlib.Path, report: dict, targets, *, expected_sources) -> dict:
+    """Use only a validated QC bound to its draft and the target's real source.
+
+    Observations guide candidate retrieval and pixel review; they never certify
+    another shot or change the QC grade.
+    """
+    if not isinstance(report, dict) or not targets:
+        return {}
+    response = report.get("response_contract") or {}
+    draft = pathlib.Path(str(report.get("draft") or ""))
+    if (response.get("status") != "VALIDATED" or response.get("errors")
+            or not production_eval.visual_qc_contract.report_matches_draft(report, draft)):
+        return {}
+    segments = _read_json(rd / "shot_match_report.json").get("segments") or []
+    bound_sources = [row.get("identity") for row in report.get("source_bindings") or [] if isinstance(row, dict)]
+    try:
+        from orchestrator.quality import draft_visual_qc, ai_editor_qc
+        from orchestrator.media.source_normalization import read_prepared_sources
+        actual, issues = draft_visual_qc._timeline_items(draft_visual_qc._load_json(draft), draft)
+        if issues:
+            return {}
+        actual_by_index = {item["index"]: item for item in actual if not item.get("intentional_gap")}
+        prepared_sources = read_prepared_sources(draft)
+    except (OSError, RuntimeError, ValueError, KeyError, TypeError):
+        return {}
+    mapping = report.get("segment_map") or []
+    out = {}
+    for row in report.get("model_review") or []:
+        if not isinstance(row, dict) or row.get("index") not in targets:
+            continue
+        index = row["index"]
+        if (type(index) is not int or not 1 <= index <= len(segments)
+                or production_eval.visual_qc_contract.row_errors(row)):
+            continue
+        segment = segments[index - 1]
+        if not isinstance(segment, dict) or str(row.get("claim") or "").strip() != str(segment.get("text") or "").strip():
+            continue
+        parts = segment.get("span_parts") or [segment]
+        if any(not isinstance(part, dict) or not isinstance(part.get("ai_selection"), dict)
+               or part["ai_selection"].get("source_identity") not in expected_sources
+               or part["ai_selection"].get("source_identity") not in bound_sources for part in parts):
+            continue
+        maps = [item for item in mapping if isinstance(item, dict) and item.get("claim_index") == index]
+        if len(maps) != 1 or not isinstance(maps[0].get("draft_segments"), list):
+            continue
+        actual_indices = maps[0]["draft_segments"]
+        if (len(actual_indices) != len(parts) or any(type(i) is not int for i in actual_indices)
+                or len(set(actual_indices)) != len(actual_indices)
+                or any(i not in actual_by_index for i in actual_indices)):
+            continue
+        if any(not ai_editor_qc.source_matches_receipt(actual_by_index[i]["source"],
+                   part["ai_selection"]["source_identity"], prepared_sources)
+               for i, part in zip(actual_indices, parts)):
+            continue
+        source_ids = sorted({str(part.get("shot_id")) for part in parts if part.get("shot_id")})
+        if not source_ids:
+            continue
+        out[str(index)] = {"claim": row["claim"], "observed": row["observed"],
+                           "reason": row["reason"], "match_level": row["match_level"],
+                           "prior_shot_ids": source_ids}
+    return out
+
+
 def qc_rejection_identity(manifest: dict) -> dict:
     """Bind retry exclusions to editing inputs and the actual local sources."""
     transient = {"draft_name", "force_overwrite", "parent_run_id", "recovery_stage",
                  "shot_analysis_file", "shot_analysis", "_selection_attempt",
-                 "qc_rejected_shots", "ai_refill_indices", "variant_index", "variant_count",
+                 "qc_rejected_shots", "ai_refill_indices", "ai_refill_feedback", "variant_index", "variant_count",
                  "variant_pool_size", "variant_score_tolerance"}
     logical = {key: value for key, value in manifest.items() if key not in transient}
     sources = []
@@ -1160,13 +1223,14 @@ def qc_rejection_identity(manifest: dict) -> dict:
     return {"manifest_sha256": _payload_sha256(logical), "sources": sources}
 
 
-def save_qc_rejections(rd: pathlib.Path, identity: dict, rejected: dict, repair_indices=None) -> None:
+def save_qc_rejections(rd: pathlib.Path, identity: dict, rejected: dict, repair_indices=None, feedback=None) -> None:
     """Checkpoint before another build can overwrite the latest QC evidence."""
     from orchestrator.file_safety import atomic_write_text
     atomic_write_text(rd / "qc_rejected_shots.json", json.dumps({
         "schema": "sentence-qc-rejections-v1", "identity": identity,
         "rejected_shots": {str(index): sorted(ids) for index, ids in sorted(rejected.items())},
         "repair_indices": sorted(repair_indices or []),
+        "repair_feedback": feedback or {},
     }, ensure_ascii=False, indent=2))
 
 
@@ -1175,6 +1239,7 @@ def restore_qc_rejections(rd: pathlib.Path, manifest: dict) -> tuple[dict, dict]
     saved = _read_json(rd / "qc_rejected_shots.json")
     rejected = {}
     repair_indices = set()
+    feedback = {}
     if saved.get("schema") == "sentence-qc-rejections-v1" and saved.get("identity") == identity:
         repair_indices.update(i for i in saved.get("repair_indices") or [] if type(i) is int and i > 0)
         rows = saved.get("rejected_shots")
@@ -1209,7 +1274,7 @@ def restore_qc_rejections(rd: pathlib.Path, manifest: dict) -> tuple[dict, dict]
         # its enriched input only if reconstructing that snapshot matches it.
         try:
             from tools.workflow import selection_recovery
-            controls = {key: prior_input[key] for key in ("draft_name", "ai_refill_indices", "qc_rejected_shots")
+            controls = {key: prior_input[key] for key in ("draft_name", "ai_refill_indices", "qc_rejected_shots", "ai_refill_feedback")
                         if key in prior_input}
             expected = selection_recovery.freeze_refill_input({**manifest, **controls}, rd)
             input_matches = selection_recovery._logical(expected) == selection_recovery._logical(prior_input)
@@ -1228,7 +1293,9 @@ def restore_qc_rejections(rd: pathlib.Path, manifest: dict) -> tuple[dict, dict]
         for index, ids in qc_rejected_shots_from_report(
                 rd, report, expected_sources=identity["sources"]).items():
             rejected.setdefault(index, set()).update(ids)
-    save_qc_rejections(rd, identity, rejected, repair_indices)
+    if input_matches and repair_indices:
+        feedback.update(qc_refill_feedback_from_report(rd, report, repair_indices, expected_sources=identity["sources"]))
+    save_qc_rejections(rd, identity, rejected, repair_indices, feedback)
     return identity, rejected
 
 
@@ -1539,6 +1606,7 @@ def process_task(task: dict, *, retry_partial: bool = False,
             rejection_identity, qc_rejected = restore_qc_rejections(rd, manifest)
             saved_repairs = _read_json(rd / "qc_rejected_shots.json")
             repair_visual_missing_indices.update(saved_repairs.get("repair_indices") or [])
+            repair_feedback = saved_repairs.get("repair_feedback") or {}
             if qc_rejected:
                 log("restore post-draft QC rejections: %s" % {
                     k: sorted(v) for k, v in sorted(qc_rejected.items())})
@@ -1590,6 +1658,8 @@ def process_task(task: dict, *, retry_partial: bool = False,
                     build_manifest["variant_score_tolerance"] = 8
                     if repair_visual_missing_indices:
                         build_manifest["ai_refill_indices"] = sorted(repair_visual_missing_indices)
+                        if repair_feedback:
+                            build_manifest["ai_refill_feedback"] = repair_feedback
                     if qc_rejected:
                         # Re-select a different pixel-reviewed shot for each
                         # QC-rejected sentence; never blank or re-use it.
@@ -1697,7 +1767,11 @@ def process_task(task: dict, *, retry_partial: bool = False,
                                     expected_sources=rejection_identity["sources"]).items():
                                 repair_visual_missing_indices.add(key)
                                 qc_rejected.setdefault(key, set()).update(ids)
-                            save_qc_rejections(rd, rejection_identity, qc_rejected, repair_visual_missing_indices)
+                            repair_feedback.update(qc_refill_feedback_from_report(
+                                rd, qc_result.get("report") or {}, repair_visual_missing_indices,
+                                expected_sources=rejection_identity["sources"]))
+                            save_qc_rejections(rd, rejection_identity, qc_rejected,
+                                               repair_visual_missing_indices, repair_feedback)
                         log("DRAFT %d/%d attempt %d failed (%s): %s" % (
                             i, count, attempt,
                             "hard" if cls["vision_hard"] else "transient",

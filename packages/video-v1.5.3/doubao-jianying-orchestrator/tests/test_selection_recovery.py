@@ -311,6 +311,90 @@ class SelectionRecoveryTests(unittest.TestCase):
         before.pop('timing_certainty', None)
         self.assertEqual(preserved, before)
 
+    def test_refill_uses_qc_gap_tail_window_and_current_draft_through_writer(self):
+        from orchestrator.application import engine, headless_production
+        self.manifest['head_trim_s'] = .3
+        self.manifest['segments'][1]['audio_duration_us'] = 1_279_000
+        original_plan = self.plan()
+        original_plan['rows'][1]['parts'][0]['audio_duration_us'] = 1_279_000
+        baseline = editor._assemble(self.manifest, self.analysis, original_plan, narration_timing=None, verify_sources=True)
+        baseline['manifest'].update(draft_name='old-a1', force_overwrite=True, parent_run_id='old-run')
+        preserved = copy.deepcopy(baseline['segments'][0])
+        segments = copy.deepcopy(self.manifest['segments'])
+        for index, segment in enumerate(segments, 1):
+            audio = self.root / f'fixed-{index}.wav'
+            audio.write_bytes(b'fixed recording')
+            segment.update(audio=str(audio), timing_certainty='audio')
+        alternative_path = self.root / 'alternative.mp4'
+        alternative_path.write_bytes(b'distinct source')
+        alternative = {**self.shots[1], 'shot_id': 'direct-action', 'video': str(alternative_path),
+                       'source_end': 6.333, 'duration': 6.333, 'material_duration_us': 6_333_000,
+                       'visual_description': 'early action then later action',
+                       'action_segments': [{'start': 0, 'end': 3, 'action': 'early action'},
+                                           {'start': 5.7, 'end': 6.18, 'action': 'later action'}]}
+        analysis = {'shots': [*self.shots, alternative]}
+        review = {**copy.deepcopy(self.reviews['2'][0]), 'shot_id': 'direct-action',
+                  'source_identity': contract.source_identity(alternative_path),
+                  'evidence_intervals_us': [{'start': 5_700_000, 'end': 6_180_000}]}
+        feedback = {'claim': segments[1]['text'], 'observed': 'only a static display',
+                    'reason': 'the actual action is not visible', 'match_level': 'ACCEPTABLE_DEGRADED',
+                    'prior_shot_ids': ['shot2']}
+        request = {**self.manifest, 'segments': segments, 'delivery_mode': 'formal', 'draft_name': 'new-a2',
+                   'force_overwrite': False, 'parent_run_id': 'new-run', 'ai_refill_indices': [2],
+                   'ai_refill_feedback': {'2': feedback}}
+        (self.root / 'shot_match_report.json').write_text(json.dumps(baseline, ensure_ascii=False), encoding='utf-8')
+        def inventory(m, shots, directory):
+            self.assertIn('actual action is not visible', m['revision_feedback'])
+            return [{'candidate_ids': ['direct-action', 'shot2'], 'candidate_windows': [
+                {'shot_id': 'direct-action', 'start': 5.7, 'end': 6.18}]}]
+        def review_pool(_m, sentence, shots, _directory, _audio, **_kwargs):
+            self.assertEqual(sentence['qc_feedback'], feedback)
+            self.assertEqual(sentence['candidate_ids'][0], 'direct-action')
+            self.assertIn('shot2', sentence['candidate_ids'])
+            def media(shot, _directory, **_kwargs):
+                self.assertLessEqual(shot['source_start'], 5.7)
+                self.assertGreaterEqual(shot['source_end'], 6.18)
+                self.assertGreaterEqual(shot['source_end'] - shot['source_start'], 1.279 + .3 - 0.00001)
+                return {'start': shot['source_start'], 'end': shot['source_end'],
+                        'before': contract.source_identity(shot['video']),
+                        'times': [5.7, 6.0, 6.18], 'sheet': self.root / 'synthetic.jpg'}
+            def call(prompt, _path, _sheet=None):
+                self.assertIn('the actual action is not visible', prompt)
+                self.assertIn('反馈与规则冲突时不得把反馈中的额外要求变成新规则', prompt)
+                return copy.deepcopy(review)
+            with patch.object(editor, '_review_media', side_effect=media), patch.object(editor, '_call', side_effect=call):
+                observed = editor._review(_m, sentence, shots['direct-action'], _directory)
+            return [observed], {'feasible': True}
+        with patch.object(cli, '_run_shot_analysis', return_value=analysis), \
+                patch('orchestrator.material_corrections.apply', side_effect=lambda _m, a, _r: a), \
+                patch.object(editor, '_inventory', side_effect=inventory), \
+                patch.object(editor, '_review_pool', side_effect=review_pool):
+            result, blocker = cli._temporary_match(request, self.root / 'input.json', self.root)
+        self.assertIsNone(blocker, blocker)
+        self.assertEqual(result['draft_name'], 'new-a2')
+        self.assertFalse(result['force_overwrite'])
+        self.assertEqual(result['parent_run_id'], 'new-run')
+        self.assertEqual(result['segments'][1]['shot_id'], 'direct-action')
+        retained = dict(result['segments'][0]); retained.pop('audio'); retained.pop('timing_certainty')
+        preserved.pop('timing_certainty', None)
+        self.assertEqual(retained, preserved)
+        self.assertEqual([r['audio'] for r in result['segments']], [s['audio'] for s in segments])
+        drafts = self.root / 'drafts'; drafts.mkdir()
+        old = drafts / 'old-a1'; old.mkdir(); (old / 'sentinel').write_text('keep')
+        obj = engine.OrchestrationEngine.__new__(engine.OrchestrationEngine)
+        obj.m = result
+        def writer(instance, clips, bgm):
+            target = drafts / instance.m['draft_name']
+            target.mkdir(exist_ok=False)
+            return {'status': 'SUCCESS', 'draft_name': target.name}
+        with patch.dict('os.environ', {'JY_DRAFT_BACKEND': 'headless'}), \
+                patch.object(obj, '_playback_gate', return_value=None), \
+                patch.object(headless_production, 'write_draft', side_effect=writer):
+            answer = obj.write_draft([], None)
+        self.assertEqual(answer['draft_name'], 'new-a2')
+        self.assertEqual((old / 'sentinel').read_text(), 'keep')
+        self.assertTrue((drafts / 'new-a2').is_dir())
+
     def test_rejected_joint_group_still_allows_independent_two_x(self):
         plan = self.plan()
         audio = 1_197_812
