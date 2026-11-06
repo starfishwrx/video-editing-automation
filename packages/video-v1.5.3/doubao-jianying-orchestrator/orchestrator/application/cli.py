@@ -609,11 +609,26 @@ def _match_temporary_input(manifest: dict, input_path: Path, report_dir: Path,
     refill_indices = sorted(set(i for i in refill_indices if i >= 1))
 
     if mode == "ai_editor":
-        analysis = ai_editor.prepare(manifest, analysis, report_dir, narration_timing=narration_timing)
-        matched = shot_analyzer.match_manifest(
-            manifest, analysis, topk=int(manifest.get("shot_topk", 3) or 3),
-            auto_accept_top1=bool(manifest.get("auto_accept_top1", True)),
-            narration_timing=narration_timing)
+        if refill_indices:
+            prior_path = report_dir / "shot_match_report.json"
+            try:
+                prior_match = json.loads(prior_path.read_text(encoding="utf-8-sig"))
+                reason = _validate_preserved_match(manifest, analysis, prior_match, refill_indices, narration_timing)
+                if prior_match.get("ok") is not True:
+                    reason = "PRIOR_SELECTION_NOT_COMPLETE"
+            except (OSError, ValueError, TypeError, KeyError):
+                reason = "PRIOR_SELECTION_IDENTITY_MISMATCH"
+            if reason:
+                return manifest, {"status": "SHOT_MATCH_BLOCKED", "message": reason,
+                                  "match_report": str(prior_path)}
+            matched = ai_editor.refill_indices(manifest, analysis, prior_match, refill_indices,
+                                                report_dir, narration_timing=narration_timing)
+        else:
+            analysis = ai_editor.prepare(manifest, analysis, report_dir, narration_timing=narration_timing)
+            matched = shot_analyzer.match_manifest(
+                manifest, analysis, topk=int(manifest.get("shot_topk", 3) or 3),
+                auto_accept_top1=bool(manifest.get("auto_accept_top1", True)),
+                narration_timing=narration_timing)
     elif mode == "rule_then_ai":
         from .. import ai_editor_contract
         # Keep prior AI-refill sentences across rebuilds. A fresh rule pass would
@@ -1017,11 +1032,12 @@ def cmd_build(args) -> int:
                 if path.is_file():
                     audio_files.append(content_identity(path))
             manifest["_selection_attempt"] = logger.run_id
-            (report_dir / "selection_resume.json").write_text(json.dumps({
-                "input_manifest": _read(input_path), "manifest": manifest,
-                "audio_files": audio_files, "bgm_file": bgm_identity, "timing": narration_timing,
-                "run_id": logger.run_id,
-            }, ensure_ascii=False, indent=2), encoding="utf-8")
+            if not manifest.get("ai_refill_indices"):
+                (report_dir / "selection_resume.json").write_text(json.dumps({
+                    "input_manifest": _read(input_path), "manifest": manifest,
+                    "audio_files": audio_files, "bgm_file": bgm_identity, "timing": narration_timing,
+                    "run_id": logger.run_id,
+                }, ensure_ascii=False, indent=2), encoding="utf-8")
             manifest, blocker = _temporary_match(manifest, input_path, report_dir,
                                                  narration_timing=narration_timing)
             shot_match_report = report_dir / "shot_match_report.json"
@@ -1189,7 +1205,8 @@ def cmd_recover(args) -> int:
     manifest["parent_run_id"] = parent_run_id
     manifest["recovery_stage"] = stage
     suffix = time.strftime("%Y%m%d_%H%M%S")
-    manifest["draft_name"] = f"{manifest.get('draft_name') or '豆包剪映编排草稿'}_recovery_{suffix}"
+    requested_name = str(getattr(args, "draft_name", "") or "").strip()
+    manifest["draft_name"] = f"{requested_name or manifest.get('draft_name') or '豆包剪映编排草稿'}_recovery_{suffix}"
     manifest["force_overwrite"] = False
     report_dir = Path(args.report_dir).expanduser().resolve()
     report_dir.mkdir(parents=True, exist_ok=True)
@@ -1749,6 +1766,7 @@ def main(argv=None) -> int:
     rc.add_argument("--stage", choices=("preflight", "semantic_match", "draft_write", "ui_acceptance"),
                     default="draft_write", help="只恢复一个阶段；默认只消费已有匹配结果写稿")
     rc.add_argument("--draft", default="", help="ui_acceptance 阶段的草稿目录")
+    rc.add_argument("--draft-name", default="", help="恢复草稿的本轮名称前缀（仍自动添加唯一后缀）")
     rc.set_defaults(func=cmd_recover)
 
     me = sub.add_parser("migrate-encrypted", help="通过剪映官方副本流程迁移加密草稿（不解密、不覆盖）")

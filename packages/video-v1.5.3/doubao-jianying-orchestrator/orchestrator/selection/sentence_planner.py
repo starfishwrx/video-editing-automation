@@ -60,5 +60,7 @@ def plan(manifest: dict, directory: Path, call: Callable | None = None) -> dict:
     if call is None:
         from .ai_editor import _call
         call = _call
-    response = call(PROMPT + text, directory / 'sentence_plan.json')
+    feedback = str(manifest.get('revision_feedback') or '').strip()
+    instruction = ("\n旧稿修订反馈（仅用于修订当前断句，不允许改写原文）：\n" + feedback + "\n") if feedback else ""
+    response = call(PROMPT + text + instruction, directory / 'sentence_plan.json')
     return {**manifest, 'segments': validate(text, response), 'sentence_plan_version': 'semantic-v1'}

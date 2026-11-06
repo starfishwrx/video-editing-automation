@@ -156,6 +156,12 @@ def batch_result_contract(status: str, *, pipeline_version: str, run_id: str, fa
     else:
         failure_class, failure_code = None, None
 
+    if first.get("retryable") is True and first.get("resume_stage") in {"semantic_match", "draft_write", "delivery"}:
+        if first.get("failure_class"):
+            failure_class = str(first["failure_class"])
+        if first.get("failure_code"):
+            failure_code = str(first["failure_code"])
+
     retryable = bool(
         failure_class in {"vision", "provider"}
         and any(token in lower for token in (
@@ -166,6 +172,8 @@ def batch_result_contract(status: str, *, pipeline_version: str, run_id: str, fa
     )
     if (first.get("preflight_only") is True and first.get("retryable") is True
             and first.get("resume_stage") == "semantic_match"):
+        retryable = True
+    if first.get("retryable") is True and first.get("resume_stage") in {"draft_write", "delivery"}:
         retryable = True
     if any(row.get("stage_retry_exhausted") is True or row.get("retryable") is False for row in rows) or any(
             token in lower for token in ("unauthorized", "forbidden", "invalid api key", "insufficient balance", "http 401", "http 403")):

@@ -1,7 +1,7 @@
 {
   "rulepack": "weipin",
   "label": "卫品",
-  "version": "1.5.3-11",
+  "version": "1.5.3-12",
   "experiment_contracts": {
     "absorb_rewet": {
       "same_experiment": true,
@@ -156,7 +156,7 @@
       "id": "absorb_test",
       "label": "吸水实验",
       "kind": "split_speed",
-      "text_keywords": ["吸水", "瞬吸", "秒吸", "倒水", "吸收", "回渗", "吸得快", "反渗", "回流", "锁水", "吸完", "吸干", "吸进",
+      "text_keywords": ["吸水", "瞬吸", "秒吸", "倒水", "吸收", "下渗", "渗透", "回渗", "吸得快", "反渗", "回流", "锁水", "吸完", "吸干", "吸进",
                         "量大", "量多", "一整晚", "不扩散", "锁中央", "锁在中央"],
       "follow_keywords": ["干爽", "干净", "清爽", "不黏", "不粘", "兜住", "肉眼可见"],
       "group_bridge": 1,

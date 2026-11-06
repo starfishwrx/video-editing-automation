@@ -275,6 +275,25 @@ class DefaultHeadlessTests(unittest.TestCase):
             native.assert_called_once_with(engine, [], None)
             legacy.assert_not_called()
 
+    def test_only_known_media_incompatibility_falls_back_once(self):
+        engine = OrchestrationEngine.__new__(OrchestrationEngine)
+        engine.m = {"draft_name": "offline"}
+        clips = []
+        with patch.dict(os.environ, {}, clear=True), patch.object(headless_production, 'write_draft',
+                return_value={'status': 'HEADLESS_BUILD_BLOCKED', 'reason': 'SOURCE_ROTATION_HDR_METADATA_UNSUPPORTED'}), \
+                patch.object(engine, '_write_legacy_draft', return_value={'status': 'SUCCESS'}) as legacy:
+            result = engine.write_draft(clips, 'music.wav')
+            self.assertEqual(result['draft_backend'], 'legacy')
+            self.assertEqual(result['fallback_reason'], 'SOURCE_ROTATION_HDR_METADATA_UNSUPPORTED')
+            legacy.assert_called_once_with(clips, 'music.wav')
+            self.assertEqual(engine.m['draft_name'], 'offline')
+        for reason in ('FILE_NOT_FOUND', 'DISK_FULL', 'TASK_LOCKED', 'QC_FAILED'):
+            with patch.dict(os.environ, {}, clear=True), patch.object(headless_production, 'write_draft',
+                    return_value={'status': 'HEADLESS_BUILD_BLOCKED', 'reason': reason}), \
+                    patch.object(engine, '_write_legacy_draft') as legacy:
+                self.assertEqual(engine.write_draft(clips, 'music.wav')['reason'], reason)
+                legacy.assert_not_called()
+
     def test_empty_bgm_runs_automatically_without_music_preview_confirmation(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -298,6 +317,19 @@ class DefaultHeadlessTests(unittest.TestCase):
         for value, expected in [('song-id',{'music_id':'song-id'}), ('Official title',{'music_id':'Official title'}),
                 (r'C:\music.wav',{'path':r'C:\music.wav'}), ({'path':'a.wav','start':2},{'path':'a.wav','start':2})]:
             self.assertEqual(normalize(value), expected)
+
+    def test_plaintext_desktop_timeline_is_read_and_encrypted_index_is_not(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            (root / 'draft_info.json').write_text(json.dumps({'id': 'stale-root', 'tracks': []}), encoding='utf-8')
+            timeline = root / 'Timelines' / 'LINE1'
+            timeline.mkdir(parents=True)
+            (root / 'Timelines' / 'project.json').write_text(json.dumps({'main_timeline_id': 'LINE1'}), encoding='utf-8')
+            (timeline / 'draft_content.json').write_text(json.dumps({'id': 'LINE1', 'tracks': []}), encoding='utf-8')
+            self.assertEqual(draft_documents.timeline(root)['id'], 'LINE1')
+            (timeline / 'draft_content.json').write_bytes(b'\x00not-json')
+            with self.assertRaisesRegex(ValueError, 'UNOWNED_NATIVE_DRAFT_UNSUPPORTED'):
+                draft_documents.timeline(root)
 
     def test_native_read_failure_never_falls_back_to_old_plaintext(self):
         with tempfile.TemporaryDirectory() as raw:

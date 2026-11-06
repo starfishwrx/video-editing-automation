@@ -81,6 +81,28 @@ class AIEditorTests(unittest.TestCase):
         self.assertEqual([r["shot_id"] for r in rows], ["alt"])
         self.assertTrue(coverage["feasible"])
 
+    def test_qc_inventory_exposes_action_windows_only_as_retrieval_hints(self):
+        shot = {**self.shot, 'action_segments': [
+            {'start': 0.5, 'end': 3.0, 'action': 'early action'},
+            {'start': 5.7, 'end': 5.9, 'action': 'later action'}]}
+        manifest = {**self.manifest, 'category': 'general',
+                    'ai_refill_feedback': {'1': {'reason': 'later action missing'}}}
+        response = {'sentences': [{'index': 1, 'kind': 'selling_point',
+            'selling_points': [{'id': 'p1', 'text': 'visible action'}],
+            'candidate_ids': ['handfeel'], 'scene_ids': [],
+            'candidate_windows': [{'shot_id': 'handfeel', 'start': 5.7, 'end': 5.9}]}],
+            'display_pool_ids': []}
+        captured = []
+        def call(prompt, path):
+            captured.append(prompt)
+            return response
+        with mock.patch.object(editor, '_call', side_effect=call):
+            result = editor._inventory(manifest, [shot], self.root)
+        self.assertIn('action_segments', captured[0])
+        self.assertIn('later action', captured[0])
+        self.assertEqual(result[0]['candidate_windows'][0]['start'], 5.7)
+        self.assertIn('仅作定位线索', captured[0])
+
     def test_inventory_discards_unknown_ids_without_promoting_them(self):
         model = {"sentences": [{**self.sentence, "candidate_ids": ["invented", "handfeel"]}],
                  "display_pool_ids": ["invented-display", "handfeel"]}
@@ -196,6 +218,64 @@ class AIEditorTests(unittest.TestCase):
         row = result["segments"][1]
         self.assertEqual(row["ai_selection"]["index"], 2)
         self.assertTrue(contract.validate_segment_receipt(row, index=2, verify_source=True, manifest=manifest)["ok"])
+
+    def test_all_ai_refill_passes_real_worker_gate_but_mixed_does_not(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+        import batch_worker as worker
+        alt_video = self.root / 'alternative.mp4'
+        alt_video.write_bytes(b'alternative source')
+        alt = {**self.shot, 'shot_id': 'alternative', 'video': str(alt_video)}
+        alt_review = {**self.review, 'shot_id': 'alternative',
+                      'source_identity': contract.source_identity(alt_video)}
+        first = self.result()
+        self.assertTrue(first['ok'], first)
+        second = {'text': '柔和细腻的手感', 'audio_duration_us': 2000000}
+        manifest = {**self.manifest, 'delivery_mode': 'formal',
+                    'segments': [self.manifest['segments'][0], second]}
+        previous = {**first, 'segments': [first['segments'][0],
+                    {'index': 2, 'text': second['text']}], 'pending_items': []}
+        analysis = {'shots': [self.shot, alt]}
+        with mock.patch.object(editor, '_review_pool', return_value=([alt_review], {'feasible': True})):
+            result = editor.refill_indices(manifest, analysis, previous, [2], self.root)
+        self.assertTrue(result['ok'], result)
+        self.assertEqual(result['selection_mode'], 'ai_editor')
+        self.assertEqual(result['claim_gate_coverage']['certification'], 'CERTIFIED')
+        (self.root / 'shot_candidates.json').write_text(json.dumps(analysis), encoding='utf-8')
+        (self.root / 'shot_match_report.json').write_text(json.dumps(result), encoding='utf-8')
+        self.assertEqual(worker.validate_visual_match(self.root),
+                         (True, 'ai_visual_match_valid_independent_qc_required'))
+        # Source/receipt validation remains mandatory even for an all-AI report.
+        broken = copy.deepcopy(result)
+        broken['segments'][1]['ai_selection']['index'] = 1
+        broken['manifest']['segments'] = copy.deepcopy(broken['segments'])
+        (self.root / 'shot_match_report.json').write_text(json.dumps(broken), encoding='utf-8')
+        self.assertFalse(worker.validate_visual_match(self.root)[0])
+        # A genuine legacy + AI result retains the mixed contract and fails
+        # the legacy claim gate when no legacy certification was supplied.
+        kept = copy.deepcopy(first['segments'][0])
+        kept.pop('ai_selection', None)
+        kept['selection_mode'] = 'rule'
+        mixed_prior = {**previous, 'segments': [kept, previous['segments'][1]]}
+        with mock.patch.object(editor, '_review_pool', return_value=([alt_review], {'feasible': True})):
+            mixed = editor.refill_indices(manifest, analysis, mixed_prior, [2], self.root)
+        self.assertTrue(mixed['ok'], mixed)
+        self.assertEqual(mixed['selection_mode'], 'rule_then_ai')
+        self.assertEqual(mixed['claim_gate_coverage']['certification'], 'MIXED_RULE_AND_AI_REFILL')
+        (self.root / 'shot_match_report.json').write_text(json.dumps(mixed), encoding='utf-8')
+        self.assertFalse(worker.validate_visual_match(self.root)[0])
+
+    def test_refill_does_not_reuse_rejected_shot_for_original_second_sentence(self):
+        manifest = {**self.manifest, 'segments': [
+            {'text': '保留原句', 'audio_duration_us': 2_000_000}, self.manifest['segments'][0]],
+            'ai_refill_indices': [2], 'qc_rejected_shots': {'2': ['handfeel']}}
+        kept = {'index': 1, 'text': '保留原句', 'shot_id': 'keep', 'video': 'kept.mp4'}
+        matched = {'ok': True, 'segments': [kept, {'index': 2, 'text': self.sentence['text'], 'shot_id': 'handfeel'}]}
+        with mock.patch.object(editor, '_review_pool') as review:
+            result = editor.refill_indices(manifest, {'shots': [self.shot]}, matched, [2], self.root)
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['segments'][0], kept)
+        self.assertNotIn(2, result.get('refill_replaced') or [])
+        review.assert_not_called()
 
     def test_refill_preserves_fixed_audio_through_engine_clips(self):
         from orchestrator.application import engine
@@ -548,7 +628,17 @@ class AIEditorTests(unittest.TestCase):
         frames = ai_editor_qc.frame_plan(claim, [row])
         self.assertGreaterEqual(len(frames), 8)
         self.assertIn(0, [f[2] for f in frames])
+        shifted = {**row, "source_start": segment["source_start"] + .05}
+        self.assertEqual(ai_editor_qc.validate_cut(claim, [shifted]), [])
         row["source_duration"] = .2
+        self.assertIn("AI_QC_EVIDENCE_CUT_AWAY", ai_editor_qc.validate_cut(claim, [row]))
+
+    def test_small_cut_shift_cannot_remove_entire_evidence(self):
+        segment = self.result()["segments"][0]
+        start = round(segment["source_start"] * 1_000_000)
+        segment["ai_selection"]["evidence_intervals_us"] = [{"start": start, "end": start + 50_000}]
+        claim = {"index": 1, "ai_segment": segment}
+        row = {"source": str(self.video), "source_start": segment["source_start"] + .05, "source_duration": segment["duration"]}
         self.assertIn("AI_QC_EVIDENCE_CUT_AWAY", ai_editor_qc.validate_cut(claim, [row]))
 
     def test_round_expands_beyond_first_eight(self):
@@ -953,6 +1043,27 @@ class AIEditorTests(unittest.TestCase):
         self.assertEqual(cli._validate_preserved_match(manifest, analysis, prior, [2], changed_timing), "PRIOR_AUDIO_TIMING_MISMATCH")
         bad = {**prior, "manifest": {"segments": []}}
         self.assertEqual(cli._validate_preserved_match(manifest, analysis, bad, [2], None), "PRIOR_SELECTION_IDENTITY_MISMATCH")
+
+    def test_ai_editor_explicit_refill_only_rechecks_target_and_preserves_prior_rows(self):
+        from orchestrator import cli
+        rows = [{'index': 1, 'text': '第一句'}, {'index': 2, 'text': '第二句'}]
+        prior = {'ok': True, 'segments': rows, 'manifest': {'segments': rows}}
+        (self.root / 'shot_match_report.json').write_text(json.dumps(prior, ensure_ascii=False), encoding='utf-8')
+        manifest = {'selection_mode': 'ai_editor', 'segments': rows, 'ai_refill_indices': [2]}
+        analysis = {'shots': [{'shot_id': 'fixture'}]}
+        def refill(_m, _a, selected, indices, *_args, **_kwargs):
+            self.assertEqual(indices, [2])
+            self.assertEqual(selected['segments'][0], rows[0])
+            return selected
+        with mock.patch.object(cli, '_run_shot_analysis', return_value=analysis), \
+                mock.patch('orchestrator.material_corrections.apply', side_effect=lambda _m, a, _r: a), \
+                mock.patch.object(cli, '_validate_preserved_match', return_value=''), \
+                mock.patch.object(editor, 'prepare', side_effect=AssertionError('full selection repeated')), \
+                mock.patch.object(editor, 'refill_indices', side_effect=refill) as called:
+            result, blocker = cli._temporary_match(manifest, self.root / 'input.json', self.root)
+        self.assertIsNone(blocker)
+        self.assertEqual(result['segments'][0], rows[0])
+        called.assert_called_once()
 
     def test_multiple_shots_cover_distinct_points_and_bind_every_part(self):
         plan = self.plan()

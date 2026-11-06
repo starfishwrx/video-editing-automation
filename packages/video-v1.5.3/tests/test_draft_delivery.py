@@ -81,6 +81,18 @@ class DeliveryTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'BYTES_DIFFER'):
             delivery.verify_shared(receiver, self.source)
 
+    def test_sidecar_file_path_is_rewritten_with_collected_media(self):
+        ship = delivery.ship_module()
+        meta = n.read_json(self.source / 'draft_meta_info.json')
+        meta['draft_materials'] = [{'file_Path': str(self.media)}]
+        n.write_json(self.source / 'draft_meta_info.json', meta)
+        staging = self.base / 'stage' / self.source.name
+        shutil.copytree(self.source, staging)
+        ship.rewrite(str(staging), 'local')
+        rewritten = n.read_json(staging / 'draft_meta_info.json')
+        self.assertEqual(Path(rewritten['draft_materials'][0]['file_Path']).resolve(),
+                         (staging / 'media' / self.media.name).resolve())
+
     def test_registration_paths_are_checked(self):
         meta = n.read_json(self.source / 'draft_meta_info.json')
         meta['draft_fold_path'] = str(self.base / 'old computer')

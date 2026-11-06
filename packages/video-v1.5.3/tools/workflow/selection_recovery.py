@@ -1,7 +1,9 @@
 """Resume a transient selection failure from frozen audio and observations."""
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import time
@@ -33,7 +35,75 @@ def pending(report_dir: Path) -> bool:
 
 def _logical(manifest: dict) -> dict:
     return {k: v for k, v in manifest.items() if k not in {
-        "draft_name", "parent_run_id", "force_overwrite", "shot_analysis", "shot_analysis_file"}}
+        "draft_name", "parent_run_id", "force_overwrite", "shot_analysis", "shot_analysis_file", "_selection_attempt",
+        "qc_rejected_shots", "ai_refill_indices", "ai_refill_feedback"}}
+
+
+def freeze_refill_input(manifest: dict, report_dir: Path) -> dict:
+    """Reuse the exact planned sentences and verified audio of the current cut."""
+    frozen = _read(Path(report_dir) / "selection_resume.json")
+    if _logical(frozen["input_manifest"]) != _logical(manifest):
+        raise ValueError("REFILL_ORIGINAL_INPUT_CHANGED")
+    from orchestrator.runtime.file_safety import content_identity
+    from orchestrator.selection import timing_contract
+    prepared, timing = frozen["manifest"], frozen["timing"]
+    rows, files = timing.get("rows") or [], frozen.get("audio_files") or []
+    sentences = timing_contract.split_sentences(prepared)
+    if len(sentences) != len(rows) or len(files) != len(rows) or not rows:
+        raise ValueError("REFILL_FROZEN_AUDIO_REQUIRED")
+    segments = []
+    for index, (sentence, row, identity) in enumerate(zip(sentences, rows, files), 1):
+        path = str(row.get("tts_path") or "")
+        if (not path or row.get("timing_certainty") != "audio"
+                or int(row.get("audio_duration_us") or 0) <= 0
+                or str(Path(path).resolve()) != str(identity.get("path") or "")
+                or content_identity(path) != identity
+                or row.get("key") != timing_contract.sentence_key(sentence, index)
+                or row.get("text") != timing_contract.sentence_text(sentence)):
+            raise ValueError("REFILL_FROZEN_AUDIO_CHANGED")
+        segment = dict(sentence) if isinstance(sentence, dict) else {"text": str(sentence)}
+        segment.update(audio=path, audio_duration_us=int(row["audio_duration_us"]), timing_certainty="audio")
+        segments.append(segment)
+    resumed = dict(prepared)
+    for key in ("draft_name", "force_overwrite", "delivery_mode", "parent_run_id",
+                "recovery_stage", "run_id", "task_id", "_selection_attempt", "variant_index",
+                "variant_count", "qc_rejected_shots", "ai_refill_indices", "ai_refill_feedback"):
+        resumed.pop(key, None)
+        if key in manifest:
+            resumed[key] = manifest[key]
+    resumed["segments"] = segments
+    return resumed
+
+
+def _invalidate_match_report(report_dir: Path, matching_input: dict, failure: dict) -> None:
+    """Archive prior matching evidence before recording this failed attempt."""
+    from orchestrator.runtime.file_safety import atomic_write_text
+    path = report_dir / "shot_match_report.json"
+    try:
+        current = _read(path)
+    except (OSError, ValueError):
+        current = {}
+    if current.get("ok") is not False or current.get("input_manifest") != matching_input:
+        if path.is_file():
+            raw = path.read_bytes()
+            if raw:
+                archive = report_dir / "match_history"
+                archive.mkdir(parents=True, exist_ok=True)
+                backup = archive / (hashlib.sha256(raw).hexdigest() + ".json")
+                try:
+                    with backup.open("xb") as stream:
+                        stream.write(raw)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                except FileExistsError:
+                    if backup.read_bytes() != raw:
+                        raise OSError("MATCH_REPORT_ARCHIVE_CONFLICT")
+        current = {}
+    current.update({"ok": False, "input_manifest": matching_input,
+                    "status": failure.get("status", "SHOT_MATCH_BLOCKED"),
+                    "message": failure.get("message", "本次匹配未完成，旧成功结果不可用于恢复。")})
+    report_dir.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(path, json.dumps(current, ensure_ascii=False, indent=2))
 
 
 def selection_timeout(report_dir: Path, *, previous_run_id: str | None = None) -> dict | None:
@@ -55,8 +125,9 @@ def selection_timeout(report_dir: Path, *, previous_run_id: str | None = None) -
                "message": "选镜阶段超过时间预算，已保留原配音、句长和素材观察。",
                "retryable": True, "resume_stage": "semantic_match", "failed_stage": plan["phase"]}
     (report_dir / "last_result.json").write_text(json.dumps(failure, ensure_ascii=False), encoding="utf-8")
-    (report_dir / "shot_match_report.json").write_text(json.dumps({"ok": False,
-        "input_manifest": frozen["input_manifest"], **failure}, ensure_ascii=False), encoding="utf-8")
+    # Use the existing report-history mechanism before replacing a prior
+    # successful match needed to audit an earlier draft.
+    _invalidate_match_report(report_dir, frozen["input_manifest"], failure)
     return {"rc": 1, "stdout": json.dumps(failure, ensure_ascii=False), "stderr": "",
             "combined": json.dumps(failure, ensure_ascii=False)}
 
@@ -72,6 +143,56 @@ def completed(report_dir: Path, *, previous_run_id: str | None = None) -> bool:
                 and matched.get("input_manifest") == frozen["input_manifest"])
     except (OSError, ValueError, KeyError):
         return False
+
+
+def draft_pending(report_dir: Path) -> bool:
+    try:
+        state = _read(Path(report_dir) / "last_result.json")
+        return state.get("retryable") is True and state.get("resume_stage") == "draft_write"
+    except (OSError, ValueError):
+        return False
+
+
+def recover_draft(manifest: dict, report_dir: Path, *, prefix: list[str], run, env: dict,
+                  cwd: str, deadline: float, drafts_root: Path) -> dict:
+    """Use the already matched input; the CLI independently checks audio and identity."""
+    report_dir = Path(report_dir)
+    try:
+        matched = _read(report_dir / "shot_match_report.json")
+        original = matched.get("input_manifest")
+        if matched.get("ok") is not True or not isinstance(original, dict):
+            raise ValueError("DRAFT_RECOVERY_MATCH_INPUT_MISMATCH")
+        if _logical(original) != _logical(manifest):
+            # A local refill matched the fully enriched frozen input, while
+            # the next worker starts from the original request. Rebuild and
+            # verify every sentence and audio identity before comparing it.
+            if not original.get("ai_refill_indices"):
+                raise ValueError("DRAFT_RECOVERY_MATCH_INPUT_MISMATCH")
+            derived = freeze_refill_input(manifest, report_dir)
+            if _logical(original) != _logical(derived):
+                raise ValueError("DRAFT_RECOVERY_MATCH_INPUT_MISMATCH")
+        input_path = report_dir / "draft_recovery_input.json"
+        input_path.write_text(json.dumps(original, ensure_ascii=False, indent=2), encoding="utf-8")
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            raise ValueError("DRAFT_RECOVERY_DEADLINE_EXCEEDED")
+        process = run([*prefix, "recover", "--input", str(input_path), "--report-dir", str(report_dir),
+                       "--draft-name", str(manifest.get("draft_name") or ""), "--stage", "draft_write"], cwd=cwd, env=env, capture_output=True,
+                      text=True, encoding="utf-8", errors="replace", timeout=remaining + 30)
+        if process.returncode:
+            return {"rc": process.returncode, "stdout": process.stdout or "", "stderr": process.stderr or "",
+                    "combined": (process.stdout or "") + "\n" + (process.stderr or ""),
+                    "stage_retry_exhausted": True}
+        result = _read(report_dir / "last_result.json")
+        draft = Path(str(result.get("draft_path") or ""))
+        if result.get("status") != "SUCCESS" or draft.resolve().parent != drafts_root.resolve() or not draft.is_dir():
+            raise ValueError("DRAFT_RECOVERY_DRAFT_INVALID")
+        return {"rc": 0, "stdout": process.stdout or "", "stderr": process.stderr or "",
+                "combined": process.stdout or "", "draft_name": draft.name, "selection_recovered": True}
+    except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError) as exc:
+        error = "DRAFT_RECOVERY_BLOCKED:" + str(exc)
+        return {"rc": 1, "stdout": error, "stderr": "", "combined": error,
+                "stage_retry_exhausted": True}
 
 
 def archive_state(report_dir: Path) -> None:

@@ -1240,6 +1240,17 @@ class ExperimentGroupChainTests(unittest.TestCase):
         groups = scene_rules._split_groups(segments, rules, {"s1": SHOT}, category="weipin")
         self.assertEqual([g["positions"] for g in groups], [[1, 2]])
 
+    def test_downward_seep_stays_inside_the_absorb_group(self):
+        rules = rulepack.load("weipin")
+        segments = self._script([
+            ("新升级的7层瞬吸结构", 1.2),
+            ("能在液体流下就快速下渗", 1.3),
+            ("纸巾按压还不反渗", 1.4),
+        ])
+        groups = scene_rules._split_groups(segments, rules, {"s1": SHOT}, category="weipin")
+        absorb = [g["positions"] for g in groups if g["scene"]["id"] == "absorb_test"]
+        self.assertEqual(absorb, [[0, 1, 2]])
+
     def test_absorb_group_bridges_one_unrelated_sentence(self):
         rules = rulepack.load("weipin")
         segments = self._script([("吸收力老强了", 2.0), ("姐妹们", 0.8), ("一点也不反渗", 1.5), ("赶紧下单", 1.0)])

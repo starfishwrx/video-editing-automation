@@ -7,6 +7,40 @@
 
 ## 新增条目
 
+### L-20261106-refill-run-controls 局部修复使用本轮写稿控制
+- status: OPEN
+- hits: 1
+- 模块: selection / ai_editor
+- 现象: 复用上轮选镜报告时，旧草稿名覆盖本轮唯一稿名，写入撞上已存在的旧稿。
+- 以后怎么做: 上轮结果仅复用经验证的镜头和事实；草稿名及其他执行控制由本轮输入决定，不覆盖旧稿。
+- 证据: 局部修复至写稿入口的隔离集成测试。
+
+### L-20261106-qc-feedback-window 局部修复带入质检缺口和动作时间线索
+- status: OPEN
+- hits: 1
+- 模块: selection / quality
+- 现象: 只传质检句号会反复召回同类降级画面，均匀抽帧还可能漏掉素材末尾的目标动作。
+- 以后怎么做: 绑定当前稿与来源后，将质检事实作为单句召回与复核线索；相关动作时段只用于定位，实际抽帧及独立质检决定证据和等级。
+- 证据: 缺口检索、局部时间窗复核和相邻句保留测试。
+
+
+### L-20261106-formal-qc-evidence 正式质检不能用关键词代替观察
+- status: OPEN
+- hits: 1
+- 模块: quality / selection
+- 现象: 卫生包装和实验按压的关键词可能出现在否定、不确定或不同实验的说明中。
+- 以后怎么做: 保留独立质检原始等级；跨文件实验必须有同次证据。100 毫秒刀口容差不允许整段证据被裁掉。
+- 证据: 对应质检、相位和裁切反例测试。
+
+### L-20261106-stage-recovery 正式流程按实际已完成阶段恢复
+- status: OPEN
+- hits: 1
+- 模块: scheduler / delivery
+- 现象: 未启动任务提前扣次数，或交付恢复重新执行质检，会浪费预算并混淆状态。
+- 以后怎么做: 实际启动素材准备或 worker 前持久化一次单任务次数，等待任务不扣；交付恢复复用当前稿的通过报告并走既有 finalizer。
+- 证据: 定时调度和质检交付合同测试。
+
+
 ### L-20261105-evidence-then-place 找画面与放入时间线必须拆开
 - status: OPEN
 - hits: 5
@@ -687,3 +721,19 @@
 - 模块: orchestrator-cli / visual-matching
 - 现象: 选镜在引擎构造前就跑完，引擎里写回 manifest 的 `delivery_mode` 对它无效（engine.run 注释）。
 - 以后怎么做: 影响选镜的字段必须在 `cli.cmd_build` 侧先写入 manifest。
+
+### L-20261106-05 拼图负面观察要按镜头编号复看
+- status: OPEN
+- hits: 1
+- 模块: visual-matching
+- 现象: 多镜头拼图的模型观察可能把邻镜头动作归错，或把无编号黑色填充看成素材帧。
+- 以后怎么做: 每条观察只对应其分配的编号；全黑等相关旧负面观察走现有增量视觉复核，画面不清仍保留不通过。
+- 证据: `packages/video-v1.5.3/doubao-jianying-orchestrator/tests/test_v152_vision_v3.py`。
+
+### L-20261106-06 局部重选的合同应反映最终镜头类型
+- status: OPEN
+- hits: 1
+- 模块: visual-matching / runtime-and-recovery
+- 现象: 全部句子已有 AI 像素复核凭据，但局部重选后被错误标成规则与 AI 混合，导致预质检门按错误合同阻断。
+- 以后怎么做: 根据最终每句实际类型保留对应的现有合同，逐句来源、证据和时序仍由消费端核验；真正混合结果不得跳过规则门。
+- 证据: `packages/video-v1.5.3/doubao-jianying-orchestrator/tests/test_ai_editor.py`。

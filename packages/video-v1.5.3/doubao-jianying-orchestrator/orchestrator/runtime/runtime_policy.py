@@ -15,7 +15,7 @@ from .proc_slots import SlotHandle, slot, _try_lock, _unlock
 
 @dataclass(frozen=True)
 class RuntimePolicy:
-    task_workers: int = 4
+    task_workers: int = 3
     prep_workers: int = 2
     prep_slots: int = 2
     api_workers: int = 20

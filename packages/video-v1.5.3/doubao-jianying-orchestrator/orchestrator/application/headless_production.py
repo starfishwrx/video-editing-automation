@@ -198,6 +198,11 @@ def write_draft(engine, clips, bgm_path):
         cache = Path(os.environ['JY_WORK_ROOT']) / '.cache' if os.environ.get('JY_WORK_ROOT') else engine.report_dir
         with _draft_write_io_slot(engine, cache):
             prepared, video_overrides = {}, {}
+            # Check every source first so an incompatible later clip does not
+            # cause partial transcoding before the legacy fallback.
+            for path in {str(Path(clip.video).resolve()) for clip in clips}:
+                facts = source_normalization.probe_media(path, ffprobe=str(engine.ffprobe or 'ffprobe'))
+                source_normalization.check_compatibility(facts)
             for clip in clips:
                 path = str(Path(clip.video).resolve())
                 if path in prepared:

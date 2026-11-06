@@ -1,5 +1,9 @@
 """Default worker recovery must reuse frozen audio and never restart a full build."""
 import copy
+import argparse
+import contextlib
+import io
+from contextlib import ExitStack
 import json
 from pathlib import Path
 import subprocess
@@ -65,6 +69,61 @@ class WorkerSelectionRecoveryTests(unittest.TestCase):
         else:
             self.write("last_result.json", {"status": "PREFLIGHT_READY" if stage == "preflight" else "SHOT_MATCH_READY"})
         return SimpleNamespace(returncode=0, stdout=json.dumps({"stage": stage}), stderr="")
+
+    def test_qc_refill_freezes_original_sentences_and_audio(self):
+        from orchestrator.runtime.file_safety import content_identity
+        self.snapshot['audio_files'] = [content_identity(self.audio)]
+        self.write('selection_resume.json', self.snapshot)
+        request = {**self.manifest, 'ai_refill_indices': [1], 'qc_rejected_shots': {}}
+        result = selection_recovery.freeze_refill_input(request, self.report)
+        self.assertEqual(result['segments'][0]['text'], '保持原句。')
+        self.assertEqual(result['segments'][0]['audio'], str(self.audio))
+        self.assertEqual(result['segments'][0]['audio_duration_us'], 1_000_000)
+        self.assertEqual(result['ai_refill_indices'], [1])
+        self.audio.write_bytes(b'changed audio')
+        with self.assertRaisesRegex(ValueError, 'REFILL_FROZEN_AUDIO_CHANGED'):
+            selection_recovery.freeze_refill_input(request, self.report)
+
+    def test_explicit_force_build_refill_reuses_frozen_audio_and_feedback(self):
+        from orchestrator.runtime.file_safety import content_identity
+        self.snapshot['audio_files'] = [content_identity(self.audio)]
+        self.snapshot['manifest']['force_overwrite'] = True
+        self.snapshot['manifest']['_selection_attempt'] = 'old-run'
+        self.write('selection_resume.json', self.snapshot)
+        self.write('selection_recovery_state.json', {'status': 'SUCCESS', 'source_run_id': 'current-attempt'})
+        feedback = {'1': {'claim': '保持原句。', 'observed': 'prior display', 'reason': 'action missing',
+                          'match_level': 'ACCEPTABLE_DEGRADED', 'prior_shot_ids': ['old-shot']}}
+        request = {**self.manifest, 'force_overwrite': False, '_selection_attempt': 'new-run',
+                   'ai_refill_indices': [1], 'ai_refill_feedback': feedback}
+        def subprocess_build(command, **kwargs):
+            input_path = Path(command[command.index('--input') + 1])
+            actual = json.loads(input_path.read_text(encoding='utf-8'))
+            self.assertEqual(actual['draft_name'], 'new-draft')
+            self.assertFalse(actual['force_overwrite'])
+            self.assertEqual(actual['_selection_attempt'], 'new-run')
+            self.assertEqual(actual['segments'][0]['audio'], str(self.audio))
+            self.assertEqual(actual['segments'][0]['audio_duration_us'], 1_000_000)
+            self.assertEqual(actual['ai_refill_feedback'], feedback)
+            return SimpleNamespace(returncode=0, stdout='fixture success', stderr='')
+        with patch.object(worker, 'log'), patch.object(worker.subprocess, 'run', side_effect=subprocess_build) as run:
+            result = worker.run_build(request, self.report, 'new-draft', timeout=60, force_rebuild=True)
+        self.assertEqual(result['rc'], 0)
+        run.assert_called_once()
+        self.assertTrue(list(self.report.glob('selection_recovery_state.*.json')))
+        self.assertEqual(self.audio.read_bytes(), b'retained audio fixture')
+
+    def test_existing_dispatcher_resume_build_forwards_explicit_force(self):
+        from tools import batch_dispatch
+        queue = self.root / 'queue.json'
+        queue.write_text(json.dumps([{'record_id': 'one', 'force_rebuild': True},
+                                     {'record_id': 'other'}]), encoding='utf-8')
+        with patch.object(batch_dispatch, 'dispatch', return_value=[]) as dispatched, \
+                patch('builtins.print'):
+            code = batch_dispatch.main(['resume', '--queue', str(queue), '--work-root', str(self.root),
+                                        '--record-id', 'one', '--stage', 'build'])
+        self.assertEqual(code, 0)
+        self.assertEqual(dispatched.call_args.args[0], [{'record_id': 'one', 'force_rebuild': True}])
+        self.assertEqual(dispatched.call_args.kwargs['resume_stage'], 'build')
 
     def test_default_worker_runs_recovery_stages_and_keeps_original_audio_and_timing(self):
         before = self.audio.read_bytes()
@@ -284,6 +343,275 @@ class WorkerSelectionRecoveryTests(unittest.TestCase):
         self.assertTrue(done['retryable'])
         self.assertEqual(done['resume_stage'], 'semantic_match')
 
+    def test_worker_done_preserves_draft_write_resume_for_scheduler(self):
+        task = {'record_id': 'record', 'title': 'draft', 'script': '一句',
+                'material_dir': str(self.root), 'delivery_mode': 'formal'}
+        source = self.root / 'source.mp4'
+        source.write_bytes(b'fixture')
+        (self.root / 'record' / 'eval').mkdir(parents=True)
+        def interrupted(_manifest, report_dir, _name, **_kwargs):
+            report_dir.mkdir(parents=True, exist_ok=True)
+            (report_dir / 'last_result.json').write_text(json.dumps({
+                'status': 'DRAFT_WRITE_TIMEOUT', 'retryable': True, 'resume_stage': 'draft_write',
+                'failure_class': 'draft', 'failure_code': 'DRAFT_WRITE_TIMEOUT'}))
+            return {'rc': 1, 'stdout': '', 'stderr': 'DRAFT_WRITE_TIMEOUT', 'combined': 'DRAFT_WRITE_TIMEOUT'}
+        with patch.object(worker, 'WORK', self.root), patch.object(worker, 'DRAFTS', self.drafts), \
+             patch.object(worker, '_runtime_facts', return_value={}), patch.object(worker, 'video_files', return_value=[str(source)]), \
+             patch.object(worker, '_save_frozen_task'), patch.object(worker, 'restore_qc_rejections', return_value=({}, {})), \
+             patch.object(worker, 'build_progress_inputs', return_value={'fixture': True}), \
+             patch.object(worker, 'publish_failure_notification', return_value={}), patch.object(worker, 'progress'), patch.object(worker, 'log'), \
+             patch.object(worker.production_eval, 'runtime_identity', return_value={}), \
+             patch.object(worker.production_eval, 'freeze', return_value={'mode': 'enforce'}), \
+             patch.object(worker.production_eval, 'write_once'), patch.object(worker, 'run_build', side_effect=interrupted) as build:
+            worker.process_task(task, admitted=True)
+            worker.process_task(task, admitted=True, retry_error=True)
+            self.assertGreater(build.call_count, 3)
+        done = json.loads((self.root / 'record' / 'done.json').read_text(encoding='utf-8'))
+        self.assertTrue(done['retryable'], done)
+        self.assertEqual(done['resume_stage'], 'draft_write')
+        stage, _ = scheduled._plan(task, self.root.resolve(), {})
+        self.assertEqual(stage, 'build')
+
+    def test_qc_target_without_bound_feedback_never_starts_a_weak_refill(self):
+        task = {'record_id': 'record', 'title': 'draft', 'script': '一句',
+                'material_dir': str(self.root), 'delivery_mode': 'formal', 'force_rebuild': True}
+        source = self.root / 'source.mp4'; source.write_bytes(b'fixture')
+        report = self.root / 'record' / 'report' / 'draft'
+        report.mkdir(parents=True)
+        (report / 'qc_rejected_shots.json').write_text(json.dumps({'repair_indices': [1], 'repair_feedback': {}}))
+        (self.root / 'record' / 'eval').mkdir(parents=True)
+        with patch.object(worker, 'WORK', self.root), patch.object(worker, 'DRAFTS', self.drafts), \
+             patch.object(worker, '_runtime_facts', return_value={}), patch.object(worker, 'video_files', return_value=[str(source)]), \
+             patch.object(worker, '_save_frozen_task'), patch.object(worker, 'restore_qc_rejections', return_value=({}, {})), \
+             patch.object(worker, 'publish_failure_notification', return_value={}), patch.object(worker, 'progress'), patch.object(worker, 'log'), \
+             patch.object(worker.production_eval, 'runtime_identity', return_value={}), \
+             patch.object(worker.production_eval, 'freeze', return_value={'mode': 'enforce'}), \
+             patch.object(worker.production_eval, 'write_once'), patch.object(worker, 'run_build') as build:
+            worker.process_task(task, admitted=True)
+        build.assert_not_called()
+        done = json.loads((self.root / 'record' / 'done.json').read_text(encoding='utf-8'))
+        self.assertIn('QC_FEEDBACK_BINDING_UNAVAILABLE', str(done['failures']))
+
+    def test_refill_timeout_resumes_only_draft_write_and_rejects_changed_identity(self):
+        for change_source in (False, True):
+            with self.subTest(change_source=change_source):
+                task = {'record_id': 'record', 'title': 'draft', 'script': '一句',
+                        'material_dir': str(self.root), 'delivery_mode': 'formal'}
+                source = self.root / 'source.mp4'
+                source.write_bytes(b'original fixture')
+                (self.root / 'record' / 'eval').mkdir(parents=True, exist_ok=True)
+                report = self.root / 'record' / 'report' / 'draft'
+                feedback = {'1': {'observed': 'old A', 'reason': 'missing action'}}
+                original_build = worker.run_build
+                calls = []
+                def build(manifest, report_dir, name, **kwargs):
+                    calls.append(name)
+                    if len(calls) == 1:
+                        report_dir.mkdir(parents=True, exist_ok=True)
+                        worker.save_qc_rejections(report_dir, worker.qc_rejection_identity(manifest), {}, {1}, feedback)
+                        # A was reviewed; the successful refill already replaced it by B.
+                        (report_dir / 'shot_match_report.json').write_text(json.dumps({
+                            'ok': True, 'input_manifest': manifest,
+                            'segments': [{'index': 1, 'shot_id': 'source-B'}]}))
+                        (report_dir / 'draft_visual_qc.json').write_text(json.dumps({'status': 'PASS_WITH_DEGRADED'}))
+                        (report_dir / 'last_result.json').write_text(json.dumps({
+                            'retryable': True, 'resume_stage': 'draft_write', 'status': 'DRAFT_WRITE_TIMEOUT'}))
+                        return {'rc': 1, 'stdout': '', 'stderr': 'DRAFT_WRITE_TIMEOUT',
+                                'combined': 'DRAFT_WRITE_TIMEOUT', 'stage_retry_exhausted': True}
+                    self.assertNotIn('ai_refill_indices', manifest)
+                    return original_build(manifest, report_dir, name, **kwargs)
+                def cli(command, **kwargs):
+                    self.assertEqual(command[-2:], ['--stage', 'draft_write'])
+                    draft = self.drafts / 'recovered'
+                    draft.mkdir(exist_ok=True)
+                    (report / 'last_result.json').write_text(json.dumps({'status': 'SUCCESS', 'draft_path': str(draft)}))
+                    return SimpleNamespace(returncode=0, stdout='', stderr='')
+                with ExitStack() as stack:
+                    patches = [patch.object(worker, 'WORK', self.root), patch.object(worker, 'DRAFTS', self.drafts),
+                        patch.object(worker, '_runtime_facts', return_value={}), patch.object(worker, 'video_files', return_value=[str(source)]),
+                        patch.object(worker, '_save_frozen_task'), patch.object(worker, 'publish_failure_notification', return_value={}),
+                        patch.object(worker, 'progress'), patch.object(worker, 'log'),
+                        patch.object(worker.production_eval, 'runtime_identity', return_value={}),
+                        patch.object(worker.production_eval, 'freeze', return_value={'mode': 'enforce'}),
+                        patch.object(worker.production_eval, 'write_once'),
+                        patch.object(worker, 'qc_refill_feedback_from_report', return_value={}),
+                        patch.object(worker, 'run_build', side_effect=build),
+                        patch.object(worker, 'validate_visual_match', return_value=(True, '')),
+                        patch.object(worker, 'run_post_draft_qc', return_value={'status': 'PASS', 'output': 'qc.json'}),
+                        patch.object(worker, 'validate_draft_package', return_value={'ok': True}),
+                        patch.object(worker, 'finalize_closed_loop', return_value={'ok': True}),
+                        patch.object(worker, 'evaluate_task', return_value={})]
+                    for item in patches:
+                        stack.enter_context(item)
+                    run = stack.enter_context(patch.object(worker.subprocess, 'run', side_effect=cli))
+                    worker.process_task(task, admitted=True)
+                    if change_source:
+                        source.write_bytes(b'changed fixture of different size')
+                    worker.process_task(task, admitted=True, retry_error=True)
+                    state = json.loads((report / 'qc_rejected_shots.json').read_text())
+                    self.assertEqual(state['repair_feedback'], feedback)
+                    if change_source:
+                        run.assert_not_called()
+                        done = json.loads((self.root / 'record' / 'done.json').read_text(encoding='utf-8'))
+                        self.assertIn('DRAFT_RECOVERY_IDENTITY_CHANGED', str(done['failures']))
+                    else:
+                        run.assert_called_once()
+                        self.assertEqual(state['active_repair_feedback'], {})
+                # Isolate the next subtest from the previous done/checkpoint.
+                import shutil
+                shutil.rmtree(self.root / 'record')
+
+    def test_latest_qc_only_refills_current_failed_sentence(self):
+        task = {'record_id': 'record', 'title': 'draft', 'script': '三句',
+                'material_dir': str(self.root), 'delivery_mode': 'formal'}
+        source = self.root / 'source.mp4'; source.write_bytes(b'fixture')
+        (self.root / 'record' / 'eval').mkdir(parents=True)
+        fixed = {'index': 2, 'text': 'second', 'shot_id': 'fixed-B', 'audio': 'frozen.wav',
+                 'source_start': 1.2, 'source_end': 2.4}
+        calls = []
+        def build(manifest, report, name, **kwargs):
+            calls.append(copy.deepcopy(manifest))
+            report.mkdir(parents=True, exist_ok=True)
+            segments = [{'index': 1, 'text': 'first', 'shot_id': 'one'}, copy.deepcopy(fixed),
+                        {'index': 3, 'text': 'third', 'shot_id': 'three'}]
+            (report / 'shot_match_report.json').write_text(json.dumps({'segments': segments}))
+            return {'rc': 0, 'stdout': '', 'stderr': '', 'combined': ''}
+        def qc(draft, report):
+            round_no = len(calls)
+            levels = {1: 'DIRECT', 2: 'ACCEPTABLE_DEGRADED' if round_no == 1 else 'DIRECT',
+                      3: 'ACCEPTABLE_DEGRADED' if round_no == 2 else 'DIRECT'}
+            rows = [{'index': i, 'claim': ('first', 'second', 'third')[i-1],
+                     'match_level': levels[i], 'observed': 'pixels', 'reason': 'missing action'} for i in (1, 2, 3)]
+            return {'status': 'PASS' if round_no == 3 else 'PASS_WITH_DEGRADED',
+                    'message': 'DRAFT_VISUAL_QC_BLOCKED', 'report': {'model_review': rows}, 'output': 'qc.json'}
+        def feedback(report_dir, report, targets, **kwargs):
+            return {str(r['index']): {**r, 'prior_shot_ids': ['prior']}
+                    for r in report.get('model_review', []) if r['index'] in targets}
+        def rejected(report_dir, report, **kwargs):
+            if not kwargs.get('include_non_direct'):
+                return {}
+            return {r['index']: {'prior'} for r in report.get('model_review', [])
+                    if r['match_level'] == 'ACCEPTABLE_DEGRADED'}
+        with ExitStack() as stack:
+            patches = [patch.object(worker, 'WORK', self.root), patch.object(worker, 'DRAFTS', self.drafts),
+                patch.object(worker, '_runtime_facts', return_value={}), patch.object(worker, 'video_files', return_value=[str(source)]),
+                patch.object(worker, '_save_frozen_task'), patch.object(worker, 'publish_failure_notification', return_value={}),
+                patch.object(worker, 'progress'), patch.object(worker, 'log'),
+                patch.object(worker.production_eval, 'runtime_identity', return_value={}),
+                patch.object(worker.production_eval, 'freeze', return_value={'mode': 'enforce'}),
+                patch.object(worker.production_eval, 'write_once'), patch.object(worker, 'run_build', side_effect=build),
+                patch.object(worker, 'validate_visual_match', return_value=(True, '')),
+                patch.object(worker, 'run_post_draft_qc', side_effect=qc),
+                patch.object(worker, 'qc_refill_feedback_from_report', side_effect=feedback),
+                patch.object(worker, 'qc_rejected_shots_from_report', side_effect=rejected),
+                patch.object(worker, 'validate_draft_package', return_value={'ok': True}),
+                patch.object(worker, 'finalize_closed_loop', return_value={'ok': True}),
+                patch.object(worker, 'evaluate_task', return_value={})]
+            for item in patches: stack.enter_context(item)
+            worker.process_task(task, admitted=True)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(calls[1]['ai_refill_indices'], [2])
+        self.assertEqual(calls[2]['ai_refill_indices'], [3])
+        self.assertEqual(set(calls[2]['ai_refill_feedback']), {'3'})
+        report = self.root / 'record' / 'report' / 'draft' / 'shot_match_report.json'
+        self.assertEqual(json.loads(report.read_text())['segments'][1], fixed)
+
+    def test_cold_qc_refill_then_warm_force_rebuild_restores_feedback(self):
+        from orchestrator.runtime.file_safety import content_identity
+        task = {'record_id': 'record', 'title': 'draft', 'script': '一句',
+                'material_dir': str(self.root), 'delivery_mode': 'formal'}
+        source = self.root / 'source.mp4'; source.write_bytes(b'source')
+        (self.root / 'record' / 'eval').mkdir(parents=True)
+        calls = []
+        observation = {'1': {'claim': '一句', 'match_level': 'ACCEPTABLE_DEGRADED',
+                             'observed': 'package', 'reason': 'action absent', 'prior_shot_ids': ['A']}}
+        def build(manifest, report, name, **kwargs):
+            calls.append(copy.deepcopy(manifest))
+            report.mkdir(parents=True, exist_ok=True)
+            if len(calls) == 1:
+                original = {**manifest, 'draft_name': name, 'shot_analysis': {'shots': []}}
+                sentence = {'text': '一句'}
+                timing = {'rows': [{'key': timing_contract.sentence_key(sentence, 1), 'text': '一句',
+                         'tts_path': str(self.audio), 'audio_duration_us': 1_000_000,
+                         'timing_certainty': 'audio', 'estimated': False}]}
+                prepared = {**original, 'segments': [sentence], 'voice_tempo': 1.0,
+                            'narration_timing_file': str(report / 'narration_timing.json')}
+                (report / 'narration_timing.json').write_text(json.dumps(timing))
+                (report / 'selection_resume.json').write_text(json.dumps({'input_manifest': original,
+                    'manifest': prepared, 'timing': timing, 'audio_files': [content_identity(self.audio)], 'run_id': 'cold'}))
+                (report / 'shot_match_report.json').write_text(json.dumps({'ok': True,
+                    'input_manifest': original, 'segments': [{'text': '一句', 'shot_id': 'A'}]}))
+                return {'rc': 0, 'stdout': '', 'stderr': '', 'combined': ''}
+            frozen = selection_recovery.freeze_refill_input({**manifest, 'draft_name': name}, report)
+            self.assertEqual(frozen['segments'][0]['audio'], str(self.audio))
+            self.assertEqual(manifest['ai_refill_indices'], [1])
+            if len(calls) == 2:
+                (report / 'shot_match_report.json').write_text(json.dumps({'ok': True,
+                    'input_manifest': frozen, 'segments': [{'text': '一句', 'shot_id': 'A'}]}))
+                return {'rc': 1, 'stdout': '', 'stderr': 'HEADLESS_TARGET_EXISTS',
+                        'combined': 'HEADLESS_TARGET_EXISTS', 'stage_retry_exhausted': True}
+            self.assertEqual(manifest['ai_refill_feedback']['1']['reason'], 'action absent')
+            for field, value in (('variant_count', 2), ('variant_index', 1)):
+                with self.assertRaisesRegex(ValueError, 'REFILL_ORIGINAL_INPUT_CHANGED'):
+                    selection_recovery.freeze_refill_input({**manifest, field: value}, report)
+            return {'rc': 1, 'stdout': '', 'stderr': 'offline stop', 'combined': 'offline stop',
+                    'stage_retry_exhausted': True}
+        def qc(draft, report):
+            payload = {'status': 'PASS_WITH_DEGRADED', 'model_review': [{'index': 1,
+                'claim': '一句', 'match_level': 'ACCEPTABLE_DEGRADED'}]}
+            (report / 'draft_visual_qc.json').write_text(json.dumps(payload))
+            return {'status': 'PASS_WITH_DEGRADED', 'message': 'DRAFT_VISUAL_QC_BLOCKED',
+                    'report': payload, 'output': 'qc.json'}
+        def feedback(report, qc_report, targets, **kwargs):
+            return {key: value for key, value in observation.items() if int(key) in targets}
+        def rejected(report, qc_report, **kwargs):
+            return {1: {'A'}} if kwargs.get('include_non_direct') else {}
+        with ExitStack() as stack:
+            patches = [patch.object(worker, 'WORK', self.root), patch.object(worker, 'DRAFTS', self.drafts),
+                patch.object(worker, '_runtime_facts', return_value={}), patch.object(worker, 'video_files', return_value=[str(source)]),
+                patch.object(worker, '_save_frozen_task'), patch.object(worker, 'publish_failure_notification', return_value={}),
+                patch.object(worker, 'progress'), patch.object(worker, 'log'),
+                patch.object(worker.production_eval, 'runtime_identity', return_value={}),
+                patch.object(worker.production_eval, 'freeze', return_value={'mode': 'enforce'}),
+                patch.object(worker.production_eval, 'write_once'), patch.object(worker, 'run_build', side_effect=build),
+                patch.object(worker, 'validate_visual_match', return_value=(True, '')),
+                patch.object(worker, 'run_post_draft_qc', side_effect=qc),
+                patch.object(worker, 'qc_refill_feedback_from_report', side_effect=feedback),
+                patch.object(worker, 'qc_rejected_shots_from_report', side_effect=rejected)]
+            for item in patches: stack.enter_context(item)
+            worker.process_task(task, admitted=True)
+            self.assertEqual(len(calls), 2)
+            worker.process_task({**task, 'force_rebuild': True}, admitted=True, retry_error=True)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(calls[2]['ai_refill_indices'], [1])
+
+    def test_worker_done_resumes_delivery_after_table_failure(self):
+        task = {'record_id': 'record', 'title': 'draft', 'script': '一句',
+                'material_dir': str(self.root), 'delivery_mode': 'formal'}
+        source = self.root / 'source.mp4'
+        source.write_bytes(b'fixture')
+        (self.root / 'record' / 'eval').mkdir(parents=True)
+        with patch.object(worker, 'WORK', self.root), patch.object(worker, 'DRAFTS', self.drafts), \
+             patch.object(worker, 'SKIP_SHIP', False), patch.object(worker, '_runtime_facts', return_value={}), \
+             patch.object(worker, 'video_files', return_value=[str(source)]), patch.object(worker, '_save_frozen_task'), \
+             patch.object(worker, 'restore_qc_rejections', return_value=({}, {})), \
+             patch.object(worker, 'build_progress_inputs', return_value={'fixture': True}), \
+             patch.object(worker, 'publish_failure_notification', return_value={}), patch.object(worker, 'progress'), patch.object(worker, 'log'), \
+             patch.object(worker.production_eval, 'runtime_identity', return_value={}), \
+             patch.object(worker.production_eval, 'freeze', return_value={'mode': 'enforce'}), \
+             patch.object(worker.production_eval, 'write_once'), patch.object(worker, 'run_build', return_value={'rc': 0}), \
+             patch.object(worker, 'validate_visual_match', return_value=(True, '')), \
+             patch.object(worker, 'run_post_draft_qc', return_value={'status': 'PASS', 'output': 'qc.json'}), \
+             patch.object(worker, 'validate_draft_package', return_value={'ok': True}), \
+             patch.object(worker, 'finalize_closed_loop', return_value={'ok': False, 'reason': 'TABLE_READBACK_FAILED'}), \
+             patch.object(worker, 'evaluate_task', return_value={}):
+            worker.process_task(task, admitted=True)
+        done = json.loads((self.root / 'record' / 'done.json').read_text(encoding='utf-8'))
+        self.assertTrue(done['retryable'], done)
+        self.assertEqual(done['resume_stage'], 'delivery')
+        stage, _ = scheduled._plan(task, self.root.resolve(), {})
+        self.assertEqual(stage, 'delivery')
+
     def test_changed_task_input_never_launches_cli_or_falls_back_to_build(self):
         run = Mock()
         for field, value in (("voice", "another-speaker"), ("full_script", "另一句"), ("material_sources", ["different.mp4"])):
@@ -335,6 +663,9 @@ class WorkerSelectionRecoveryTests(unittest.TestCase):
             result = worker.run_build(self.manifest, self.report, "original", timeout=1)
         self.assertEqual(json.loads(result["stdout"])["resume_stage"], "semantic_match")
         self.assertFalse(json.loads((self.report / "shot_match_report.json").read_text(encoding="utf-8"))["ok"])
+        archives = list((self.report / "match_history").glob("*.json"))
+        self.assertEqual(len(archives), 1)
+        self.assertEqual(json.loads(archives[0].read_text(encoding="utf-8"))["segments"], ["stale success"])
         self.write("ai_editor/plan.json", {"phase": "selection_edit", "attempt_run_id": "old-attempt"})
         self.assertIsNone(selection_recovery.selection_timeout(self.report))
 
@@ -349,8 +680,94 @@ class WorkerSelectionRecoveryTests(unittest.TestCase):
         with patch.object(worker, "log"), patch.object(worker.subprocess, "run", side_effect=timed_out):
             result = worker.run_build(self.manifest, self.report, "original", timeout=1)
         self.assertEqual(json.loads(result["stdout"])["resume_stage"], "draft_write")
-        self.assertFalse(json.loads(result["stdout"])["retryable"])
+        self.assertTrue(json.loads(result["stdout"])["retryable"])
         self.assertTrue(json.loads((self.report / "shot_match_report.json").read_text(encoding="utf-8"))["ok"])
+
+    def test_draft_timeout_recovery_uses_only_matched_draft_write(self):
+        self.write('last_result.json', {'retryable': True, 'resume_stage': 'draft_write'})
+        self.write('shot_match_report.json', {'ok': True, 'input_manifest': self.manifest})
+        self.drafts.mkdir(exist_ok=True)
+        draft = self.drafts / 'recovered'
+        draft.mkdir()
+        def completed(command, **kwargs):
+            self.assertEqual(command[-2:], ['--stage', 'draft_write'])
+            self.write('last_result.json', {'status': 'SUCCESS', 'draft_path': str(draft)})
+            return SimpleNamespace(returncode=0, stdout='ok', stderr='')
+        with patch.object(worker, 'DRAFTS', self.drafts), patch.object(worker.subprocess, 'run', side_effect=completed) as run:
+            result = worker.run_build(self.manifest, self.report, 'requested-name', timeout=60)
+        self.assertEqual(result['draft_name'], 'recovered')
+        self.assertEqual(run.call_count, 1)
+
+    def test_frozen_refill_timeout_reaches_cli_writer_with_current_name(self):
+        from orchestrator.application import cli
+        from orchestrator.runtime.file_safety import content_identity
+        texts = [f'句子{i}' for i in range(1, 12)]
+        self.manifest = {'task_id': 'offline', 'full_script': '，'.join(texts), 'delivery_mode': 'formal',
+                         'draft_name': 'first', 'material_sources': [str(self.root / 'source.mp4')]}
+        Path(self.manifest['material_sources'][0]).write_bytes(b'source')
+        sentences = [{'text': text} for text in texts]
+        rows, files = [], []
+        for index, sentence in enumerate(sentences, 1):
+            audio = self.root / f'audio{index}.wav'; audio.write_bytes(f'audio-{index}'.encode())
+            files.append(content_identity(audio))
+            rows.append({'key': timing_contract.sentence_key(sentence, index), 'text': sentence['text'],
+                         'tts_path': str(audio), 'audio_duration_us': 1_000_000 + index,
+                         'timing_certainty': 'audio', 'estimated': False})
+        timing = {'rows': rows}
+        self.write('narration_timing.json', timing)
+        prepared = {**self.manifest, 'segments': sentences, 'narration_timing_file': str(self.report / 'narration_timing.json'),
+                    'voice_tempo': 1.0, 'sentence_plan_version': 'v1'}
+        self.write('selection_resume.json', {'input_manifest': self.manifest, 'manifest': prepared,
+                                             'timing': timing, 'audio_files': files, 'run_id': 'original'})
+        enriched = selection_recovery.freeze_refill_input({**self.manifest, 'draft_name': 'old-a2',
+                                                           'ai_refill_indices': [2]}, self.report)
+        segments = [{**row, 'shot_id': f'source-{i}', 'video': str(self.root / 'source.mp4')}
+                    for i, row in enumerate(enriched['segments'], 1)]
+        segments[1]['shot_id'] = 'replacement-B'
+        matched_manifest = {**enriched, 'segments': segments}
+        self.write('shot_match_report.json', {'ok': True, 'input_manifest': enriched,
+                                             'manifest': matched_manifest, 'segments': segments,
+                                             'delivery_mode': 'formal'})
+        self.write('last_result.json', {'retryable': True, 'resume_stage': 'draft_write'})
+        captured = []
+        class FakeEngine:
+            def __init__(inner, manifest, *args, **kwargs): captured.append(copy.deepcopy(manifest))
+            def run(inner):
+                draft = self.drafts / captured[-1]['draft_name']
+                draft.mkdir()
+                return {'status': 'SUCCESS', 'draft_path': str(draft)}
+        def run_cli(command, **kwargs):
+            arg = lambda key: command[command.index(key) + 1]
+            args = argparse.Namespace(input=arg('--input'), report_dir=arg('--report-dir'),
+                                      stage=arg('--stage'), draft_name=arg('--draft-name'))
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                code = cli.cmd_recover(args)
+            return SimpleNamespace(returncode=code, stdout='', stderr='')
+        with patch.object(worker, 'DRAFTS', self.drafts), \
+             patch.object(worker.subprocess, 'run', side_effect=run_cli) as child, \
+             patch.object(cli, '_vision_configuration_gate', return_value=None), \
+             patch.object(cli, 'OrchestrationEngine', FakeEngine), \
+             patch.object(cli, '_temporary_match') as selection, \
+             patch.object(cli, '_pre_synthesize_narration') as tts:
+            result = worker.run_build(self.manifest, self.report, 'new-a3', timeout=60)
+        self.assertEqual(result['rc'], 0, result)
+        child.assert_called_once(); selection.assert_not_called(); tts.assert_not_called()
+        writer = captured[0]
+        self.assertTrue(writer['draft_name'].startswith('new-a3_recovery_'))
+        self.assertFalse(writer['force_overwrite'])
+        self.assertFalse(writer['auto_match_shots'])
+        self.assertEqual(writer['segments'][1]['shot_id'], 'replacement-B')
+        self.assertEqual([r['audio'] for r in writer['segments']], [r['tts_path'] for r in rows])
+        self.assertEqual([r['audio_duration_us'] for r in writer['segments']], [r['audio_duration_us'] for r in rows])
+        # Frozen audio and original text are both mandatory for the same recovery.
+        for mutation in ('text', 'audio'):
+            request = copy.deepcopy(self.manifest)
+            if mutation == 'text': request['full_script'] += '变化'
+            else: Path(rows[0]['tts_path']).write_bytes(b'changed audio')
+            blocked = selection_recovery.recover_draft(request, self.report, prefix=['python'], run=Mock(),
+                env={}, cwd=str(ROOT), deadline=time.time()+60, drafts_root=self.drafts)
+            self.assertNotEqual(blocked['rc'], 0)
+            self.assertIn('REFILL_', blocked['stdout'])
 
     def test_retry_budget_belongs_to_the_selection_generation(self):
         self.write("selection_recovery_state.json", {"attempts": 1, "source_run_id": "old-generation", "status": "RUNNING"})

@@ -63,6 +63,9 @@ DIRECT表示本句按其用途正常匹配：贴切的轻薄/柔软展示和普�
 不要求它们成为物理实验。明确性能结果、数量和数值比较仍须对应画面。包装淋水不能证明巾体干爽。
 价格/优惠/划算等普通促销口播，可用同商品包装或陈列承接；明确价格数值或价格比较仍须对应可读证据。
 包装标称只支持包装上的说法，不证明实际性能；EDI纯水等原料标称不要求另拍制水过程。
+口播里的层数或结构名称如果说的是瞬吸、吸收、下渗，看得见倒液之后的吸收过程或结果就是这句证据，不要求切开看到内部层数。没有吸收过程的包装和静态陈列仍然不能证明。
+防侧漏看见立体护边、侧翼或侧边结构就是直接匹配，不要求倒液防漏实验。只拉伸腰围、没有护边不算。
+干净卫生看见同商品外包装或未拆封包装就是直接匹配，标DIRECT，不得标ACCEPTABLE_DEGRADED，不要求撕开实验。
 画面反证或对象错误为MISMATCH；动作/结果未拍到、遮挡或无法确认则INSUFFICIENT_EVIDENCE。
 不要因凑满视频而放行，不得把结尾静态结果当作已看见完整过程。
 输出唯一JSON对象：{{"response_version":"{RESPONSE_VERSION}","segments":[{{"index":1,
@@ -112,8 +115,9 @@ def validate_cut(claim: dict, rows: list[dict], prepared_sources=None) -> list[s
         if item.get("continuity_group") and (start != planned.get("start") or end != planned.get("end")
                 or round(actual.get("target_duration", 0) * 1e6) != end - start):
             issues.append("CONTINUITY_QC_ALLOCATION_CHANGED")
-        # One output frame of rounding is allowed; evidence itself cannot be cut.
-        if abs(start - planned.get("start", -1000000)) > 40000 or abs(end - planned.get("end", -1000000)) > 40000:
+        # Reopening a draft can move a cut by a few frames. Within 100ms the
+        # window is unchanged, and evidence clipped only by that shift is not a cut.
+        if abs(start - planned.get("start", -1000000)) > 100000 or abs(end - planned.get("end", -1000000)) > 100000:
             issues.append("AI_QC_FINAL_WINDOW_CHANGED")
         if "target_duration" in actual:
             target = actual["target_duration"]
@@ -123,7 +127,8 @@ def validate_cut(claim: dict, rows: list[dict], prepared_sources=None) -> list[s
                     or abs(actual["source_duration"] / speed - target) > .04):
                 issues.append("AI_QC_FINAL_SPEED_CHANGED")
         for ev in receipt.get("evidence_intervals_us", []):
-            if ev["start"] < start - 1000 or ev["end"] > end + 1000:
+            if (ev["end"] <= start or ev["start"] >= end
+                    or ev["start"] < start - 100000 or ev["end"] > end + 100000):
                 issues.append("AI_QC_EVIDENCE_CUT_AWAY")
     return sorted(set(issues))
 

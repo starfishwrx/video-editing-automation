@@ -180,9 +180,52 @@ class QCRejectionRecoveryTests(unittest.TestCase):
             "text": "First sentence.", "shot_id": shot,
             "ai_selection": {"source_identity": source}}]}
         (self.report_dir / "shot_match_report.json").write_text(json.dumps(match), encoding="utf-8")
-        qc = {"status": "FAIL", "model_review": [{"index": 1, "claim": claim, "visual_ok": False}]}
+        qc = {"status": "FAIL", "model_review": [{"index": 1, "claim": claim, "visual_ok": False, "match_level": "MISMATCH"}]}
         (self.report_dir / "draft_visual_qc.json").write_text(json.dumps(qc), encoding="utf-8")
         return qc
+
+    def test_nonsemantic_qc_issues_never_blacklist_a_source(self):
+        for level in ("INSUFFICIENT_EVIDENCE", "ACCEPTABLE_DEGRADED", "MATERIAL_GAP"):
+            with self.subTest(level=level):
+                report = self.latest_failure("shot-A")
+                report["status"] = "PASS_WITH_DEGRADED"
+                report["model_review"][0]["match_level"] = level
+                self.assertEqual(self.worker.qc_rejected_shots_from_report(self.report_dir, report), {})
+
+    def test_qc_feedback_requires_validated_draft_claim_and_bound_source(self):
+        self.latest_failure('shot-A')
+        identity = self.worker.qc_rejection_identity(self.manifest)['sources'][0]
+        row = {'index': 1, 'claim': 'First sentence.', 'match_level': 'ACCEPTABLE_DEGRADED',
+               'visual_ok': True, 'observed': 'visible package', 'reason': 'requested action is absent', 'confidence': .9}
+        report = {'draft': str(self.root / 'draft'), 'response_contract': {'status': 'VALIDATED', 'errors': []},
+                  'source_bindings': [{'identity': identity}], 'model_review': [row],
+                  'segment_map': [{'claim_index': 1, 'draft_segments': [1]}]}
+        with patch.object(self.worker.production_eval.visual_qc_contract, 'report_matches_draft', return_value=True), \
+             patch('orchestrator.quality.draft_visual_qc._load_json', return_value={}), \
+             patch('orchestrator.quality.draft_visual_qc._timeline_items', return_value=([{'index': 1, 'source': str(self.source)}], [])), \
+             patch('orchestrator.media.source_normalization.read_prepared_sources', return_value=[]), \
+             patch('orchestrator.quality.ai_editor_qc.source_matches_receipt', return_value=True) as source_match:
+            result = self.worker.qc_refill_feedback_from_report(self.report_dir, report, {1}, expected_sources=[identity])
+            self.assertEqual(result['1']['reason'], 'requested action is absent')
+            self.assertEqual(result['1']['prior_shot_ids'], ['shot-A'])
+            self.assertEqual(self.worker.qc_refill_feedback_from_report(
+                self.report_dir, {**report, 'model_review': [{**row, 'claim': 'different'}]}, {1}, expected_sources=[identity]), {})
+            self.assertEqual(self.worker.qc_refill_feedback_from_report(
+                self.report_dir, {**report, 'source_bindings': []}, {1}, expected_sources=[identity]), {})
+            source_match.return_value = False
+            self.assertEqual(self.worker.qc_refill_feedback_from_report(self.report_dir, report, {1}, expected_sources=[identity]), {})
+        with patch.object(self.worker.production_eval.visual_qc_contract, 'report_matches_draft', return_value=False):
+            self.assertEqual(self.worker.qc_refill_feedback_from_report(self.report_dir, report, {1}, expected_sources=[identity]), {})
+
+    def test_degraded_report_restores_target_without_excluding_source(self):
+        report = self.latest_failure('shot-A')
+        report['status'] = 'PASS_WITH_DEGRADED'
+        report['model_review'][0].update(match_level='ACCEPTABLE_DEGRADED', visual_ok=True)
+        (self.report_dir / 'draft_visual_qc.json').write_text(json.dumps(report), encoding='utf-8')
+        _, excluded = self.worker.restore_qc_rejections(self.report_dir, self.manifest)
+        self.assertEqual(excluded, {})
+        state = json.loads((self.report_dir / 'qc_rejected_shots.json').read_text(encoding='utf-8'))
+        self.assertEqual(state['repair_indices'], [1])
 
     def test_restart_unions_history_and_latest_uncheckpointed_failure(self):
         self.latest_failure("shot-A")

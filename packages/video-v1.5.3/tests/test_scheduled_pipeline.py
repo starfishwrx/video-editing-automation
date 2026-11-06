@@ -49,7 +49,8 @@ class ScheduledPipelineTests(unittest.TestCase):
     def test_default_dispatch_is_full_pipeline_and_second_tick_does_not_rebuild(self):
         self.queue_tasks([{"record_id": "new", "delivery_mode": "preview"}])
         def dispatch(tasks, **kwargs):
-            self.assertEqual(kwargs, {"work": self.work.resolve()})
+            self.assertEqual(kwargs["work"], self.work.resolve())
+            kwargs["on_task_start"](tasks[0], "build")
             self.assertEqual(tasks[0]["record_id"], "new")
             self.done("new", {"status": "PREVIEW_READY", "drafts": ["local"],
                               "qc_reports": [{"status": "PASS"}]})
@@ -60,6 +61,36 @@ class ScheduledPipelineTests(unittest.TestCase):
         self.assertEqual(mocked.call_count, 1)
         self.assertEqual(first["tasks"][0]["stage"], "build")
         self.assertEqual(second["tasks"][0]["reason"], "PREVIEW_LOCAL_ONLY")
+
+    def test_paid_material_start_is_counted_once_and_waiting_peer_is_not_charged(self):
+        self.queue_tasks([{'record_id': 'owner'}, {'record_id': 'waiting'}])
+        def dispatch(tasks, **kwargs):
+            kwargs['on_task_start'](tasks[0], 'build', phase='material')
+            kwargs['on_task_start'](tasks[0], 'build')
+            return [{'record_id': 'owner', 'stage': 'material', 'status': 'ERROR', 'retryable': True},
+                    {'record_id': 'waiting', 'stage': 'material', 'status': 'BLOCKED'}]
+        with patch('tools.batch_dispatch.dispatch', side_effect=dispatch):
+            scheduled.run_once(self.queue, self.work)
+            state = json.loads((self.work / 'pipeline_state.json').read_text())['records']
+            self.assertEqual(state['owner']['build_attempts'], 1)
+            self.assertEqual(state['waiting'].get('build_attempts', 0), 0)
+            scheduled.run_once(self.queue, self.work)
+            state = json.loads((self.work / 'pipeline_state.json').read_text())['records']
+            self.assertEqual(state['owner']['build_attempts'], 2)
+            self.assertEqual(state['waiting'].get('build_attempts', 0), 0)
+        result = scheduled.run_once(self.queue, self.work, dry_run=True)
+        owner = next(row for row in result['tasks'] if row['record_id'] == 'owner')
+        self.assertEqual(owner['reason'], 'BUILD_RETRY_LIMIT')
+
+    def test_interrupted_material_start_is_not_silently_replayed(self):
+        self.queue_tasks([{'record_id': 'owner'}])
+        def dispatch(tasks, **kwargs):
+            kwargs['on_task_start'](tasks[0], 'build', phase='material')
+            raise RuntimeError('supervisor interrupted')
+        with patch('tools.batch_dispatch.dispatch', side_effect=dispatch):
+            scheduled.run_once(self.queue, self.work)
+        result = scheduled.run_once(self.queue, self.work, dry_run=True)
+        self.assertEqual(result['tasks'][0]['reason'], 'FAILED_OR_ATTEMPTED_REQUIRES_RECOVERY')
 
     def test_single_record_uses_the_same_dispatcher_as_a_batch(self):
         self.queue_tasks([{"record_id": "one"}, {"record_id": "two", "delivery_mode": "preview"}])
@@ -145,8 +176,8 @@ class ScheduledPipelineTests(unittest.TestCase):
         for _ in range(3):
             result = scheduled.run_once(self.queue, self.work, dispatcher=dispatch)
         self.assertEqual(len(calls), scheduled.MAX_QC_ATTEMPTS)
-        self.assertTrue(all(row["resume_stage"] == "qc" for row in calls))
-        self.assertEqual(result["tasks"][0]["reason"], "QC_RETRY_LIMIT")
+        self.assertTrue(all(row["resume_stage"] == "delivery" for row in calls))
+        self.assertEqual(result["tasks"][0]["reason"], "DELIVERY_RETRY_LIMIT")
         self.assertEqual(json.loads((self.work / "qc/done.json").read_text())["status"], "PARTIAL")
 
     def test_verified_copy_with_pending_archive_or_table_resumes_delivery(self):

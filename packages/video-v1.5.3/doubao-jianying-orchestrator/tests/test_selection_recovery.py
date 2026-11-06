@@ -246,6 +246,183 @@ class SelectionRecoveryTests(unittest.TestCase):
             editor._assemble(self.manifest, self.analysis, plan, narration_timing=None, verify_sources=True)
         self.assertEqual(caught.exception.reason, "EVIDENCE_SPAN_TOO_LONG")
 
+    def test_matched_evidence_within_two_x_speeds_up_without_another_look(self):
+        plan = self.plan()
+        audio = 1_197_812
+        evidence = {"start": 4_567_000, "end": 6_851_000}
+        self.manifest["segments"][0]["audio_duration_us"] = audio
+        plan["sentences"][0]["audio_durations_us"] = [audio]
+        plan["rows"][0]["parts"][0]["audio_duration_us"] = audio
+        plan["reviews"]["1"][0]["evidence_intervals_us"] = [evidence]
+        failure = editor.WindowFailure(1, "shot1", "EVIDENCE_SPAN_TOO_LONG")
+        self.assertTrue(editor._speed_fit_reviewed_evidence(
+            self.manifest, self.analysis, plan, self.root, failure))
+        output = editor._assemble(self.manifest, self.analysis, plan, narration_timing=None, verify_sources=True)
+        segment = output["segments"][0]
+        self.assertGreater(segment["video_speed"], 1)
+        self.assertLessEqual(segment["video_speed"], 2)
+        self.assertLessEqual(segment["source_start"] * 1e6, evidence["start"])
+        self.assertGreaterEqual(segment["source_end"] * 1e6, evidence["end"])
+        self.assertTrue(contract.validate_segment_receipt(segment, index=1, manifest=self.manifest)["ok"])
+
+    def test_explicit_refill_reuses_speed_fit_for_complete_reviewed_evidence(self):
+        self.manifest['segments'][1]['audio_duration_us'] = 1_197_812
+        baseline = self.plan()
+        baseline['rows'][1]['parts'][0]['audio_duration_us'] = 1_197_812
+        matched = editor._assemble(self.manifest, self.analysis, baseline, narration_timing=None, verify_sources=True)
+        first = copy.deepcopy(matched['segments'][0])
+        review = {**copy.deepcopy(self.reviews['2'][0]),
+                  'evidence_intervals_us': [{'start': 4_567_000, 'end': 6_851_000}]}
+        request = {**self.manifest, 'ai_refill_indices': [2], 'delivery_mode': 'formal'}
+        with patch.object(editor, '_review_pool', return_value=([review],
+                {'feasible': False, 'reason': 'KNOWN_WINDOWS_INFEASIBLE'})), \
+                patch.object(editor, '_repair_selected_window', return_value=False), \
+                patch.object(editor.sentence_continuity, 'repair', return_value=False):
+            result = editor.refill_indices(request, self.analysis, matched, [2], self.root)
+        self.assertTrue(result['ok'], result)
+        self.assertEqual(result['segments'][0], first)
+        self.assertGreater(result['segments'][1]['video_speed'], 1)
+        self.assertLessEqual(result['segments'][1]['video_speed'], 2)
+
+    def test_first_tts_match_then_refill_keeps_all_frozen_audio_bindings(self):
+        baseline = editor._assemble(self.manifest, self.analysis, self.plan(), narration_timing=None, verify_sources=True)
+        self.assertTrue(all(not row.get('audio') for row in baseline['segments']))
+        before = copy.deepcopy(baseline['segments'][0])
+        audio_files = []
+        segments = copy.deepcopy(self.manifest['segments'])
+        for index, segment in enumerate(segments, 1):
+            audio = self.root / f'frozen-{index}.wav'
+            audio.write_bytes(b'fixture')
+            audio_files.append(audio)
+            segment['audio'] = str(audio)
+            segment['timing_certainty'] = 'audio'
+        request = {**self.manifest, 'segments': segments, 'ai_refill_indices': [2], 'delivery_mode': 'formal'}
+        (self.root / 'shot_match_report.json').write_text(json.dumps(baseline, ensure_ascii=False), encoding='utf-8')
+        with patch.object(cli, '_run_shot_analysis', return_value=self.analysis), \
+                patch('orchestrator.material_corrections.apply', side_effect=lambda _m, a, _r: a), \
+                patch.object(editor, '_review_pool', return_value=(copy.deepcopy(self.reviews['2']), {'feasible': True})):
+            result, blocker = cli._temporary_match(request, self.root / 'input.json', self.root)
+        self.assertIsNone(blocker, blocker)
+        self.assertEqual([str(Path(row['audio']).resolve()) for row in result['segments']],
+                         [str(path.resolve()) for path in audio_files])
+        preserved = dict(result['segments'][0])
+        preserved.pop('audio')
+        self.assertEqual(preserved.pop('timing_certainty'), 'audio')
+        before.pop('timing_certainty', None)
+        self.assertEqual(preserved, before)
+
+    def test_refill_uses_qc_gap_tail_window_and_current_draft_through_writer(self):
+        from orchestrator.application import engine, headless_production
+        self.manifest['head_trim_s'] = .3
+        self.manifest['segments'][1]['audio_duration_us'] = 1_279_000
+        original_plan = self.plan()
+        original_plan['rows'][1]['parts'][0]['audio_duration_us'] = 1_279_000
+        baseline = editor._assemble(self.manifest, self.analysis, original_plan, narration_timing=None, verify_sources=True)
+        baseline['manifest'].update(draft_name='old-a1', force_overwrite=True, parent_run_id='old-run')
+        preserved = copy.deepcopy(baseline['segments'][0])
+        segments = copy.deepcopy(self.manifest['segments'])
+        for index, segment in enumerate(segments, 1):
+            audio = self.root / f'fixed-{index}.wav'
+            audio.write_bytes(b'fixed recording')
+            segment.update(audio=str(audio), timing_certainty='audio')
+        alternative_path = self.root / 'alternative.mp4'
+        alternative_path.write_bytes(b'distinct source')
+        alternative = {**self.shots[1], 'shot_id': 'direct-action', 'video': str(alternative_path),
+                       'source_end': 6.333, 'duration': 6.333, 'material_duration_us': 6_333_000,
+                       'visual_description': 'early action then later action',
+                       'action_segments': [{'start': 0, 'end': 3, 'action': 'early action'},
+                                           {'start': 5.7, 'end': 6.18, 'action': 'later action'}]}
+        analysis = {'shots': [*self.shots, alternative]}
+        review = {**copy.deepcopy(self.reviews['2'][0]), 'shot_id': 'direct-action',
+                  'source_identity': contract.source_identity(alternative_path),
+                  'evidence_intervals_us': [{'start': 5_700_000, 'end': 6_180_000}]}
+        feedback = {'claim': segments[1]['text'], 'observed': 'only a static display',
+                    'reason': 'the actual action is not visible', 'match_level': 'ACCEPTABLE_DEGRADED',
+                    'prior_shot_ids': ['shot2']}
+        request = {**self.manifest, 'segments': segments, 'delivery_mode': 'formal', 'draft_name': 'new-a2',
+                   'force_overwrite': False, 'parent_run_id': 'new-run', 'ai_refill_indices': [2],
+                   'ai_refill_feedback': {'2': feedback}}
+        (self.root / 'shot_match_report.json').write_text(json.dumps(baseline, ensure_ascii=False), encoding='utf-8')
+        def inventory(m, shots, directory):
+            self.assertIn('actual action is not visible', m['revision_feedback'])
+            return [{'candidate_ids': ['direct-action', 'shot2'], 'candidate_windows': [
+                {'shot_id': 'direct-action', 'start': 5.7, 'end': 6.18}]}]
+        def review_pool(_m, sentence, shots, _directory, _audio, **_kwargs):
+            self.assertEqual(sentence['qc_feedback'], feedback)
+            self.assertEqual(sentence['candidate_ids'][0], 'direct-action')
+            self.assertIn('shot2', sentence['candidate_ids'])
+            def media(shot, _directory, **_kwargs):
+                self.assertLessEqual(shot['source_start'], 5.7)
+                self.assertGreaterEqual(shot['source_end'], 6.18)
+                self.assertGreaterEqual(shot['source_end'] - shot['source_start'], 1.279 + .3 - 0.00001)
+                return {'start': shot['source_start'], 'end': shot['source_end'],
+                        'before': contract.source_identity(shot['video']),
+                        'times': [5.7, 6.0, 6.18], 'sheet': self.root / 'synthetic.jpg'}
+            def call(prompt, _path, _sheet=None):
+                self.assertIn('the actual action is not visible', prompt)
+                self.assertIn('反馈与规则冲突时不得把反馈中的额外要求变成新规则', prompt)
+                return copy.deepcopy(review)
+            with patch.object(editor, '_review_media', side_effect=media), patch.object(editor, '_call', side_effect=call):
+                observed = editor._review(_m, sentence, shots['direct-action'], _directory)
+            return [observed], {'feasible': True}
+        with patch.object(cli, '_run_shot_analysis', return_value=analysis), \
+                patch('orchestrator.material_corrections.apply', side_effect=lambda _m, a, _r: a), \
+                patch.object(editor, '_inventory', side_effect=inventory), \
+                patch.object(editor, '_review_pool', side_effect=review_pool):
+            result, blocker = cli._temporary_match(request, self.root / 'input.json', self.root)
+        self.assertIsNone(blocker, blocker)
+        self.assertEqual(result['draft_name'], 'new-a2')
+        self.assertFalse(result['force_overwrite'])
+        self.assertEqual(result['parent_run_id'], 'new-run')
+        self.assertEqual(result['segments'][1]['shot_id'], 'direct-action')
+        retained = dict(result['segments'][0]); retained.pop('audio'); retained.pop('timing_certainty')
+        preserved.pop('timing_certainty', None)
+        self.assertEqual(retained, preserved)
+        self.assertEqual([r['audio'] for r in result['segments']], [s['audio'] for s in segments])
+        drafts = self.root / 'drafts'; drafts.mkdir()
+        old = drafts / 'old-a1'; old.mkdir(); (old / 'sentinel').write_text('keep')
+        obj = engine.OrchestrationEngine.__new__(engine.OrchestrationEngine)
+        obj.m = result
+        def writer(instance, clips, bgm):
+            target = drafts / instance.m['draft_name']
+            target.mkdir(exist_ok=False)
+            return {'status': 'SUCCESS', 'draft_name': target.name}
+        with patch.dict('os.environ', {'JY_DRAFT_BACKEND': 'headless'}), \
+                patch.object(obj, '_playback_gate', return_value=None), \
+                patch.object(headless_production, 'write_draft', side_effect=writer):
+            answer = obj.write_draft([], None)
+        self.assertEqual(answer['draft_name'], 'new-a2')
+        self.assertEqual((old / 'sentinel').read_text(), 'keep')
+        self.assertTrue((drafts / 'new-a2').is_dir())
+
+    def test_rejected_joint_group_still_allows_independent_two_x(self):
+        plan = self.plan()
+        audio = 1_197_812
+        self.manifest['segments'][0]['audio_duration_us'] = audio
+        plan['sentences'][0]['audio_durations_us'] = [audio]
+        plan['rows'][0]['parts'][0]['audio_duration_us'] = audio
+        plan['reviews']['1'][0]['evidence_intervals_us'] = [{'start': 4_567_000, 'end': 6_851_000}]
+        plan['continuity_attempts'] = {'other-point': {'index': 1, 'status': 'rejected', 'reason': 'different benefit'}}
+        neighbor = copy.deepcopy(plan['rows'][1])
+        with patch.object(editor, '_repair_selected_window', return_value=False), \
+                patch.object(editor.sentence_continuity, 'repair', return_value=False):
+            result = editor._repair_reviewed_rows(self.manifest, self.analysis, plan, self.root, None, set())
+        self.assertTrue(result['ok'], result)
+        self.assertGreater(result['segments'][0]['video_speed'], 1)
+        self.assertLessEqual(result['segments'][0]['video_speed'], 2)
+        self.assertEqual(plan['rows'][1], neighbor)
+
+    def test_matched_evidence_over_two_x_is_not_sped_up(self):
+        plan = self.plan()
+        plan["reviews"]["1"][0]["evidence_intervals_us"] = [{"start": 1_000_000, "end": 4_000_000}]
+        failure = editor.WindowFailure(1, "shot1", "EVIDENCE_SPAN_TOO_LONG")
+        self.assertFalse(editor._speed_fit_reviewed_evidence(
+            self.manifest, self.analysis, plan, self.root, failure))
+        plan["reviews"]["1"][0]["time_sensitive"] = True
+        plan["reviews"]["1"][0]["evidence_intervals_us"] = [{"start": 2_000_000, "end": 3_500_000}]
+        self.assertFalse(editor._speed_fit_reviewed_evidence(
+            self.manifest, self.analysis, plan, self.root, failure))
+
     def test_requested_small_window_is_reobserved_and_other_sentence_is_unchanged(self):
         plan = self.broken_window()
         preserved = copy.deepcopy(plan["rows"][0])
@@ -646,6 +823,407 @@ class SelectionRecoveryTests(unittest.TestCase):
         self.assertEqual(call.call_count, 1)
         self.assertTrue(editor._assemble(self.manifest, self.analysis, plan,
                           narration_timing=None, verify_sources=True)["ok"])
+
+    def test_absorption_structure_is_shown_by_the_pour_not_a_cutaway(self):
+        from orchestrator.quality import ai_editor_qc
+        self.assertIn("不要求切开看到内部层数", contract.POLICY)
+        self.assertIn("不要求倒液防漏实验", contract.POLICY)
+        self.assertIn("不要求撕开实验", contract.POLICY)
+        prompt = ai_editor_qc.prompt([{"claim": "新升级的7层瞬吸结构", "product": "测试商品",
+                                        "category": "weipin", "index": 1}], 3)
+        self.assertIn("不要求切开看到内部层数", prompt)
+        self.assertIn("不要求倒液防漏实验", prompt)
+        self.assertIn("不要求撕开实验", prompt)
+        self.assertFalse(editor._fabric_comfort_sentence(
+            {"kind": "selling_point", "text": "新升级的7层瞬吸结构", "selling_points": [{"text": "瞬吸"}]}))
+        self.assertTrue(editor._fabric_comfort_sentence(
+            {"kind": "selling_point", "text": "面层也很柔软舒适", "selling_points": [{"text": "面层柔软"}]}))
+
+    def test_short_line_without_a_selling_point_continues_the_previous_action(self):
+        plan = self.plan()
+        plan["sentences"][1] = {"index": 2, "text": "顺便说", "kind": "hook",
+                                "selling_points": [], "candidate_ids": ["shot2"], "scene_ids": []}
+        plan["rows"][1] = {"index": 2, "parts": [{"shot_id": "shot2", "audio_duration_us": 800_000}]}
+        self.manifest["segments"][1] = {"text": "顺便说", "audio_duration_us": 800_000}
+        failure = editor.WindowFailure(2, "shot2", "EVIDENCE_SPAN_TOO_LONG")
+
+        def review(_manifest, target, _directory, sentence, shot, window, attempt_metadata=None):
+            self.assertTrue(sentence.get("action_continuation"))
+            self.assertEqual(shot["shot_id"], "shot1")
+            key = "continue-tail"
+            target.setdefault("window_reviews", {})[key] = {
+                "verdict": "matched", "same_product": True, "basis": "product_display",
+                "observation": "上一镜的抚摸还在继续", "reason": "同商品动作顺延",
+                "confidence": 0.9, "supported_point_ids": [], "time_sensitive": False,
+                "scene_ids": [], "source_identity": contract.source_identity(shot["video"]),
+                "evidence_intervals_us": [{"start": window[0], "end": window[1]}],
+                "review_window_us": {"start": window[0], "end": window[1]},
+                "sentence_index": 2, "shot_id": shot["shot_id"]}
+            return key
+
+        with patch.object(editor, "_review_proposed_window", side_effect=review):
+            self.assertTrue(editor._extend_previous_action(
+                self.manifest, self.analysis, plan, self.root, failure, None))
+        part = plan["rows"][1]["parts"][0]
+        self.assertEqual(part["shot_id"], "shot1")
+        self.assertTrue(plan["window_reviews"]["continue-tail"]["action_continuation"])
+        built = editor._assemble(self.manifest, self.analysis, plan, narration_timing=None, verify_sources=True)
+        self.assertTrue(built["ok"])
+        previous = built["segments"][0].get("span_parts") or [built["segments"][0]]
+        continued = built["segments"][1].get("span_parts") or [built["segments"][1]]
+        self.assertEqual(round(previous[-1]["source_end"] * 1e6), part["source_start_us"])
+        self.assertEqual(continued[0]["video_speed"], 1)
+        with patch.object(editor, "_review_proposed_window") as blocked:
+            selling = editor.WindowFailure(2, "shot2", "EVIDENCE_SPAN_TOO_LONG")
+            untouched = self.plan()
+            self.assertFalse(editor._extend_previous_action(
+                self.manifest, self.analysis, untouched, self.root, selling, None))
+            blocked.assert_not_called()
+
+    def test_short_line_continues_after_the_last_sentence_of_a_group(self):
+        plan = self.plan()
+        plan["sentences"][1] = {"index": 2, "text": "顺便说", "kind": "hook",
+                                "selling_points": [], "candidate_ids": ["shot2"], "scene_ids": []}
+        plan["rows"][0]["continuity_key"] = "group-1"
+        plan["rows"][1] = {"index": 2, "parts": [{"shot_id": "shot2", "audio_duration_us": 800_000}]}
+        self.manifest["segments"][1] = {"text": "顺便说", "audio_duration_us": 800_000}
+        plan["continuity_reviews"] = {"group-1": {"input": {
+            "shot_id": "shot1",
+            "members": [{"index": 1, "start_us": 2_000_000, "end_us": 3_000_000}]}}}
+        failure = editor.WindowFailure(2, "shot2", "EVIDENCE_SPAN_TOO_LONG")
+
+        def review(_manifest, target, _directory, sentence, shot, window, attempt_metadata=None):
+            self.assertEqual((shot["shot_id"], window), ("shot1", (3_000_000, 3_800_000)))
+            key = "group-tail"
+            target.setdefault("window_reviews", {})[key] = {
+                "verdict": "matched", "same_product": True, "basis": "product_display",
+                "observation": "上一组的动作还在继续", "reason": "同商品动作顺延",
+                "confidence": 0.9, "supported_point_ids": [], "time_sensitive": False,
+                "scene_ids": [], "source_identity": contract.source_identity(shot["video"]),
+                "evidence_intervals_us": [{"start": window[0], "end": window[1]}],
+                "review_window_us": {"start": window[0], "end": window[1]},
+                "sentence_index": 2, "shot_id": shot["shot_id"]}
+            return key
+
+        with patch.object(editor, "_review_proposed_window", side_effect=review), \
+                patch.object(editor, "_assemble", return_value={"ok": True}):
+            self.assertTrue(editor._extend_previous_action(
+                self.manifest, self.analysis, plan, self.root, failure, None))
+        self.assertEqual(plan["rows"][1]["parts"][0]["source_start_us"], 3_000_000)
+        self.assertEqual(plan["rows"][1]["parts"][0]["shot_id"], "shot1")
+
+        plan["continuity_reviews"]["group-1"]["input"]["members"].append(
+            {"index": 4, "start_us": 3_000_000, "end_us": 4_000_000})
+        plan["rows"][1] = {"index": 2, "parts": [{"shot_id": "shot2", "audio_duration_us": 800_000}]}
+        with patch.object(editor, "_review_proposed_window") as blocked:
+            self.assertFalse(editor._extend_previous_action(
+                self.manifest, self.analysis, plan, self.root, failure, None))
+            blocked.assert_not_called()
+
+    def test_short_continuation_reserves_tail_padding_before_review(self):
+        plan = self.plan()
+        plan['sentences'][1] = {'index': 2, 'text': '顺便说', 'kind': 'hook', 'selling_points': []}
+        self.manifest['segments'][1] = {'text': '顺便说', 'audio_duration_us': 800_000}
+        self.manifest.update(tail_pad_s=.04, tail_trim_s=0)
+        shot = {**self.shots[0], 'source_end': 3.82, 'material_duration_us': 3_820_000}
+        failure = editor.WindowFailure(2, 'shot2', 'EVIDENCE_SPAN_TOO_LONG')
+        with patch.object(editor, '_single_part_end', return_value=(shot, 3_000_000)), \
+                patch.object(editor, '_review_proposed_window') as review:
+            self.assertFalse(editor._extend_previous_action(self.manifest, self.analysis, plan, self.root, failure, None))
+        review.assert_not_called()
+
+    def test_short_line_stays_blocked_when_the_previous_shot_has_no_room(self):
+        plan = self.plan()
+        plan["sentences"][1] = {"index": 2, "text": "顺便说", "kind": "hook",
+                                "selling_points": [], "candidate_ids": ["shot2"], "scene_ids": []}
+        self.manifest["segments"][0]["audio_duration_us"] = 500_000
+        self.manifest["segments"][1] = {"text": "顺便说", "audio_duration_us": 800_000}
+        plan["rows"][0]["parts"][0].update(audio_duration_us=500_000, source_start_us=9_200_000)
+        plan["reviews"]["1"][0]["evidence_intervals_us"] = [{"start": 9_200_000, "end": 9_500_000}]
+        failure = editor.WindowFailure(2, "shot2", "SOURCE_TOO_SHORT")
+        with patch.object(editor, "_review_proposed_window") as review:
+            self.assertFalse(editor._extend_previous_action(
+                self.manifest, self.analysis, plan, self.root, failure, None))
+            review.assert_not_called()
+
+    def test_short_line_with_evidence_too_long_tries_the_previous_shot_before_recrop(self):
+        plan = self.plan()
+        plan["sentences"][1] = {"index": 2, "text": "很舒服，", "kind": "product_intro",
+                                "selling_points": [], "candidate_ids": ["shot2"], "scene_ids": []}
+        failure = editor.WindowFailure(2, "shot2", "EVIDENCE_SPAN_TOO_LONG")
+        order = []
+
+        def revalidate(*_args, **_kwargs):
+            if not order:
+                raise failure
+            return {"ok": True}
+
+        def extend(*_args, **_kwargs):
+            order.append("extend")
+            return True
+
+        def recrop(*_args, **_kwargs):
+            order.append("recrop")
+            return True
+
+        with patch.object(editor, "_revalidate_rows", side_effect=revalidate), \
+                patch.object(editor, "_extend_previous_action", side_effect=extend), \
+                patch.object(editor, "_repair_selected_window", side_effect=recrop), \
+                patch.object(editor.sentence_continuity, "repair", return_value=False):
+            result = editor._repair_reviewed_rows(
+                self.manifest, self.analysis, plan, self.root, None, set())
+        self.assertEqual(order, ["extend"])
+        self.assertTrue(result["ok"])
+
+    def test_selling_point_span_still_recrops_before_the_previous_shot(self):
+        plan = self.plan()
+        failure = editor.WindowFailure(2, "shot2", "EVIDENCE_SPAN_TOO_LONG")
+        order = []
+
+        def revalidate(*_args, **_kwargs):
+            if "recrop" not in order:
+                raise failure
+            return {"ok": True}
+
+        def extend(*_args, **_kwargs):
+            order.append("extend")
+            return True
+
+        def recrop(*_args, **_kwargs):
+            order.append("recrop")
+            return True
+
+        with patch.object(editor, "_revalidate_rows", side_effect=revalidate), \
+                patch.object(editor, "_extend_previous_action", side_effect=extend), \
+                patch.object(editor, "_repair_selected_window", side_effect=recrop), \
+                patch.object(editor.sentence_continuity, "repair", return_value=False):
+            editor._repair_reviewed_rows(self.manifest, self.analysis, plan, self.root, None, set())
+        self.assertEqual(order, ["recrop"])
+
+    def _absorb_plan(self, durations):
+        texts = ["新升级的7层瞬吸结构", "能在液体流下就快速下渗", "纸巾按压还不反渗"]
+        manifest = copy.deepcopy(self.manifest)
+        manifest["segments"] = [{"text": text, "audio_duration_us": audio}
+                                for text, audio in zip(texts, durations)]
+        analysis = copy.deepcopy(self.analysis)
+        video = self.root / "source3.mp4"
+        video.write_bytes(b"synthetic source")
+        analysis["shots"].append({"shot_id": "shot3", "video": str(video), "source_start": 0,
+                                   "source_end": 10, "duration": 10, "status": "ready_for_matching"})
+        plan = self.plan()
+        plan["identity"]["editorial_rules"] = contract.rules_identity(manifest)
+        plan["sentences"], plan["reviews"], plan["rows"] = [], {}, []
+        for index, (text, audio) in enumerate(zip(texts, durations), 1):
+            sid = f"shot{index}"
+            shot = analysis["shots"][index - 1]
+            plan["sentences"].append({
+                "index": index, "text": text, "kind": "selling_point",
+                "selling_points": [{"id": f"p{index}", "text": text}],
+                "candidate_ids": [sid], "scene_ids": []})
+            plan["reviews"][str(index)] = [{
+                **copy.deepcopy(self.reviews["1"][0]), "shot_id": sid,
+                "supported_point_ids": [f"p{index}"],
+                "source_identity": contract.source_identity(shot["video"])}]
+            plan["rows"].append({"index": index, "parts": [
+                {"shot_id": sid, "audio_duration_us": audio, "source_start_us": 2_000_000}]})
+        return manifest, analysis, plan
+
+    def _phase_review(self, plan, sentence, shot, window):
+        key = f"phase-{sentence['index']}"
+        identity = contract.source_identity(shot["video"])
+        existing = next((r for r in plan["reviews"].get(str(sentence["index"]), [])
+                         if r.get("shot_id") == shot["shot_id"] and r.get("verdict") == "matched"), None)
+        if existing:
+            identity = existing["source_identity"]
+        plan.setdefault("window_reviews", {})[key] = {
+            "verdict": "matched", "same_product": True, "basis": "visible_result",
+            "observation": "倒液后液体渗入巾面", "reason": "相位切开",
+            "confidence": 0.9, "supported_point_ids": [p["id"] for p in sentence["selling_points"]],
+            "time_sensitive": False, "scene_ids": [], "source_identity": identity,
+            "shot_id": shot["shot_id"], "sentence_index": sentence["index"],
+            "evidence_intervals_us": [{"start": window[0], "end": window[1]}],
+            "review_window_us": {"start": window[0], "end": window[1]}}
+        return key
+
+    def _joint_experiment_review(self, _manifest, context, _shot, _directory):
+        from orchestrator.policy import continuity
+        observations = [{'index': m['index'], 'verdict': 'matched', 'same_product': True,
+            'basis': 'visible_result', 'phase': 'observed', 'observation': 'actual phase', 'reason': 'supports sentence',
+            'supported_point_ids': [p['id'] for p in m['selling_points']], 'time_sensitive': False, 'scene_ids': [],
+            'evidence_intervals_us': [{'start': m['start_us'], 'end': m['end_us']}]} for m in context['members']]
+        return {'schema': continuity.SCHEMA, 'input': context, 'review': {
+            'verdict': 'matched', 'same_product': True, 'same_demonstration': True, 'same_selling_point': True,
+            'semantic_continuity': True, 'complete_action': True, 'result_preserved': True,
+            'shared_point': 'experiment', 'product_observation': 'same product',
+            'demonstration_observation': 'same sample and setup', 'observation': 'complete experiment',
+            'reason': 'continuous phases', 'confidence': .9,
+            'complete_intervals_us': [copy.deepcopy(context['window_us'])], 'members': observations}}
+
+    def test_same_file_split_demonstrations_are_not_joined_without_joint_evidence(self):
+        manifest, analysis, plan = self._absorb_plan((1_200_000, 1_300_000, 1_400_000))
+        original = copy.deepcopy(plan['rows'])
+        phases = {'pour': [1.0, 2.5], 'absorb': [2.5, 5.5], 'wipe': [7.0, 9.0]}
+        with patch('orchestrator.vision.phase_timing.locate', return_value={
+                'ok': True, 'complete': True, 'phases': phases, 'note': 'two different demonstrations'}), \
+                patch.object(editor, '_review_proposed_window',
+                    side_effect=lambda *args, **kwargs: self._phase_review(plan, args[3], args[4], args[5])), \
+                patch.object(editor.sentence_continuity, 'review_group') as joint:
+            self.assertFalse(editor._place_absorb_experiment(manifest, analysis, plan, self.root, None))
+        self.assertEqual(plan['rows'], original)
+        joint.assert_not_called()
+
+    def test_contiguous_phase_cuts_still_require_joint_demonstration_review(self):
+        manifest, analysis, plan = self._absorb_plan((1_200_000, 1_300_000, 1_400_000))
+        original = copy.deepcopy(plan['rows'])
+        phases = {'pour': [1.0, 2.5], 'absorb': [2.5, 3.5], 'wipe': [3.5, 5.5]}
+        with patch('orchestrator.vision.phase_timing.locate', return_value={
+                'ok': True, 'complete': True, 'phases': phases}), \
+                patch.object(editor, '_review_proposed_window',
+                    side_effect=lambda *args, **kwargs: self._phase_review(plan, args[3], args[4], args[5])), \
+                patch.object(editor.sentence_continuity, 'review_group',
+                             side_effect=ValueError('CONTINUITY_JOINT_REVIEW_UNCERTAIN')) as joint:
+            self.assertFalse(editor._place_absorb_experiment(manifest, analysis, plan, self.root, None))
+        self.assertEqual(plan['rows'], original)
+        self.assertGreaterEqual(joint.call_count, 1)
+
+    def test_adjacent_absorb_lines_share_one_experiment_cut_by_phase(self):
+        manifest, analysis, plan = self._absorb_plan((1_200_000, 1_300_000, 1_400_000))
+        phases = {"pour": [1.0, 2.5], "absorb": [2.5, 7.0], "wipe": [3.5, 5.5]}
+        with patch("orchestrator.vision.phase_timing.locate", return_value={"ok": True, "phases": phases}), \
+                patch.object(editor, "_review_proposed_window",
+                             side_effect=lambda *args, **kwargs: self._phase_review(plan, args[3], args[4], args[5])), \
+                patch.object(editor.sentence_continuity, "review_group", side_effect=self._joint_experiment_review):
+            self.assertTrue(editor._place_absorb_experiment(manifest, analysis, plan, self.root, None))
+        self.assertEqual([row["parts"][0]["shot_id"] for row in plan["rows"]], ["shot1", "shot1", "shot1"])
+        self.assertEqual([row["parts"][0]["source_start_us"] for row in plan["rows"]],
+                         [1_000_000, 2_200_000, 3_500_000])
+        self.assertTrue(all(row.get("continuity_key") for row in plan["rows"]))
+        self.assertTrue(editor._assemble(manifest, analysis, plan, narration_timing=None)["ok"])
+
+    def test_a_later_sentence_rejection_does_not_drop_the_pour(self):
+        manifest, analysis, plan = self._absorb_plan((1_200_000, 1_300_000, 1_400_000))
+        manifest["qc_rejected_shots"] = {"3": ["shot1"]}
+        phases = {"pour": [1.0, 2.5], "absorb": [2.5, 7.0], "wipe": [3.5, 5.5]}
+        with patch("orchestrator.vision.phase_timing.locate", return_value={"ok": True, "phases": phases}), \
+                patch.object(editor, "_review_proposed_window",
+                             side_effect=lambda *args, **kwargs: self._phase_review(plan, args[3], args[4], args[5])), \
+                patch.object(editor.sentence_continuity, "review_group", side_effect=self._joint_experiment_review):
+            self.assertFalse(editor._place_absorb_experiment(manifest, analysis, plan, self.root, None))
+        self.assertEqual([row["parts"][0]["shot_id"] for row in plan["rows"]], ["shot1", "shot2", "shot3"])
+
+    def test_missing_wipe_phase_keeps_the_press_line_on_its_own_shot(self):
+        manifest, analysis, plan = self._absorb_plan((1_200_000, 1_300_000, 1_400_000))
+        phases = {"pour": [1.0, 2.5], "absorb": [2.5, 7.0]}
+        with patch("orchestrator.vision.phase_timing.locate", return_value={"ok": True, "phases": phases}), \
+                patch.object(editor, "_review_proposed_window",
+                             side_effect=lambda *args, **kwargs: self._phase_review(plan, args[3], args[4], args[5])), \
+                patch.object(editor.sentence_continuity, "review_group", side_effect=self._joint_experiment_review):
+            editor._place_absorb_experiment(manifest, analysis, plan, self.root, None)
+        self.assertEqual(plan["rows"][0]["parts"][0]["shot_id"], "shot1")
+        self.assertEqual(plan["rows"][1]["parts"][0]["shot_id"], "shot2")
+        self.assertEqual(plan["rows"][2]["parts"][0]["shot_id"], "shot3")
+        self.assertTrue(any(note.get("reason") == "PHASE_UNLOCATED" for note in plan["absorb_phase_notes"]))
+
+    def test_unrelated_reviewed_press_is_not_assumed_to_be_same_experiment(self):
+        manifest, analysis, plan = self._absorb_plan((1_200_000, 1_300_000, 1_400_000))
+        plan["sentences"][2]["text"] = "吸完之后不粘腻"
+        manifest["segments"][2]["text"] = "吸完之后不粘腻"
+        shot2 = analysis["shots"][1]
+        plan["reviews"]["3"].append({
+            **copy.deepcopy(self.reviews["1"][0]), "shot_id": "shot2",
+            "source_identity": contract.source_identity(shot2["video"]),
+            "observation": "纸巾按压后巾面干爽",
+            "evidence_intervals_us": [{"start": 2_000_000, "end": 2_800_000}],
+            "time_sensitive": False})
+        phases = {"pour": [1.0, 2.5], "absorb": [2.5, 7.0]}
+        with patch("orchestrator.vision.phase_timing.locate", return_value={"ok": True, "phases": phases}), \
+                patch.object(editor, "_review_proposed_window",
+                             side_effect=lambda *args, **kwargs: self._phase_review(plan, args[3], args[4], args[5])), \
+                patch.object(editor.sentence_continuity, "review_group", side_effect=self._joint_experiment_review):
+            self.assertFalse(editor._place_absorb_experiment(manifest, analysis, plan, self.root, None))
+        self.assertEqual(plan["rows"][2]["parts"][0]["shot_id"], "shot3")
+        self.assertNotIn("absorb_phase", plan["rows"][2]["parts"][0])
+        self.assertTrue(any(note.get("reason") == "PHASE_UNLOCATED" for note in plan["absorb_phase_notes"]))
+
+    def test_absorb_group_retries_another_candidate_when_first_cannot_fit(self):
+        manifest, analysis, plan = self._absorb_plan((1_200_000, 1_300_000, 1_400_000))
+        short = {'pour': [1.0, 1.4], 'absorb': [1.4, 1.8], 'wipe': [7.0, 7.5]}
+        full = {'pour': [1.0, 2.5], 'absorb': [2.5, 7.0], 'wipe': [3.5, 5.5]}
+        def locate(shot, *_args, **_kwargs):
+            return {'ok': True, 'phases': short if shot['shot_id'] == 'shot1' else full}
+        with patch('orchestrator.vision.phase_timing.locate', side_effect=locate), \
+                patch.object(editor, '_review_proposed_window',
+                             side_effect=lambda *args, **kwargs: self._phase_review(plan, args[3], args[4], args[5])), \
+                patch.object(editor.sentence_continuity, 'review_group', side_effect=self._joint_experiment_review):
+            self.assertTrue(editor._place_absorb_experiment(manifest, analysis, plan, self.root, None))
+        self.assertEqual([row['parts'][0]['shot_id'] for row in plan['rows']], ['shot2'] * 3)
+
+    def test_absorb_group_uses_a_later_pour_when_the_opener_does_not_locate(self):
+        manifest, analysis, plan = self._absorb_plan((1_200_000, 1_300_000, 1_400_000))
+        phases = {"pour": [1.0, 2.5], "absorb": [2.5, 7.0], "wipe": [3.5, 5.5]}
+
+        def locate(shot, *_args, **_kwargs):
+            if shot.get("shot_id") == "shot1":
+                return {"ok": False, "reason": "NO_POUR"}
+            return {"ok": True, "phases": phases}
+
+        with patch("orchestrator.vision.phase_timing.locate", side_effect=locate), \
+                patch.object(editor, "_review_proposed_window",
+                             side_effect=lambda *args, **kwargs: self._phase_review(plan, args[3], args[4], args[5])), \
+                patch.object(editor.sentence_continuity, "review_group", side_effect=self._joint_experiment_review):
+            self.assertTrue(editor._place_absorb_experiment(manifest, analysis, plan, self.root, None))
+        self.assertEqual([row["parts"][0]["shot_id"] for row in plan["rows"]], ["shot2", "shot2", "shot2"])
+        self.assertTrue(all(row.get("continuity_key") for row in plan["rows"]))
+
+    def test_nonstick_line_uses_the_tissue_press(self):
+        manifest, analysis, plan = self._absorb_plan((1_200_000, 1_300_000, 1_400_000))
+        plan["sentences"][2]["text"] = "吸完之后不粘腻"
+        manifest["segments"][2]["text"] = "吸完之后不粘腻"
+        phases = {"pour": [1.0, 2.5], "absorb": [2.5, 7.0], "wipe": [3.5, 5.5]}
+        with patch("orchestrator.vision.phase_timing.locate", return_value={"ok": True, "phases": phases}), \
+                patch.object(editor, "_review_proposed_window",
+                             side_effect=lambda *args, **kwargs: self._phase_review(plan, args[3], args[4], args[5])), \
+                patch.object(editor.sentence_continuity, "review_group", side_effect=self._joint_experiment_review):
+            self.assertTrue(editor._place_absorb_experiment(manifest, analysis, plan, self.root, None))
+        self.assertTrue(plan["rows"][2].get("continuity_key"))
+        self.assertEqual(plan["rows"][2]["parts"][0]["shot_id"], "shot1")
+
+    def test_repeated_comfort_lines_take_two_different_touch_shots(self):
+        plan = self.plan()
+        plan["sentences"][0].update(text="用着非常舒适", selling_points=[{"id": "p1", "text": "舒适"}])
+        plan["sentences"][1].update(text="面层也很柔软舒适", selling_points=[{"id": "p1", "text": "面层柔软"}])
+        plan["rows"][1]["parts"][0]["shot_id"] = "shot1"
+        same = {**copy.deepcopy(self.reviews["2"][0]), "shot_id": "shot1",
+                "source_identity": contract.source_identity(self.shots[0]["video"]),
+                "evidence_intervals_us": [{"start": 2_000_000, "end": 2_800_000}],
+                "time_sensitive": False, "basis": "editorial_fit"}
+        longer = {**copy.deepcopy(self.reviews["2"][0]), "shot_id": "shot2",
+                  "source_identity": contract.source_identity(self.shots[1]["video"]),
+                  "evidence_intervals_us": [{"start": 1_000_000, "end": 5_000_000}],
+                  "time_sensitive": False, "basis": "editorial_fit"}
+        plan["reviews"]["2"] = [same, longer]
+
+        def review(_manifest, target, _directory, sentence, shot, window, attempt_metadata=None):
+            self.assertEqual(shot["shot_id"], "shot2")
+            key = "comfort-other"
+            target.setdefault("window_reviews", {})[key] = {
+                "verdict": "matched", "same_product": True, "basis": "editorial_fit",
+                "observation": "手在另一条面层上抚摸", "reason": "这段抚摸完整",
+                "confidence": 0.9, "supported_point_ids": ["p1"], "time_sensitive": False,
+                "placement_review": True, "scene_ids": [],
+                "source_identity": contract.source_identity(shot["video"]),
+                "evidence_intervals_us": [{"start": window[0], "end": window[1]}],
+                "review_window_us": {"start": window[0], "end": window[1]},
+                "sentence_index": sentence["index"], "shot_id": shot["shot_id"]}
+            return key
+
+        with patch.object(editor, "_review_proposed_window", side_effect=review):
+            fixed = editor._repair_repeated_window(
+                self.manifest, self.analysis, plan, self.root, None, 2, set())
+        self.assertTrue(fixed)
+        part = plan["rows"][1]["parts"][0]
+        self.assertEqual(part["shot_id"], "shot2")
+        self.assertEqual(part["source_start_us"], 1_000_000)
 
     def test_repeat_repair_expands_at_most_one_round_of_actual_reviews(self):
         plan = self.plan()

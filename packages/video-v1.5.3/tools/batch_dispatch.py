@@ -155,10 +155,14 @@ def _voice_error(task: dict) -> str | None:
 
 
 def _bgm_error(task: dict) -> str | None:
-    from orchestrator.audio import bgm_request, library_resources
+    from orchestrator.audio import bgm_request, bgm_selector, library_resources
     try:
-        if not bgm_request.normalize(task.get("bgm")).get("path"):
+        spec = bgm_request.normalize(task.get("bgm"))
+        if not spec.get("path"):
             library_resources.read_catalog("cloud_music_library.csv")
+            requested = str(spec.get("music_id") or "").strip()
+            if requested and not bgm_selector.select_bgm(music_id=requested):
+                return "BGM_REQUIRED_NO_MATCHING_TRACK"
     except (ValueError, TypeError, library_resources.RuntimeCatalogError) as exc:
         return str(exc)
     return None
@@ -241,7 +245,9 @@ def run_task(task: dict, stage: str, env: dict, work: Path) -> dict:
     task_dir.mkdir(parents=True, exist_ok=True)
     path = task_dir / "task.json"
     prior_deliveries = formal_delivery_count(_read(task_dir / "done.json"))
-    if stage == "qc" and path.is_file():
+    if stage in {"qc", "delivery"}:
+        if not path.is_file():
+            raise ValueError("TASK_SNAPSHOT_REQUIRED_FOR_RESUME")
         # QC resumes the frozen run. Replacing its normalized task snapshot
         # with a fresh queue row would invalidate the hash-bound review input.
         if str(_read(path).get("record_id") or "") != str(task["record_id"]):
@@ -295,7 +301,8 @@ def _supervisor(policy: RuntimePolicy):
 
 def dispatch(tasks: list[dict], *, work: Path, policy: RuntimePolicy | None = None,
              preparer: Callable = prepare_product, runner: Callable = run_task,
-             dry_run: bool = False, resume_stage: str | None = None) -> list[dict]:
+             dry_run: bool = False, resume_stage: str | None = None,
+             on_task_start: Callable | None = None) -> list[dict]:
     policy = policy or load_policy()
     started_at = time.time()
     started_clock = time.monotonic()
@@ -311,8 +318,8 @@ def dispatch(tasks: list[dict], *, work: Path, policy: RuntimePolicy | None = No
             task["_dispatch_admitted_clock"] = started_clock
             task["_dispatch_wait_origin"] = "supervisor_admission"
             unique.append(task)
-    pending = [(task, "qc" if resume_stage == "qc" or
-                (not resume_stage and _qc_pending(task, work)) else "build") for task in unique]
+    pending = [(task, resume_stage if resume_stage in {"qc", "delivery"} else
+                "qc" if not resume_stage and _qc_pending(task, work) else "build") for task in unique]
     pending.sort(key=lambda job: 0 if job[1] == "qc" else 1)  # stable FIFO
     if dry_run:
         return [{"record_id": task["record_id"], "stage": "material" if resume_stage == "material" else stage,
@@ -351,7 +358,7 @@ def dispatch(tasks: list[dict], *, work: Path, policy: RuntimePolicy | None = No
                            "error": str(exc), "formal_deliveries": 0, "rc": 1}
             # Queue wait includes material wait; these two components partition
             # it rather than representing additional elapsed wall-clock time.
-            material_wait = max(0.0, min(before, ready_clock) - admitted) if stage != "qc" else 0.0
+            material_wait = max(0.0, min(before, ready_clock) - admitted) if stage not in {"qc", "delivery"} else 0.0
             queue_wait = max(0.0, before - admitted)
             return dict(outcome, stage=stage, elapsed_s=time.monotonic() - before,
                         queue_wait_s=queue_wait, material_wait_s=material_wait,
@@ -423,7 +430,7 @@ def dispatch(tasks: list[dict], *, work: Path, policy: RuntimePolicy | None = No
                             record({"record_id": task["record_id"], "status": "ALREADY_DELIVERED",
                                     "stage": "complete", "formal_deliveries": 0})
                             continue
-                    if stage != "qc":
+                    if stage not in {"qc", "delivery"}:
                         voice_error = _voice_error(task)
                         audio_error = voice_error or _bgm_error(task)
                         if audio_error:
@@ -435,12 +442,12 @@ def dispatch(tasks: list[dict], *, work: Path, policy: RuntimePolicy | None = No
                     if rid not in preflight_results:
                         # QC resumes the persisted task, not the current queue
                         # row; check the same settings the worker will read.
-                        frozen = _read(task_work / rid / "task.json") if stage == "qc" else {}
+                        frozen = _read(task_work / rid / "task.json") if stage in {"qc", "delivery"} else {}
                         actual_task = frozen if frozen.get("record_id") == rid else task
                         try:
                             preflight_results[rid] = _production_preflight(
                                 actual_task, environment_cache=preflight_environment,
-                                check_narration=stage != "qc")
+                                check_narration=stage not in {"qc", "delivery"})
                         except (OSError, ValueError, TypeError, RuntimeError, ImportError) as exc:
                             preflight_results[rid] = {"ready": False, "reason": str(exc)}
                         for warning in (preflight_results[rid].get("runtime") or {}).get("configuration_warnings", []):
@@ -452,7 +459,7 @@ def dispatch(tasks: list[dict], *, work: Path, policy: RuntimePolicy | None = No
                                 "error": "ENVIRONMENT_PRECHECK_FAILED: " + str(checked.get("reason") or "NOT_READY"),
                                 "retryable": True, "formal_deliveries": 0})
                         continue
-                    if stage == "qc":
+                    if stage in {"qc", "delivery"}:
                         if sum(kind == "task" for kind, *_ in futures.values()) >= policy.task_workers:
                             continue
                     elif key in failed:
@@ -464,6 +471,8 @@ def dispatch(tasks: list[dict], *, work: Path, policy: RuntimePolicy | None = No
                         if key not in preparing and len(preparing) < policy.prep_workers:
                             preparing.add(key)
                             env = _child_env(policy_file, policy)
+                            if on_task_start:
+                                on_task_start(task, stage, phase="material")
                             future = prep_pool.submit(timed_preparer, task, work / "products" / key, env)
                             futures[future] = ("prep", key, task)
                         continue
@@ -477,6 +486,10 @@ def dispatch(tasks: list[dict], *, work: Path, policy: RuntimePolicy | None = No
                     env = _child_env(policy_file, policy, task)
                     if key in ready:
                         env["JY_SHARED_ANALYSIS_FILE"] = ready[key]
+                    # Persist admission only after preflight and a worker slot,
+                    # immediately before dispatching this specific task.
+                    if on_task_start:
+                        on_task_start(task, stage)
                     future = task_pool.submit(timed_runner, task, stage, env, task_work,
                                               material_ready_clock.get(key, task["_dispatch_admitted_clock"]))
                     futures[future] = ("task", key, task)
@@ -505,7 +518,7 @@ def dispatch(tasks: list[dict], *, work: Path, policy: RuntimePolicy | None = No
                                     "status": "ERROR" if error is not None else "READY",
                                     "elapsed_s": elapsed, "timing_scope": "product_preparation",
                                     "error": error, "analysis_file": str(output) if output else None,
-                                    "formal_deliveries": 0})
+                                    "retryable": error is not None, "formal_deliveries": 0})
                         else:
                             record(outcome)
                     except Exception as exc:
@@ -535,7 +548,7 @@ def main(argv=None) -> int:
             sub.add_argument("--stage", choices=("qc", "build", "material"), required=True)
     worker = subs.add_parser("_worker", help=argparse.SUPPRESS)
     worker.add_argument("--task-file", type=Path, required=True)
-    worker.add_argument("--stage", choices=("qc", "build"), required=True)
+    worker.add_argument("--stage", choices=("qc", "delivery", "build"), required=True)
     args = parser.parse_args(argv)
     if args.command == "_worker":
         import batch_worker
@@ -544,8 +557,8 @@ def main(argv=None) -> int:
         with slot("production_task", policy.task_workers, slot_dir=Path(policy.slot_dir), timeout=0) as admission:
             if not admission.acquired:
                 raise RuntimeError("DISPATCH_TASK_CAPACITY_EXCEEDED")
-            if args.stage == "qc":
-                batch_worker.resume_task_qc(task)
+            if args.stage in {"qc", "delivery"}:
+                batch_worker.resume_task_qc(task, delivery_only=args.stage == "delivery")
             else:
                 task.update(retry_deferred=True, retry_error=True)
                 batch_worker.process_task(task, retry_partial=True, retry_error=True, admitted=True)

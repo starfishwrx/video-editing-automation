@@ -97,13 +97,13 @@ if (-not (Test-Path work/batch_queue.json)) {
     Copy-Item examples/queue.example.json work/batch_queue.json
 }
 # 编辑 work/batch_queue.json 后，仅查看本轮执行计划。
-powershell -NoProfile -File scripts/run_pipeline.ps1 -DryRun
+pwsh -NoProfile -File scripts/run_pipeline.ps1 -DryRun
 ```
 
 检查计划和输入后，执行完整一轮；这一步会调用配置的模型与配音服务：
 
 ```powershell
-powershell -NoProfile -File scripts/run_pipeline.ps1
+pwsh -NoProfile -File scripts/run_pipeline.ps1
 ```
 
 队列的 `delivery_mode` 省略时按 `preview` 处理。需要正式交付时明确填写 `formal`，并配置相应的 NAS／表格连接；四项验收通过后才会分发和回写。只在本机留稿可设置 `JY_SKIP_SHIP=1`。
@@ -113,7 +113,7 @@ powershell -NoProfile -File scripts/run_pipeline.ps1
 只处理队列中的一条时，仍使用同一个入口，指定该任务的 `record_id`：
 
 ```powershell
-powershell -NoProfile -File scripts/run_pipeline.ps1 -RecordId example-product-a
+pwsh -NoProfile -File scripts/run_pipeline.ps1 -RecordId example-product-a
 ```
 
 此路径与批量及定时运行共用素材准备、选镜、建稿、独立质检和交付门禁。`run.py build` 是用于诊断或嵌入的底层建稿命令，不单独完成队列的独立质检和交付。

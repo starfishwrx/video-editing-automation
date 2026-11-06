@@ -138,6 +138,10 @@ def _plan(task: dict, work: Path, prior: dict) -> tuple[str | None, str]:
             return None, "INVALID_RETAINED_DRAFT_NAMES"
         if len(drafts) < max(1, int(task.get("count") or 1)):
             return None, "PARTIAL_BUILD_REQUIRES_RECOVERY"
+        if mode == "formal" and done.get("resume_stage") == "delivery":
+            if int(prior.get("delivery_attempts", 0)) >= MAX_QC_ATTEMPTS:
+                return None, "DELIVERY_RETRY_LIMIT"
+            return "delivery", "REUSE_VERIFIED_QC"
         refs = done.get("qc_reports") or []
         if not isinstance(refs, list):
             return None, "INVALID_QC_REFERENCES"
@@ -188,7 +192,7 @@ def _execute(queue_path: Path, work: Path, summary: dict, dispatcher, record_id:
             raise ValueError("PIPELINE_STATE_RECORD_CASE_COLLISION")
         records[key] = prior
     state["records"] = records
-    groups = {"qc": [], "build": []}
+    groups = {"delivery": [], "qc": [], "build": []}
     seen = set()
     for task in tasks:
         rid = task.get("record_id") if isinstance(task, dict) else None
@@ -218,19 +222,31 @@ def _execute(queue_path: Path, work: Path, summary: dict, dispatcher, record_id:
     for stage, selected in groups.items():
         if not selected:
             continue
-        # Count before dispatch: a killed supervisor cannot retry forever.
-        for task, row in selected:
+        rows_by_id = {task["record_id"]: row for task, row in selected}
+        tasks_by_id = {task["record_id"]: task for task, _ in selected}
+        def record_start(task, actual_stage, phase="worker"):
             rid = task["record_id"]
-            prior = records.setdefault(rid.casefold(), {"input_key": _input_key(task)})
-            key = stage + "_attempts"
+            row = rows_by_id[rid]
+            if phase == "material":
+                row["material_started"] = True
+            if "attempt" in row:
+                return
+            prior = records.setdefault(rid.casefold(), {"input_key": _input_key(tasks_by_id[rid])})
+            key = actual_stage + "_attempts"
             prior[key] = int(prior.get(key, 0)) + 1
-            prior.update(last_stage=stage, last_attempt_at=_now(), retryable=False)
-            row["attempt"] = prior[key]
-        _write(state_path, state)
+            prior.update(last_stage=actual_stage, last_attempt_at=_now(), retryable=False)
+            rows_by_id[rid]["attempt"] = prior[key]
+            _write(state_path, state)
         try:
             kwargs = {"work": work}
-            if stage == "qc":
-                kwargs["resume_stage"] = "qc"
+            if stage in {"qc", "delivery"}:
+                kwargs["resume_stage"] = stage
+            if dispatcher is _default_dispatcher:
+                kwargs["on_task_start"] = record_start
+            else:
+                # Injected offline dispatchers model immediate task admission.
+                for task, _ in selected:
+                    record_start(task, stage)
             result = dispatcher([task for task, _ in selected], **kwargs)
             if not isinstance(result, list):
                 raise ValueError("DISPATCH_RESULT_LIST_REQUIRED")
@@ -240,7 +256,8 @@ def _execute(queue_path: Path, work: Path, summary: dict, dispatcher, record_id:
                             and item.get("record_id") == task["record_id"]]
                 row.update(status="DISPATCHED" if outcomes else "UNKNOWN", results=outcomes)
                 # A caught dispatcher exception must not invent retryability.
-                records[task["record_id"].casefold()]["retryable"] = any(
+                prior = records.setdefault(task["record_id"].casefold(), {"input_key": _input_key(task)})
+                prior["retryable"] = any(
                     item.get("retryable") is True for item in outcomes)
                 control_outcomes = [item for item in outcomes if not (
                     item.get("stage") == "material" and item.get("status") == "READY")]
@@ -251,7 +268,8 @@ def _execute(queue_path: Path, work: Path, summary: dict, dispatcher, record_id:
                     # remains cached; retry the blocked step through this entry.
                     prior = records[task["record_id"].casefold()]
                     attempt_key = stage + "_attempts"
-                    prior[attempt_key] = max(0, int(prior.get(attempt_key, 0)) - 1)
+                    if "attempt" in row and not row.get("material_started"):
+                        prior[attempt_key] = max(0, int(prior.get(attempt_key, 0)) - 1)
                     prior["retryable"] = True
                     row["preflight_only"] = True
         except Exception as exc:

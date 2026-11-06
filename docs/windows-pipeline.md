@@ -24,13 +24,13 @@ if (-not (Test-Path work/config.local.ps1)) { Copy-Item examples/config.example.
 if (-not (Test-Path work/batch_queue.json)) { Copy-Item examples/queue.example.json work/batch_queue.json }
 
 # 在私有队列中填写真实素材和任务后，先查看本轮计划。
-powershell -NoProfile -File scripts/run_pipeline.ps1 -DryRun
+pwsh -NoProfile -File scripts/run_pipeline.ps1 -DryRun
 
 # 执行完整一轮。
-powershell -NoProfile -File scripts/run_pipeline.ps1
+pwsh -NoProfile -File scripts/run_pipeline.ps1
 
 # 只处理队列中的一条；仍经过相同的调度、建稿、独立质检和交付门禁。
-powershell -NoProfile -File scripts/run_pipeline.ps1 -RecordId example-product-a
+pwsh -NoProfile -File scripts/run_pipeline.ps1 -RecordId example-product-a
 ```
 
 配置副本保存在忽略的 `work/config.local.ps1`。已有私有配置不要用示例覆盖。默认 Python 为包内 `.venv/Scripts/python.exe`，可用 `-PythonPath` 指定；`-WorkRoot`、`-DraftRoot`、`-QueuePath` 和 `-ConfigPath` 接受绝对路径，支持中文和空格。默认队列是 `<WorkRoot>/batch_queue.json`，默认配置是 `<WorkRoot>/config.local.ps1`。显式参数优先。
@@ -63,15 +63,14 @@ powershell -NoProfile -File scripts/run_pipeline.ps1 -RecordId example-product-a
 
 草稿使用原生加密时间轴及字体资源，QC、包验收、NAS 复制、重试和版本归档均
 读取当前活动镜像。分发只改新副本内的素材／字体路径，源稿不动；原有正式
-四项 PASS 门禁保留。旧加密编辑会话不被该新流程自动接管。显式历史恢复可选
-`draft_backend=legacy`，默认不回退到旧 writer。
+四项 PASS 门禁保留。旧加密编辑会话不被该新流程自动接管。明确检测到旋转媒体元数据等无头后端不兼容时，自动尝试一次 legacy writer；缺素材、磁盘、锁或质检失败不触发回退。
 
 ## 注册定时执行
 
 下面的安装脚本把同一个完整入口注册到 Windows 任务计划程序，默认每 5 分钟一轮，可用 `-IntervalMinutes` 修改。运行身份为当前登录用户，使用隐藏窗口，重复触发时忽略并发实例；需要用户保持登录。安装脚本不会立即启动任务。
 
 ```powershell
-powershell -NoProfile -File scripts/install_pipeline_task.ps1 -TaskName VideoAutomationPipeline -IntervalMinutes 5
+pwsh -NoProfile -File scripts/install_pipeline_task.ps1 -TaskName VideoAutomationPipeline -IntervalMinutes 5
 ```
 
 安装脚本支持与运行脚本相同的路径参数。执行它会注册或更新指定名称的任务；源码更新和离线测试不会修改本机计划任务。历史 JyPoll/JyRun 入口维持退役状态。
@@ -86,7 +85,7 @@ powershell -NoProfile -File scripts/install_pipeline_task.ps1 -TaskName VideoAut
 | `work/<record_id>/report/` | 分析、选镜、独立 QC 与失败证据 |
 | `work/<record_id>/eval/` | 当前输入、草稿与自动验收结果 |
 
-操作系统锁防止多进程重入。已完成、正在执行、普通预览和确定性失败会跳过；明确可重试的制作最多尝试两次，保留草稿的 QC／交付最多自动恢复两次，次数在开始前保存。恢复复用草稿，不重做 TTS 或选镜。同一记录的输入变化不能重置次数，必须使用新记录或显式定向恢复。不要删除整个状态文件来重放全部任务。
+操作系统锁防止多进程重入。已完成、正在执行、普通预览和确定性失败会跳过；明确可重试的制作最多尝试两次，保留草稿的 QC／交付最多自动恢复两次，每条任务在实际启动素材准备或 worker 前持久化一次尝试次数；共享素材的等待任务不预扣。恢复按已有阶段复用素材、配音和草稿，交付恢复复用已通过质检并走现有 finalizer。同一记录的输入变化不能重置次数，必须使用新记录或显式定向恢复。不要删除整个状态文件来重放全部任务。
 
 选镜服务超时/限流的制作重试改为阶段恢复：复用冻结的配音、句长、素材分析及完成的候选观察，仅补失败调用。每次原始运行持久记录一次恢复预算，中断也不清零；缓存缺失、输入变化或预算耗尽直接停止，不回到完整build。选镜完成后的BGM/写稿超时保留匹配结果。恢复产物和原始运行身份见[运行时与恢复](subsystems/runtime-and-recovery.md)。
 
