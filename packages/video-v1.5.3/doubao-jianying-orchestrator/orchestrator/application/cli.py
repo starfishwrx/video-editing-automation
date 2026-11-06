@@ -1205,7 +1205,8 @@ def cmd_recover(args) -> int:
     manifest["parent_run_id"] = parent_run_id
     manifest["recovery_stage"] = stage
     suffix = time.strftime("%Y%m%d_%H%M%S")
-    manifest["draft_name"] = f"{manifest.get('draft_name') or '豆包剪映编排草稿'}_recovery_{suffix}"
+    requested_name = str(getattr(args, "draft_name", "") or "").strip()
+    manifest["draft_name"] = f"{requested_name or manifest.get('draft_name') or '豆包剪映编排草稿'}_recovery_{suffix}"
     manifest["force_overwrite"] = False
     report_dir = Path(args.report_dir).expanduser().resolve()
     report_dir.mkdir(parents=True, exist_ok=True)
@@ -1765,6 +1766,7 @@ def main(argv=None) -> int:
     rc.add_argument("--stage", choices=("preflight", "semantic_match", "draft_write", "ui_acceptance"),
                     default="draft_write", help="只恢复一个阶段；默认只消费已有匹配结果写稿")
     rc.add_argument("--draft", default="", help="ui_acceptance 阶段的草稿目录")
+    rc.add_argument("--draft-name", default="", help="恢复草稿的本轮名称前缀（仍自动添加唯一后缀）")
     rc.set_defaults(func=cmd_recover)
 
     me = sub.add_parser("migrate-encrypted", help="通过剪映官方副本流程迁移加密草稿（不解密、不覆盖）")

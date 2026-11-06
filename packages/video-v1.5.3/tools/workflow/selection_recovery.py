@@ -160,15 +160,24 @@ def recover_draft(manifest: dict, report_dir: Path, *, prefix: list[str], run, e
     try:
         matched = _read(report_dir / "shot_match_report.json")
         original = matched.get("input_manifest")
-        if matched.get("ok") is not True or not isinstance(original, dict) or _logical(original) != _logical(manifest):
+        if matched.get("ok") is not True or not isinstance(original, dict):
             raise ValueError("DRAFT_RECOVERY_MATCH_INPUT_MISMATCH")
+        if _logical(original) != _logical(manifest):
+            # A local refill matched the fully enriched frozen input, while
+            # the next worker starts from the original request. Rebuild and
+            # verify every sentence and audio identity before comparing it.
+            if not original.get("ai_refill_indices"):
+                raise ValueError("DRAFT_RECOVERY_MATCH_INPUT_MISMATCH")
+            derived = freeze_refill_input(manifest, report_dir)
+            if _logical(original) != _logical(derived):
+                raise ValueError("DRAFT_RECOVERY_MATCH_INPUT_MISMATCH")
         input_path = report_dir / "draft_recovery_input.json"
         input_path.write_text(json.dumps(original, ensure_ascii=False, indent=2), encoding="utf-8")
         remaining = deadline - time.time()
         if remaining <= 0:
             raise ValueError("DRAFT_RECOVERY_DEADLINE_EXCEEDED")
         process = run([*prefix, "recover", "--input", str(input_path), "--report-dir", str(report_dir),
-                       "--stage", "draft_write"], cwd=cwd, env=env, capture_output=True,
+                       "--draft-name", str(manifest.get("draft_name") or ""), "--stage", "draft_write"], cwd=cwd, env=env, capture_output=True,
                       text=True, encoding="utf-8", errors="replace", timeout=remaining + 30)
         if process.returncode:
             return {"rc": process.returncode, "stdout": process.stdout or "", "stderr": process.stderr or "",

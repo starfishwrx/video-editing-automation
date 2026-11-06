@@ -1,5 +1,8 @@
 """Default worker recovery must reuse frozen audio and never restart a full build."""
 import copy
+import argparse
+import contextlib
+import io
 from contextlib import ExitStack
 import json
 from pathlib import Path
@@ -625,6 +628,77 @@ class WorkerSelectionRecoveryTests(unittest.TestCase):
             result = worker.run_build(self.manifest, self.report, 'requested-name', timeout=60)
         self.assertEqual(result['draft_name'], 'recovered')
         self.assertEqual(run.call_count, 1)
+
+    def test_frozen_refill_timeout_reaches_cli_writer_with_current_name(self):
+        from orchestrator.application import cli
+        from orchestrator.runtime.file_safety import content_identity
+        texts = [f'句子{i}' for i in range(1, 12)]
+        self.manifest = {'task_id': 'offline', 'full_script': '，'.join(texts), 'delivery_mode': 'formal',
+                         'draft_name': 'first', 'material_sources': [str(self.root / 'source.mp4')]}
+        Path(self.manifest['material_sources'][0]).write_bytes(b'source')
+        sentences = [{'text': text} for text in texts]
+        rows, files = [], []
+        for index, sentence in enumerate(sentences, 1):
+            audio = self.root / f'audio{index}.wav'; audio.write_bytes(f'audio-{index}'.encode())
+            files.append(content_identity(audio))
+            rows.append({'key': timing_contract.sentence_key(sentence, index), 'text': sentence['text'],
+                         'tts_path': str(audio), 'audio_duration_us': 1_000_000 + index,
+                         'timing_certainty': 'audio', 'estimated': False})
+        timing = {'rows': rows}
+        self.write('narration_timing.json', timing)
+        prepared = {**self.manifest, 'segments': sentences, 'narration_timing_file': str(self.report / 'narration_timing.json'),
+                    'voice_tempo': 1.0, 'sentence_plan_version': 'v1'}
+        self.write('selection_resume.json', {'input_manifest': self.manifest, 'manifest': prepared,
+                                             'timing': timing, 'audio_files': files, 'run_id': 'original'})
+        enriched = selection_recovery.freeze_refill_input({**self.manifest, 'draft_name': 'old-a2',
+                                                           'ai_refill_indices': [2]}, self.report)
+        segments = [{**row, 'shot_id': f'source-{i}', 'video': str(self.root / 'source.mp4')}
+                    for i, row in enumerate(enriched['segments'], 1)]
+        segments[1]['shot_id'] = 'replacement-B'
+        matched_manifest = {**enriched, 'segments': segments}
+        self.write('shot_match_report.json', {'ok': True, 'input_manifest': enriched,
+                                             'manifest': matched_manifest, 'segments': segments,
+                                             'delivery_mode': 'formal'})
+        self.write('last_result.json', {'retryable': True, 'resume_stage': 'draft_write'})
+        captured = []
+        class FakeEngine:
+            def __init__(inner, manifest, *args, **kwargs): captured.append(copy.deepcopy(manifest))
+            def run(inner):
+                draft = self.drafts / captured[-1]['draft_name']
+                draft.mkdir()
+                return {'status': 'SUCCESS', 'draft_path': str(draft)}
+        def run_cli(command, **kwargs):
+            arg = lambda key: command[command.index(key) + 1]
+            args = argparse.Namespace(input=arg('--input'), report_dir=arg('--report-dir'),
+                                      stage=arg('--stage'), draft_name=arg('--draft-name'))
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                code = cli.cmd_recover(args)
+            return SimpleNamespace(returncode=code, stdout='', stderr='')
+        with patch.object(worker, 'DRAFTS', self.drafts), \
+             patch.object(worker.subprocess, 'run', side_effect=run_cli) as child, \
+             patch.object(cli, '_vision_configuration_gate', return_value=None), \
+             patch.object(cli, 'OrchestrationEngine', FakeEngine), \
+             patch.object(cli, '_temporary_match') as selection, \
+             patch.object(cli, '_pre_synthesize_narration') as tts:
+            result = worker.run_build(self.manifest, self.report, 'new-a3', timeout=60)
+        self.assertEqual(result['rc'], 0, result)
+        child.assert_called_once(); selection.assert_not_called(); tts.assert_not_called()
+        writer = captured[0]
+        self.assertTrue(writer['draft_name'].startswith('new-a3_recovery_'))
+        self.assertFalse(writer['force_overwrite'])
+        self.assertFalse(writer['auto_match_shots'])
+        self.assertEqual(writer['segments'][1]['shot_id'], 'replacement-B')
+        self.assertEqual([r['audio'] for r in writer['segments']], [r['tts_path'] for r in rows])
+        self.assertEqual([r['audio_duration_us'] for r in writer['segments']], [r['audio_duration_us'] for r in rows])
+        # Frozen audio and original text are both mandatory for the same recovery.
+        for mutation in ('text', 'audio'):
+            request = copy.deepcopy(self.manifest)
+            if mutation == 'text': request['full_script'] += '变化'
+            else: Path(rows[0]['tts_path']).write_bytes(b'changed audio')
+            blocked = selection_recovery.recover_draft(request, self.report, prefix=['python'], run=Mock(),
+                env={}, cwd=str(ROOT), deadline=time.time()+60, drafts_root=self.drafts)
+            self.assertNotEqual(blocked['rc'], 0)
+            self.assertIn('REFILL_', blocked['stdout'])
 
     def test_retry_budget_belongs_to_the_selection_generation(self):
         self.write("selection_recovery_state.json", {"attempts": 1, "source_run_id": "old-generation", "status": "RUNNING"})
