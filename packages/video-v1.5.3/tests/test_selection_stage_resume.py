@@ -368,6 +368,26 @@ class WorkerSelectionRecoveryTests(unittest.TestCase):
         stage, _ = scheduled._plan(task, self.root.resolve(), {})
         self.assertEqual(stage, 'build')
 
+    def test_qc_target_without_bound_feedback_never_starts_a_weak_refill(self):
+        task = {'record_id': 'record', 'title': 'draft', 'script': '一句',
+                'material_dir': str(self.root), 'delivery_mode': 'formal', 'force_rebuild': True}
+        source = self.root / 'source.mp4'; source.write_bytes(b'fixture')
+        report = self.root / 'record' / 'report' / 'draft'
+        report.mkdir(parents=True)
+        (report / 'qc_rejected_shots.json').write_text(json.dumps({'repair_indices': [1], 'repair_feedback': {}}))
+        (self.root / 'record' / 'eval').mkdir(parents=True)
+        with patch.object(worker, 'WORK', self.root), patch.object(worker, 'DRAFTS', self.drafts), \
+             patch.object(worker, '_runtime_facts', return_value={}), patch.object(worker, 'video_files', return_value=[str(source)]), \
+             patch.object(worker, '_save_frozen_task'), patch.object(worker, 'restore_qc_rejections', return_value=({}, {})), \
+             patch.object(worker, 'publish_failure_notification', return_value={}), patch.object(worker, 'progress'), patch.object(worker, 'log'), \
+             patch.object(worker.production_eval, 'runtime_identity', return_value={}), \
+             patch.object(worker.production_eval, 'freeze', return_value={'mode': 'enforce'}), \
+             patch.object(worker.production_eval, 'write_once'), patch.object(worker, 'run_build') as build:
+            worker.process_task(task, admitted=True)
+        build.assert_not_called()
+        done = json.loads((self.root / 'record' / 'done.json').read_text(encoding='utf-8'))
+        self.assertIn('QC_FEEDBACK_BINDING_UNAVAILABLE', str(done['failures']))
+
     def test_worker_done_resumes_delivery_after_table_failure(self):
         task = {'record_id': 'record', 'title': 'draft', 'script': '一句',
                 'material_dir': str(self.root), 'delivery_mode': 'formal'}

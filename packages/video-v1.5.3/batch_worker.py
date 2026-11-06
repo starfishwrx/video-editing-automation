@@ -1657,9 +1657,16 @@ def process_task(task: dict, *, retry_partial: bool = False,
                     build_manifest["variant_pool_size"] = min(5, max(3, count))
                     build_manifest["variant_score_tolerance"] = 8
                     if repair_visual_missing_indices:
+                        missing_feedback = sorted(i for i in repair_visual_missing_indices
+                                                  if str(i) not in repair_feedback)
+                        if missing_feedback:
+                            last_failure = {"index": i, "draft": name, "phase": "post_draft_qc",
+                                "type": "uncertified_qc", "resume_stage": "qc",
+                                "message": "QC_FEEDBACK_BINDING_UNAVAILABLE: " + str(missing_feedback)}
+                            log("QC feedback is not bound to the current source; retain the draft for QC recovery")
+                            break
                         build_manifest["ai_refill_indices"] = sorted(repair_visual_missing_indices)
-                        if repair_feedback:
-                            build_manifest["ai_refill_feedback"] = repair_feedback
+                        build_manifest["ai_refill_feedback"] = repair_feedback
                     if qc_rejected:
                         # Re-select a different pixel-reviewed shot for each
                         # QC-rejected sentence; never blank or re-use it.

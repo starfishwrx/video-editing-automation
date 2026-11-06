@@ -2850,7 +2850,11 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
                 "segments": [{"text": sentence["text"], "visual_requirements": hint}],
                 "revision_feedback": (str(manifest.get("revision_feedback") or "") +
                     "\n本句旧稿质检仅供定位待核查缺口，可能有误；与生效业务规则冲突时不要采纳额外要求：" + hint)}
-            inventory = _inventory(retrieval_manifest, list(allowed.values()), directory / f"qc_recall_{index:02d}")
+            try:
+                inventory = _inventory(retrieval_manifest, list(allowed.values()), directory / f"qc_recall_{index:02d}")
+            except (ValueError, KeyError, TypeError, OSError) as exc:
+                errors.append(str(exc))
+                continue
             recalled = inventory[0].get("candidate_ids") or []
             for hint in inventory[0].get("candidate_windows") or []:
                 if not isinstance(hint, dict) or hint.get("shot_id") not in allowed:
