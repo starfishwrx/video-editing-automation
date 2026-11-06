@@ -66,6 +66,20 @@ class WorkerSelectionRecoveryTests(unittest.TestCase):
             self.write("last_result.json", {"status": "PREFLIGHT_READY" if stage == "preflight" else "SHOT_MATCH_READY"})
         return SimpleNamespace(returncode=0, stdout=json.dumps({"stage": stage}), stderr="")
 
+    def test_qc_refill_freezes_original_sentences_and_audio(self):
+        from orchestrator.runtime.file_safety import content_identity
+        self.snapshot['audio_files'] = [content_identity(self.audio)]
+        self.write('selection_resume.json', self.snapshot)
+        request = {**self.manifest, 'ai_refill_indices': [1], 'qc_rejected_shots': {}}
+        result = selection_recovery.freeze_refill_input(request, self.report)
+        self.assertEqual(result['segments'][0]['text'], '保持原句。')
+        self.assertEqual(result['segments'][0]['audio'], str(self.audio))
+        self.assertEqual(result['segments'][0]['audio_duration_us'], 1_000_000)
+        self.assertEqual(result['ai_refill_indices'], [1])
+        self.audio.write_bytes(b'changed audio')
+        with self.assertRaisesRegex(ValueError, 'REFILL_FROZEN_AUDIO_CHANGED'):
+            selection_recovery.freeze_refill_input(request, self.report)
+
     def test_default_worker_runs_recovery_stages_and_keeps_original_audio_and_timing(self):
         before = self.audio.read_bytes()
         with patch.object(worker, "DRAFTS", self.drafts), patch.object(worker, "log"), \
@@ -283,6 +297,62 @@ class WorkerSelectionRecoveryTests(unittest.TestCase):
         self.assertEqual(done['failure_code'], 'ENVIRONMENT_PRECHECK_FAILED')
         self.assertTrue(done['retryable'])
         self.assertEqual(done['resume_stage'], 'semantic_match')
+
+    def test_worker_done_preserves_draft_write_resume_for_scheduler(self):
+        task = {'record_id': 'record', 'title': 'draft', 'script': '一句',
+                'material_dir': str(self.root), 'delivery_mode': 'formal'}
+        source = self.root / 'source.mp4'
+        source.write_bytes(b'fixture')
+        (self.root / 'record' / 'eval').mkdir(parents=True)
+        def interrupted(_manifest, report_dir, _name, **_kwargs):
+            report_dir.mkdir(parents=True, exist_ok=True)
+            (report_dir / 'last_result.json').write_text(json.dumps({
+                'status': 'DRAFT_WRITE_TIMEOUT', 'retryable': True, 'resume_stage': 'draft_write',
+                'failure_class': 'draft', 'failure_code': 'DRAFT_WRITE_TIMEOUT'}))
+            return {'rc': 1, 'stdout': '', 'stderr': 'DRAFT_WRITE_TIMEOUT', 'combined': 'DRAFT_WRITE_TIMEOUT'}
+        with patch.object(worker, 'WORK', self.root), patch.object(worker, 'DRAFTS', self.drafts), \
+             patch.object(worker, '_runtime_facts', return_value={}), patch.object(worker, 'video_files', return_value=[str(source)]), \
+             patch.object(worker, '_save_frozen_task'), patch.object(worker, 'restore_qc_rejections', return_value=({}, {})), \
+             patch.object(worker, 'build_progress_inputs', return_value={'fixture': True}), \
+             patch.object(worker, 'publish_failure_notification', return_value={}), patch.object(worker, 'progress'), patch.object(worker, 'log'), \
+             patch.object(worker.production_eval, 'runtime_identity', return_value={}), \
+             patch.object(worker.production_eval, 'freeze', return_value={'mode': 'enforce'}), \
+             patch.object(worker.production_eval, 'write_once'), patch.object(worker, 'run_build', side_effect=interrupted) as build:
+            worker.process_task(task, admitted=True)
+            worker.process_task(task, admitted=True, retry_error=True)
+            self.assertGreater(build.call_count, 3)
+        done = json.loads((self.root / 'record' / 'done.json').read_text(encoding='utf-8'))
+        self.assertTrue(done['retryable'], done)
+        self.assertEqual(done['resume_stage'], 'draft_write')
+        stage, _ = scheduled._plan(task, self.root.resolve(), {})
+        self.assertEqual(stage, 'build')
+
+    def test_worker_done_resumes_delivery_after_table_failure(self):
+        task = {'record_id': 'record', 'title': 'draft', 'script': '一句',
+                'material_dir': str(self.root), 'delivery_mode': 'formal'}
+        source = self.root / 'source.mp4'
+        source.write_bytes(b'fixture')
+        (self.root / 'record' / 'eval').mkdir(parents=True)
+        with patch.object(worker, 'WORK', self.root), patch.object(worker, 'DRAFTS', self.drafts), \
+             patch.object(worker, 'SKIP_SHIP', False), patch.object(worker, '_runtime_facts', return_value={}), \
+             patch.object(worker, 'video_files', return_value=[str(source)]), patch.object(worker, '_save_frozen_task'), \
+             patch.object(worker, 'restore_qc_rejections', return_value=({}, {})), \
+             patch.object(worker, 'build_progress_inputs', return_value={'fixture': True}), \
+             patch.object(worker, 'publish_failure_notification', return_value={}), patch.object(worker, 'progress'), patch.object(worker, 'log'), \
+             patch.object(worker.production_eval, 'runtime_identity', return_value={}), \
+             patch.object(worker.production_eval, 'freeze', return_value={'mode': 'enforce'}), \
+             patch.object(worker.production_eval, 'write_once'), patch.object(worker, 'run_build', return_value={'rc': 0}), \
+             patch.object(worker, 'validate_visual_match', return_value=(True, '')), \
+             patch.object(worker, 'run_post_draft_qc', return_value={'status': 'PASS', 'output': 'qc.json'}), \
+             patch.object(worker, 'validate_draft_package', return_value={'ok': True}), \
+             patch.object(worker, 'finalize_closed_loop', return_value={'ok': False, 'reason': 'TABLE_READBACK_FAILED'}), \
+             patch.object(worker, 'evaluate_task', return_value={}):
+            worker.process_task(task, admitted=True)
+        done = json.loads((self.root / 'record' / 'done.json').read_text(encoding='utf-8'))
+        self.assertTrue(done['retryable'], done)
+        self.assertEqual(done['resume_stage'], 'delivery')
+        stage, _ = scheduled._plan(task, self.root.resolve(), {})
+        self.assertEqual(stage, 'delivery')
 
     def test_changed_task_input_never_launches_cli_or_falls_back_to_build(self):
         run = Mock()

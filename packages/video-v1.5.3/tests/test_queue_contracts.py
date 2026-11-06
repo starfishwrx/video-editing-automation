@@ -192,6 +192,16 @@ class QCRejectionRecoveryTests(unittest.TestCase):
                 report["model_review"][0]["match_level"] = level
                 self.assertEqual(self.worker.qc_rejected_shots_from_report(self.report_dir, report), {})
 
+    def test_degraded_report_restores_target_without_excluding_source(self):
+        report = self.latest_failure('shot-A')
+        report['status'] = 'PASS_WITH_DEGRADED'
+        report['model_review'][0].update(match_level='ACCEPTABLE_DEGRADED', visual_ok=True)
+        (self.report_dir / 'draft_visual_qc.json').write_text(json.dumps(report), encoding='utf-8')
+        _, excluded = self.worker.restore_qc_rejections(self.report_dir, self.manifest)
+        self.assertEqual(excluded, {})
+        state = json.loads((self.report_dir / 'qc_rejected_shots.json').read_text(encoding='utf-8'))
+        self.assertEqual(state['repair_indices'], [1])
+
     def test_restart_unions_history_and_latest_uncheckpointed_failure(self):
         self.latest_failure("shot-A")
         identity, rejected = self.worker.restore_qc_rejections(self.report_dir, self.manifest)

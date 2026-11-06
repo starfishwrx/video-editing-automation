@@ -197,6 +197,19 @@ class AIEditorTests(unittest.TestCase):
         self.assertEqual(row["ai_selection"]["index"], 2)
         self.assertTrue(contract.validate_segment_receipt(row, index=2, verify_source=True, manifest=manifest)["ok"])
 
+    def test_refill_does_not_reuse_rejected_shot_for_original_second_sentence(self):
+        manifest = {**self.manifest, 'segments': [
+            {'text': '保留原句', 'audio_duration_us': 2_000_000}, self.manifest['segments'][0]],
+            'ai_refill_indices': [2], 'qc_rejected_shots': {'2': ['handfeel']}}
+        kept = {'index': 1, 'text': '保留原句', 'shot_id': 'keep', 'video': 'kept.mp4'}
+        matched = {'ok': True, 'segments': [kept, {'index': 2, 'text': self.sentence['text'], 'shot_id': 'handfeel'}]}
+        with mock.patch.object(editor, '_review_pool') as review:
+            result = editor.refill_indices(manifest, {'shots': [self.shot]}, matched, [2], self.root)
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['segments'][0], kept)
+        self.assertNotIn(2, result.get('refill_replaced') or [])
+        review.assert_not_called()
+
     def test_refill_preserves_fixed_audio_through_engine_clips(self):
         from orchestrator.application import engine
         audio = self.root / "fixed.wav"

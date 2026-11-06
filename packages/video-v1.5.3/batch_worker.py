@@ -639,6 +639,13 @@ def run_build(manifest: dict, report_dir: pathlib.Path, draft_name: str, *,
         return selection_recovery.recover(manifest, report_dir,
             prefix=[PY, "-m", "orchestrator.cli"], run=subprocess.run, env=env,
             cwd=str(SKILL), deadline=deadline, drafts_root=DRAFTS)
+    if manifest.get("ai_refill_indices"):
+        try:
+            manifest = selection_recovery.freeze_refill_input(manifest, report_dir)
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            error = "REFILL_FROZEN_INPUT_BLOCKED:" + str(exc)
+            return {"rc": 1, "stdout": error, "stderr": "", "combined": error,
+                    "stage_retry_exhausted": True}
     if reuse_analysis:
         try:
             cached_payload = json.loads(pathlib.Path(reuse_analysis).read_text(
@@ -1197,6 +1204,17 @@ def restore_qc_rejections(rd: pathlib.Path, manifest: dict) -> tuple[dict, dict]
                         "narration_timing_file": str(rd / "narration_timing.json")}
             input_matches = (prior_input == expected
                              and qc_rejection_identity(original)["manifest_sha256"] == identity["manifest_sha256"])
+    if not input_matches and isinstance(prior_input, dict) and prior_input.get("ai_refill_indices"):
+        # A refill reuses the original frozen sentence/audio snapshot; accept
+        # its enriched input only if reconstructing that snapshot matches it.
+        try:
+            from tools.workflow import selection_recovery
+            controls = {key: prior_input[key] for key in ("draft_name", "ai_refill_indices", "qc_rejected_shots")
+                        if key in prior_input}
+            expected = selection_recovery.freeze_refill_input({**manifest, **controls}, rd)
+            input_matches = selection_recovery._logical(expected) == selection_recovery._logical(prior_input)
+        except (OSError, ValueError, TypeError, KeyError):
+            input_matches = False
     try:
         current = ((rd / "draft_visual_qc.json").stat().st_mtime_ns
                    >= (rd / "shot_match_report.json").stat().st_mtime_ns)
@@ -1583,8 +1601,9 @@ def process_task(task: dict, *, retry_partial: bool = False,
                     inputs = build_progress_inputs(build_manifest, analysis_cache,
                                                    repair_visual_missing_indices)
                     previous_inputs = _read_json(attempt_state).get("input")
-                    from tools.workflow.selection_recovery import pending as selection_recovery_pending
-                    if previous_inputs == inputs and not (force_rebuild and attempt == 1) and not selection_recovery_pending(rd):
+                    from tools.workflow import selection_recovery
+                    if (previous_inputs == inputs and not (force_rebuild and attempt == 1)
+                            and not selection_recovery.pending(rd) and not selection_recovery.draft_pending(rd)):
                         if last_failure:
                             last_failure["no_progress"] = True
                         else:
@@ -1852,7 +1871,7 @@ def process_task(task: dict, *, retry_partial: bool = False,
                 failures.append({
                     "phase": "closed_loop",
                     "type": "delivery_or_table_gate",
-                    "detail": closed,
+                    "detail": closed, "retryable": True, "resume_stage": "delivery",
                     "message": str(closed),
                 })
                 log("CLOSED_LOOP_BLOCKED: %s" % closed)

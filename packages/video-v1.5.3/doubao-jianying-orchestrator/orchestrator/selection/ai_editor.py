@@ -1293,7 +1293,7 @@ def _single_part_end(manifest, analysis, plan, narration_timing, index):
         if type(part["source_start_us"]) is not int:
             return None
         observed["source_start"] = max(float(shot["source_start"]), part["source_start_us"] / 1e6)
-    cfg = {**manifest, "tail_pad_s": 0}
+    cfg = dict(manifest)
     if "source_start_us" in part or window_key:
         guard = max(0.0, shot_analyzer._number(manifest.get("head_trim_s"), shot_analyzer.DEFAULT_HEAD_TRIM_S))
         offset = observed["source_start"] - float(original_shot["source_start"])
@@ -1366,21 +1366,31 @@ def _extend_previous_action(manifest, analysis, plan, directory, failure, narrat
         scene_end = min(scene_end, limit)
     hi = scene_end - timing_contract.us_of(
         manifest.get("tail_trim_s"), round(shot_analyzer.DEFAULT_TAIL_TRIM_S * 1e6))
-    if hi - prev_end < audio:
+    required = audio + timing_contract.us_of(manifest.get("tail_pad_s"), 0)
+    if hi - prev_end < required:
         return False
-    window = (prev_end, prev_end + audio)
+    window = (prev_end, prev_end + required)
     key = _review_proposed_window(
         manifest, plan, directory, {**sentence, "action_continuation": True}, shot, window)
     if key is None:
         return False
     plan["window_reviews"][key]["action_continuation"] = True
-    row = next(r for r in plan["rows"] if r["index"] == failure.index)
-    audio_part = audio
-    row.clear()
-    row.update({"index": failure.index, "parts": [{
-        "shot_id": shot["shot_id"], "audio_duration_us": audio_part,
+    candidate = {"index": failure.index, "parts": [{
+        "shot_id": shot["shot_id"], "audio_duration_us": audio,
         "source_start_us": prev_end, "window_review_key": key}],
-        "reason": "无卖点短句顺延上一镜还没播完的动作"})
+        "reason": "无卖点短句顺延上一镜还没播完的动作"}
+    trial = copy.deepcopy(plan)
+    trial["rows"] = [candidate if r["index"] == failure.index else r for r in trial["rows"]]
+    try:
+        _assemble(manifest, analysis, trial, narration_timing=narration_timing, verify_sources=True)
+    except WindowFailure as exc:
+        if exc.index <= failure.index:
+            return False
+    except (ValueError, KeyError, TypeError, OSError):
+        return False
+    row = next(r for r in plan["rows"] if r["index"] == failure.index)
+    row.clear()
+    row.update(candidate)
     _save(directory / "plan.json", plan)
     return True
 
@@ -1883,7 +1893,8 @@ def _line_audio_us(manifest, sentence, narration_timing) -> int:
     return int(audio or 0)
 
 
-def _place_absorb_experiment(manifest, analysis, plan, directory, narration_timing) -> bool:
+def _place_absorb_experiment(manifest, analysis, plan, directory, narration_timing,
+                             _excluded_candidates=None, _only_group=None) -> bool:
     """Put adjacent absorb claims on one experiment shot, cut by phase.
 
     下渗/渗透 stay with the pour and absorb. A tissue-press line uses the wipe
@@ -1913,11 +1924,19 @@ def _place_absorb_experiment(manifest, analysis, plan, directory, narration_timi
         return False
     notes = plan.setdefault("absorb_phase_notes", [])
     placed_any = False
+    excluded_candidates = _excluded_candidates if _excluded_candidates is not None else {}
     for group in groups:
         members = [sentences[p] for p in group["positions"] if p < len(sentences)]
+        group_id = tuple(s["index"] for s in members)
+        if _only_group is not None and group_id != _only_group:
+            continue
         if any(rows.get(s["index"], {}).get("continuity_key") for s in members):
             continue
         rejected = qc_rejected_shots(manifest)
+        # A directed repair must retain accepted neighboring sentences; this
+        # optional group rewrite cannot establish cross-file experiment identity.
+        if rejected or manifest.get("ai_refill_indices"):
+            continue
         candidates = []
         seen_shots = set()
         for sentence in members:
@@ -1925,7 +1944,8 @@ def _place_absorb_experiment(manifest, analysis, plan, directory, narration_timi
             if len(parts) != 1 or not parts[0].get("shot_id"):
                 continue
             sid = str(parts[0]["shot_id"])
-            if sid in seen_shots or sid in rejected.get(sentence["index"], set()):
+            if (sid in seen_shots or sid in excluded_candidates.get(group_id, set())
+                    or sid in rejected.get(sentence["index"], set())):
                 continue
             seen_shots.add(sid)
             shot = shots.get(sid)
@@ -1945,7 +1965,11 @@ def _place_absorb_experiment(manifest, analysis, plan, directory, narration_timi
             material = candidate.get("material_duration_us")
             if type(material) is int and material > 0:
                 hi = min(hi, material)
-            if _phase_span_us(found_phases, ("pour", "absorb"), lo, hi) is None:
+            if any(_phase_span_us(found_phases, (phase,), lo, hi) is None
+                   for phase in ("pour", "absorb")):
+                continue
+            if (any(_absorb_sentence_phase(s.get("text")) == "wipe" for s in members)
+                    and _phase_span_us(found_phases, ("wipe",), lo, hi) is None):
                 continue
             located, shot, phases = found, candidate, found_phases
             break
@@ -2010,7 +2034,15 @@ def _place_absorb_experiment(manifest, analysis, plan, directory, narration_timi
             row.pop("continuity_key", None)
             cursors[phase] = start + audio
             placed.append(index)
-        if not placed:
+        if len(placed) != len(members):
+            for index in placed:
+                rows[index].clear()
+                rows[index].update(snapshot[index])
+            notes.append({"indices": list(group_id), "shot_id": shot.get("shot_id"),
+                          "reason": "实验相位无法完整配对，尝试其他已选素材"})
+            excluded_candidates.setdefault(group_id, set()).add(str(shot.get("shot_id")))
+            placed_any = (_place_absorb_experiment(manifest, analysis, plan, directory, narration_timing,
+                          excluded_candidates, group_id) or placed_any)
             continue
         try:
             _assemble(manifest, analysis, plan, narration_timing=narration_timing)
@@ -2021,11 +2053,17 @@ def _place_absorb_experiment(manifest, analysis, plan, directory, narration_timi
                     rows[index].update(snapshot[index])
                 notes.append({"indices": placed, "shot_id": shot.get("shot_id"),
                               "reason": f"相位切开后排不开:{exc.reason}"})
+                excluded_candidates.setdefault(group_id, set()).add(str(shot.get("shot_id")))
+                placed_any = (_place_absorb_experiment(manifest, analysis, plan, directory, narration_timing,
+                              excluded_candidates, group_id) or placed_any)
                 continue
         except (ValueError, KeyError, TypeError):
             for index in placed:
                 rows[index].clear()
                 rows[index].update(snapshot[index])
+            excluded_candidates.setdefault(group_id, set()).add(str(shot.get("shot_id")))
+            placed_any = (_place_absorb_experiment(manifest, analysis, plan, directory, narration_timing,
+                          excluded_candidates, group_id) or placed_any)
             continue
         placed_any = True
         plan.setdefault("absorb_groups", []).append({
@@ -2159,10 +2197,12 @@ def _repair_reviewed_rows(manifest, analysis, plan, directory, narration_timing,
                 continue
             if _repair_selected_window(manifest, analysis, plan, directory, failure):
                 continue
-            if not short_without_point and _speed_fit_reviewed_evidence(
-                    manifest, analysis, plan, directory, failure):
-                continue
             if sentence_continuity.repair(manifest, analysis, plan, directory, failure, narration_timing):
+                continue
+            group_uncertain = any(a.get("index") == failure.index and a.get("status") == "rejected"
+                                  for a in plan.get("continuity_attempts", {}).values() if isinstance(a, dict))
+            if not short_without_point and not group_uncertain and _speed_fit_reviewed_evidence(
+                    manifest, analysis, plan, directory, failure):
                 continue
             if not short_without_point and _extend_previous_action(
                     manifest, analysis, plan, directory, failure, narration_timing):
@@ -2713,7 +2753,6 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
         row = copy.deepcopy(segment)
         index = script_indices.get("".join(str(row.get("text") or row.get("claim") or "").split()))
         index = index or int(row.get("index") or enum_i)
-        row["index"] = index
         by_index[index] = row
     reserved = {str(part.get("shot_id") or part.get("temporary_shot_id"))
                 for index, row in by_index.items() if index not in wanted
@@ -2724,13 +2763,14 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
             errors.append(f"AI_REFILL_INDEX_OOB:{index}")
             continue
         sentence = _heuristic_sentence(index, timing_contract.sentence_text(original[index - 1]))
+        excluded = qc_rejected_shots(manifest).get(index, set())
+        allowed = {sid: shot for sid, shot in shots.items() if sid not in reserved and sid not in excluded}
         preferred = [sid for sid in _rule_shortlist_ids(matched, analysis, index, limit=max(ROUND_SIZE, 16))
-                     if sid in shots and sid not in reserved]
-        observed = _observed_text_shortlist(sentence["text"],
-                                             {sid: shot for sid, shot in shots.items() if sid not in reserved})
+                     if sid in allowed]
+        observed = _observed_text_shortlist(sentence["text"], allowed)
         sentence["candidate_ids"] = [sid for sid in dict.fromkeys(
             [*preferred[:ROUND_SIZE], *observed, *preferred[ROUND_SIZE:], *shots])
-                                     if sid in shots and sid not in reserved]
+                                     if sid in allowed]
         audio_us, certainty = timing_contract.duration_for(narration_timing, index,
                                                           segment=original[index - 1])
         sentence["audio_durations_us"] = [audio_us]
@@ -2743,17 +2783,18 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
             review_manifest = ({**manifest, "allow_partial_selling_points": False}
                                if explicit and len(sentence["selling_points"]) > 1 else manifest)
             reviews, coverage = _review_pool(review_manifest, sentence, shots, directory, narration_timing or {})
-            good = [r for r in reviews if r.get("verdict") == "matched"]
+            good = [r for r in reviews if r.get("verdict") == "matched"
+                    and r.get("shot_id") in allowed]
             partial = manifest.get("delivery_mode") == "preview" and manifest.get("allow_partial_selling_points") is True
-            if not good or (not coverage.get("feasible") and not partial):
-                if good and coverage.get("reason") == "KNOWN_WINDOWS_INFEASIBLE":
-                    raise ValueError(f"AI_REFILL_WINDOW_INFEASIBLE:{index}")
+            if not good or (not coverage.get("feasible") and not partial
+                            and coverage.get("reason") != "KNOWN_WINDOWS_INFEASIBLE"):
                 raise ValueError(f"AI_REFILL_NO_MATCH:{index}")
             mini_manifest = {k: v for k, v in manifest.items() if k not in ("segments", "full_script", "script")}
             # Keep this sentence's real audio and other input attributes. The
             # one-sentence assembly replaces only its visual selection.
             mini_manifest.update(full_script=sentence["text"], selection_mode="ai_editor",
-                                 segments=[copy.deepcopy(original[index - 1])])
+                                 segments=[copy.deepcopy(original[index - 1])],
+                                 qc_rejected_shots={"1": sorted(excluded)})
             timing_row = {"key": "s1", "text": sentence["text"], "audio_duration_us": audio_us,
                           "timing_certainty": certainty}
             if narration_timing and index <= len(narration_timing.get("rows", [])):
@@ -2798,7 +2839,9 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
                     last_error = str(exc)
                     continue
                 if allocations is None:
-                    continue
+                    if len(group) != 1:
+                        continue
+                    allocations = [audio_us]
                 plan = {"schema": contract.PLAN_SCHEMA, "policy_version": contract.POLICY_VERSION,
                         "sentences": [{**sentence, "index": 1}], "reviews": {"1": reviews},
                         "display_reviews": [], "rows": [{"index": 1, "parts": [
@@ -2808,8 +2851,12 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
                         "identity": {"model": _editor_model(),
                                      "editorial_rules": contract.rules_identity(manifest)}, "ok": True}
                 try:
-                    assembled = _assemble(mini_manifest, analysis, plan, narration_timing=mini_timing,
-                                          verify_sources=True)
+                    try:
+                        assembled = _assemble(mini_manifest, analysis, plan, narration_timing=mini_timing,
+                                              verify_sources=True)
+                    except WindowFailure:
+                        assembled = _repair_reviewed_rows(mini_manifest, analysis, plan, directory,
+                                                          mini_timing, set())
                     row = _reindex_ai_segment(assembled["segments"][0], index)
                     checked = contract.validate_segment_receipt(row, index=index, verify_source=True,
                                                                  manifest=manifest)

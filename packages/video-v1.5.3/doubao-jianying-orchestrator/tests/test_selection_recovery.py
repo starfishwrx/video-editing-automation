@@ -265,6 +265,25 @@ class SelectionRecoveryTests(unittest.TestCase):
         self.assertGreaterEqual(segment["source_end"] * 1e6, evidence["end"])
         self.assertTrue(contract.validate_segment_receipt(segment, index=1, manifest=self.manifest)["ok"])
 
+    def test_explicit_refill_reuses_speed_fit_for_complete_reviewed_evidence(self):
+        self.manifest['segments'][1]['audio_duration_us'] = 1_197_812
+        baseline = self.plan()
+        baseline['rows'][1]['parts'][0]['audio_duration_us'] = 1_197_812
+        matched = editor._assemble(self.manifest, self.analysis, baseline, narration_timing=None, verify_sources=True)
+        first = copy.deepcopy(matched['segments'][0])
+        review = {**copy.deepcopy(self.reviews['2'][0]),
+                  'evidence_intervals_us': [{'start': 4_567_000, 'end': 6_851_000}]}
+        request = {**self.manifest, 'ai_refill_indices': [2], 'delivery_mode': 'formal'}
+        with patch.object(editor, '_review_pool', return_value=([review],
+                {'feasible': False, 'reason': 'KNOWN_WINDOWS_INFEASIBLE'})), \
+                patch.object(editor, '_repair_selected_window', return_value=False), \
+                patch.object(editor.sentence_continuity, 'repair', return_value=False):
+            result = editor.refill_indices(request, self.analysis, matched, [2], self.root)
+        self.assertTrue(result['ok'], result)
+        self.assertEqual(result['segments'][0], first)
+        self.assertGreater(result['segments'][1]['video_speed'], 1)
+        self.assertLessEqual(result['segments'][1]['video_speed'], 2)
+
     def test_matched_evidence_over_two_x_is_not_sped_up(self):
         plan = self.plan()
         plan["reviews"]["1"][0]["evidence_intervals_us"] = [{"start": 1_000_000, "end": 4_000_000}]
@@ -758,7 +777,8 @@ class SelectionRecoveryTests(unittest.TestCase):
                 "sentence_index": 2, "shot_id": shot["shot_id"]}
             return key
 
-        with patch.object(editor, "_review_proposed_window", side_effect=review):
+        with patch.object(editor, "_review_proposed_window", side_effect=review), \
+                patch.object(editor, "_assemble", return_value={"ok": True}):
             self.assertTrue(editor._extend_previous_action(
                 self.manifest, self.analysis, plan, self.root, failure, None))
         self.assertEqual(plan["rows"][1]["parts"][0]["source_start_us"], 3_000_000)
@@ -771,6 +791,18 @@ class SelectionRecoveryTests(unittest.TestCase):
             self.assertFalse(editor._extend_previous_action(
                 self.manifest, self.analysis, plan, self.root, failure, None))
             blocked.assert_not_called()
+
+    def test_short_continuation_reserves_tail_padding_before_review(self):
+        plan = self.plan()
+        plan['sentences'][1] = {'index': 2, 'text': '顺便说', 'kind': 'hook', 'selling_points': []}
+        self.manifest['segments'][1] = {'text': '顺便说', 'audio_duration_us': 800_000}
+        self.manifest.update(tail_pad_s=.04, tail_trim_s=0)
+        shot = {**self.shots[0], 'source_end': 3.82, 'material_duration_us': 3_820_000}
+        failure = editor.WindowFailure(2, 'shot2', 'EVIDENCE_SPAN_TOO_LONG')
+        with patch.object(editor, '_single_part_end', return_value=(shot, 3_000_000)), \
+                patch.object(editor, '_review_proposed_window') as review:
+            self.assertFalse(editor._extend_previous_action(self.manifest, self.analysis, plan, self.root, failure, None))
+        review.assert_not_called()
 
     def test_short_line_stays_blocked_when_the_previous_shot_has_no_room(self):
         plan = self.plan()
@@ -916,9 +948,9 @@ class SelectionRecoveryTests(unittest.TestCase):
                              side_effect=lambda *args, **kwargs: self._phase_review(plan, args[3], args[4], args[5])):
             editor._place_absorb_experiment(manifest, analysis, plan, self.root, None)
         self.assertEqual(plan["rows"][0]["parts"][0]["shot_id"], "shot1")
-        self.assertEqual(plan["rows"][1]["parts"][0]["shot_id"], "shot1")
+        self.assertEqual(plan["rows"][1]["parts"][0]["shot_id"], "shot2")
         self.assertEqual(plan["rows"][2]["parts"][0]["shot_id"], "shot3")
-        self.assertTrue(any(note.get("missing_phase") == "wipe" for note in plan["absorb_phase_notes"]))
+        self.assertTrue(any(note.get("reason") == "PHASE_UNLOCATED" for note in plan["absorb_phase_notes"]))
 
     def test_unrelated_reviewed_press_is_not_assumed_to_be_same_experiment(self):
         manifest, analysis, plan = self._absorb_plan((1_200_000, 1_300_000, 1_400_000))
@@ -935,10 +967,22 @@ class SelectionRecoveryTests(unittest.TestCase):
         with patch("orchestrator.vision.phase_timing.locate", return_value={"ok": True, "phases": phases}), \
                 patch.object(editor, "_review_proposed_window",
                              side_effect=lambda *args, **kwargs: self._phase_review(plan, args[3], args[4], args[5])):
-            self.assertTrue(editor._place_absorb_experiment(manifest, analysis, plan, self.root, None))
+            self.assertFalse(editor._place_absorb_experiment(manifest, analysis, plan, self.root, None))
         self.assertEqual(plan["rows"][2]["parts"][0]["shot_id"], "shot3")
         self.assertNotIn("absorb_phase", plan["rows"][2]["parts"][0])
-        self.assertTrue(any(note.get("missing_phase") == "wipe" for note in plan["absorb_phase_notes"]))
+        self.assertTrue(any(note.get("reason") == "PHASE_UNLOCATED" for note in plan["absorb_phase_notes"]))
+
+    def test_absorb_group_retries_another_candidate_when_first_cannot_fit(self):
+        manifest, analysis, plan = self._absorb_plan((1_200_000, 1_300_000, 1_400_000))
+        short = {'pour': [1.0, 1.4], 'absorb': [1.4, 1.8], 'wipe': [7.0, 7.5]}
+        full = {'pour': [1.0, 2.5], 'absorb': [2.5, 7.0], 'wipe': [7.0, 9.0]}
+        def locate(shot, *_args, **_kwargs):
+            return {'ok': True, 'phases': short if shot['shot_id'] == 'shot1' else full}
+        with patch('orchestrator.vision.phase_timing.locate', side_effect=locate), \
+                patch.object(editor, '_review_proposed_window',
+                             side_effect=lambda *args, **kwargs: self._phase_review(plan, args[3], args[4], args[5])):
+            self.assertTrue(editor._place_absorb_experiment(manifest, analysis, plan, self.root, None))
+        self.assertEqual([row['parts'][0]['shot_id'] for row in plan['rows']], ['shot2'] * 3)
 
     def test_absorb_group_uses_a_later_pour_when_the_opener_does_not_locate(self):
         manifest, analysis, plan = self._absorb_plan((1_200_000, 1_300_000, 1_400_000))

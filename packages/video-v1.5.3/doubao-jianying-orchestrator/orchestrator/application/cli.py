@@ -1032,11 +1032,12 @@ def cmd_build(args) -> int:
                 if path.is_file():
                     audio_files.append(content_identity(path))
             manifest["_selection_attempt"] = logger.run_id
-            (report_dir / "selection_resume.json").write_text(json.dumps({
-                "input_manifest": _read(input_path), "manifest": manifest,
-                "audio_files": audio_files, "bgm_file": bgm_identity, "timing": narration_timing,
-                "run_id": logger.run_id,
-            }, ensure_ascii=False, indent=2), encoding="utf-8")
+            if not manifest.get("ai_refill_indices"):
+                (report_dir / "selection_resume.json").write_text(json.dumps({
+                    "input_manifest": _read(input_path), "manifest": manifest,
+                    "audio_files": audio_files, "bgm_file": bgm_identity, "timing": narration_timing,
+                    "run_id": logger.run_id,
+                }, ensure_ascii=False, indent=2), encoding="utf-8")
             manifest, blocker = _temporary_match(manifest, input_path, report_dir,
                                                  narration_timing=narration_timing)
             shot_match_report = report_dir / "shot_match_report.json"

@@ -33,7 +33,37 @@ def pending(report_dir: Path) -> bool:
 
 def _logical(manifest: dict) -> dict:
     return {k: v for k, v in manifest.items() if k not in {
-        "draft_name", "parent_run_id", "force_overwrite", "shot_analysis", "shot_analysis_file"}}
+        "draft_name", "parent_run_id", "force_overwrite", "shot_analysis", "shot_analysis_file",
+        "qc_rejected_shots", "ai_refill_indices"}}
+
+
+def freeze_refill_input(manifest: dict, report_dir: Path) -> dict:
+    """Reuse the exact planned sentences and verified audio of the current cut."""
+    frozen = _read(Path(report_dir) / "selection_resume.json")
+    if _logical(frozen["input_manifest"]) != _logical(manifest):
+        raise ValueError("REFILL_ORIGINAL_INPUT_CHANGED")
+    from orchestrator.runtime.file_safety import content_identity
+    from orchestrator.selection import timing_contract
+    prepared, timing = frozen["manifest"], frozen["timing"]
+    rows, files = timing.get("rows") or [], frozen.get("audio_files") or []
+    sentences = timing_contract.split_sentences(prepared)
+    if len(sentences) != len(rows) or len(files) != len(rows) or not rows:
+        raise ValueError("REFILL_FROZEN_AUDIO_REQUIRED")
+    segments = []
+    for index, (sentence, row, identity) in enumerate(zip(sentences, rows, files), 1):
+        path = str(row.get("tts_path") or "")
+        if (not path or row.get("timing_certainty") != "audio"
+                or int(row.get("audio_duration_us") or 0) <= 0
+                or str(Path(path).resolve()) != str(identity.get("path") or "")
+                or content_identity(path) != identity
+                or row.get("key") != timing_contract.sentence_key(sentence, index)
+                or row.get("text") != timing_contract.sentence_text(sentence)):
+            raise ValueError("REFILL_FROZEN_AUDIO_CHANGED")
+        segment = dict(sentence) if isinstance(sentence, dict) else {"text": str(sentence)}
+        segment.update(audio=path, audio_duration_us=int(row["audio_duration_us"]), timing_certainty="audio")
+        segments.append(segment)
+    controls = {key: manifest[key] for key in ("draft_name", "qc_rejected_shots", "ai_refill_indices") if key in manifest}
+    return {**prepared, **controls, "segments": segments}
 
 
 def selection_timeout(report_dir: Path, *, previous_run_id: str | None = None) -> dict | None:
@@ -55,8 +85,10 @@ def selection_timeout(report_dir: Path, *, previous_run_id: str | None = None) -
                "message": "选镜阶段超过时间预算，已保留原配音、句长和素材观察。",
                "retryable": True, "resume_stage": "semantic_match", "failed_stage": plan["phase"]}
     (report_dir / "last_result.json").write_text(json.dumps(failure, ensure_ascii=False), encoding="utf-8")
-    (report_dir / "shot_match_report.json").write_text(json.dumps({"ok": False,
-        "input_manifest": frozen["input_manifest"], **failure}, ensure_ascii=False), encoding="utf-8")
+    # Use the existing report-history mechanism before replacing a prior
+    # successful match needed to audit an earlier draft.
+    from orchestrator.application.cli import _invalidate_match_report
+    _invalidate_match_report(report_dir, frozen["input_manifest"], failure)
     return {"rc": 1, "stdout": json.dumps(failure, ensure_ascii=False), "stderr": "",
             "combined": json.dumps(failure, ensure_ascii=False)}
 
