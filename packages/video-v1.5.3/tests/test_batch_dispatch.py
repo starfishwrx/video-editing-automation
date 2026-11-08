@@ -285,6 +285,29 @@ class BatchDispatchTests(unittest.TestCase):
         self.assertGreaterEqual(rows[-1]["elapsed_s"], 0)
         self.assertEqual(rows[-1]["verified_draft_deliveries"], 0)
 
+    def test_shared_material_failure_reports_reason_to_each_waiter(self):
+        prepared, ran = [], []
+        def prepare(task, directory, env):
+            prepared.append(task["material_dir"])
+            if task["material_dir"] == "broken":
+                raise RuntimeError("MATERIAL_PREP_INCOMPLETE: NETWORK_ERROR")
+            return str(directory / "ready.json")
+        def run(task, stage, env, work):
+            ran.append(task["record_id"])
+            return {"record_id": task["record_id"], "status": "OK"}
+        tasks = [{"record_id": rid, "material_dir": "broken"} for rid in ("a", "b")]
+        tasks.append({"record_id": "good", "material_dir": "healthy"})
+        rows = dispatch.dispatch(tasks, work=self.root, policy=self.policy,
+                                 preparer=prepare, runner=run)
+        blocked = [row for row in rows if row.get("status") == "BLOCKED"]
+        self.assertEqual({row["record_id"] for row in blocked}, {"a", "b"})
+        self.assertTrue(all(row["error"] == "MATERIAL_PREP_INCOMPLETE: NETWORK_ERROR"
+                            and row["formal_deliveries"] == 0 for row in blocked))
+        self.assertEqual(sorted(prepared), ["broken", "healthy"])
+        self.assertEqual(ran, ["good"])
+        saved = json.loads(next((self.root / "dispatch_runs").glob("*.json")).read_text(encoding="utf-8"))
+        self.assertEqual({r["record_id"] for r in saved["results"] if r.get("status") == "BLOCKED"}, {"a", "b"})
+
     def test_ok_or_preview_flags_without_certified_delivery_never_count(self):
         for status in ("OK", "PREVIEW_READY", "ERROR"):
             self.assertEqual(dispatch.formal_delivery_count({"status": status, "drafts": ["x"]}), 0)

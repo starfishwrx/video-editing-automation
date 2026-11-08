@@ -2810,16 +2810,40 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
     shots = {str(s["shot_id"]): s for s in analysis.get("shots", [])
              if isinstance(s, dict) and s.get("status") == "ready_for_matching"
              and s.get("shot_id") and s.get("text_pass") not in ("pending", "failed")}
+    # Repeated text can identify several distinct narration positions. Keep
+    # every candidate position and validate any explicit index before reusing
+    # an existing selection; do not silently overwrite an earlier sentence.
+    script_texts = ["".join(timing_contract.sentence_text(s).split()) for s in original]
+    script_indices = {}
+    for i, text in enumerate(script_texts, 1):
+        script_indices.setdefault(text, []).append(i)
+    segments = matched.get("segments", [])
+    by_index = {}
+    for enum_i, segment in enumerate(segments, 1):
+        row = copy.deepcopy(segment)
+        text = "".join(str(row.get("text") or row.get("claim") or "").split())
+        explicit = row.get("index")
+        if isinstance(explicit, str) and explicit.isdecimal():
+            explicit = int(explicit)
+        index = None
+        if explicit is not None:
+            if (type(explicit) is int and 1 <= explicit <= len(original)
+                    and (not text or script_texts[explicit - 1] == text)):
+                index = explicit
+        elif len(script_indices.get(text, [])) == 1 and text:
+            index = script_indices[text][0]
+        elif (len(segments) == len(original) and enum_i <= len(original)
+              and text and script_texts[enum_i - 1] == text):
+            index = enum_i
+        if index is None or index in by_index:
+            reason = (f"AI_REFILL_SEGMENT_INDEX_DUPLICATE:{index}" if index in by_index
+                      else f"AI_REFILL_SEGMENT_IDENTITY_AMBIGUOUS:{enum_i}")
+            return {**matched, "ok": False, "refill_indices": wanted, "refill_replaced": [],
+                    "refill_errors": [reason], "pending_items": [*(matched.get("pending_items") or []),
+                        {"type": "AI_EDITOR_UNCERTIFIED", "message": reason}]}
+        by_index[index] = row
     directory = report_dir / "ai_editor_refill"
     directory.mkdir(parents=True, exist_ok=True)
-    script_indices = {"".join(timing_contract.sentence_text(s).split()): i
-                      for i, s in enumerate(original, 1)}
-    by_index = {}
-    for enum_i, segment in enumerate(matched.get("segments", []), 1):
-        row = copy.deepcopy(segment)
-        index = script_indices.get("".join(str(row.get("text") or row.get("claim") or "").split()))
-        index = index or int(row.get("index") or enum_i)
-        by_index[index] = row
     reserved = {str(part.get("shot_id") or part.get("temporary_shot_id"))
                 for index, row in by_index.items() if index not in wanted
                 for part in (row.get("span_parts") or [row])}
@@ -2883,8 +2907,12 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
                     window_hints[sid] = {**shot, "source_start": window_start, "source_end": window_end}
                 except (ValueError, TypeError, KeyError, OverflowError):
                     continue
+        # Give both retrieval signals room in the first review round. Existing
+        # QC feedback remains first, and none of these hints certify a shot.
+        interleaved = [group[i] for i in range(ROUND_SIZE)
+                       for group in (preferred, observed) if i < len(group)]
         ranked = [sid for sid in dict.fromkeys(
-            [*recalled, *preferred[:ROUND_SIZE], *observed, *preferred[ROUND_SIZE:], *shots]) if sid in allowed]
+            [*recalled, *interleaved, *preferred, *observed, *shots]) if sid in allowed]
         first, rest = ranked[:ROUND_SIZE], ranked[ROUND_SIZE:]
         sentence["candidate_ids"] = ([sid for sid in first if sid not in previous] +
                                      [sid for sid in first if sid in previous] + rest)

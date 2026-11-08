@@ -219,6 +219,53 @@ class AIEditorTests(unittest.TestCase):
         self.assertEqual(row["ai_selection"]["index"], 2)
         self.assertTrue(contract.validate_segment_receipt(row, index=2, verify_source=True, manifest=manifest)["ok"])
 
+    def test_refill_keeps_repeated_sentence_positions_and_rejects_conflicts(self):
+        manifest = {**self.manifest, "selection_mode": "rule_then_ai", "segments": [
+            {"text": "囤纸了，", "audio_duration_us": 1_000_000},
+            {"text": "囤纸了，", "audio_duration_us": 1_000_000},
+            self.manifest["segments"][0]]}
+        first = {"index": 1, "text": "囤纸了，", "span_parts": [
+            {"temporary_shot_id": "first-a"}, {"temporary_shot_id": "first-b"}]}
+        second = {"index": 2, "text": "囤纸了，", "temporary_shot_id": "second"}
+        third = {"index": 3, "text": self.sentence["text"]}
+        matched = {"segments": [first, second, third], "pending_items": []}
+        with mock.patch.object(editor, "_review_pool", return_value=([self.review], {"feasible": True})):
+            result = editor.refill_indices(manifest, {"shots": [self.shot]}, matched, [3], self.root)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["segments"][:2], [first, second])
+        self.assertEqual(result["segments"][2]["ai_selection"]["index"], 3)
+
+        for bad, expected in [
+            ({**second, "index": 1}, "AI_REFILL_SEGMENT_INDEX_DUPLICATE:1"),
+            ({**second, "index": 3}, "AI_REFILL_SEGMENT_IDENTITY_AMBIGUOUS:2"),
+        ]:
+            broken = {**matched, "segments": [first, bad, third]}
+            with self.subTest(bad=bad), mock.patch.object(editor, "_review_pool") as review:
+                result = editor.refill_indices(manifest, {"shots": [self.shot]}, broken, [3], self.root)
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["refill_errors"], [expected])
+            self.assertEqual(result["segments"], broken["segments"])
+            review.assert_not_called()
+
+    def test_refill_rejects_incomplete_ambiguous_repetition_but_accepts_indexed_legacy_row(self):
+        manifest = {**self.manifest, "selection_mode": "rule_then_ai", "segments": [
+            {"text": "重复句", "audio_duration_us": 1_000_000},
+            {"text": "重复句", "audio_duration_us": 1_000_000},
+            self.manifest["segments"][0]]}
+        with mock.patch.object(editor, "_review_pool") as review:
+            result = editor.refill_indices(manifest, {"shots": [self.shot]},
+                {"segments": [{"text": "重复句"}]}, [3], self.root)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["refill_errors"], ["AI_REFILL_SEGMENT_IDENTITY_AMBIGUOUS:1"])
+        review.assert_not_called()
+        legacy = {"index": 1, "temporary_shot_id": "legacy"}
+        matched = {"segments": [legacy, {"index": 2, "text": "重复句"},
+                                {"index": 3, "text": self.sentence["text"]}]}
+        with mock.patch.object(editor, "_review_pool", return_value=([self.review], {"feasible": True})):
+            result = editor.refill_indices(manifest, {"shots": [self.shot]}, matched, [3], self.root)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["segments"][0], legacy)
+
     def test_all_ai_refill_passes_real_worker_gate_but_mixed_does_not(self):
         sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
         import batch_worker as worker
@@ -356,11 +403,38 @@ class AIEditorTests(unittest.TestCase):
         with mock.patch.object(editor, "_review_pool", return_value=([], {"feasible": False})) as review:
             result = editor.refill_indices(manifest, {"shots": generic + [holder]}, matched, [1], self.root)
         order = review.call_args.args[1]["candidate_ids"]
-        self.assertEqual(order[:editor.ROUND_SIZE], [f"generic-{i}" for i in range(editor.ROUND_SIZE)])
+        self.assertIn("holder", order[:editor.ROUND_SIZE])
+        self.assertEqual(order[0], "generic-0")
         self.assertLess(order.index("holder"), order.index("generic-8"))
         self.assertEqual(set(order), {s["shot_id"] for s in generic + [holder]})
+        self.assertEqual(len(order), len(set(order)))
         self.assertFalse(result["ok"])
         self.assertIn("AI_REFILL_NO_MATCH:1", result["refill_errors"])
+
+    def test_refill_preserves_qc_recall_priority_and_excludes_rejected_candidates(self):
+        text = "展示纸巾支架"
+        generic = [{**self.shot, "shot_id": f"generic-{i}", "description": "展示纸巾包装"}
+                   for i in range(10)]
+        holder = {**self.shot, "shot_id": "holder", "description": "手持纸巾支架"}
+        recalled = {**self.shot, "shot_id": "feedback", "description": "其他"}
+        manifest = {**self.manifest, "segments": [{"text": text, "audio_duration_us": 2_000_000}],
+                    "qc_rejected_shots": {"1": ["generic-1"]},
+                    "ai_refill_feedback": {"1": {"claim": text, "observed": "观察",
+                        "reason": "原因", "prior_shot_ids": ["generic-0"]}}}
+        matched = {"segments": [{"index": 1, "text": text}], "recommendations": [
+            {"index": 1, "top3": [{"shot_id": s["shot_id"]} for s in generic]}]}
+        with mock.patch.object(editor, "_inventory", return_value=[
+                {"candidate_ids": ["feedback", "generic-1"], "candidate_windows": []}]), \
+             mock.patch.object(editor, "_review_pool", return_value=([], {"feasible": False})) as review:
+            result = editor.refill_indices(manifest, {"shots": generic + [holder, recalled]},
+                                           matched, [1], self.root)
+        order = review.call_args.args[1]["candidate_ids"]
+        self.assertEqual(order[0], "feedback")
+        self.assertIn("holder", order[:editor.ROUND_SIZE])
+        self.assertNotIn("generic-1", order)
+        self.assertGreater(order.index("generic-0"), order.index("holder"))
+        self.assertEqual(len(order), len(set(order)))
+        self.assertFalse(result["ok"])
 
     def test_observed_text_retrieval_is_empty_without_overlap_and_stable_on_ties(self):
         shots = {"a": {"description": "手拿纸巾支架"}, "b": {"description": "展示纸巾支架"},

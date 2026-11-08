@@ -6,7 +6,7 @@
     "machine-specific paths",
     "knowledge-base bodies"
   ],
-  "file_count": 454,
+  "file_count": 456,
   "files": [
     {
       "path": ".gitignore"
@@ -1167,6 +1167,9 @@
       "path": "tests/test_eval_bootstrap.py"
     },
     {
+      "path": "tests/test_extract_voice_catalog.py"
+    },
+    {
       "path": "tests/test_feedback_candidates.py"
     },
     {
@@ -1288,6 +1291,9 @@
     },
     {
       "path": "tools/eval_bootstrap.py"
+    },
+    {
+      "path": "tools/extract_voice_catalog.py"
     },
     {
       "path": "tools/feedback_candidates.py"

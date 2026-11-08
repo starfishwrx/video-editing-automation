@@ -18,6 +18,15 @@
 - CSV 位于 `jianying-editor/resources/catalogs/`，随 Git 和源码 ZIP 交付；不从本机 `data/` 隐式补表。`TVB女声1.2` 对应 `BV409_streaming`、1.2 倍速，`TVB女声Pro` 是另一音色。缺失／坏表是 `ENV_ERROR / RUNTIME_CATALOG_*`，与名称歧义分开；应用层生产预检在付费前汇总资源状态。
 - dispatcher 按 worker 相同的会议字段规范化预检音色、原文回填及独立倍速；无效输入只阻断本任务，其他任务继续，QC 恢复不重做音频准入。空音色保留自动选择合同，但仍要求资源就绪；显式本地 BGM 不要求音乐表。直接 `build` 也在配音／分析前检查所需表。
 
+需要人工核对本机剪映音色面板时，可在活包根显式运行以下只读快照工具，输出必须是新文件：
+
+```powershell
+$voiceCache = Join-Path $env:LOCALAPPDATA 'JianyingPro\User Data\Cache\ressdk_db'
+uv run --frozen python -m tools.extract_voice_catalog --cache-root $voiceCache --output "$env:TEMP\voice-review-snapshot.csv"
+```
+
+工具拒绝标记仍有后续页的响应、冲突数据及可能被表格软件当作公式的单元格；仅凭缓存无法确定是否从首页取到全部数据，因此快照不保证完整。数据库使用 SQLite 只读连接；不覆盖已有文件，也不允许写入缓存目录或随包音色表目录。输出是五列待审快照，不是运行时音色表，不会自动启用；名称和标签可能含本机信息，分享前须自行核对。
+
 ## 3. TTS 并发与缓存
 - 缓存键仅看“文本+音色+后端+后处理版本”（`AUDIO_PIPELINE_VERSION`），与 `video_speed/窗口` 无关；命中即完全复用字节
 - 后端优先 `SAMI`（需联网）；失败不自动回落到 Edge（会造成“所听非所选”），而是显式报错；长文本损坏时自动“分段合成+拼接”恢复
