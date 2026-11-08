@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import pathlib
 import re
@@ -540,6 +541,18 @@ def main() -> int:
             "distinct_materials": len({r["material_id"] for r in active_rows}),
             "intentional_visual_gaps": intentional_gaps,
         }
+        # A duration ratio is an average for variable-speed cuts, not a peak.
+        # This is a viewing advisory and does not change the quality verdict.
+        fast_segments = []
+        for row in active_rows:
+            source, target = row["source_duration"], row["target_duration"]
+            if (math.isfinite(source) and math.isfinite(target) and source > 0 and target > 0
+                    and source / target > 3):
+                fast_segments.append({"draft_segment": row["index"], "average_speed": source / target})
+        result["timeline"]["fast_segments_for_playback_review"] = fast_segments
+        if fast_segments:
+            result["warnings"].append("PLAYBACK_AVERAGE_SPEED_REVIEW:" + ",".join(
+                f"segment_{item['draft_segment']}={item['average_speed']:.2f}x" for item in fast_segments))
         expected_rows = sum(claim["slots"] for claim in active_claims)
         result["timeline"]["expected_active_video_segments"] = expected_rows
         if not claims:

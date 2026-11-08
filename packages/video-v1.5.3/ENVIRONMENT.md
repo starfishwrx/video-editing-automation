@@ -129,10 +129,13 @@ For `rule_then_ai`, the optional manifest field `ai_refill_max_sentences` limits
 automatic gap review (`0` or omitted means unlimited); explicit refill indices
 are not truncated. When capped, functional claims are reviewed before general
 display and promotion sentences. Unreviewed or partially supported claims remain preview-only.
-The optional `max_absorb_demo_speed` bounds the pour, absorption and wipe speeds
-for that task (finite value from 1 to 20). If a full observed action does not fit,
-the scene must try another candidate or remain unresolved; the limit never
-authorizes inventing or silently clipping the missing action.
+The optional `max_absorb_demo_speed` bounds the legacy scene planner's pour,
+absorption and wipe speeds (finite value from 1 to 20). If a full observed
+action does not fit, the scene must try another candidate or remain unresolved;
+the limit never authorizes inventing or silently clipping the missing action.
+The default AI editor does not yet enforce this task-specific field. Its shared
+production playback policy still caps reviewed process windows at 3x and keeps
+unknown or critical phases at 1x; do not rely on this field for a lower AI limit.
 An explicitly enabled `retain_related_on_unmet_scene` keeps a relevant, already
 observed shot in preview when a complete group cannot fit; the scene remains
 unresolved and cannot be represented as complete evidence.

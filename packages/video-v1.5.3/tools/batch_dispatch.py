@@ -339,7 +339,7 @@ def dispatch(tasks: list[dict], *, work: Path, policy: RuntimePolicy | None = No
         atomic_write_text(policy_file, json.dumps(policy.to_dict(), indent=2))
         progress = work / "batch_dispatch_progress.jsonl"
         atomic_write_text(progress, "")
-        results, ready, preparing, failed = [], {}, set(), set()
+        results, ready, preparing, failed = [], {}, set(), {}
         preflight_results, preflight_environment = {}, {}
         material_ready_clock = {}
         submitted_files = set()
@@ -465,7 +465,7 @@ def dispatch(tasks: list[dict], *, work: Path, policy: RuntimePolicy | None = No
                     elif key in failed:
                         pending.remove((task, stage))
                         record({"record_id": task["record_id"], "stage": "material",
-                                "status": "BLOCKED", "formal_deliveries": 0})
+                                "status": "BLOCKED", "error": failed[key], "formal_deliveries": 0})
                         continue
                     elif key not in ready:
                         if key not in preparing and len(preparing) < policy.prep_workers:
@@ -510,7 +510,7 @@ def dispatch(tasks: list[dict], *, work: Path, policy: RuntimePolicy | None = No
                             output, elapsed, error = outcome
                             preparing.remove(key)
                             if error is not None:
-                                failed.add(key)
+                                failed[key] = error or "MATERIAL_PREPARATION_FAILED"
                             else:
                                 ready[key] = str(output)
                                 material_ready_clock[key] = time.monotonic()
@@ -524,7 +524,7 @@ def dispatch(tasks: list[dict], *, work: Path, policy: RuntimePolicy | None = No
                     except Exception as exc:
                         if kind == "prep":
                             preparing.discard(key)
-                            failed.add(key)
+                            failed[key] = str(exc) or "MATERIAL_PREPARATION_FAILED"
                         else:
                             record({"record_id": task["record_id"], "status": "ERROR",
                                     "error": str(exc), "formal_deliveries": 0})
