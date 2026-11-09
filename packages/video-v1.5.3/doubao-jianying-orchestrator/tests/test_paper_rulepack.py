@@ -18,7 +18,7 @@ class PaperRulepackTests(unittest.TestCase):
         self.assertEqual(defaults["voice_tempo"], 1.3)
         self.assertTrue(defaults["voice_edge_trim"])
         self.assertEqual(defaults["rulepack"]["voice_max_gap_frames"], 1)
-        self.assertEqual(defaults["rulepack"]["voice_acceptance_max_gap_frames"], 5)
+        self.assertEqual(defaults["rulepack"]["voice_acceptance_max_gap_frames"], 10)
         self.assertFalse(defaults["auto_transition"])
         self.assertEqual(defaults["subtitle_position_px"], {"x": 0, "y": -528})
         for name in ("奶被纸", "tad厨房纸", "TAD厨房纸"):

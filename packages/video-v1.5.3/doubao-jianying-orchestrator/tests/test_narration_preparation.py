@@ -1,4 +1,4 @@
-"""Real PCM/media and entrypoint checks for the unchanged five-frame paper gate."""
+"""Real PCM/media and entrypoint checks for the ten-frame paper narration gate."""
 import concurrent.futures
 import json
 import math
@@ -75,6 +75,9 @@ class NarrationBoundaryUnitTests(unittest.TestCase):
             d=engine.Clip('v',0,1,audio_mode='tts',tts_path='other.wav',raw_index=1,start_us=1000000)
             with patch('orchestrator.policy.production_parameters.silence_edges',return_value={
                     'leading_s':.1,'trailing_s':.1,'all_silent':False}):
+                self.assertIsNone(e._narration_gap_gate([c,d]))
+            with patch('orchestrator.policy.production_parameters.silence_edges',return_value={
+                    'leading_s':.2,'trailing_s':.2,'all_silent':False}):
                 self.assertEqual(e._narration_gap_gate([c,d])['status'],'NARRATION_GAP_EXCEEDED')
             with patch('orchestrator.policy.production_parameters.silence_edges',return_value={'all_silent':True}):
                 self.assertEqual(e._narration_gap_gate([c])['status'],'NARRATION_AUDIO_UNVERIFIED')
@@ -337,14 +340,14 @@ class NarrationMediaTests(unittest.TestCase):
 
     def _split_boundary(self,side):
         a=self.root/'a.wav';b=self.root/'b.wav'
-        make_wave(a,head=0,tail=.22 if side=='tail' else 0,speech=.4)
-        make_wave(b,head=.22 if side=='head' else 0,tail=0,speech=.4)
+        make_wave(a,head=0,tail=.40 if side=='tail' else 0,speech=.4)
+        make_wave(b,head=.40 if side=='head' else 0,tail=0,speech=.4)
         e=engine.OrchestrationEngine.__new__(engine.OrchestrationEngine)
         e.m={'category':'zhipin'};e.report_dir=self.root;e.ffmpeg=self.ffmpeg
         if side=='tail':
-            cuts=[(a,0,0,.52,0),(a,0,.52,.1,.52),(b,1,.62,.4,0)]
+            cuts=[(a,0,0,.50,0),(a,0,.50,.30,.50),(b,1,.80,.4,0)]
         else:
-            cuts=[(a,0,0,.4,0),(b,1,.4,.1,0),(b,1,.5,.52,.1)]
+            cuts=[(a,0,0,.4,0),(b,1,.4,.30,0),(b,1,.70,.50,.30)]
         clips=[]
         for index,(path,parent,start,duration,offset) in enumerate(cuts):
             c=engine.Clip('v',0,duration,text='A' if parent==0 else 'B',audio_mode='file',audio=str(path),
@@ -354,8 +357,8 @@ class NarrationMediaTests(unittest.TestCase):
             clips.append(c)
         result=e._narration_gap_gate(clips)
         self.assertEqual(result['status'],'NARRATION_GAP_EXCEEDED')
-        self.assertGreater(result['narration_gap']['issues'][0]['gap_frames'],6.5)
-        self.assertEqual(result['narration_gap']['max_gap_frames'],5)
+        self.assertGreater(result['narration_gap']['issues'][0]['gap_frames'],10)
+        self.assertEqual(result['narration_gap']['max_gap_frames'],10)
 
     def test_tail_silence_across_multiple_sentence_slices_still_blocks(self):
         self._split_boundary('tail')

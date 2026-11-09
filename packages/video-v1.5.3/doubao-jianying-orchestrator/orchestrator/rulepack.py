@@ -228,7 +228,7 @@ def apply_manifest_defaults(manifest: dict[str, Any]) -> dict[str, Any]:
         "versions": rules.get("versions"),
         "voice_max_gap_frames": int(max_gap),
         **({"voice_acceptance_max_gap_frames": int(
-            voice.get("acceptance_max_gap_frames", 5))} if category == CATEGORY_ZHIPIN else {}),
+            voice.get("acceptance_max_gap_frames", 10))} if category == CATEGORY_ZHIPIN else {}),
     }
     return out
 
