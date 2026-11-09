@@ -15,6 +15,7 @@ from orchestrator.engine import OrchestrationEngine, Clip
 
 
 class SingleCopyTests(unittest.TestCase):
+    @offline_host
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
