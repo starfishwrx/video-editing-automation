@@ -240,7 +240,7 @@ def _validate_items(items: list[dict]) -> None:
                     f"（{it[field]}），窗口求解结果非法，交编排层重规划")
 
 
-VOICE_POST_VERSION = "1"
+VOICE_POST_VERSION = "2"
 VOICE_EDGE_KEEP_MS = 25
 VOICE_SILENCE_THRESHOLD_DB = -50
 VOICE_TEMPO_RANGE = (0.5, 2.0)
@@ -251,9 +251,14 @@ def normalize_tempo(value) -> float:
 
 
 def _post_name(src: Path, tempo: float, keep_ms: int, trim: bool) -> Path:
+    from ..runtime.file_safety import content_identity
     tag = f"k{keep_ms}" if trim else "raw"
-    return src.with_name(
-        f"{src.stem}.p{VOICE_POST_VERSION}_{tag}_t{int(round(tempo * 100))}.ogg")
+    # Preserve raw synthesis; invalidate only tempo/trim derivatives, including
+    # sub-percent tempo changes and bytes changed at the same source path.
+    identity = [content_identity(src)["sha256"], tempo, keep_ms, trim,
+                VOICE_SILENCE_THRESHOLD_DB, "peak", "opus-64k", VOICE_POST_VERSION]
+    key = hashlib.sha256(json.dumps(identity).encode()).hexdigest()[:16]
+    return src.with_name(f"{src.stem}.p{VOICE_POST_VERSION}_{tag}_t{int(round(tempo * 100))}_{key}.ogg")
 
 
 def _probe_seconds(path: Path) -> float:
@@ -281,7 +286,7 @@ def postprocess_voice(path, *, tempo=1.0, edge_trim: bool = True,
     tempo = normalize_tempo(tempo)
     # A caller may resume from a previously returned derived path. Always restart
     # from the original cache entry; never chain atempo over a .p1_* artifact.
-    while derived := re.match(r"^(?P<raw>.+)\.p\d+_(?:k\d+|raw)_t\d+$", src.stem):
+    while derived := re.match(r"^(?P<raw>.+)\.p\d+_(?:k\d+|raw)_t\d+(?:_[0-9a-f]{16})?$", src.stem):
         raw = src.with_name(derived.group("raw") + src.suffix)
         if not raw.is_file() or not _audio_cache_is_usable(raw):
             raise RuntimeError(f"原始配音缓存不存在，拒绝对已处理音频再次变速: {src}")
@@ -308,7 +313,8 @@ def postprocess_voice(path, *, tempo=1.0, edge_trim: bool = True,
             filters += [one, "areverse", one, "areverse"]
         if abs(tempo - 1.0) >= 1e-6:
             filters.append(f"atempo={tempo}")
-        tmp = target.with_name(target.stem + ".tmp.ogg")
+        import uuid
+        tmp = target.with_name(target.stem + "." + uuid.uuid4().hex + ".tmp.ogg")
         run = subprocess.run(
             [str(ffmpeg), "-hide_banner", "-loglevel", "error", "-y", "-i", str(src),
              "-af", ",".join(filters), "-c:a", "opus", "-strict", "-2", "-b:a", "64k",
@@ -342,7 +348,7 @@ def _postprocess_all(paths: dict, *, tempo: float, edge_trim: bool) -> dict:
 
 def generate_batch(items: list[dict], out_dir: Path, voice_spec=None, *,
                    concurrency: int | None = None, tempo: float | None = None,
-                   edge_trim: bool = True) -> tuple[VoicePreset, dict]:
+                   edge_trim: bool = True, final_narration: dict | None = None) -> tuple[VoicePreset, dict]:
     """并发生成一批口播。
 
     items: [{"key": "s3", "text": "..."}]；同文本+同音色直接命中缓存。
@@ -367,7 +373,14 @@ def generate_batch(items: list[dict], out_dir: Path, voice_spec=None, *,
     paths = _quiet_async_run(_gather(items, out_dir, preset, concurrency))
     tempo = request.tempo
     if edge_trim or abs(tempo - 1.0) >= 1e-6:
-        paths = _postprocess_all(paths, tempo=tempo, edge_trim=edge_trim)
+        paths = _postprocess_all(paths, tempo=tempo,
+            edge_trim=False if final_narration is not None else edge_trim)
+    if final_narration is not None:
+        from .narration_preparation import prepare
+        ffmpeg, ffprobe = find_ffmpeg()
+        paths = {key: prepare(path, out_dir / "final", loudness=final_narration,
+                    edge_trim=edge_trim, ffmpeg=str(ffmpeg or "ffmpeg"),
+                    ffprobe=str(ffprobe or "ffprobe"))["path"] for key, path in paths.items()}
     return preset, paths
 
 

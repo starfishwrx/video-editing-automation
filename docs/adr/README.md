@@ -15,3 +15,5 @@
 - [0007 实验组与默认接入意图](0007-experiment-groups.md)
 - [0008 独立时间线与预览边界](0008-timeline-preview.md)
 - [0009 冻结输入与有界阶段恢复](0009-frozen-input-recovery.md)
+
+- [0010 纸品最终配音定长与连续静音闸门](0010-final-narration-gate.md)（隔离候选实现，部署和听审待验）

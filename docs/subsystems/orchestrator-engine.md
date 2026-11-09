@@ -18,7 +18,7 @@
 7. `visual_evidence_gate()`（源证据与 AI/人工标签校验；preview 仅记 `preview_uncertified_reasons`）
 8. `_upload_videos_and_check_capacity()` → `_background_pressure()`（资源压力）
 9. `script_review` → `stabilize` → `score_storyboard` → `synthesize`（必要时 TTS）→ 压力检查
-10. `align_audio_video()` → `validate_audio_video_sync()`（需求3/5 的等式校验与容差）→ `_invariant_gate(stage="plan_complete")` → `final_visual_evidence_gate()`
+10. `align_audio_video()` → `validate_audio_video_sync()`（需求3/5 的等式校验与容差）→ `_narration_gap_gate()`（纸品五帧）→ `_invariant_gate(stage="plan_complete")` → `final_visual_evidence_gate()`
 11. `plan_transitions()` → `prepare_bgm()`（失败返回 `BGM_REQUIRED`）→ `write_draft()`（安全写稿与 post-write 校验）
 
 ## 3. 关键不变量
@@ -76,3 +76,13 @@
 - 选镜前必须在 CLI 写入 `delivery_mode`（见 `LESSONS.md#L-SEED-03`）
 - 4K HEVC CUDA 解码需 `-threads 1`，否则 NVDEC 静默退回 CPU（见 `LESSONS.md#L-SEED-02`）
 
+
+## 9. 纸品最终音频闸门
+
+纸品正常选镜入口在预合成阶段完成最终变速/响度/保守边缘处理、真实定长和气口预检；引擎 synthesize 复用同一最终资产。直接引擎构建同样在对齐前完成处理；保留配音只允许既有固定时长处理，不在写稿恢复裁短。
+
+第10步在音画同步检查之后、不变量和最终视觉检查之前执行 _narration_gap_gate。纸品规则 acceptance_max_gap_frames=5 保持不变，量实际音频切片首尾与时间轴间距；空证据、缺音、全静音、探测故障均不放行。headless与legacy写稿器复用已检查的音频，不第二次增益或淡变；检查后音频变化拒绝写入。
+
+状态：NARRATION_GAP_EXCEEDED→timing/replan_narration；NARRATION_AUDIO_UNVERIFIED→timing/replan_narration；NARRATION_GAP_UNVERIFIED及NARRATION_PREPARATION_FAILED→environment/fix_environment。均阻断，retryable=false，不整任务重试。具体选择、代价及冻结边界见 [ADR 0010](../adr/0010-final-narration-gate.md)。
+
+同一句跨多个子镜头时，先按父句合并连续首尾静音，再量句间气口；整段静音子片和时间轴间距都计入。单个静音子片不等于整句全静音，但所有子片均静音仍阻断。

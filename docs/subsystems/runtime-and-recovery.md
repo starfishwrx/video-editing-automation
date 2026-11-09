@@ -59,3 +59,7 @@
 - 包级 `test_selection_stage_resume.py`：真实 worker 到三阶段 CLI 的调用、原配音绑定、中断/耗尽不回退完整 build、运行身份和完成后超时分类
 - `test_capacity_and_sync.py`：恢复/持久化/容量校验
 
+
+## 纸品配音失败恢复
+
+NARRATION_GAP_EXCEEDED 与 NARRATION_AUDIO_UNVERIFIED 属时序阻断，next_action=replan_narration；探测失败 NARRATION_GAP_UNVERIFIED、准备失败 NARRATION_PREPARATION_FAILED 属环境阻断，next_action=fix_environment。均不可整任务自动重试。新增配音在选镜前有一次有界边缘修复；已冻结的音频/句长不在draft_write阶段自动改变，输入变化须重新规划受影响窗口，不能沿用原匹配认证。见 [ADR 0010](../adr/0010-final-narration-gate.md)。

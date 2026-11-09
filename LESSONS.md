@@ -7,6 +7,14 @@
 
 ## 新增条目
 
+### L-20261109-narration-boundary 最终音频定长前完成边缘处理
+- status: OPEN
+- hits: 1
+- 模块: audio / production_parameters / CLI / engine
+- 现象: 不同静音阈值与末尾40ms归并造成真实超限及误报；按错误报告裁剪会切到有声采样。再次调用合成入口还可能在原始缓存变化后换掉冻结音轨。
+- 以后怎么做: 先完成一次变速、响度和有界连续边缘处理，再定长和选镜；引擎直接绑定已冻结文件，最终切片闸门保留。冻结恢复不改句长，探测故障与真实超限分开。
+- 证据: ADR 0010、test_narration_preparation.py、test_paper_production.py。
+
 ### L-20261109-group-adapters 实验接入共用约束并保留各策略职责
 - status: OPEN
 - hits: 1

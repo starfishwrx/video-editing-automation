@@ -58,3 +58,13 @@ uv run --frozen python -m tools.extract_voice_catalog --cache-root $voiceCache -
 - 不要把 `video_speed` 混进 TTS 缓存键（只作用于画面）
 - Edge 兜底只能在“试听/离线环境”显式启用；正式合成保持音色一致性
 
+
+## 9. 纸品最终配音与五帧验收
+
+纸品新TTS在原始合成缓存后只做一次tempo，随后归一响度、以48kHz双声道PCM做一次保守首尾修复，再给选镜和字幕定长。跳过旧 -50dB 预裁剪；最终边缘按 -40dB 连续采样定位，各留25ms，每侧最多裁0.5s且保留至少60%时长；修复不动内部停顿。全静音、损坏或保护不满足都阻断。普通显式文件音频不自动处理；voice_edge_trim=false明确禁用裁剪，最终五帧闸门仍执行。
+
+实现为 audio/narration_preparation.py；原始TTS缓存不变，tempo/trim派生p2包含源内容及精确参数，最终paper-narration-v2缓存包含源内容、响度版本/参数和边缘策略，原子发布并校验文件与长度。选镜前报告 narration_preflight_report.json，最终入轨切片报告 narration_gap_report.json，不能用早期通过替代最终验收。
+
+保留TTS在选镜前先准备固定句长的响度结果，保存在内部 _paper_fixed_narrations 映射，选择与写稿消费同一文件；响度禁用则保持原件。恢复已冻结句长不自动缩短、重新合成或再次变速。最终资产不重复归一；检查后字节变化阻断。旧音轨仍超限时明确要求重排，保留旧选镜和原件。
+
+连续尾静音不能包含静音结束后重新出现的有声尾音；FFmpeg零起点日志异常仅允许由明确结束时间及静音时长恢复。检测故障与真实超限分别分类，详见 [ADR 0010](../adr/0010-final-narration-gate.md)。采样能量保护不能代替首尾听审。

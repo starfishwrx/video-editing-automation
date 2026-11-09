@@ -145,6 +145,10 @@ def result_contract(result: dict[str, Any], *, task_id: str, run_id: str,
         failure_class = "environment"
         failure_code = failure_code or status
     status_codes = {
+        "NARRATION_PREPARATION_FAILED": ("environment", "NARRATION_PREPARATION_FAILED"),
+        "NARRATION_GAP_EXCEEDED": ("timing", "NARRATION_GAP_EXCEEDED"),
+        "NARRATION_GAP_UNVERIFIED": ("environment", "NARRATION_GAP_UNVERIFIED"),
+        "NARRATION_AUDIO_UNVERIFIED": ("timing", "NARRATION_AUDIO_UNVERIFIED"),
         "RECOVERY_ANALYSIS_REQUIRED": ("semantic", "RECOVERY_ANALYSIS_REQUIRED"),
         "RECOVERY_MATCHED_MANIFEST_REQUIRED": ("semantic", "RECOVERY_MATCHED_MANIFEST_REQUIRED"),
         "RECOVERY_DRAFT_REQUIRED": ("ui", "RECOVERY_DRAFT_REQUIRED"),
@@ -218,6 +222,8 @@ def result_contract(result: dict[str, Any], *, task_id: str, run_id: str,
         next_action = "draft_write"
     elif terminal_state == "SUCCESS":
         next_action = "complete"
+    elif status in {"NARRATION_GAP_EXCEEDED", "NARRATION_AUDIO_UNVERIFIED"}:
+        next_action = "replan_narration"
     elif failure_class == "environment":
         next_action = "fix_environment"
     elif retryable:

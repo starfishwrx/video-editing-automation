@@ -6,7 +6,7 @@
     "machine-specific paths",
     "knowledge-base bodies"
   ],
-  "file_count": 458,
+  "file_count": 460,
   "files": [
     {
       "path": ".gitignore"
@@ -145,6 +145,9 @@
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/audio/library_resources.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/audio/narration_preparation.py"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/audio/narration_probe.py"
@@ -724,6 +727,9 @@
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_meeting_voice.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/tests/test_narration_preparation.py"
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_opening_hook.py"

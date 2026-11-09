@@ -983,8 +983,12 @@ class VoicePostTests(unittest.TestCase):
         # Operator input must not silently become a different requested tempo.
         with self.assertRaises(ValueError):
             voice_tts.normalize_tempo(9)
-        name = voice_tts._post_name(Path("tts_abc.ogg"), 1.2, 25, True)
-        self.assertEqual(name.name, "tts_abc.p1_k25_t120.ogg")
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "tts_abc.ogg"
+            source.write_bytes(b"original cached audio")
+            name = voice_tts._post_name(source, 1.2, 25, True)
+            self.assertNotEqual(name, voice_tts._post_name(source, 1.3, 25, True))
+            self.assertEqual(name, voice_tts._post_name(source, 1.2, 25, True))
 
     def test_postprocess_trims_and_speeds_up(self):
         ffmpeg, ffprobe = voice_tts.find_ffmpeg()[:2]
