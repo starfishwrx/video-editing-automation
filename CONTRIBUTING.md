@@ -47,7 +47,7 @@ uv run --frozen python -X utf8 -m tools.check_architecture
 
 Windows 离线 CI 在 PR、`main` push 和手动触发时运行这两套测试、模块边界及示例 JSON/CLI 检查。它使用锁定依赖，无生产密钥；不调用真实视觉/TTS 服务，不触碰生产队列、NAS 或飞书。AI 测试通过只证明程序合同，不能替代真实图片观察和人工成片验收。
 
-每次改动更新 `docs/working.md`；可复用教训记入 `LESSONS.md`。默认模型写全为 GLM-5.3-Flash（`glm-5.3-flash`），流程默认 `ai_editor` / QC v4；旧行为注明 legacy 或历史适用范围。
+每次改动更新 `docs/working.md`；可复用教训记入 `LESSONS.md`。默认模型写全为 GLM-5.3-Flash（`glm-5.3-flash`），流程默认 `ai_editor` / QC v5；旧行为注明 legacy 或历史适用范围。
 
 ## 私有配置与产物
 

@@ -31,6 +31,7 @@
 | [`../AGENTS.md`](../AGENTS.md) | AI Agent | 路由表、禁令、本地验证命令 |
 | [`prd.md`](prd.md) | 人 / Agent | 目标、用户、成功标准 |
 | [`rfc.md`](rfc.md) | 人 / Agent | 架构边界与定案 |
+| [ADR 索引](adr/README.md) | 人 / Agent | 重要决策、证据与状态 |
 | [`working.md`](working.md) | Agent | 按日 changelog |
 | [`test.md`](test.md) | Agent | 什么算验证完成 |
 | [`../LESSONS.md`](../LESSONS.md) | Agent | 错题本（可晋升硬规则） |

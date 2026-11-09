@@ -1,6 +1,6 @@
 # RFC — 架构与关键设计决策
 
-本文记录已经定案、后续 agent 不应重新争论的边界。实现细节见 `docs/architecture.md` 与 `docs/subsystems/`。
+本文记录已经定案、后续 agent 不应重新争论的边界。实现细节见 `docs/architecture.md` 与 `docs/subsystems/`；决策背景、状态及证据见 [ADR 索引](adr/README.md)。
 
 ## 1. 仓库形态
 
@@ -45,7 +45,7 @@
 
 ## 5. 写稿与交付边界
 
-- 端到端写稿只走 `doubao-jianying-orchestrator`；默认 `headless_production` 使用独立授权后端，空 BGM 自动准备。`jianying-editor` 的 JyProject / vendor API 保留给显式 legacy 与兼容能力，默认不自动回退。
+- 端到端写稿只走 `doubao-jianying-orchestrator`；默认 `headless_production` 使用独立授权后端，空 BGM 自动准备。`jianying-editor` 的 JyProject / vendor API 保留给显式 legacy 与兼容能力，仅无头构建明确返回旋转/HDR、像素格式或全范围不确定等媒体兼容错误时，自动以新草稿名尝试旧写稿器；其他失败不自动回退，最终验收不变。
 - `env` 默认汇总生产环境，包含所选后端；`--input` 读取任务覆盖，`--profile base` 仅报告通用工具链。完整检查失败时返回非零；它不认证云端密钥。
 - 恢复写稿消费 `shot_match_report.json` 中的成功结果与原始输入绑定，裸 `matched_manifest.json` 仅作建稿输入。当前匹配失败会使当前报告失效；输入变化和无绑定旧报告不能自动用于写稿。
 - 禁止手改 `draft_content.json` / `draft_info.json` / `draft_meta_info.json`，禁止任务内临时 `gen_*.py`。
