@@ -68,6 +68,25 @@ class PurchaseQuantityContractTests(unittest.TestCase):
         self.assertFalse(da.cta_quantity_eligible(
             {"description": "手持一包产品", "action": "举起单包展示"}, "囤两包更划算", "纸品")[0])
 
+    def test_pack_action_cannot_borrow_a_verb_or_object_from_another_clause(self):
+        for description in ("拿起纸巾揉搓，背景摆着一包产品", "把纸巾拿起擦手，一包产品摆在背景",
+                            "拿起纸巾并揉搓旁边的一包包装", "背景里手拿一包产品，前景揉搓巾体",
+                            "镜头没有拿起单包，只有包装特写", "未举起单包产品",
+                            "镜头晃动拍摄一包产品", "一包产品旁镜头晃动", "拿起一包旁的毛巾",
+                            "一包旁的毛巾被拿起", "对比一包产品旁的毛巾"):
+            with self.subTest(description=description):
+                self.assertFalse(da.cta_quantity_eligible(
+                    {"description": description, "has_subject": True}, "多囤几包真不亏", "纸品")[0])
+        for description in ("拿起一包洗脸巾展示", "从箱中拿出一包洗脸巾，双手举起", "手持两包产品对比", "一包洗脸巾被手举起", "一包纸巾被手举起", "手持一包在镜头前晃动展示"):
+            self.assertTrue(da.cta_quantity_eligible(
+                {"description": description, "has_subject": True}, "多囤几包真不亏", "纸品")[0])
+
+    def test_pack_mix_does_not_expand_to_named_units_or_other_categories(self):
+        shot = {"description": "手持一包产品", "action": "举起单包展示"}
+        for text in ("囤一箱", "囤整箱", "囤两包", "囤一提", "每包200抽", "4层加厚"):
+            self.assertFalse(da.paper_unspecified_pack_line(text, "纸品"))
+        self.assertFalse(da.cta_quantity_eligible(shot, "多囤几包真不亏", "卫品")[0])
+
     def test_content_spec_sentence_still_accepts_matching_readable_pack(self):
         self.assertEqual(da.cta_quantity_eligible(
             {"description": "包装正面140PCS特写", "readable_claims": ["140PCS"]},
@@ -139,6 +158,47 @@ class ObservationReliabilityTests(unittest.TestCase):
         self.assertEqual(da.shot_fit(
             {"description": "包装侧面印着4层", "readable_claims": ["4层"], "has_subject": True},
             contract), 2)
+
+    def test_explicit_no_pointing_cannot_be_overridden_by_descriptions_or_hires(self):
+        for fields in ({"pointing_to_text": False}, {"explicit_pointing": False},
+                       {"pointing_to_text": False, "explicit_pointing": True},
+                       {"pointing_to_text": False, "text_pass": "hires",
+                        "text_agreed": ["4层"], "pointed_agreed": ["4层"]}):
+            with self.subTest(fields=fields):
+                result = da.packaging_claim_direct(label(**fields), "4层加厚")
+                self.assertFalse(result["ok"], result)
+
+    def test_negated_pointing_is_not_a_positive_keyword_match(self):
+        for description in ("手指没有指向包装4层字样", "并未指着4层", "未指向包装4层",
+                            "手指不是指向4层"):
+            shot = label(description=description, action="普通拿包装", pointing_action="")
+            self.assertFalse(da.packaging_claim_direct(shot, "4层加厚")["ok"])
+            shot.pop("pointing_to_text")
+            self.assertFalse(da.packaging_claim_direct(shot, "4层加厚")["ok"])
+
+    def test_literal_pointing_copy_from_current_prompt_is_consumed(self):
+        shot = label(description="手指指向包装正面", pointing_action="4层", gesture="加厚")
+        from orchestrator.vision.vision_analyzer import _demo_action_fields
+        shot.update(_demo_action_fields(shot))
+        self.assertTrue(da.packaging_claim_direct(shot, "4层加厚")["ok"])
+        self.assertEqual(da.shot_fit(shot, da.sentence_contract("4层加厚", category="纸品")), 2)
+        shot["pointing_to_text"] = False
+        self.assertFalse(da.packaging_claim_direct(shot, "4层加厚")["ok"])
+
+    def test_completed_empty_pointed_review_does_not_borrow_stale_fields(self):
+        shot = label(text_pass="hires", text_agreed=["4层"], pointed_agreed=[],
+                     pointed_claims=["4层"], pointed_text=["4层"], pointing_action="4层")
+        self.assertFalse(da.packaging_claim_direct(shot, "4层加厚")["ok"])
+
+    def test_pointed_block_does_not_expand_to_other_faces_or_arbitrary_neighbors(self):
+        for description in ("手指指向包装正面但4层字样印在背面", "手指指向包装正面，包装另一块印着4层",
+                            "手指指向包装正面，4层印在其他位置", "手指指向包装正面，包装印着4层",
+                            "手指指向包装正面而4层字样印在背面",
+                            "手指指向包装正面且远处包装印着4层",
+                            "手指指向包装正面（4层印在背面）"):
+            self.assertFalse(da.packaging_claim_direct(label(description=description), "4层加厚")["ok"])
+        self.assertTrue(da.packaging_claim_direct(
+            label(description="手指指向包装背面的4层字样"), "4层加厚")["ok"])
 
     def test_old_missing_confidence_retains_narrow_packaging_compatibility(self):
         self.assertTrue(da.packaging_claim_direct(label(), "4层加厚")["ok"])

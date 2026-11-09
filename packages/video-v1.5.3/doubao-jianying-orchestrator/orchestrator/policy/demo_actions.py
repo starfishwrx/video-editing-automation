@@ -1237,12 +1237,24 @@ _AIMED_MARKERS = ("指向", "指着", "指到", "指给", "点到")
 
 
 _SENTENCE_BREAK = re.compile(r"[。；;!！?？\n]")
-_COMMA_BREAK = re.compile(r"[，,]")
-_OTHER_FACE = ("背面", "另一侧", "另一面", "底部", "远处", "别处")
+_OTHER_FACE = ("背面", "另一侧", "另一面", "另一块", "其他位置", "其他地方", "底部", "远处", "别处")
+_NEAR_POINT = ("旁边这块", "附近这块", "指尖附近", "指尖旁", "指着这块", "这块文案")
+_POINTING_NEGATION = re.compile(
+    r"(?:没有|没|未|不|并非|并未|不是|无|未见|看不到|未能|无法|不能).{0,8}(?:"
+    + "|".join(_AIMED_MARKERS) + r")")
+
+
+def _pointing_denied(shot: dict[str, Any]) -> bool:
+    if any(shot.get(key) is False for key in ("pointing_to_text", "explicit_pointing")):
+        return True
+    return any(_POINTING_NEGATION.search(part)
+               for key in ("pointing_action", "gesture", "action", "description", "visual_description")
+               for value in _flatten_observation(shot.get(key))
+               for part in re.split(r"[，,。；;!！?？\n]", value))
 
 
 def _nearby_pointed_clauses(shot: dict[str, Any]) -> list[str]:
-    """指尖附近那一块文案：指向句，以及同一句里紧挨着的一块。
+    """指尖附近那一块文案：明确指向，以及明确邻近的同块观察。
 
     另一面、背面、远处的文字不在这块里。
     """
@@ -1251,15 +1263,21 @@ def _nearby_pointed_clauses(shot: dict[str, Any]) -> list[str]:
                   "visual_description", "rationale"):
         for raw in _flatten_observation(shot.get(field)):
             for sentence in _SENTENCE_BREAK.split(str(raw)):
-                parts = [part.strip() for part in _COMMA_BREAK.split(sentence) if part.strip()]
+                parts = [part.strip() for part in re.split(r"[，,]|但是|不过|而且|以及|但|却|而|且", sentence) if part.strip()]
                 aimed = [index for index, part in enumerate(parts)
-                         if any(marker in _claim_compact(part) for marker in _AIMED_MARKERS)]
+                         if any(marker in _claim_compact(part) for marker in _AIMED_MARKERS)
+                         and not _POINTING_NEGATION.search(part)]
                 chosen: set[int] = set()
                 for index in aimed:
+                    target = parts[index]
+                    if (any(word in target for word in ("远处", "别处", "另一块", "其他位置", "另一面", "另一侧"))
+                            or ("正面" in target and "背面" in target)):
+                        continue
                     chosen.add(index)
                     for neighbor in (index - 1, index + 1):
-                        if 0 <= neighbor < len(parts) and not any(
-                                word in parts[neighbor] for word in _OTHER_FACE):
+                        if (0 <= neighbor < len(parts)
+                                and any(word in parts[neighbor] for word in _NEAR_POINT)
+                                and not any(word in parts[neighbor] for word in _OTHER_FACE)):
                             chosen.add(neighbor)
                 kept.extend(parts[index] for index in sorted(chosen))
     return kept
@@ -1267,6 +1285,8 @@ def _nearby_pointed_clauses(shot: dict[str, Any]) -> list[str]:
 
 def _claims_aimed_pointing(shot: dict[str, Any] | None) -> bool:
     shot = shot or {}
+    if _pointing_denied(shot):
+        return False
     if shot.get("pointing_to_text") is True or shot.get("explicit_pointing") is True:
         return True
     if shot.get("text_pass") == "hires" and any(
@@ -1278,14 +1298,22 @@ def _claims_aimed_pointing(shot: dict[str, Any] | None) -> bool:
 def _pointed_claim_texts(shot: dict[str, Any] | None) -> list[str]:
     """指尖附近那一块文案。高清复核记了这块里的短语，就以这块为准。"""
     shot = shot or {}
-    if shot.get("text_pass") == "hires" and any(
-            key in shot for key in ("pointed_agreed", "pointed_text", "pointed_claims")):
-        values: list[str] = []
+    if _pointing_denied(shot):
+        return []
+    if shot.get("text_pass") == "hires":
         for field in ("pointed_agreed", "pointed_text", "pointed_claims"):
             if field in shot:
-                values.extend(_flatten_observation(shot.get(field)))
-        return values
-    return _nearby_pointed_clauses(shot)
+                # A completed review, including an empty result, is authoritative.
+                return _flatten_observation(shot.get(field))
+    values = _nearby_pointed_clauses(shot)
+    if shot.get("pointing_to_text") is True or shot.get("explicit_pointing") is True:
+        # The current prompt asks these fields for literal nearby copy, not a verb.
+        for field in ("pointing_action", "gesture"):
+            for value in _flatten_observation(shot.get(field)):
+                if (not any(marker in value for marker in _AIMED_MARKERS)
+                        and not any(word in value for word in _OTHER_FACE)):
+                    values.append(value)
+    return values
 
 
 def _mark_text(shot: dict[str, Any] | None, fallback: str) -> str:
@@ -1359,6 +1387,8 @@ def packaging_claim_direct(shot: dict[str, Any], claim_text: str) -> dict[str, A
         )
     else:
         explicit_pointing = any(marker in action_text for marker in _POINTING_MARKERS)
+    if _pointing_denied(shot):
+        return {"ok": False, "reason": "PACKAGING_CLAIM_NOT_POINTED", "claim_key": matched_key}
     if not readable and not pointed:
         return {"ok": False, "reason": "PACKAGING_CLAIM_NOT_READABLE", "claim_key": matched_key}
     if not pointed:
@@ -1395,8 +1425,8 @@ def absorb_quantity_context(text: str, category: str = "") -> bool:
 
 
 _PACK_HANDLING = (
-    "拿起", "拿着", "手拿", "举起", "举着", "手持", "拎", "托起", "托着",
-    "递", "拆开", "撕开", "抽出", "抽取", "打开", "晃", "拍打", "按压", "揉", "翻开", "对比",
+    "拿起", "拿出", "拿着", "手拿", "举起", "举着", "手持", "拎", "托起", "托着",
+    "递", "拆开", "撕开", "抽出", "抽取", "打开", "拍打", "按压", "揉", "翻开", "对比",
 )
 _SINGLE_OR_TWO_PACK = (
     "单包", "一包", "1包", "一个包装", "单个包装", "两包", "2包", "两个包装", "两袋", "两提",
@@ -1437,13 +1467,31 @@ def _single_or_two_pack_action(shot: dict[str, Any]) -> bool:
             clauses.extend(str(item) for item in value if item)
         elif value:
             clauses.append(str(value))
-    compact = [re.sub(r"\s+", "", clause) for clause in clauses] or [_shot_search_text(shot)]
-    if any(any(word in clause for word in ("静态", "无动作", "单片")) for clause in compact):
+    compact = [re.sub(r"\s+", "", clause) for clause in clauses]
+    verbs = "|".join(map(re.escape, _PACK_HANDLING))
+    packs = "|".join(map(re.escape, _SINGLE_OR_TWO_PACK))
+    denied = re.compile(r"(?:没有|没|未|并非|并未|不是|无|不能).{0,5}(?:" + verbs + r")")
+    if any(any(word in clause for word in ("静态", "无动作", "单片"))
+           or denied.search(clause) for clause in compact):
         return False
-    return any(
-        any(marker in clause for marker in _SINGLE_OR_TWO_PACK)
-        and any(verb in clause for verb in _PACK_HANDLING)
-        for clause in compact)
+    handling = re.compile(r"(?:" + verbs + r")(.{0,8}?)(?:" + packs + r")"
+                          r"|(?:" + packs + r")(.{0,8}?)(?:" + verbs + r")")
+    for value in compact:
+        for clause in re.split(r"[，,。；;!！?？\n]|但是|不过|但", value):
+            if "背景" in clause:
+                continue
+            for match in handling.finditer(clause):
+                bridge = match.group(1) if match.group(1) is not None else match.group(2)
+                # A nearby pack cannot be the object of handling a towel/camera.
+                suffix = clause[match.end():]
+                if re.match(r"(?:产品|洗脸巾|纸巾|包装)?(?:旁|边|附近|后面|前面)", suffix):
+                    continue
+                if any(word in bridge for word in ("旁", "附近", "镜头", "相机", "毛巾", "面层", "一张")):
+                    continue
+                if match.group(1) is not None and any(word in bridge for word in ("巾体", "纸巾", "纸张")):
+                    continue
+                return True
+    return False
 
 
 def cta_quantity_eligible(shot: dict[str, Any], text: str = "",
