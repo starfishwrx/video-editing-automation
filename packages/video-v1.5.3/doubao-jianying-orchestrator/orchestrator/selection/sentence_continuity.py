@@ -130,6 +130,9 @@ members每句恰好一行并按原序，证据区间只填本句切片内实际�
 
 def install(plan, key, group):
     """Store new observations separately; original wide-window facts stay untouched."""
+    if continuity.is_experiment(group):
+        from .experiment_groups import install as install_experiment
+        return install_experiment(plan, key, group)
     continuity.validate(group)
     plan.setdefault("continuity_reviews", {})[key] = copy.deepcopy(group)
     context = group["input"]
@@ -157,6 +160,19 @@ def validate_plan(manifest, analysis, plan, narration_timing):
             continue
         group = continuity.validate(plan.get("continuity_reviews", {})[key])
         context = group["input"]
+        if continuity.is_experiment(group):
+            from . import experiment_groups
+            experiment_groups.validate_plan(manifest, analysis, plan, group, narration_timing)
+            # Rebuild the selected rows from the immutable allocation and compare.
+            expected = copy.deepcopy(plan)
+            experiment_groups.install(expected, key, group)
+            for member in context["members"]:
+                current = next(r for r in plan["rows"] if r["index"] == member["index"])
+                target = next(r for r in expected["rows"] if r["index"] == member["index"])
+                if current != target:
+                    raise ValueError("CONTINUITY_INPUT_CHANGED")
+            groups[key] = group
+            continue
         if (context["product"] != manifest.get("product") or context["category"] != manifest.get("category")
                 or context["rules"] != contract.rules_identity(manifest)
                 or context["source_identity"] != contract.source_identity(shots[context["shot_id"]]["video"])):
@@ -175,11 +191,13 @@ def validate_plan(manifest, analysis, plan, narration_timing):
     return groups
 
 
-def repair(manifest, analysis, plan, directory, failure, narration_timing):
+def repair(manifest, analysis, plan, directory, failure, narration_timing, *, member_indices=None):
     from . import ai_editor as editor
     from .ai_editor_recovery import failure_fields, repairable_index
     attempts = plan.setdefault("continuity_attempts", {})
     for context in proposals(manifest, analysis, plan, failure.index, narration_timing):
+        if member_indices is not None and {m["index"] for m in context["members"]} != set(member_indices):
+            continue
         key = contract.digest(context)[:24]
         group = plan.get("continuity_reviews", {}).get(key)
         if not group:

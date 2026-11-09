@@ -6,6 +6,7 @@ from pathlib import Path
 
 from ..domain.timeline import SourceInterval, VideoEvent
 from .paper_retiming import plan_retiming
+from ..policy.continuity import adjacent, source_chain
 
 
 def _source_key(asset, by_id, original_paths=None):
@@ -42,6 +43,8 @@ def replace_group(timeline, sentence_ids, clips, *, group_id, assets=(), group_k
                if s.start_us < hi and s.start_us + s.duration_us > lo]
     if tuple(overlap) != ids:
         raise ValueError("TEMPORAL_GROUP_NOT_ADJACENT")
+    if not adjacent([i for i, s in enumerate(timeline.sentences) if s.sentence_id in ids]):
+        raise ValueError("TEMPORAL_GROUP_NOT_ADJACENT")
     kept = []
     for event in timeline.videos:
         end = event.target_start_us + event.duration_us
@@ -55,19 +58,17 @@ def replace_group(timeline, sentence_ids, clips, *, group_id, assets=(), group_k
     by_id = {a.asset_id: a for a in all_assets}
     if len(by_id) != len(all_assets):
         raise ValueError("TEMPORAL_GROUP_DUPLICATE_ASSET")
-    previous_source = None
-    previous_end = None
     authorized = {(os.path.normcase(str(Path(a).resolve())),os.path.normcase(str(Path(b).resolve())))
                   for a,b in matched_pairs}
-    for clip in clips:
-        source = _source_key(by_id[clip["asset_id"]], by_id, original_paths)
-        if group_kind == "continuous_experiment" and previous_source is not None:
-            if source != previous_source:
-                if (previous_source,source) not in authorized:
-                    raise ValueError("TEMPORAL_GROUP_EXPERIMENT_PAIR_EVIDENCE_REQUIRED")
-            elif clip["source_start_us"] != previous_end and (source,source) not in authorized:
-                raise ValueError("TEMPORAL_GROUP_EXPERIMENT_SOURCE_GAP")
-        previous_source, previous_end = source, clip["source_end_us"]
+    if group_kind == "continuous_experiment":
+        try:
+            source_chain([(_source_key(by_id[c["asset_id"]], by_id, original_paths),
+                           c["source_start_us"], c["source_end_us"]) for c in clips], authorized)
+        except ValueError as exc:
+            reason = str(exc).removeprefix("CONTINUITY_")
+            if reason == "SOURCE_GAP":
+                reason = "EXPERIMENT_SOURCE_GAP"
+            raise ValueError("TEMPORAL_GROUP_" + reason) from exc
     replaced_placeholders = {sid for event in timeline.videos if lo <= event.target_start_us < hi
         and any(isinstance(e, dict) and e.get("diagnostic_placeholder") is True for e in event.evidence)
         for sid in event.sentence_ids}

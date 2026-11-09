@@ -112,8 +112,10 @@ def validate_cut(claim: dict, rows: list[dict], prepared_sources=None) -> list[s
         start = round(actual["source_start"] * 1e6)
         end = round((actual["source_start"] + actual["source_duration"]) * 1e6)
         planned = receipt.get("window_us") or {}
+        expected_target = (part.get("segment_us") if contract.continuity.is_experiment(item.get("continuity_group"))
+                           else end - start)
         if item.get("continuity_group") and (start != planned.get("start") or end != planned.get("end")
-                or round(actual.get("target_duration", 0) * 1e6) != end - start):
+                or round(actual.get("target_duration", 0) * 1e6) != expected_target):
             issues.append("CONTINUITY_QC_ALLOCATION_CHANGED")
         # Reopening a draft can move a cut by a few frames. Within 100ms the
         # window is unchanged, and evidence clipped only by that shift is not a cut.

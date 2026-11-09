@@ -7,6 +7,14 @@
 
 ## 新增条目
 
+### L-20261109-group-adapters 实验接入共用约束并保留各策略职责
+- status: OPEN
+- hits: 1
+- 模块: selection / continuity / visual QC
+- 现象: 单源分相、原速连续句和跨文件局部变速解决不同约束，单纯让新入口覆盖旧入口会漏掉单源回退；笛卡尔积预算也可能全部花在一个来源。
+- 以后怎么做: 共用相邻句、来源、完整组与音频约束，保留各策略；配对预算覆盖不同来源。粗观察边界可重叠，事件细化后的实际选段必须无重播。新分相结果要按真实句界拆片并在写稿后回读，定向修复锁定已接受邻句画面。
+- 证据: `test_default_experiment_groups.py`的同源回退、来源多样性、重叠窗细化、原音轨装配及定向修复回归；`docs/plans/20261109-unified-experiment-groups.md`。
+
 ### L-20261108-refill-identity 重复文案不能只按文本映射
 - status: OPEN
 - hits: 1

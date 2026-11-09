@@ -18,6 +18,7 @@ from typing import Any
 from .. import ai_editor_contract as contract
 from . import timing_contract
 from . import sentence_continuity
+from . import experiment_groups
 from .ai_editor_recovery import WindowFailure, failed_index, failure_fields, proposed_window, repairable_index
 
 ROUND_SIZE = 8
@@ -102,10 +103,14 @@ def _duration_resume_safe(previous: dict, resume_identity: dict, analysis: dict,
                 if not identity_only:
                     return False
                 context = previous["continuity_reviews"][group_key]["input"]
-                limit = shots[context["shot_id"]].get("material_duration_us")
-                end = context["window_us"]["end"]
-                if type(limit) is not int or type(end) is not int or end > limit:
-                    return False
+                from ..policy import continuity
+                boundaries = ([(sid, value["end_us"]) for sid, value in context["sources"].items()]
+                    if continuity.is_experiment(previous["continuity_reviews"][group_key]) else
+                    [(context["shot_id"], context["window_us"]["end"])])
+                for sid, end in boundaries:
+                    limit = shots[sid].get("material_duration_us")
+                    if type(limit) is not int or type(end) is not int or end > limit:
+                        return False
             for part in row.get("parts", []):
                 key = part.get("window_review_key")
                 if key:
@@ -226,12 +231,16 @@ def _inventory(manifest: dict, shots: list[dict], directory: Path) -> list[dict]
                        "notes": s.get("shot_note") or s.get("visual_requirements")} for i, s in sentence_rows],
         "catalog": catalog}, ensure_ascii=False) + """
 输出JSON对象 {"sentences":[{"index":1,"kind":"selling_point|product_intro|hook",
-"selling_points":[{"id":"p1","text":"本句具体卖点"}],"candidate_ids":["最相关shot_id", "其余候选"],"scene_ids":[]}],
+"selling_points":[{"id":"p1","text":"本句具体卖点"}],"candidate_ids":["最相关shot_id", "其余候选"],"scene_ids":[],
+"experiment_role":"absorption|rewet|followup|bridge|breathability|fluorescence|sku_change|promotion|other|uncertain"}],
 "display_pool_ids":["适合包装/拆包/产品展示的shot_id"]}。
 每句恰好一行，不改变原文。selling_point列出本句全部具体卖点，其他kind的selling_points为空。
 纸品scene_ids必须给出本句语义适用的semantic_contracts场景id，不适用时为空；不能只因某候选有擦拭就把包装抽数句判为清洁。
 每句candidate_ids只返回最相关的前8个，display_pool_ids也只返回前8个，避免响应被整库ID挤满。
 程序会把未列出的镜头加入后续逐轮扩展。不能因描述不确定就宣布无素材，不用A/B强度或旧合同词表淘汰。
+卫品experiment_role按原句语义分类：倒液/吸收卖点为absorption，纸巾按压/反渗/干爽验证为rewet；
+只有明确承接同次吸水验证的总结/衔接才可followup/bridge。透气、荧光、促销、商品切换必须独立，
+不能为了借时长并组。该角色只是分组召回，实际同次实验、动作与卖点必须另看真实画面。
 如提供action_segments，允许每句返回candidate_windows=[{"shot_id":"候选ID","start":0.0,"end":1.0}]，
 start/end使用原素材秒数，选择与该素材action_segments重叠且最可能体现旧稿缺口的时间段；
 它仅作定位线索，实际画面必须另行复核。
@@ -289,6 +298,10 @@ start/end使用原素材秒数，选择与该素材action_segments重叠且最�
         if type(index) is not int or not 1 <= index <= len(rows) or index in by_index or row.get("kind") not in contract.KINDS:
             raise ValueError("AI_EDITOR_CLASSIFICATION_INVALID")
         points = row.get("selling_points")
+        role = row.get("experiment_role", "other")
+        if role not in experiment_groups.ROLES:
+            raise ValueError("AI_EDITOR_EXPERIMENT_ROLE_INVALID")
+        row["experiment_role"] = role
         known_scenes = {scene["id"] for scene in contract.editorial_context(manifest)["rules"].get("semantic_contracts", [])}
         scene_ids = row.get("scene_ids", [] if not known_scenes else None)
         row["scene_ids"], row["inventory_ignored_scene_ids"] = _scene_ids(
@@ -496,6 +509,10 @@ def _cached_row_feasible(manifest, analysis, plan, sentence, narration_timing):
             return False
         groups = sentence_continuity.validate_plan(manifest, analysis, plan, narration_timing)
         group = groups.get(row.get("continuity_key"))
+        if contract.continuity.is_experiment(group):
+            experiment_groups.assemble_member(manifest, plan, group, index,
+                timing_contract.split_sentences(manifest)[index - 1])
+            return True
         shots = {s["shot_id"]: s for s in analysis["shots"]}
         duration, _ = timing_contract.duration_for(narration_timing, index,
             segment=timing_contract.split_sentences(manifest)[index - 1])
@@ -796,6 +813,17 @@ def _assemble(manifest: dict, analysis: dict, plan: dict, *, narration_timing: d
     for sentence in sentences:
         index = sentence["index"]
         row = indexed[index]
+        frozen = plan.get("_frozen_segments", {}).get(index)
+        if frozen is not None:
+            check = contract.validate_segment_receipt(frozen, index=index, manifest=manifest, verify_source=True)
+            if not check["ok"]:
+                raise ValueError("AI_REFILL_FROZEN_INVALID:" + ";".join(check["reasons"]))
+            output.append(copy.deepcopy(frozen))
+            continue
+        group = continuity_groups.get(row.get("continuity_key"))
+        if contract.continuity.is_experiment(group):
+            output.append(experiment_groups.assemble_member(manifest, plan, group, index, original[index - 1]))
+            continue
         parts = row.get("parts")
         if not isinstance(parts, list) or not parts:
             raise ValueError(f"AI_EDITOR_NO_SELECTION:{index}")
@@ -1924,9 +1952,17 @@ def _place_absorb_experiment(manifest, analysis, plan, directory, narration_timi
     segments = [{"text": s.get("text"), "video": "grouped",
                  "audio_duration_us": _line_audio_us(manifest, s, narration_timing)}
                 for s in sentences]
-    groups = [g for g in scene_rules._split_groups(
-        segments, rules, {}, category=str(manifest.get("category") or ""))
-        if g.get("scene", {}).get("id") == "absorb_test" and len(g.get("positions") or []) >= 2]
+    semantic_roles = any(s.get("experiment_role") not in (None, "other", "uncertain") for s in sentences)
+    if semantic_roles:
+        positions = {s["index"]: p for p, s in enumerate(sentences)}
+        groups = [{"positions": [positions[s["index"]] for s in group]}
+                  for group in experiment_groups.groups(sentences, require_rewet=False)]
+    else:
+        # Historical plans keep their existing recall hints. They still need
+        # phase pixels and the same joint continuity certificate to install.
+        groups = [g for g in scene_rules._split_groups(
+            segments, rules, {}, category=str(manifest.get("category") or ""))
+            if g.get("scene", {}).get("id") == "absorb_test" and len(g.get("positions") or []) >= 2]
     if not groups:
         return False
     notes = plan.setdefault("absorb_phase_notes", [])
@@ -1934,6 +1970,11 @@ def _place_absorb_experiment(manifest, analysis, plan, directory, narration_timi
     excluded_candidates = _excluded_candidates if _excluded_candidates is not None else {}
     for group in groups:
         members = [sentences[p] for p in group["positions"] if p < len(sentences)]
+        phase_by_index, verification = {}, False
+        for member in members:
+            role = member.get("experiment_role")
+            verification = verification or role == "rewet"
+            phase_by_index[member["index"]] = ("wipe" if verification else "absorb") if semantic_roles else _absorb_sentence_phase(member.get("text"))
         group_id = tuple(s["index"] for s in members)
         if _only_group is not None and group_id != _only_group:
             continue
@@ -1975,7 +2016,7 @@ def _place_absorb_experiment(manifest, analysis, plan, directory, narration_timi
             if any(_phase_span_us(found_phases, (phase,), lo, hi) is None
                    for phase in ("pour", "absorb")):
                 continue
-            if (any(_absorb_sentence_phase(s.get("text")) == "wipe" for s in members)
+            if (any(phase_by_index[s["index"]] == "wipe" for s in members)
                     and _phase_span_us(found_phases, ("wipe",), lo, hi) is None):
                 continue
             located, shot, phases = found, candidate, found_phases
@@ -1997,7 +2038,7 @@ def _place_absorb_experiment(manifest, analysis, plan, directory, narration_timi
         cursors = {"absorb": body[0] if body else None, "wipe": wipe[0] if wipe else None}
         limits = {"absorb": body[1] if body else None, "wipe": wipe[1] if wipe else None}
         for sentence in members:
-            phase = _absorb_sentence_phase(sentence.get("text"))
+            phase = phase_by_index[sentence["index"]]
             index = sentence["index"]
             # Directed QC repairs must not silently replace already accepted
             # neighboring sentences in the same experiment group.
@@ -2227,6 +2268,7 @@ def _repair_reviewed_rows(manifest, analysis, plan, directory, narration_timing,
     # Empty OUT_OF_RANGE / SPAN seeds must place before earlier sentences spend
     # the vision budget on their own short-window repairs.
     _place_absorb_experiment(manifest, analysis, plan, directory, narration_timing)
+    experiment_groups.repair(manifest, analysis, plan, directory, narration_timing)
     _place_empty_matched_evidence(manifest, analysis, plan, directory, narration_timing)
     seen = set()
     for _ in range(1 + 8 * len(plan.get("sentences", []))):
@@ -2350,7 +2392,7 @@ def _edit_plan(manifest: dict, analysis: dict, plan: dict, directory: Path,
 同源连续实验顺接后续区间，不每句重播。source_start_us可省略，提供时不得裁掉必需证据。
 镜头变化和去重只是质量接近时的偏好，不得抢走唯一卖点候选。没有合格候选返回空parts，不编造支持。
 technical_option是按本句完整配音求出的实际可行窗口；分配多镜后程序会重新求解，不可用单镜无解淘汰组合。
-匹配质量相近时优先within_preferred_speed=true；只有已复看的纯过程允许2到3倍，未知阶段和关键动作结果保持原速。technical_option无解时必须换完整短窗口或如实报告冲突。
+匹配质量相近时优先within_preferred_speed=true；普通完整放置短窗保留最高2倍许可，2到3倍仅限已复看的纯过程。实验分相的关键动作结果原速，无许可时原速。technical_option无解时必须换完整短窗口或如实报告冲突。
 根据source_identity、源区间及可见动作描述减少近重复。优先中后段，但完整证据和唯一卖点先于取段偏好。
 确实只有一个实际支持的候选、卖点不得不复用时，可在该row写scarce_reuse_reason解释；介绍/钩子和有替代候选时不允许此例外，相关实验仍须顺接而非相邻重播。
 """
@@ -2500,7 +2542,7 @@ def prepare(manifest: dict, analysis: dict, report_dir: Path, *, narration_timin
         if previous.get("resume_identity") == plan["resume_identity"] or duration_resume:
             for key in ("sentences", "reviews", "display_reviews", "coverage", "rows", "window_reviews",
                         "duration_migration", "duration_migrations",
-                        "window_repair_attempts", "repair_history", "duplicate_repair_reviews", "continuity_reviews", "continuity_attempts", "continuity_repairs"):
+                        "window_repair_attempts", "repair_history", "duplicate_repair_reviews", "continuity_reviews", "continuity_attempts", "continuity_repairs", "experiment_attempts"):
                 if key in previous:
                     plan[key] = copy.deepcopy(previous[key])
             if not duration_resume or identity_only_resume:
@@ -2599,6 +2641,11 @@ def prepare(manifest: dict, analysis: dict, report_dir: Path, *, narration_timin
                 # placement: short crop + mild speed, or a sentence group.
                 # Never trim the original evidence and relabel it as new.
                 if coverage.get("reason") == "KNOWN_WINDOWS_INFEASIBLE" and row["candidates"]:
+                    continue
+                if any(row["index"] in {s["index"] for s in group}
+                       for group in experiment_groups.groups(plan["sentences"])):
+                    # Individual fragments may not certify the whole experiment.
+                    # Its bounded joint review will still have to pass before assembly.
                     continue
                 raise ValueError(f"AI_EDITOR_OBSERVATION_OR_WINDOW_PENDING:{row['index']}:{coverage.get('reason', 'UNKNOWN')}")
         plan["phase"] = "selection_edit"
@@ -2844,11 +2891,15 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
         by_index[index] = row
     directory = report_dir / "ai_editor_refill"
     directory.mkdir(parents=True, exist_ok=True)
+    grouped_replaced, grouped_errors = experiment_groups.refill_groups(
+        manifest, analysis, by_index, wanted, directory, narration_timing)
     reserved = {str(part.get("shot_id") or part.get("temporary_shot_id"))
                 for index, row in by_index.items() if index not in wanted
                 for part in (row.get("span_parts") or [row])}
-    replaced, errors, refill_unresolved = [], [], []
+    replaced, errors, refill_unresolved = list(grouped_replaced), list(grouped_errors.values()), []
     for index in wanted:
+        if index in grouped_replaced or index in grouped_errors:
+            continue
         if index > len(original):
             errors.append(f"AI_REFILL_INDEX_OOB:{index}")
             continue

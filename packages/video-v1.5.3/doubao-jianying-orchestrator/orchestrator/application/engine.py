@@ -856,6 +856,8 @@ class OrchestrationEngine:
                                       or raw.get("speed_range_override")),
                 preferred_speed=part.get("preferred_speed", raw.get("preferred_speed", 1.0)),
                 playback_observation=part.get("playback_observation"),
+                continuity_group=part.get("continuity_group"),
+                guard_override=part.get("guard_override"),
                 raw_index=c.raw_index,
             )
             if sub.audio_mode == "file":

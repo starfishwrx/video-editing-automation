@@ -27,7 +27,7 @@
 
 引擎闸门形态统一为 `Optional[dict]`：`None` 放行，`dict` 终止并带原因。新增闸门必须带「必拦样例」测试。
 
-默认视觉后端为火山 Ark GLM-5.3-Flash（`glm-5.3-flash`）。运行时只保留 GLM（`volc_glm` / `glm` / `volc`）与 Qwen（`qwen` / `qwen_compatible`）直连；Codex CLI、Anthropic 和 CCSwitch 通道已移除，旧值和未知值明确拒绝。文字复核与 `JY_AI_EDITOR_QWEN` 保留。模型名称与覆盖优先级见[模型说明](model-and-vision.md)。显式 `legacy` 才沿用旧 Top3、`scene_rules` / `phase_timing` 与 QC v3；`ai_editor` 不使用旧词表/旧换镜器裁决语义。QC v3 不能认证新模式草稿。
+默认视觉后端为火山 Ark GLM-5.3-Flash（`glm-5.3-flash`）。运行时只保留 GLM（`volc_glm` / `glm` / `volc`）与 Qwen（`qwen` / `qwen_compatible`）直连；Codex CLI、Anthropic 和 CCSwitch 通道已移除，旧值和未知值明确拒绝。文字复核与 `JY_AI_EDITOR_QWEN` 保留。模型名称与覆盖优先级见[模型说明](model-and-vision.md)。显式 `legacy` 沿用旧 Top3、场景换镜和 QC v3；默认 AI 的单源分相可以复用 `phase_timing`，历史无角色计划可用旧词表作召回，但必须重新看图并取得完整组认证。新计划按语义角色分组，不能靠关键词裁决支持。QC v3 不能认证新模式草稿。
 
 ## 3. Formal vs Preview
 
