@@ -470,14 +470,15 @@ def contradiction(shot: dict[str, Any] | None, contract: dict[str, Any] | None) 
     for topic in contract.get("topics") or []:
         if topic.get("match") == "count":
             spoken = contract.get("sheet_counts") or []
+            shown_text = _mark_text(shot, printed)
             shown = {_chinese_count_to_arabic(m.group(1))
-                     for m in _SHOWN_COUNT_RE.finditer(printed)}
+                     for m in _SHOWN_COUNT_RE.finditer(shown_text)}
             if spoken and shown and not shown & set(spoken):
                 return f"count:{'/'.join(sorted(shown))}≠{'/'.join(spoken)}"
             continue
         if topic.get("id") == "layers":
             expected = {tuple(p) for p in contract.get("number_units") or [] if p[1] == "layer"}
-            shown = {p for p in _number_units(printed) if p[1] == "layer"}
+            shown = {p for p in _number_units(_mark_text(shot, printed)) if p[1] == "layer"}
             if expected and shown and not expected & shown:
                 return "layers:PACKAGING_LAYER_COUNT_MISMATCH"
             continue
@@ -505,6 +506,7 @@ def _topic_positive_or_excluded(shot: dict[str, Any], contract: dict[str, Any],
     observed = printed if topic.get("match") in ("count", "same_words") else acted
     if topic.get("match") == "count":
         expected = {(str(n), "sheet") for n in contract.get("counts") or []}
+        observed = _mark_text(shot, observed)
         if not unverified and expected & _number_units(observed):
             return 2, False
         if any(marker in observed for marker in _COUNT_RELATED) or re.search(
@@ -514,6 +516,7 @@ def _topic_positive_or_excluded(shot: dict[str, Any], contract: dict[str, Any],
     if topic.get("match") == "same_words":
         if topic.get("id") == "layers":
             expected = {tuple(p) for p in contract.get("number_units") or [] if p[1] == "layer"}
+            observed = _mark_text(shot, observed)
             return (2 if not unverified and expected & _number_units(observed) else 0), False
         for hit in [] if unverified else topic.get("hits") or []:
             base, negated = _label_base(hit.lower())
@@ -629,8 +632,10 @@ def count_readable_rank(shot: dict[str, Any] | None, contract: dict[str, Any] | 
         " ".join(str(t) for t in (shot.get("readable_claims") or [])),
         str(shot.get("action") or ""),
     ])
+    if _claims_aimed_pointing(shot):
+        blob = " ".join(_pointed_claim_texts(shot))
     if spoken & _number_units(blob):
-        return 2 if any(k in blob for k in ("指向", "特写", "侧面", "PCS", "pcs")) else 1
+        return 2 if any(k in blob for k in ("指向", "指着", "指到", "特写", "侧面", "PCS", "pcs")) else 1
     return 0
 
 
@@ -1228,12 +1233,74 @@ def _shot_search_text(shot: dict[str, Any]) -> str:
     return re.sub(r"\s+", "", " ".join(values)).lower()
 
 
+_AIMED_MARKERS = ("指向", "指着", "指到", "指给", "点到")
+
+
+_SENTENCE_BREAK = re.compile(r"[。；;!！?？\n]")
+_COMMA_BREAK = re.compile(r"[，,]")
+_OTHER_FACE = ("背面", "另一侧", "另一面", "底部", "远处", "别处")
+
+
+def _nearby_pointed_clauses(shot: dict[str, Any]) -> list[str]:
+    """指尖附近那一块文案：指向句，以及同一句里紧挨着的一块。
+
+    另一面、背面、远处的文字不在这块里。
+    """
+    kept: list[str] = []
+    for field in ("pointing_action", "gesture", "action", "description",
+                  "visual_description", "rationale"):
+        for raw in _flatten_observation(shot.get(field)):
+            for sentence in _SENTENCE_BREAK.split(str(raw)):
+                parts = [part.strip() for part in _COMMA_BREAK.split(sentence) if part.strip()]
+                aimed = [index for index, part in enumerate(parts)
+                         if any(marker in _claim_compact(part) for marker in _AIMED_MARKERS)]
+                chosen: set[int] = set()
+                for index in aimed:
+                    chosen.add(index)
+                    for neighbor in (index - 1, index + 1):
+                        if 0 <= neighbor < len(parts) and not any(
+                                word in parts[neighbor] for word in _OTHER_FACE):
+                            chosen.add(neighbor)
+                kept.extend(parts[index] for index in sorted(chosen))
+    return kept
+
+
+def _claims_aimed_pointing(shot: dict[str, Any] | None) -> bool:
+    shot = shot or {}
+    if shot.get("pointing_to_text") is True or shot.get("explicit_pointing") is True:
+        return True
+    if shot.get("text_pass") == "hires" and any(
+            key in shot for key in ("pointed_agreed", "pointed_text", "pointed_claims")):
+        return True
+    return bool(_nearby_pointed_clauses(shot))
+
+
+def _pointed_claim_texts(shot: dict[str, Any] | None) -> list[str]:
+    """指尖附近那一块文案。高清复核记了这块里的短语，就以这块为准。"""
+    shot = shot or {}
+    if shot.get("text_pass") == "hires" and any(
+            key in shot for key in ("pointed_agreed", "pointed_text", "pointed_claims")):
+        values: list[str] = []
+        for field in ("pointed_agreed", "pointed_text", "pointed_claims"):
+            if field in shot:
+                values.extend(_flatten_observation(shot.get(field)))
+        return values
+    return _nearby_pointed_clauses(shot)
+
+
+def _mark_text(shot: dict[str, Any] | None, fallback: str) -> str:
+    """镜头声称在指包装时，只认指尖附近那一块，不用包装另一处的文字顶上。"""
+    if _claims_aimed_pointing(shot):
+        return _claim_compact(" ".join(_pointed_claim_texts(shot)))
+    return fallback
+
+
 def packaging_claim_direct(shot: dict[str, Any], claim_text: str) -> dict[str, Any]:
     """Return the narrow, auditable packaging-claim direct-evidence decision.
 
-    A readable package mark is not enough. The frame must also record an
-    explicit pointing/indicating action, and the pointed claim must be the same
-    canonical claim as the spoken text. This keeps the user-confirmed
+    A readable package mark is not enough. The claim has to sit in the copy
+    block next to the fingertip. Text on another face of the pack does not
+    count. This keeps the user-confirmed
     “100% 原生木浆” exception from turning generic packaging into evidence for
     softness, absorption, or any other functional claim.
     """
@@ -1273,6 +1340,7 @@ def packaging_claim_direct(shot: dict[str, Any], claim_text: str) -> dict[str, A
         return any(_claim_compact(variant) in observed for variant in _PACKAGING_CLAIMS[matched_key])
 
     readable = readable_in(observed_values)
+    pointed = readable_in(_pointed_claim_texts(shot))
     independent_text = (
         shot.get("text_pass") == "hires"
         and readable_in(_flatten_observation(shot.get("text_agreed")))
@@ -1291,10 +1359,12 @@ def packaging_claim_direct(shot: dict[str, Any], claim_text: str) -> dict[str, A
         )
     else:
         explicit_pointing = any(marker in action_text for marker in _POINTING_MARKERS)
-    if not readable:
+    if not readable and not pointed:
         return {"ok": False, "reason": "PACKAGING_CLAIM_NOT_READABLE", "claim_key": matched_key}
-    if not explicit_pointing:
-        return {"ok": False, "reason": "PACKAGING_CLAIM_NOT_POINTED", "claim_key": matched_key}
+    if not pointed:
+        reason = ("PACKAGING_POINTING_MISMATCH" if explicit_pointing or _claims_aimed_pointing(shot)
+                  else "PACKAGING_CLAIM_NOT_POINTED")
+        return {"ok": False, "reason": reason, "claim_key": matched_key}
     return {
         "ok": True,
         "reason": "PACKAGING_CLAIM_DIRECT",
@@ -1322,6 +1392,58 @@ def absorb_quantity_context(text: str, category: str = "") -> bool:
     return (any(term in value for term in ("吸水", "吸收", "吸量", "锁水", "经量"))
             or (rulepack.normalize_category(category) == rulepack.CATEGORY_WEIPIN
                 and any(term in value for term in ("量大", "量多", "一整晚"))))
+
+
+_PACK_HANDLING = (
+    "拿起", "拿着", "手拿", "举起", "举着", "手持", "拎", "托起", "托着",
+    "递", "拆开", "撕开", "抽出", "抽取", "打开", "晃", "拍打", "按压", "揉", "翻开", "对比",
+)
+_SINGLE_OR_TWO_PACK = (
+    "单包", "一包", "1包", "一个包装", "单个包装", "两包", "2包", "两个包装", "两袋", "两提",
+)
+
+
+def paper_unspecified_pack_line(text: str, category: str = "") -> bool:
+    """纸品口播没点明箱、提、包或抽数时，堆量和单包、两包动作可以混用。"""
+    from .. import rulepack
+    if rulepack.normalize_category(category) != rulepack.CATEGORY_ZHIPIN:
+        return False
+    if sentence_contract(text, category=category).get("kind") != "display":
+        return False
+    intents = infer_intents(text, category=category)
+    if "cta" not in intents and "quantity" not in intents:
+        return False
+    blob = _count_text(text)
+    if _SHEET_COUNT_RE.search(blob) or _LAYERS_RE.search(blob):
+        return False
+    if any(word in blob for word in ("整箱", "整提", "单包", "整包")):
+        return False
+    for match in re.finditer(rf"({_NUMBER_TOKEN})\s*(包|提|箱|卷|件)", blob):
+        if match.group(1) != "几":
+            return False
+    return True
+
+
+def _single_or_two_pack_action(shot: dict[str, Any]) -> bool:
+    """A handled one-pack or two-pack shot, not a static package close-up.
+
+    The pack and the handling verb must sit in the same field. A sheet rub
+    whose background merely mentions a pack does not qualify.
+    """
+    clauses: list[str] = []
+    for key in ("action", "result", "description", "visual_description", "object", "action_object"):
+        value = shot.get(key)
+        if isinstance(value, (list, tuple, set)):
+            clauses.extend(str(item) for item in value if item)
+        elif value:
+            clauses.append(str(value))
+    compact = [re.sub(r"\s+", "", clause) for clause in clauses] or [_shot_search_text(shot)]
+    if any(any(word in clause for word in ("静态", "无动作", "单片")) for clause in compact):
+        return False
+    return any(
+        any(marker in clause for marker in _SINGLE_OR_TWO_PACK)
+        and any(verb in clause for verb in _PACK_HANDLING)
+        for clause in compact)
 
 
 def cta_quantity_eligible(shot: dict[str, Any], text: str = "",
@@ -1361,6 +1483,10 @@ def cta_quantity_eligible(shot: dict[str, Any], text: str = "",
         minimum = 1 if match.group(2) in ("箱", "提") else 2
         if int(count) >= minimum:
             return True, "VISIBLE_PURCHASE_UNIT_COUNT"
+    # A paper line that does not name a carton, bundle, pack count, or sheet
+    # count can use a handled one-pack or two-pack shot alongside a stack.
+    if paper_unspecified_pack_line(text, category) and _single_or_two_pack_action(shot):
+        return True, "PAPER_UNSPECIFIED_PACK_MIX"
     # Explicit single-pack language without a count is exactly the failure mode
     # reported in the manual reviews; never let role preference override it.
     return False, "SINGLE_PACK_OR_NO_VISIBLE_QUANTITY"
