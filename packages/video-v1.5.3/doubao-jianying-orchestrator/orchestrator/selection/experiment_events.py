@@ -5,6 +5,10 @@ from copy import deepcopy
 from .experiment_retiming import validate_motion,windows,fit_group,boundary
 
 
+def allows_absorption_focus(text):
+    return bool(text) and not re.search(r'秒|瞬吸|瞬间|立刻|马上|一倒就|倒|整杯|毫升|ml', text, re.I)
+
+
 def validate_focus(sentences,roles,observations):
     """A partial pour supports qualitative absorption, never a complete/timed pour claim."""
     if (not isinstance(observations,list) or len(observations)!=2 or not isinstance(observations[0],dict)
@@ -16,7 +20,7 @@ def validate_focus(sentences,roles,observations):
     timed_process_faster=any(s['kind'] in {'pour','absorb'} and s['can_speed'] for s in observations[0]['segments'])
     if timed_process_faster and re.search(r'秒|瞬吸|瞬间|立刻|马上|一倒就',text):
         raise ValueError('EXPERIMENT_ABSORPTION_SPEED_INCOMPATIBLE_CLAIM')
-    if focused and (not text or re.search(r'秒|瞬吸|瞬间|立刻|马上|一倒就|倒|整杯|毫升|ml',text,re.I)):
+    if focused and not allows_absorption_focus(text):
         raise ValueError('EXPERIMENT_ABSORPTION_FOCUS_INCOMPATIBLE_CLAIM')
 
 

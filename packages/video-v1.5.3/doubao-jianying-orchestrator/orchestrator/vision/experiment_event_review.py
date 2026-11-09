@@ -12,8 +12,22 @@ from .purpose_review import policy,save
 from . import temporal_video
 
 
-def review(manifest,pair,output,*,focus='complete_pour',ffmpeg='ffmpeg',ffprobe='ffprobe',font_path):
-    from PIL import Image,ImageDraw,ImageFont
+def _frame_sheet(member, ids, target, *, ffmpeg, ffprobe, font_path):
+    from PIL import Image, ImageDraw, ImageFont
+    metadata=action_frames.probe(member['samples']['source']['path'],target.parent,ffprobe=ffprobe)
+    frames=action_frames.extract(member['samples']['source']['path'],metadata,
+        [member['samples']['frames'][i]['source_frame'] for i in ids],target.parent,ffmpeg=ffmpeg,width=270)
+    canvas=Image.new('RGB',(1620,((len(ids)+5)//6)*510),'#222');draw=ImageDraw.Draw(canvas)
+    font=ImageFont.truetype(str(font_path),20)
+    for n,(index,frame) in enumerate(zip(ids,frames)):
+        im=Image.open(frame['path']).convert('RGB');im.thumbnail((270,480));x=n%6*270;y=n//6*510
+        canvas.paste(im,(x,y+30));draw.text((x+5,y+4),f'{member["part"]} frame {index}',font=font,fill='white')
+    sheet=target.with_suffix('.jpg');canvas.save(sheet,quality=95)
+    return sheet
+
+
+def review(manifest,pair,output,*,focus='complete_pour',ffmpeg='ffmpeg',ffprobe='ffprobe',font_path,
+           frames_only=False):
     if focus not in {'complete_pour','absorption_focus'}:raise ValueError('EXPERIMENT_EVENTS_FOCUS_INVALID')
     output=Path(output);binding=prepare_review(manifest,pair,output)
     for part in ('A','B'):
@@ -28,7 +42,7 @@ def review(manifest,pair,output,*,focus='complete_pour',ffmpeg='ffmpeg',ffprobe=
     observations=[];facts=[]
     for member in pair['members']:
         target=output.with_name(output.stem+'-'+member['part']+'.json')
-        window=window_video(member,target,ffmpeg=ffmpeg,ffprobe=ffprobe)
+        window=None if frames_only else window_video(member,target,ffmpeg=ffmpeg,ffprobe=ffprobe)
         coverage=focus if member['part']=='A' else 'complete_verification'
         prompt=policy(manifest)+'''只报告实际视频中的事件事实和编号边界，不判断倍速，不接收目标句长。
 A按顺序分为pour（液体实际流入）和absorb（倒液结束后吸收过程及最终可见状态）。
@@ -54,7 +68,18 @@ complete_pour须保留倒液的开始和完成；absorption_focus允许从实际
             save(target.with_suffix('.candidate.json'),row)
             if row.get('coverage')!=coverage:raise ValueError('EXPERIMENT_EVENTS_COVERAGE_CHANGED')
             return bool(compile_events(row,member))
-        row=temporal_video.review(window,prompt,target,fps=10,validator=validate)
+        if frames_only:
+            left,right=member['window_frame_ids']
+            anchors={round(left+i*(right-left)/15) for i in range(16)}
+            shown=sorted({max(left,min(right,i+d)) for i in anchors for d in (-1,0,1)})
+            sheet=_frame_sheet(member,shown,target,ffmpeg=ffmpeg,ffprobe=ffprobe,font_path=font_path)
+            row=ai_editor._call(prompt+'\n本次为实际顺序源帧，未提供连续视频；边界只使用已展示编号。'+
+                json.dumps({'shown_frame_ids':shown}),target,sheet)
+            validate(row)
+            if any(e[k] not in shown for e in row['events'] for k in ('first_frame','last_frame')):
+                raise ValueError('EXPERIMENT_EVENTS_BOUNDARY_NOT_SHOWN')
+        else:
+            row=temporal_video.review(window,prompt,target,fps=10,validator=validate)
         # Only uncertain boundaries and a few intervening context frames need
         # dense source-image refinement; the video supplies the motion context.
         left,right=member['window_frame_ids'];ids=set()
@@ -65,15 +90,7 @@ complete_pour须保留倒液的开始和完成；absorption_focus允许从实际
         if b-a<=40:ids.update(range(a,b+1))
         ids=sorted(ids)
         target=output.with_name(output.stem+'-'+member['part']+'-detail.json')
-        metadata=action_frames.probe(member['samples']['source']['path'],target.parent,ffprobe=ffprobe)
-        frames=action_frames.extract(member['samples']['source']['path'],metadata,
-            [member['samples']['frames'][i]['source_frame'] for i in ids],target.parent,ffmpeg=ffmpeg,width=270)
-        canvas=Image.new('RGB',(1620,((len(ids)+5)//6)*510),'#222');draw=ImageDraw.Draw(canvas)
-        font=ImageFont.truetype(str(font_path),20)
-        for n,(index,frame) in enumerate(zip(ids,frames)):
-            im=Image.open(frame['path']).convert('RGB');im.thumbnail((270,480));x=n%6*270;y=n//6*510
-            canvas.paste(im,(x,y+30));draw.text((x+5,y+4),f'{member["part"]} frame {index}',font=font,fill='white')
-        sheet=target.with_suffix('.jpg');canvas.save(sheet,quality=95)
+        sheet=_frame_sheet(member,ids,target,ffmpeg=ffmpeg,ffprobe=ffprobe,font_path=font_path)
         detail_prompt=prompt+'\n依据本次实际编号帧校正以下视频事件边界。边界必须使用本图实际展示的编号；中间状态不能从旧描述推断。'+json.dumps(
             {'video_observation':row,'shown_frame_ids':ids},ensure_ascii=False)
         refined=ai_editor._call(detail_prompt,target,sheet)
@@ -83,7 +100,8 @@ complete_pour须保留倒液的开始和完成；absorption_focus允许从实际
         validate_samples(member['samples']);observations.append(compile_events(refined,member))
         facts.append({'video':row,'frame_refinement':refined,'shown_frame_ids':ids,'sheet':identity.source_identity(sheet)})
     artifact={'protocol':PROTOCOL,'task_id':manifest['task_id'],'rules':identity.rules_identity(manifest),
-        'pair_input_sha256':identity.digest(binding),'method':'qwen_video_events_with_actual_frame_refinement',
+        'pair_input_sha256':identity.digest(binding),'method':('actual_frame_events_with_dense_refinement' if frames_only
+            else 'qwen_video_events_with_actual_frame_refinement'),
         'observations':observations,'event_observations':facts,'formal_delivery_allowed':False}
     save(output.with_suffix('.motion.json'),artifact)
     return artifact

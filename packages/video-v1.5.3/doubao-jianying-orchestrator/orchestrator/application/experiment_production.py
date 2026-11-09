@@ -1,6 +1,5 @@
 """Apply one visually verified experiment across fixed adjacent sentences."""
 from pathlib import Path
-import json
 
 from .. import ai_editor_contract as identity
 from ..domain.timeline import Asset
@@ -121,45 +120,14 @@ def apply(manifest, timeline, sentence_ids, roles, evidence, *, group_id, prior_
 
 def apply_pair(manifest,timeline,sentence_ids,roles,evidence,*,group_id,prior_origins=(),ffprobe="ffprobe",motion=None,align_phases=False):
     from ..selection.timing_contract import split_sentences
-    from ..selection.experiment_contract import validate_pair
     from ..vision.experiment_pair_review import PROTOCOL as PAIR_PROTOCOL
     if [s.text for s in timeline.sentences]!=[r["text"]for r in split_sentences(manifest)]:
         raise ValueError("EXPERIMENT_TIMELINE_SCRIPT_CHANGED")
+    from ..selection.experiment_contract import validate_pair_evidence
     rules=contract_for(manifest);validate_group(timeline,sentence_ids,roles,rules)
-    if (timeline.task_id!=manifest["task_id"] or evidence.get("task_id")!=manifest["task_id"]
-        or evidence.get("protocol")!=PAIR_PROTOCOL or evidence.get("rules")!=identity.rules_identity(manifest)
-        or evidence.get("context")!={"product":manifest["product"],"category":"weipin"}):
-        raise ValueError("EXPERIMENT_PAIR_RULE_OR_CONTEXT_CHANGED")
-    members=evidence.get("members")
-    if not isinstance(members,list)or [m.get("part")for m in members]!=["A","B"]:
-        raise ValueError("EXPERIMENT_PAIR_MEMBERS_INVALID")
+    bounds=validate_pair_evidence(manifest,evidence)
+    members=evidence["members"];row=evidence["observation"]
     allowed={str(Path(p).resolve())for p in manifest["material_sources"]}
-    visible={};bounds=[]
-    for member in members:
-        samples=validate_samples(member["samples"])
-        if samples["original"]["path"]not in allowed:raise ValueError("EXPERIMENT_PAIR_OUTSIDE_TASK")
-        a,b=member["window_frame_ids"]
-        if type(a)is not int or type(b)is not int or not 0<=a<b<len(samples["frames"]):
-            raise ValueError("EXPERIMENT_PAIR_WINDOW_INVALID")
-        ids=sorted({round(a+i*(b-a)/7)for i in range(8)})
-        if member["visible_frame_ids"]!=ids:raise ValueError("EXPERIMENT_PAIR_SHOWN_FRAMES_CHANGED")
-        visible[member["part"]]=set(ids)
-        bounds.append((samples["frames"][a]["pts_us"],
-                       min(samples["source_end_us"],samples["frames"][b]["pts_us"]+16_667)))
-    if identity.source_identity(evidence["sheet"]["path"])!=evidence["sheet"]:
-        raise ValueError("EXPERIMENT_PAIR_SHEET_CHANGED")
-    from ..vision.experiment_pair_review import input_binding
-    binding=evidence.get("input_binding")or {};bound_file=binding.get("file")or {}
-    try:
-        binding_valid=(identity.source_identity(bound_file["path"])==bound_file
-            and identity.file_sha256(bound_file["path"])==binding["sha256"]
-            and json.loads(Path(bound_file["path"]).read_text("utf-8"))==input_binding(manifest,members,evidence["sheet"]["path"]))
-    except (KeyError,OSError,ValueError,TypeError):binding_valid=False
-    if not binding_valid:raise ValueError("EXPERIMENT_PAIR_REVIEW_INPUT_CHANGED")
-    row=validate_pair(evidence["observation"],visible)
-    if row["verdict"]!="matched":raise ValueError("EXPERIMENT_PAIR_NOT_CONFIRMED")
-    if members[0]["samples"]["original"]==members[1]["samples"]["original"]and bounds[1][0]<bounds[0][1]:
-        raise ValueError("EXPERIMENT_PAIR_SOURCE_ORDER_OR_REPLAY")
     selected=[s for s in timeline.sentences if s.sentence_id in sentence_ids]
     lo,hi=selected[0].start_us,selected[-1].start_us+selected[-1].duration_us
     minimum=[];intervals=[]
