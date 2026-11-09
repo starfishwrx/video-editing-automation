@@ -118,3 +118,9 @@ uv run --frozen python -X utf8 -m tools.release_package build --output $releaseO
 1. 增加「必拦样例」测试。
 2. 不把 formal 降到 preview 语义。
 3. 不在回复/PR 中声称「已上线」。
+
+## 7. 纸品配音回归
+
+新增 test_narration_preparation.py，使用真实PCM和FFmpeg覆盖连续边缘保护、末尾有声的内部停顿、五帧边界、时间轴缺口、静音/损坏、禁止过裁、精确tempo与源内容缓存身份、同资产并发、先定长后选择、最终写稿资产一致和冻结恢复。异常分类分别验证真实超限、工具缺失和TTS准备故障；非纸品保持原入口。test_paper_production.py继续覆盖最终闸门失败关闭。
+
+门禁与共享音频入口变更必须跑两套完整discover和架构检查。冷启动的git-tracked-only测试要求新增模块已加入Git索引；测试台PowerShell输出编码须与测试的UTF-8解码一致，不以乱码失败判断音频行为。真实缓存隔离重放禁止新TTS/视觉请求，保持原音频与生产不变，核对预合成/引擎/写稿计划同字节；数值通过不代表听感或成片验收。

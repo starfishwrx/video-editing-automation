@@ -27,7 +27,7 @@ from ..audio import voice_catalog
 from ..audio import voice_tts
 from ..audio.library_resources import RuntimeCatalogError
 from .engine import OrchestrationEngine
-from ..runtime.platform_env import clear_environment_cache, environment_report
+from ..runtime.platform_env import clear_environment_cache, environment_report, find_ffmpeg
 from ..runtime.file_safety import content_identity
 from ..runtime.task_log import TaskAlreadyRunningError, TaskLogger
 
@@ -440,12 +440,15 @@ def _lock_voice_once(manifest: dict) -> tuple[object | None, dict | None]:
     return preset, None
 
 
+from ..audio.narration_preparation import NarrationError
+
+
 def _pre_synthesize_narration(manifest: dict, report_dir: Path, preset) -> dict:
     """选镜**之前**拿到逐句真实配音时长（定案第 3 条）。
 
     切句口径与规划层共用 `timing_contract.split_sentences`（否则真值表的键对不
-    上段落）；合成结果落 `narration_timing.json`，引擎 `synthesize` 因为缓存名
-    只含「文本+音色+后端+后处理版本」会命中同一批文件，**不额外花钱**。
+    上段落）；合成结果落 `narration_timing.json`。纸品引擎直接绑定已冻结的最终文件，
+    不再调用合成／后处理；其他品类沿用增量缓存，**不额外花钱**。
 
     单句合成失败不阻断：该句显式降级为 ``timing_certainty="estimated"``，
     并随段落一路带进成片报告，绝不在正常路径上冒充真值。
@@ -468,6 +471,9 @@ def _pre_synthesize_narration(manifest: dict, report_dir: Path, preset) -> dict:
         if text and not declared_audio and declared_us <= 0:
             tts_items.append({"key": key, "text": text})
 
+    from ..audio import narration_preparation
+    paper = rulepack.for_manifest(manifest).get("category") == "zhipin"
+    final_options = {"final_narration": manifest.get("narration_loudness") or {}} if paper else {}
     paths: dict[str, str] = {}
     tts_error = ""
     if tts_items:
@@ -475,20 +481,50 @@ def _pre_synthesize_narration(manifest: dict, report_dir: Path, preset) -> dict:
             _, paths = voice_tts.generate_batch(
                 tts_items, report_dir / "tts", voice_spec=preset, concurrency=4,
                 tempo=manifest.get("voice_tempo"),
-                edge_trim=bool(manifest.get("voice_edge_trim", True)))
-        except Exception as exc:  # noqa: BLE001 —— 合成失败只降级，不能拦住选镜
+                edge_trim=bool(manifest.get("voice_edge_trim", True)), **final_options)
+        except Exception as exc:  # noqa: BLE001
+            if paper:
+                if isinstance(exc, narration_preparation.NarrationError):
+                    raise
+                raise narration_preparation.NarrationError("NARRATION_PREPARATION_FAILED:" + str(exc),
+                    status="NARRATION_PREPARATION_FAILED") from exc
             tts_error = f"{type(exc).__name__}: {exc}"
     for row in rows:
         resolved = paths.get(row["key"])
         if resolved:
             row["tts_path"] = resolved
 
+    if paper:
+        retained = {str(Path(p).resolve()) for p in manifest.get("retained_tts_audio", [])}
+        fixed = dict(manifest.get("_paper_fixed_narrations") or {})
+        ffmpeg, ffprobe = find_ffmpeg()[:2]
+        for row in rows:
+            path = str(Path(row["tts_path"]).resolve()) if row.get("tts_path") else ""
+            if path in retained and (manifest.get("narration_loudness") or {}).get("enabled") is not False:
+                # Frozen TTS may receive the existing fixed-length gain treatment,
+                # but must never be shortened after a prior selection.
+                try:
+                    record = narration_preparation.frozen(path, loudness=manifest.get("narration_loudness"))
+                    record = record or narration_preparation.prepare(path, report_dir / "fixed-narration",
+                        loudness=manifest.get("narration_loudness"), edge_trim=False,
+                        ffmpeg=str(ffmpeg or "ffmpeg"), ffprobe=str(ffprobe or "ffprobe"))
+                except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+                    raise NarrationError("NARRATION_PREPARATION_FAILED:" + str(exc),
+                        status="NARRATION_PREPARATION_FAILED") from exc
+                fixed[path] = record
+                row["tts_path"] = record["path"]
+        if fixed:
+            manifest["_paper_fixed_narrations"] = fixed
     timing = timing_contract.narration_timing(rows, ffprobe=_audio_probe(), manifest=manifest)
     timing["tts_error"] = tts_error
     timing["tts_attempted"] = len(tts_items)
     timing["voice"] = str(manifest.get("voice", ""))
     (report_dir / "narration_timing.json").write_text(
         json.dumps(timing, ensure_ascii=False, indent=2), encoding="utf-8")
+    if paper:
+        narration_preparation.preflight(timing, report_dir, fps=float(manifest.get("fps") or 30),
+            max_frames=int((rulepack.for_manifest(manifest).get("voice") or {})["acceptance_max_gap_frames"]),
+            ffmpeg=str(find_ffmpeg()[0] or "ffmpeg"))
     return timing
 
 
@@ -1065,6 +1101,8 @@ def cmd_build(args) -> int:
                     usage_ledger.record(manifest, manifest.get("segments") or [], reserved=True)
                 except (OSError, TimeoutError, ValueError) as exc:
                     logger.event("usage_ledger_reserve_failed", error=str(exc))
+    except NarrationError as exc:
+        return _emit(_compact_build_result(finalize(exc.result())), 1)
     except Exception as exc:  # noqa: BLE001
         logger.event("prebuild_exception", error_type=type(exc).__name__, error=str(exc))
         result = finalize({
@@ -1085,6 +1123,8 @@ def cmd_build(args) -> int:
                 contextlib.redirect_stdout(runtime_out), \
                 contextlib.redirect_stderr(runtime_out):
             result = eng.run()
+    except NarrationError as exc:
+        result = exc.result()
     except Exception as exc:  # noqa: BLE001
         logger.event("task_exception", error_type=type(exc).__name__, error=str(exc))
         result = {"status": "ERROR", "error": str(exc), "error_type": type(exc).__name__}
@@ -1455,6 +1495,8 @@ def cmd_recover(args) -> int:
     try:
         with contextlib.redirect_stdout(sys.stderr):
             result = eng.run()
+    except NarrationError as exc:
+        result = exc.result()
     except Exception as exc:  # noqa: BLE001
         result = {"status": "ERROR", "error": str(exc), "error_type": type(exc).__name__}
     result["matched_manifest_sha256"] = matched_manifest_sha256

@@ -1308,6 +1308,26 @@ class OrchestrationEngine:
 
     # ---------- 需求5+2：TTS 并发 ----------
     def synthesize(self, clips: list[Clip], global_voice):
+        from .. import rulepack
+        if rulepack.for_manifest(self.m).get("category") == "zhipin" and self.m.get("narration_timing_file"):
+            from . import recovery_audio
+            from ..audio.narration_preparation import NarrationError
+            try:
+                bound = recovery_audio.bind(self.m)
+                for clip in clips:
+                    if clip.audio_mode != "tts" or not clip.text:
+                        continue
+                    index = _parent_id(clip)
+                    index = index if index >= 0 else clip.raw_index
+                    segment = bound["segments"][index]
+                    if index < 0 or segment.get("text") != clip.text:
+                        raise ValueError("FROZEN_NARRATION_SENTENCE_CHANGED")
+                    clip.audio, clip.audio_mode, clip.tts_path = segment["audio"], "file", None
+                self.m = bound
+                self._event("tts_reused_frozen", clips=len(clips))
+                return None
+            except (OSError, ValueError, TypeError, KeyError, IndexError) as exc:
+                raise NarrationError("FROZEN_NARRATION_BINDING_REQUIRED:" + str(exc)) from exc
         groups: dict[str, dict] = {}
         seen_parents: set[int] = set()
         # A voice supplied by the Feishu task is an operator decision.  Keep
@@ -1341,12 +1361,21 @@ class OrchestrationEngine:
         tts_dir = self.report_dir / "tts"
         presets = []
         for group in groups.values():
-            preset, paths = voice_tts.generate_batch(
-                group["items"], tts_dir, voice_spec=group["voice"],
-                concurrency=min(int(self.m.get("tts_concurrency", self.profile.tts_concurrency)),
-                               self.profile.tts_concurrency),
-                tempo=self.m.get("voice_tempo"),
-                edge_trim=bool(self.m.get("voice_edge_trim", True)))
+            try:
+                preset, paths = voice_tts.generate_batch(
+                    group["items"], tts_dir, voice_spec=group["voice"],
+                    concurrency=min(int(self.m.get("tts_concurrency", self.profile.tts_concurrency)),
+                                   self.profile.tts_concurrency),
+                    tempo=self.m.get("voice_tempo"),
+                    edge_trim=bool(self.m.get("voice_edge_trim", True)),
+                    **({"final_narration": self.m.get("narration_loudness") or {}}
+                       if rulepack.for_manifest(self.m).get("category") == "zhipin" else {}))
+            except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+                if rulepack.for_manifest(self.m).get("category") != "zhipin":
+                    raise
+                from ..audio.narration_preparation import NarrationError
+                raise NarrationError("NARRATION_PREPARATION_FAILED:" + str(exc),
+                    status="NARRATION_PREPARATION_FAILED") from exc
             presets.append(preset)
             for key, c in group["clips"].items():
                 # 同一条旁白回写给**它的每个子段**：多镜段的对齐、切片、字幕都
@@ -2214,6 +2243,12 @@ class OrchestrationEngine:
         与具体某条视频无关，故按用户定案做成**通用规则**。处理新合成 TTS 和
         恢复时绑定的原 TTS；操作方明确指定的其他文件配音沿用原规则，不改变电平。
         """
+        if hasattr(self, "_paper_audio_overrides"):
+            from ..runtime.file_safety import content_identity
+            for path, identity in self._paper_audio_signatures.items():
+                if content_identity(path) != identity:
+                    raise ValueError("NARRATION_CHANGED_AFTER_GAP_GATE")
+            return self._paper_audio_overrides
         spec = self.m.get("narration_loudness")
         spec = spec if isinstance(spec, dict) else {}
         if spec.get("enabled") is False:
@@ -2227,6 +2262,10 @@ class OrchestrationEngine:
 
         retained_tts = {str(Path(p).resolve()) for p in self.m.get("retained_tts_audio", [])}
         wanted: dict[str, str] = {}
+        prepared_overrides: dict[str, str] = {}
+        from .. import rulepack
+        from ..audio import narration_preparation
+        paper = rulepack.for_manifest(self.m).get("category") == "zhipin"
         for c in clips:
             raw = c.tts_path if c.audio_mode == "tts" else c.audio if c.audio_mode == "file" else None
             if not raw or (c.audio_mode == "file" and str(Path(raw).resolve()) not in retained_tts):
@@ -2234,6 +2273,26 @@ class OrchestrationEngine:
             src = Path(raw)
             key = str(src)
             if key in wanted:
+                continue
+            fixed_record = None
+            if paper:
+                fixed = self.m.get("_paper_fixed_narrations") or {}
+                fixed_record = fixed.get(str(src.resolve())) or next((r for r in fixed.values()
+                    if str(Path(r["path"]).resolve()) == str(src.resolve())), None)
+            if fixed_record:
+                from ..runtime.file_safety import content_identity
+                if (str(src.resolve()) == fixed_record["source"]["path"]
+                        and content_identity(src)["sha256"] != fixed_record["source"]["sha256"]):
+                    raise narration_preparation.NarrationError("FROZEN_NARRATION_SOURCE_CHANGED")
+                checked = narration_preparation.prepared(fixed_record["path"], narration_preparation.settings(
+                    self.m.get("narration_loudness"), edge_trim=fixed_record["settings"]["edge_trim"]))
+                if checked is None or checked["output"]["sha256"] != fixed_record["output"]["sha256"]:
+                    raise narration_preparation.NarrationError("FROZEN_NARRATION_ASSET_CHANGED")
+                prepared_overrides[key] = checked["path"]
+                continue
+            if paper and narration_preparation.prepared(src, narration_preparation.settings(
+                    self.m.get("narration_loudness"), edge_trim=bool(self.m.get("voice_edge_trim", True)))):
+                prepared_overrides[key] = key
                 continue
             wanted[key] = str(audio_loudness.normalized_path(src, out_dir, target_lufs=target + gain_db))
 
@@ -2244,7 +2303,7 @@ class OrchestrationEngine:
                         count=len(file_mode),
                         message="file 模式配音由操作方指定，未做响度归一。")
         if not wanted:
-            return {}
+            return prepared_overrides
 
         def _one(item: tuple[str, str]) -> tuple[str, str, dict]:
             src_key, dst = item
@@ -2273,7 +2332,7 @@ class OrchestrationEngine:
                                  min(d["out_lufs"] for d in done), 2) if done else None),
             elapsed_s=round(time.perf_counter() - started, 3),
             details=details)
-        return overrides
+        return {**overrides, **prepared_overrides}
 
     def _stage(self, source: Path, media_dir: Path) -> str:
         """Copy once into self-contained draft media, never link mutable inputs."""
@@ -2820,29 +2879,39 @@ class OrchestrationEngine:
     # ---------- 主流水线 ----------
     def _narration_gap_gate(self, clips: list[Clip]) -> Optional[dict]:
         from .. import rulepack
-        from ..policy.production_parameters import silence_edges, gap_errors
+        from ..policy.production_parameters import silence_edges, gap_errors, sentence_edges
+        from ..audio.narration_preparation import NarrationError
         rules = rulepack.for_manifest(self.m)
         maximum = (rules.get("voice") or {}).get("acceptance_max_gap_frames")
         if rules.get("category") != "zhipin" or maximum is None:
             return None
         rows = []
         try:
-            for c in clips:
+            for position, c in enumerate(clips):
                 narration = c.tts_path if c.audio_mode == "tts" else (c.audio if c.audio_mode == "file" else None)
                 if not narration:
-                    continue
+                    raise ValueError("NARRATION_GAP_AUDIO_MISSING")
                 edges = silence_edges(narration, start_s=self._audio_slice_us(c) / US,
                     duration_s=c.duration, ffmpeg=str(self.ffmpeg))
-                rows.append({**edges, "sentence": c.raw_index, "start_s": c.start_us / US,
+                parent = _parent_id(c)
+                sentence = parent if parent >= 0 else (c.raw_index if c.raw_index >= 0 else position)
+                rows.append({**edges, "path": narration, "sentence": sentence, "start_s": c.start_us / US,
                     "end_s": c.start_us / US + c.duration})
+            if not rows:
+                raise ValueError("NARRATION_GAP_AUDIO_MISSING")
+            if any(row["all_silent"] for row in sentence_edges(rows)):
+                raise NarrationError("NARRATION_ALL_SILENT")
             issues = gap_errors(rows, fps=self._fps(), max_frames=int(maximum))
-        except (ValueError, OSError, subprocess.TimeoutExpired) as exc:
-            issues = [{"code": "NARRATION_GAP_UNVERIFIED", "reason": str(exc)}]
+            failure_status = "NARRATION_GAP_EXCEEDED"
+        except (ValueError, OSError, subprocess.SubprocessError) as exc:
+            failure_status = exc.status if isinstance(exc, NarrationError) else "NARRATION_GAP_UNVERIFIED"
+            issues = [{"code": failure_status, "reason": str(exc)}]
         report = {"status": "PASS" if not issues else "UNCERTIFIED", "rows": rows,
-            "max_gap_frames": maximum, "issues": issues}
+            "sentence_rows": sentence_edges(rows),
+            "max_gap_frames": maximum, "measurement_version": "contiguous-eof-v2", "issues": issues}
         (self.report_dir / "narration_gap_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
         if issues:
-            return {"status": "NARRATION_GAP_UNVERIFIED", "narration_gap": report}
+            return {"status": failure_status, "narration_gap": report, "formal_delivery_allowed": False}
         return None
 
     def run(self) -> dict:
@@ -2966,6 +3035,20 @@ class OrchestrationEngine:
         pressure = self._background_pressure("after_tts")
         if pressure:
             return pressure
+        from .. import rulepack
+        if rulepack.for_manifest(self.m).get("category") == "zhipin":
+            # Final gain precedes gate/timing; frozen audio is never shortened here.
+            overrides = self._normalize_narrations(clips)
+            self._paper_audio_overrides = overrides
+            for clip in clips:
+                if clip.tts_path in overrides:
+                    clip.tts_path = overrides[clip.tts_path]
+                if clip.audio in overrides:
+                    clip.audio = overrides[clip.audio]
+            from ..runtime.file_safety import content_identity
+            self._paper_audio_signatures = {path: content_identity(path) for clip in clips
+                for path in [clip.tts_path if clip.audio_mode == "tts" else clip.audio]
+                if path}
         self._timed("audio_video_alignment", self.align_audio_video, clips)              # 需求6/补3
         sync_err = self.validate_audio_video_sync(clips)
         if sync_err:
