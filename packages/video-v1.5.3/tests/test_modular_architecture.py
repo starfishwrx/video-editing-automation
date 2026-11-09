@@ -19,6 +19,23 @@ sys.path.insert(0, str(SKILL))
 
 
 class ArchitectureTests(unittest.TestCase):
+    def boundary_fixture(self, directory):
+        """Small valid graph for fault injection; current_boundaries scans the real tree."""
+        root = Path(directory) / "orchestrator"
+        layout = {"features": {"application": ["engine", "cli"], "selection": ["ai_editor"],
+                               "media": ["frames"]}, "anchored": ["ai_editor_contract"]}
+        root.mkdir()
+        (root / "module_map.json").write_text(json.dumps(layout), encoding="utf-8")
+        for feature, names in layout["features"].items():
+            (root / feature).mkdir()
+            for name in names:
+                (root / feature / (name + ".py")).write_text("", encoding="utf-8")
+                (root / (name + ".py")).write_text(
+                    architecture._wrapper(name, feature + "." + name), encoding="utf-8")
+        (root / "ai_editor_contract.py").write_text("", encoding="utf-8")
+        self.assertEqual(architecture.check(root), [])
+        return root
+
     def test_release_inventory_keeps_media_source_and_excludes_private_media(self):
         spec = importlib.util.spec_from_file_location("_modular_inventory", SKILL.parent / "build_manifest.py")
         inventory = importlib.util.module_from_spec(spec)
@@ -41,8 +58,7 @@ class ArchitectureTests(unittest.TestCase):
 
     def test_forbidden_edges_and_legacy_imports_are_detected(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory) / "orchestrator"
-            shutil.copytree(architecture.ROOT, root, ignore=shutil.ignore_patterns("__pycache__"))
+            root = self.boundary_fixture(directory)
             (root / "media" / "forbidden.py").write_text(
                 "from ..application import engine\nfrom ..selection import ai_editor\n"
                 "def lazy():\n    from orchestrator import cli\n", encoding="utf-8")
@@ -52,8 +68,7 @@ class ArchitectureTests(unittest.TestCase):
 
     def test_business_logic_cannot_return_to_legacy_entrypoints(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory) / "orchestrator"
-            shutil.copytree(architecture.ROOT, root, ignore=shutil.ignore_patterns("__pycache__"))
+            root = self.boundary_fixture(directory)
             with (root / "engine.py").open("a", encoding="utf-8") as stream:
                 stream.write("\ndef business_logic():\n    return True\n")
             (root / "new_business.py").write_text("value = 1\n", encoding="utf-8")
@@ -63,8 +78,7 @@ class ArchitectureTests(unittest.TestCase):
 
     def test_anchored_public_contracts_cannot_load_application_or_delivery(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory) / "orchestrator"
-            shutil.copytree(architecture.ROOT, root, ignore=shutil.ignore_patterns("__pycache__"))
+            root = self.boundary_fixture(directory)
             contract = root / "ai_editor_contract.py"
             with contract.open("a", encoding="utf-8") as stream:
                 stream.write("\ndef forbidden():\n    from .application import engine\n    from tools import draft_delivery\n")

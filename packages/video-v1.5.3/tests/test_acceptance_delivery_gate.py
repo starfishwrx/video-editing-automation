@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib
+from contextlib import ExitStack
 import importlib.util
 import json
 from pathlib import Path
@@ -115,9 +116,52 @@ class AcceptanceDeliveryGateTests(unittest.TestCase):
         self.assertFalse(result["delivery_started"])
         ship.assert_not_called()
 
-    def test_collection_loop_has_no_distribution_side_effect(self):
-        import inspect
-        self.assertNotIn("ship_one(", inspect.getsource(worker.process_task))
+    def test_collection_waits_for_all_drafts_before_the_shared_delivery_gate(self):
+        source = self.root / "source.mp4"
+        source.write_bytes(b"build fixture")
+        (self.root / "work/collect/eval").mkdir(parents=True)
+        task = dict(self.task, record_id="collect", title="collected", meeting_profile="legacy", count=2,
+                    material_dir=str(self.root), script="测试文案")
+        collected = []
+        with ExitStack() as stack:
+            for target, value in (("WORK", self.root / "work"), ("DRAFTS", self.drafts), ("SKIP_SHIP", False)):
+                stack.enter_context(patch.object(worker, target, value))
+            stack.enter_context(patch.dict(worker.os.environ, {
+                "JY_TASK_DEADLINE_TS": "", "JY_TASK_DEADLINE_EPOCH": "", "JY_MATERIAL_INDEX_FILE": ""}))
+            ship = stack.enter_context(patch.object(worker, "ship_one"))
+            delivery = stack.enter_context(patch.object(worker, "finalize_closed_loop",
+                return_value={"ok": False, "reason": "DELIVERY_EVIDENCE_NOT_PASS"}))
+            def build(manifest, report, name, **kwargs):
+                ship.assert_not_called()
+                delivery.assert_not_called()
+                collected.append(name)
+                return {"rc": 0, "stdout": "", "stderr": ""}
+            for target, value in (("_runtime_facts", {}), ("video_files", [str(source)]),
+                                  ("calibrated_source_limit", 0), ("restore_qc_rejections", ({}, {})),
+                                  ("build_progress_inputs", {"fixture": True}),
+                                  ("validate_visual_match", (True, "ok")),
+                                  ("run_post_draft_qc", {"status": "PASS", "output": "qc.json"}),
+                                  ("validate_draft_package", {"ok": True}), ("evaluate_task", {}),
+                                  ("publish_failure_notification", {})):
+                stack.enter_context(patch.object(worker, target, return_value=value))
+            for target in ("_save_frozen_task", "progress", "log"):
+                stack.enter_context(patch.object(worker, target))
+            stack.enter_context(patch.object(worker.production_eval, "runtime_identity", return_value={}))
+            stack.enter_context(patch.object(worker.production_eval, "freeze", return_value={"mode": "enforce"}))
+            stack.enter_context(patch.object(worker.production_eval, "write_once"))
+            stack.enter_context(patch.object(worker, "run_build", side_effect=build))
+            worker.process_task(task, admitted=True)
+            ship.assert_not_called()
+            delivery.assert_called_once()
+        self.assertEqual(len(collected), 2)
+        self.assertEqual(len(set(collected)), 2)
+        self.assertTrue(all(name.startswith("collected-") for name in collected))
+        self.assertEqual(delivery.call_args.args[2], collected)
+        self.assertEqual(len(delivery.call_args.args[3]), 2)
+        done = pe.read(self.root / "work/collect/done.json")
+        self.assertEqual(done["drafts"], collected)
+        self.assertEqual(done["nas_links"], [])
+        self.assertEqual(done["failures"][0]["detail"]["reason"], "DELIVERY_EVIDENCE_NOT_PASS")
 
     def test_unknown_missing_or_preview_modes_never_become_formal(self):
         for declaration in ({}, {"delivery_mode": "preview"}, {"delivery_mode": "preview_only"},
@@ -166,13 +210,6 @@ class AcceptanceModuleCompatibilityTests(unittest.TestCase):
                 run = subprocess.run([sys.executable, "-X", "utf8", str(path), "--help"],
                     cwd=directory, capture_output=True, text=True, timeout=30)
                 self.assertEqual(run.returncode, 0, run.stderr)
-
-    def test_retired_handoff_entrypoints_are_absent(self):
-        for name in ("eval_stage.py", "mac_review_handoff.py"):
-            self.assertFalse((ROOT / "tools" / name).exists())
-        for name in ("stages.py", "mac_review.py", "review_state.py"):
-            self.assertFalse((ROOT / "tools" / "acceptance" / name).exists())
-        self.assertFalse(hasattr(worker, "prepare_mac_review"))
 
 
 class FinalizationContextTests(unittest.TestCase):

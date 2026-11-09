@@ -5,6 +5,8 @@ import argparse
 import sys
 import tempfile
 import unittest
+
+from offline_host import offline_host
 from pathlib import Path
 from unittest import mock
 
@@ -491,6 +493,7 @@ class RecoveryStageTests(unittest.TestCase):
                             input=str(source), report_dir=str(report), stage="draft_write")), 1)
                     engine.assert_not_called()
 
+    @offline_host
     def test_failed_semantic_attempt_invalidates_an_older_success(self):
         with tempfile.TemporaryDirectory() as raw, contextlib.redirect_stdout(io.StringIO()):
             root = Path(raw)
@@ -530,6 +533,7 @@ class RecoveryStageTests(unittest.TestCase):
             saved = json.loads((root / "report/last_result.json").read_text(encoding="utf-8"))
             self.assertEqual(saved["reason"], "HEADLESS_ROOT_REQUIRED")
 
+    @offline_host
     def test_match_shots_early_failure_or_exception_invalidates_its_old_result(self):
         from orchestrator.selection import ai_editor
         with tempfile.TemporaryDirectory() as raw, contextlib.redirect_stdout(io.StringIO()):

@@ -1,5 +1,6 @@
 """Bounded media work preserves requested evidence, including real VFR input."""
 import os
+import json
 from pathlib import Path
 import subprocess
 import sys
@@ -75,6 +76,8 @@ class BoundedBatchTests(unittest.TestCase):
             video = self.root / f'clip_{vfr}_{offset}.mp4'
             cmd = ['ffmpeg', '-y', '-hide_banner', '-loglevel', 'error', '-f', 'lavfi',
                    '-i', 'testsrc2=s=96x64:r=25:d=12']
+            if not vfr:
+                cmd += ['-f', 'lavfi', '-i', 'sine=f=440:d=12', '-c:a', 'aac', '-shortest']
             if vfr:
                 cmd += ['-vf', "select='not(mod(n,3))'", '-fps_mode', 'vfr']
             cmd += ['-c:v', 'libx264', '-g', '100', '-pix_fmt', 'yuv420p',
@@ -83,12 +86,17 @@ class BoundedBatchTests(unittest.TestCase):
                 subprocess.run(cmd, check=True, capture_output=True)
             except (OSError, subprocess.SubprocessError) as exc:
                 self.skipTest(f'synthetic ffmpeg unavailable: {exc}')
+            if not vfr:
+                probe = subprocess.run(['ffprobe', '-v', 'error', '-show_streams', '-of', 'json', str(video)],
+                                       check=True, capture_output=True, text=True)
+                self.assertIn('audio', [s['codec_type'] for s in json.loads(probe.stdout)['streams']])
             for label, times in [('zero', [0, .01, .01, .2]), ('late', [9.21, 9.23, 9.6])]:
                 requests = [(t, self.root / f'{vfr}_{label}_{n}.jpg') for n,t in enumerate(times)]
                 real = shot_analyzer.run_ffmpeg_decode
                 with mock.patch.object(shot_analyzer, 'run_ffmpeg_decode', wraps=real) as decode:
                     self.assertTrue(all(shot_analyzer.extract_frames_batch(video, requests)))
                     self.assertEqual(decode.call_count, 1)
+                    self.assertTrue(any("select=" in str(arg) for arg in decode.call_args.args[0]))
                 from PIL import Image, ImageChops, ImageStat
                 for n, (t, output) in enumerate(requests):
                     single = self.root / f'single_{n}.jpg'

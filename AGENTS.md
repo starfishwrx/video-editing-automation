@@ -46,9 +46,10 @@
 
 ## 2. 改完必须做（按范围验证）
 
+- 顺序固定为定向检查 → 独立审阅/修正 → 最终一次本地全量（范围需要时）；新增文件先加入 Git 索引，媒体与 UTF-8 环境先准备好。不要因每次 commit/push/安装重复全量。
 - 单模块小改动默认只跑对应模块及直接调用方，映射见 `docs/test.md`；不要每次修改都运行两套全量。
 - 例如 BGM：活包根执行 `uv run --frozen python -X utf8 -m unittest discover -s doubao-jianying-orchestrator/tests -p "test_*bgm.py" -q` 和 `-p test_default_headless.py`（同一 discover 目录），当前35项；再执行 `uv run --frozen python -X utf8 -m tools.check_architecture`。
-- 跨模块、共享合同或正式质量／交付门禁变更才本地全量；范围不确定也用全量。PR 的 CI 保持两套 discover。
+- 跨模块、共享合同或正式质量／交付门禁变更才本地全量；范围不确定也用全量。PR/main/手动 CI 保持两套 discover 并行，稳定聚合检查失败关闭，见 ADR 0011。
 - 发版 PR 用 `tools.release_package build --output <包外新目录> --checks full`，在最终解压目录跑一次全量即可。最终代码未变时，不再分别在开发树、解压目录和安装面重跑全套；安装只验证入口、依赖和必要案例。
 - 改了闸门/状态：必须保留「该拦住的输入确实被拦住」的行为覆盖。低价值源码字符串、文档数字及重复存在性检查可以精简；音频、动作证据、formal和NAS恢复保护不能删。
 - 测试通过 ≠ 生产通过。不要将离线结果说成真实成片验收。

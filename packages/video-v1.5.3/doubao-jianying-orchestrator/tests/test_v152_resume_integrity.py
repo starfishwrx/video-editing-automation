@@ -6,6 +6,8 @@ import os
 import sys
 import tempfile
 import unittest
+
+from offline_host import offline_host
 from pathlib import Path
 from unittest import mock
 
@@ -309,6 +311,7 @@ class CliReuseTest(unittest.TestCase):
             enrich.assert_called_once()
             self.assertEqual(result, {"ok": False})
 
+    @offline_host
     def test_vision_disabled_returns_file_as_is(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)

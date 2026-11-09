@@ -14,8 +14,16 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  offline-windows:
-    name: Windows Python 3.11
+  suites:
+    name: ${{ matrix.label }} / Windows Python 3.11
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Package
+            directory: tests
+          - label: Orchestrator
+            directory: doubao-jianying-orchestrator/tests
     runs-on: windows-latest
     timeout-minutes: 20
     defaults:
@@ -29,6 +37,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+          ref: ${{ github.sha }}
       - name: Set up uv and Python
         uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
         with:
@@ -39,10 +48,13 @@ jobs:
       - name: Sync locked dependencies
         run: uv sync --frozen
       - name: Check CLI entrypoint
+        if: matrix.label == 'Package'
         run: uv run --frozen python -X utf8 doubao-jianying-orchestrator/run.py --help
       - name: Check feature boundaries
+        if: matrix.label == 'Package'
         run: uv run --frozen python -X utf8 -m tools.check_architecture
       - name: Check example JSON
+        if: matrix.label == 'Package'
         run: uv run --frozen python -X utf8 -m json.tool examples/manifest.preview.json
       - name: Prepare portable FFmpeg for media fixtures
         run: |
@@ -54,7 +66,21 @@ jobs:
           (Split-Path -Parent $setup.ffmpeg) | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           "FFMPEG_BIN=$($setup.ffmpeg)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "FFPROBE_BIN=$($setup.ffprobe)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-      - name: Package tests
-        run: uv run --frozen python -X utf8 -m unittest discover -s tests -q
-      - name: Orchestrator tests
-        run: uv run --frozen python -X utf8 -m unittest discover -s doubao-jianying-orchestrator/tests -q
+      - name: Run full suite
+        run: uv run --frozen python -X utf8 -m unittest discover -s ${{ matrix.directory }} -q
+
+  offline-windows:
+    name: Windows Python 3.11
+    if: ${{ always() }}
+    needs: [suites]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Require both complete suites
+        env:
+          SUITES_RESULT: ${{ needs.suites.result }}
+        run: |
+          if [ "$SUITES_RESULT" != "success" ]; then
+            echo "Full Windows suites did not both pass: $SUITES_RESULT"
+            exit 1
+          fi

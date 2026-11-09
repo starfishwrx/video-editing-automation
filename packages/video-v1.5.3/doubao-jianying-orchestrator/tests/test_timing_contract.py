@@ -13,6 +13,8 @@
 """
 import sys
 import unittest
+
+from offline_host import offline_host
 from pathlib import Path
 from unittest import mock
 
@@ -766,6 +768,7 @@ class EngineInvariantItemTests(unittest.TestCase):
         self.assertEqual(c.window_solution["speed"], 1.0)
         self.assertEqual(c.solved_window["speed"], 0.95)
 
+    @offline_host
     def test_invariant_items_prefer_recorded_solver_answer(self):
         """源出点取求解器原解，而不是用吸附后的速度反推（反推等于自证）。"""
         from orchestrator.engine import Clip
@@ -777,6 +780,7 @@ class EngineInvariantItemTests(unittest.TestCase):
         item = eng._invariant_items([c], [])[0]
         self.assertEqual(item["source_end_us"], 9_000_000)      # 不是 0 + 4.12×0.95
 
+    @offline_host
     def test_missing_recorded_answer_falls_back_to_arithmetic(self):
         from orchestrator.engine import Clip
         eng = self._engine()
@@ -787,6 +791,7 @@ class EngineInvariantItemTests(unittest.TestCase):
         item = eng._invariant_items([c], [])[0]
         self.assertEqual(item["source_end_us"], 5_120_000)
 
+    @offline_host
     def test_audio_baseline_is_runtime_probe_not_requested_duration(self):
         """段长比对必须拿 ffprobe 真值；拿 c.duration 自己比自己恒成立。"""
         from orchestrator.engine import Clip
@@ -799,6 +804,7 @@ class EngineInvariantItemTests(unittest.TestCase):
         codes = [i["code"] for i in tc.check_invariants(items)]
         self.assertIn(tc.INV_DURATION_MISMATCH, codes)   # 写入前闸门确实会拦
 
+    @offline_host
     def test_clean_clip_passes_the_gate(self):
         """干净段落必须过闸 —— 防线假阳性会把所有草稿拦死。"""
         from orchestrator.engine import Clip
@@ -809,6 +815,7 @@ class EngineInvariantItemTests(unittest.TestCase):
         items = eng._invariant_items([c], [])
         self.assertEqual(tc.check_invariants(items, fps=eng._fps()), [])
 
+    @offline_host
     def test_clamped_boundary_speed_passes_the_gate(self):
         """端点上取到的最慢速度不得被自己的防线误判 SPEED_OUT_OF_RANGE。"""
         from orchestrator.engine import Clip
@@ -822,6 +829,7 @@ class EngineInvariantItemTests(unittest.TestCase):
         items = eng._invariant_items([c], [])
         self.assertEqual(tc.check_invariants(items, fps=eng._fps()), [])
 
+    @offline_host
     def test_draft_reread_duration_reaches_the_gate(self):
         """回读段长（最终渲染真正用的那个数）必须进闸门，否则 min() 截断发现不了。"""
         from orchestrator.engine import Clip
@@ -853,6 +861,7 @@ class NarrationSliceOffsetTests(unittest.TestCase):
         root = Path(tempfile.mkdtemp(prefix="tc_narr_"))
         return OrchestrationEngine({}, root, root / "report", capacity_guard=False)
 
+    @offline_host
     def test_single_shot_offset_is_zero_even_at_large_cursor(self):
         """单镜段落在第 7s 之后（游标 7,468,375），偏移仍必须是 0。"""
         from orchestrator.engine import Clip
@@ -863,6 +872,7 @@ class NarrationSliceOffsetTests(unittest.TestCase):
         c.multi_shot = False              # 单镜段
         self.assertEqual(eng._audio_slice_us(c), 0)
 
+    @offline_host
     def test_span_subclip_gets_sibling_delta(self):
         """多镜子段仍按基准相减：第二子段偏移 = 游标 − 父段起点。"""
         from orchestrator.engine import Clip
@@ -874,6 +884,7 @@ class NarrationSliceOffsetTests(unittest.TestCase):
         c.audio_clip_start_us = 5_000_000 # 父段旁白起点（_mark_audio_origin 记的）
         self.assertEqual(eng._audio_slice_us(c), 3_000_000)
 
+    @offline_host
     def test_first_span_subclip_offset_is_zero(self):
         """多镜首子段：基准 == 自身游标，偏移 0（从整句头播）。"""
         from orchestrator.engine import Clip
@@ -885,6 +896,7 @@ class NarrationSliceOffsetTests(unittest.TestCase):
         c.audio_clip_start_us = 2_500_000
         self.assertEqual(eng._audio_slice_us(c), 0)
 
+    @offline_host
     def test_unmarked_single_shot_default_stays_zero(self):
         """默认 Clip（audio_clip_start_us 未写、multi_shot 未置）也要 0 ——
         不能靠「恰好 start_us==0」侥幸。"""
@@ -1114,6 +1126,7 @@ class PreviewDeliveryTests(unittest.TestCase):
         self.assertEqual(resolve({}), "formal")
 
     # ---- 要不要打画面标注：只认「闸门未认证」 ----
+    @offline_host
     def test_uncertified_coverage_three_branches(self):
         self.assertIsNone(self._engine({})._uncertified_coverage())
         self.assertIsNone(self._engine({})._uncertified_coverage())
@@ -1135,6 +1148,7 @@ class PreviewDeliveryTests(unittest.TestCase):
         )._uncertified_coverage())
 
     # ---- 上报口径 ----
+    @offline_host
     def test_coverage_report_formal_delivery_allowed(self):
         self.assertIsNone(self._engine({})._coverage_report())
         self.assertIsNone(self._engine(
@@ -1157,6 +1171,7 @@ class PreviewDeliveryTests(unittest.TestCase):
         rep = self._engine({"delivery_mode": "preview"})._coverage_report()
         self.assertEqual(rep["formal_delivery_allowed"], False)
 
+    @offline_host
     def test_formal_uncertified_gate_still_reports_allowed(self):
         """已知语义落差，锁住它以免被误当成 bug 修掉或误当成合规放过。
 
@@ -1207,6 +1222,7 @@ class PreviewDeliveryTests(unittest.TestCase):
             ["草稿名称", "草稿路径", "草稿文件", "生成日志", "运行信息", "交付模式"]))
 
     # ---- 预览放宽只记理由，不改交付语义 ----
+    @offline_host
     def test_preview_tolerated_only_records_reason(self):
         eng = self._engine({"claim_gate_coverage": self.CERTIFIED,
                             "delivery_mode": "preview"})

@@ -6,7 +6,7 @@
     "machine-specific paths",
     "knowledge-base bodies"
   ],
-  "file_count": 460,
+  "file_count": 461,
   "files": [
     {
       "path": ".gitignore"
@@ -643,6 +643,9 @@
     },
     {
       "path": "doubao-jianying-orchestrator/tests/fixtures/production_speed_failures.json"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/tests/offline_host.py"
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_ai_editor.py"

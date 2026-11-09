@@ -7,6 +7,8 @@ from concurrent.futures import ThreadPoolExecutor
 import sys
 import tempfile
 import unittest
+
+from offline_host import offline_host
 from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from orchestrator.engine import OrchestrationEngine, Clip
@@ -27,6 +29,7 @@ class SingleCopyTests(unittest.TestCase):
         clip = Clip(video=str(self.source), source_start=0, duration=1, audio_mode='mute')
         return self.engine._upload_videos_and_check_capacity([clip, clip])
 
+    @offline_host
     def test_one_copy_and_draft_survives_original_removal(self):
         with mock.patch('orchestrator.engine.shutil.copy2', wraps=shutil.copy2) as copy:
             self.assertIsNone(self.admit())
@@ -38,6 +41,7 @@ class SingleCopyTests(unittest.TestCase):
         self.source.unlink()
         self.assertEqual(staged.read_bytes(), b'original synthetic media')
 
+    @offline_host
     def test_changed_source_after_admission_is_blocked(self):
         self.admit()
         self.source.write_bytes(b'changed')
@@ -45,6 +49,7 @@ class SingleCopyTests(unittest.TestCase):
             self.engine._stage(self.source, self.media)
         self.assertFalse(list(self.media.glob('*.mov')))
 
+    @offline_host
     def test_source_changed_during_copy_never_publishes_or_certifies(self):
         original = shutil.copy2
         def mutate(src, dst):
@@ -56,6 +61,7 @@ class SingleCopyTests(unittest.TestCase):
                 self.engine._stage(self.source, self.media)
         self.assertEqual(list(self.media.iterdir()), [])
 
+    @offline_host
     def test_interrupted_copy_cleans_temporary_file(self):
         def interrupted(src, dst):
             Path(dst).write_bytes(b'partial')
@@ -65,6 +71,7 @@ class SingleCopyTests(unittest.TestCase):
                 self.engine._stage(self.source, self.media)
         self.assertEqual(list(self.media.iterdir()), [])
 
+    @offline_host
     def test_same_named_sources_remain_distinct_and_original_not_linked(self):
         other = self.root / 'other' / self.source.name
         other.parent.mkdir()
@@ -76,6 +83,7 @@ class SingleCopyTests(unittest.TestCase):
         self.assertEqual(self.source.read_bytes(), b'original synthetic media')
         self.assertEqual(two.read_bytes(), b'other source')
 
+    @offline_host
     def test_concurrent_same_names_cannot_alias(self):
         other = self.root / 'other' / self.source.name
         other.parent.mkdir()
@@ -93,6 +101,7 @@ class SingleCopyTests(unittest.TestCase):
         self.assertEqual(paths[0].read_bytes(), self.source.read_bytes())
         self.assertEqual(paths[1].read_bytes(), other.read_bytes())
 
+    @offline_host
     def test_same_size_modified_cached_copy_is_not_reused(self):
         one = Path(self.engine._stage(self.source, self.media))
         old = one.stat().st_mtime_ns
@@ -101,6 +110,7 @@ class SingleCopyTests(unittest.TestCase):
         recovered = Path(self.engine._stage(self.source, self.media))
         self.assertEqual(recovered.read_bytes(), self.source.read_bytes())
 
+    @offline_host
     def test_truncated_cached_copy_is_replaced(self):
         one = Path(self.engine._stage(self.source, self.media))
         one.write_bytes(b'bad')

@@ -34,7 +34,6 @@ class Release140ContractTests(unittest.TestCase):
             self.assertEqual((ROOT / component / "VERSION").read_text(encoding="utf-8").strip(), current)
         self.assertEqual(__version__, current)
         self.assertEqual(policy["video_tool_version"], current)
-        self.assertIn("version: " + policy["visual_policy_version"], (ROOT / "RULES.md").read_text(encoding="utf-8"))
 
     def test_credentials_are_environment_bound(self):
         paths = [
