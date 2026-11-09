@@ -1,6 +1,6 @@
 # 2026-11-06 卫品正式批复盘
 
-这批是卫品表上 17 条 formal。13 条在修口径之前已经发出。剩下 4 条（小马 403、qwt2、萌睡裤 10602、萌睡裤 10603）按下面的口径改完，独立质检为精确 `PASS` 后才分发并回写。代码还在工作区，没有提交，也没有开 PR。
+这批是卫品表上 17 条 formal。13 条在修口径之前已经发出。剩下 4 条（小马 403、qwt2、萌睡裤 10602、萌睡裤 10603）按下面的口径改完，独立质检为精确 `PASS` 后才分发并回写。行为改动和这份复盘在同一批提交里。默认写稿仍是无头，旧入口不并进默认。
 
 复盘不代替成片验收。单测通过只说明回归还在。
 
@@ -14,7 +14,7 @@
 | `docs/agent-loops.md` Loop C | 夜间巡检：`hits >= 3` 且还是 `OPEN` 的，起草升级 PR。每晚最多一个清理 PR，那个 PR 不做行为变更。 |
 | `packages/video-v1.5.3/doubao-jianying-orchestrator/references/production_quality_and_lessons.md` | 经验进包的最小交付：原要求、可见事实、旧失败、新预期、函数和规则、反例测试、真实样例、运行身份。状态要分开写：待修、源码测试通过、已部署、真实验收通过。 |
 
-`AGENTS.md` 第 4 节和 `LESSONS.md` 文首约定：`hits >= 3` 才开 PR，把口径写进 `AGENTS.md`、`docs/code-standards.md` 或测试，并把条目改成 `PROMOTED`。这次只写复盘，不升硬规则，也不开 PR。
+`AGENTS.md` 第 4 节和 `LESSONS.md` 文首约定：`hits >= 3` 才开 PR，把口径写进 `AGENTS.md`、`docs/code-standards.md` 或测试，并把条目改成 `PROMOTED`。这次提交行为改动和复盘，不把这些条目标成 `PROMOTED`。
 
 ## 建议进主干的
 

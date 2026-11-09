@@ -397,6 +397,7 @@ def _review(manifest: dict, sentence: dict, shot: dict, directory: Path, *, dens
 "evidence_intervals_us":[{"start":1000000,"end":2000000}], "time_sensitive":false, "scene_ids":[]}。
 scene_ids只列出本句语义适用且本镜实际支持的纸品semantic_contracts场景id；不支持或本句不涉及的场景不能列入，不适用时为空。
 共享展示池句子index=0时，判断是否为同商品包装/拆包/取出/手持或本体展示，不承担功能证明。
+sentence.action_continuation 为 true 时，这句没有卖点，只判断附图是不是上一镜动作还能再延续的一段。同商品且动作仍在继续就 matched，不要因为没有新卖点而拒绝。证据区间落在 scene_us 内，长度不要超过这句配音。
 卖点可以只支持其中几项，必须如实返回支持的id，不能凭口播推断。区间必须在提供的scene_us内，
 包含支持判断必需的完整动作和结果；感受性展示按实际贴切区间。看不清返回uncertain，不能凭模型强度标签推断。
 具体香型、成分、数量和数值须有画面可读的对应标称或可确认的直接证据；香薰、花朵等氛围只能表达一般香味体验，不能证明某种具体香型。检测仪外观或数字本身也不能证明仪器用途与检测结论。
@@ -817,6 +818,13 @@ def _assemble(manifest: dict, analysis: dict, plan: dict, *, narration_timing: d
         used_reviews = []
         for n, part in enumerate(parts):
             sid = part.get("shot_id")
+            window_key = part.get("window_review_key")
+            continuation = plan.get("window_reviews", {}).get(window_key) or {} if window_key else {}
+            if (sid not in good and continuation.get("action_continuation") is True
+                    and sentence.get("kind") in {"hook", "product_intro"} and not sentence.get("selling_points")
+                    and continuation.get("shot_id") == sid and continuation.get("verdict") == "matched"
+                    and sid in shots and sid not in rejected.get(index, set())):
+                good = {**good, sid: continuation}
             if sid not in good or sid not in shots or sid in rejected.get(index, set()):
                 raise ValueError(f"AI_EDITOR_UNREVIEWED_SELECTION:{index}")
             original_shot = shots[sid]
@@ -1147,11 +1155,17 @@ def _review_proposed_window(manifest, plan, directory, sentence, shot, window, *
                     and parent_ok):
                 return key
             return None
-    if sum(v.get("index") == index for v in attempts.values()) >= 3:
+    continuation = sentence.get("action_continuation") is True
+    prior = [v for v in attempts.values() if isinstance(v, dict) and v.get("index") == index]
+    # Failed crops of this sentence's own shot do not spend the one look at the previous action.
+    if continuation:
+        if sum(v.get("mode") == "continuation" for v in prior) >= 1:
+            return None
+    elif len(prior) >= 3:
         return None
     attempts[key] = {"index": index, "shot_id": shot["shot_id"],
                      "window_us": {"start": window[0], "end": window[1]}, "status": "reviewing",
-                     "mode": "placement" if parent else "semantic"}
+                     "mode": "continuation" if continuation else ("placement" if parent else "semantic")}
     if attempt_metadata:
         attempts[key].update(attempt_metadata)
     _save(directory / "plan.json", plan)
@@ -1227,6 +1241,146 @@ def _repair_selected_window(manifest: dict, analysis: dict, plan: dict, director
     part["window_review_key"] = key
     if adjusted_start:
         part["source_start_us"] = window[0]
+    _save(directory / "plan.json", plan)
+    return True
+
+
+def _fabric_comfort_sentence(sentence: dict) -> bool:
+    """面料手感句可以换一条不同的抚摸镜头；吸收、防漏、干爽不走这条裁切。"""
+    if sentence.get("kind") != "selling_point":
+        return False
+    text = str(sentence.get("text") or "")
+    for point in sentence.get("selling_points") or []:
+        if isinstance(point, dict):
+            text += str(point.get("text") or "")
+    if re.search(r"吸收|瞬吸|防漏|反渗|干爽|透气", text):
+        return False
+    return re.search(r"柔软|舒适|面层", text) is not None
+
+
+def _single_part_end(manifest, analysis, plan, narration_timing, index):
+    """Solve one already selected part. Returns the shot and where that cut ends."""
+    from . import shot_analyzer
+    sentence = next(s for s in plan["sentences"] if s["index"] == index)
+    row = next(r for r in plan["rows"] if r["index"] == index)
+    parts = row.get("parts") or []
+    if row.get("continuity_key") or len(parts) != 1 or not isinstance(parts[0], dict):
+        return None
+    part = parts[0]
+    sid = part.get("shot_id")
+    shot = next((s for s in analysis["shots"] if s["shot_id"] == sid), None)
+    if shot is None or type(part.get("audio_duration_us")) is not int:
+        return None
+    original_shot = shot
+    reviews = (plan.get("reviews", {}).get(str(index), []) if sentence.get("kind") == "selling_point"
+               else plan.get("display_reviews", []))
+    review = next((r for r in reviews if isinstance(r, dict) and r.get("shot_id") == sid
+                   and r.get("verdict") == "matched"), None)
+    window_key = part.get("window_review_key")
+    if window_key:
+        revised = plan.get("window_reviews", {}).get(window_key) or {}
+        if revised.get("verdict") != "matched" or revised.get("shot_id") != sid:
+            return None
+        review = revised
+        window = revised.get("review_window_us") or {}
+        if type(window.get("start")) is not int or type(window.get("end")) is not int:
+            return None
+        shot = {**shot, "source_start": window["start"] / 1e6, "source_end": window["end"] / 1e6}
+    if review is None:
+        return None
+    observed = _observed_shot(shot, review)
+    if "source_start_us" in part:
+        if type(part["source_start_us"]) is not int:
+            return None
+        observed["source_start"] = max(float(shot["source_start"]), part["source_start_us"] / 1e6)
+    cfg = {**manifest, "tail_pad_s": 0}
+    if "source_start_us" in part or window_key:
+        guard = max(0.0, shot_analyzer._number(manifest.get("head_trim_s"), shot_analyzer.DEFAULT_HEAD_TRIM_S))
+        offset = observed["source_start"] - float(original_shot["source_start"])
+        cfg["head_trim_s"] = max(0.0, guard - offset)
+        cfg["tail_trim_s"] = max(0.0, shot_analyzer._number(manifest.get("tail_trim_s"), shot_analyzer.DEFAULT_TAIL_TRIM_S)
+                                  - (float(original_shot["source_end"]) - float(shot["source_end"])))
+    solution = shot_analyzer.candidate_window(
+        observed, audio_duration_us=part["audio_duration_us"], manifest=cfg,
+        time_sensitive=bool(review.get("time_sensitive")))
+    if not solution.ok:
+        return None
+    return original_shot, solution.source_end_us
+
+
+def _grouped_cut_end(analysis, plan, index):
+    """Source end of the last sentence in a continuity group.
+
+    A grouped sentence has no single solved part. The tail after that group's
+    final cut can still carry a following line that has no selling point.
+    Footage already given to a later member of the same group is not free.
+    """
+    row = next((r for r in plan.get("rows") or [] if isinstance(r, dict) and r.get("index") == index), None)
+    key = (row or {}).get("continuity_key")
+    group = (plan.get("continuity_reviews") or {}).get(key) if key else None
+    if not isinstance(group, dict):
+        return None
+    context = group.get("input") or {}
+    members = context.get("members") or []
+    if not members or not isinstance(members[-1], dict) or members[-1].get("index") != index:
+        return None
+    end = members[-1].get("end_us")
+    sid = context.get("shot_id")
+    parts = row.get("parts") or []
+    shot = next((s for s in analysis.get("shots") or [] if s.get("shot_id") == sid), None)
+    if (shot is None or type(end) is not int or end < 0 or len(parts) != 1
+            or parts[0].get("shot_id") != sid):
+        return None
+    return shot, end
+
+
+def _extend_previous_action(manifest, analysis, plan, directory, failure, narration_timing) -> bool:
+    """A short line with no selling point may keep playing the previous action.
+
+    The extra picture has to already be in that shot, at the previous cut, and
+    long enough at original speed. A pixel review still has to accept the tail.
+    The previous sentence may be the last line of a continuity group; the cut
+    is that group's final source end, not a new slice inside the group.
+    """
+    if not isinstance(failure, WindowFailure):
+        return False
+    sentence = next((s for s in plan.get("sentences", []) if s.get("index") == failure.index), None)
+    if (sentence is None or sentence.get("kind") not in {"hook", "product_intro"}
+            or sentence.get("selling_points") or failure.index < 2):
+        return False
+    solved = _single_part_end(manifest, analysis, plan, narration_timing, failure.index - 1)
+    if solved is None:
+        solved = _grouped_cut_end(analysis, plan, failure.index - 1)
+    if solved is None:
+        return False
+    shot, prev_end = solved
+    from . import shot_analyzer
+    original = timing_contract.split_sentences(manifest)
+    audio, certainty = timing_contract.duration_for(
+        narration_timing, failure.index, segment=original[failure.index - 1])
+    if certainty == timing_contract.TIMING_CERTAINTY_ESTIMATED or audio <= 0:
+        return False
+    scene_end = round(float(shot["source_end"]) * 1e6)
+    limit = shot.get("material_duration_us")
+    if type(limit) is int and limit > 0:
+        scene_end = min(scene_end, limit)
+    hi = scene_end - timing_contract.us_of(
+        manifest.get("tail_trim_s"), round(shot_analyzer.DEFAULT_TAIL_TRIM_S * 1e6))
+    if hi - prev_end < audio:
+        return False
+    window = (prev_end, prev_end + audio)
+    key = _review_proposed_window(
+        manifest, plan, directory, {**sentence, "action_continuation": True}, shot, window)
+    if key is None:
+        return False
+    plan["window_reviews"][key]["action_continuation"] = True
+    row = next(r for r in plan["rows"] if r["index"] == failure.index)
+    audio_part = audio
+    row.clear()
+    row.update({"index": failure.index, "parts": [{
+        "shot_id": shot["shot_id"], "audio_duration_us": audio_part,
+        "source_start_us": prev_end, "window_review_key": key}],
+        "reason": "无卖点短句顺延上一镜还没播完的动作"})
     _save(directory / "plan.json", plan)
     return True
 
@@ -1320,6 +1474,92 @@ def _repair_display_duplicate_window(manifest, analysis, plan, directory, narrat
     return False
 
 
+def _repair_comfort_duplicate_window(manifest, analysis, plan, directory, narration_timing, index, baseline, before):
+    """Two fabric-feel lines may each keep a different already-seen touch."""
+    sentence = next(s for s in plan["sentences"] if s["index"] == index)
+    if not _fabric_comfort_sentence(sentence):
+        return False
+    row = next(r for r in plan["rows"] if r["index"] == index)
+    current = row["parts"][0].get("shot_id")
+    def accept(candidate):
+        trial = copy.deepcopy(plan)
+        trial["rows"] = [candidate if r["index"] == index else r for r in trial["rows"]]
+        try:
+            checked = _assemble(manifest, analysis, trial, narration_timing=narration_timing,
+                                verify_sources=True, validate_sequence=False)
+            parts = checked["segments"][index - 1].get("span_parts") or [checked["segments"][index - 1]]
+            if any(p["video_speed"] != 1 for p in parts):
+                return False
+            if not set(contract.sequence_conflict_details(checked["segments"])) < before:
+                return False
+        except (ValueError, KeyError, OSError, TypeError):
+            return False
+        row.clear()
+        row.update(copy.deepcopy(candidate))
+        _save(directory / "plan.json", plan)
+        return True
+    shots = {s["shot_id"]: s for s in analysis["shots"]}
+    excluded = qc_rejected_shots(manifest).get(index, set())
+    used = {}
+    for i, segment in enumerate(baseline["segments"], 1):
+        if i == index:
+            continue
+        for part in segment.get("span_parts") or [segment]:
+            source_key = os.path.normcase(contract.source_identity(part["video"])["path"])
+            used.setdefault(source_key, []).append((round(part["source_start"] * 1e6), round(part["source_end"] * 1e6)))
+    from . import shot_analyzer
+    duration = row["parts"][0]["audio_duration_us"] + timing_contract.us_of(manifest.get("tail_pad_s"), 0)
+    reviews = [r for r in plan.get("reviews", {}).get(str(index), [])
+               if isinstance(r, dict) and r.get("verdict") == "matched" and r.get("same_product") is True
+               and r.get("time_sensitive") is not True and r.get("shot_id") not in {current, *excluded}
+               and r.get("shot_id") in shots]
+    for review in reviews:
+        shot = shots[review["shot_id"]]
+        source = contract.source_identity(shot["video"])
+        if review.get("source_identity") != source:
+            continue
+        intervals = review.get("evidence_intervals_us") or []
+        if not intervals:
+            continue
+        evlo = min(e["start"] for e in intervals)
+        evhi = max(e["end"] for e in intervals)
+        if evhi - evlo <= duration:
+            continue
+        lo = round(shot["source_start"] * 1e6) + timing_contract.us_of(
+            manifest.get("head_trim_s"), round(shot_analyzer.DEFAULT_HEAD_TRIM_S * 1e6))
+        scene_end = round(shot["source_end"] * 1e6)
+        limit = shot.get("material_duration_us")
+        if type(limit) is int and limit > 0:
+            scene_end = min(scene_end, limit)
+        hi = scene_end - timing_contract.us_of(
+            manifest.get("tail_trim_s"), round(shot_analyzer.DEFAULT_TAIL_TRIM_S * 1e6))
+        start = max(lo, evlo)
+        if start + duration > min(hi, evhi):
+            continue
+        window = (start, start + duration)
+        source_key = os.path.normcase(source["path"])
+        if any(min(window[1], end) - max(window[0], begin) > 40_000 for begin, end in used.get(source_key, [])):
+            continue
+        key = _review_proposed_window(manifest, plan, directory, sentence, shot, window)
+        if key is None:
+            if sum(r.get("index") == index for r in plan.get("window_repair_attempts", {}).values()) >= 3:
+                return False
+            continue
+        candidate = {"index": index, "parts": [{"shot_id": shot["shot_id"],
+            "audio_duration_us": row["parts"][0]["audio_duration_us"],
+            "source_start_us": start, "window_review_key": key}],
+            "reason": "面料舒适改用另一条已经看过的抚摸镜头。"}
+        if accept(candidate):
+            return True
+    return False
+
+
+def _repair_distinct_window(manifest, analysis, plan, directory, narration_timing, index, baseline, before):
+    if _repair_display_duplicate_window(manifest, analysis, plan, directory, narration_timing, index, baseline, before):
+        return True
+    return _repair_comfort_duplicate_window(manifest, analysis, plan, directory, narration_timing, index, baseline, before)
+
+
 def _repair_repeated_window(manifest: dict, analysis: dict, plan: dict, directory: Path,
                             narration_timing: dict | None, index: int, expanded: set[int]) -> bool:
     """Try already pixel-reviewed single-shot alternatives; add at most one review round."""
@@ -1370,7 +1610,7 @@ def _repair_repeated_window(manifest: dict, analysis: dict, plan: dict, director
     if any(r.get("index") == index and r.get("reviewed_candidates") for r in plan.get("duplicate_repair_reviews", [])):
         expanded.add(index)
     if index in expanded:
-        return _repair_display_duplicate_window(manifest, analysis, plan, directory, narration_timing, index, baseline, before)
+        return _repair_distinct_window(manifest, analysis, plan, directory, narration_timing, index, baseline, before)
     expanded.add(index)
     display = sentence["kind"] != "selling_point"
     reviews = plan.get("display_reviews", []) if display else plan.get("reviews", {}).get(str(index), [])
@@ -1378,7 +1618,7 @@ def _repair_repeated_window(manifest: dict, analysis: dict, plan: dict, director
     all_ids = list(dict.fromkeys(sentence.get("candidate_ids") or []))
     new_ids = [sid for sid in all_ids if sid not in seen][:ROUND_SIZE]
     if not new_ids:
-        return _repair_display_duplicate_window(manifest, analysis, plan, directory, narration_timing, index, baseline, before)
+        return _repair_distinct_window(manifest, analysis, plan, directory, narration_timing, index, baseline, before)
     # Keep all previous observations, and cap newly reviewed candidates to one round.
     retained = [r for r in reviews if isinstance(r, dict)
                 and not failure_fields(str(r.get("error", ""))).get("retryable")]
@@ -1400,7 +1640,7 @@ def _repair_repeated_window(manifest: dict, analysis: dict, plan: dict, director
     plan.setdefault("duplicate_repair_reviews", []).append({"index": index, "new_candidates": new_ids,
         "reviewed_candidates": [r["shot_id"] for r in fresh]})
     _save(directory / "plan.json", plan)
-    return try_reviewed() or _repair_display_duplicate_window(
+    return try_reviewed() or _repair_distinct_window(
         manifest, analysis, plan, directory, narration_timing, index, baseline, before)
 
 
@@ -1600,6 +1840,323 @@ def _place_empty_matched_evidence(manifest, analysis, plan, directory, narration
     return changed
 
 
+_WIPE_MARK = re.compile(r"纸巾|按压|擦拭")
+_WIPE_ONLY = re.compile(r"反渗|回流|不粘|不黏")
+_ABSORB_MARK = re.compile(r"瞬吸|秒吸|吸收|下渗|渗透|倒水|倒液")
+
+
+def _absorb_sentence_phase(text: str) -> str:
+    """Wipe claims use the press; seep and absorb stay on the pour-to-absorb span."""
+    raw = str(text or "")
+    if _WIPE_MARK.search(raw):
+        return "wipe"
+    if _WIPE_ONLY.search(raw) and not _ABSORB_MARK.search(raw):
+        return "wipe"
+    return "absorb"
+
+
+def _phase_span_us(phases: dict, names: tuple[str, ...], lo: int, hi: int):
+    starts, ends = [], []
+    for name in names:
+        span = phases.get(name) if isinstance(phases, dict) else None
+        if not isinstance(span, (list, tuple)) or len(span) < 2:
+            continue
+        try:
+            starts.append(int(round(float(span[0]) * 1_000_000)))
+            ends.append(int(round(float(span[1]) * 1_000_000)))
+        except (TypeError, ValueError):
+            continue
+    if not starts:
+        return None
+    start, end = max(lo, min(starts)), min(hi, max(ends))
+    if end - start < 100_000:
+        return None
+    return start, end
+
+
+def _line_audio_us(manifest, sentence, narration_timing) -> int:
+    index = sentence.get("index")
+    original = timing_contract.split_sentences(manifest)
+    if type(index) is not int or not 1 <= index <= len(original):
+        return 0
+    audio, _certainty = timing_contract.duration_for(narration_timing, index, segment=original[index - 1])
+    return int(audio or 0)
+
+
+def _fitting_press_review(plan, sentence, audio: int):
+    """Use a reviewed tissue press when the shared experiment has no wipe phase."""
+    if audio <= 0:
+        return None
+    best = None
+    for review in (plan.get("reviews") or {}).get(str(sentence.get("index")), []):
+        if not isinstance(review, dict) or review.get("verdict") != "matched" or review.get("time_sensitive") is True:
+            continue
+        text = f"{review.get('observation') or ''}{review.get('reason') or ''}"
+        if _WIPE_MARK.search(text) is None:
+            continue
+        intervals = [ev for ev in review.get("evidence_intervals_us") or []
+                     if isinstance(ev, dict) and type(ev.get("start")) is int and type(ev.get("end")) is int
+                     and ev["start"] < ev["end"]]
+        if not intervals:
+            continue
+        start, end = min(ev["start"] for ev in intervals), max(ev["end"] for ev in intervals)
+        if end - start > audio * 2:
+            continue
+        if best is None or end - start < best[0]:
+            best = (end - start, review)
+    return None if best is None else best[1]
+
+
+def _place_absorb_experiment(manifest, analysis, plan, directory, narration_timing) -> bool:
+    """Put adjacent absorb claims on one experiment shot, cut by phase.
+
+    下渗/渗透 stay with the pour and absorb. A tissue-press line uses the wipe
+    phase of that same shot. A phase the shot does not contain keeps the
+    sentence's own shot and is recorded, instead of borrowing another experiment.
+    """
+    from .. import rulepack
+    from ..policy import scene_rules
+    from ..vision import phase_timing
+
+    rules = rulepack.for_manifest(manifest)
+    scene = next((s for s in rules.get("scenes") or []
+                  if isinstance(s, dict) and s.get("id") == "absorb_test"), None)
+    sentences = [s for s in plan.get("sentences") or [] if isinstance(s, dict) and type(s.get("index")) is int]
+    if scene is None or len(sentences) < 2:
+        return False
+    sentences.sort(key=lambda s: s["index"])
+    rows = {r.get("index"): r for r in plan.get("rows") or [] if isinstance(r, dict)}
+    shots = {str(s.get("shot_id")): s for s in analysis.get("shots") or [] if isinstance(s, dict)}
+    segments = [{"text": s.get("text"), "video": "grouped",
+                 "audio_duration_us": _line_audio_us(manifest, s, narration_timing)}
+                for s in sentences]
+    groups = [g for g in scene_rules._split_groups(
+        segments, rules, {}, category=str(manifest.get("category") or ""))
+        if g.get("scene", {}).get("id") == "absorb_test" and len(g.get("positions") or []) >= 2]
+    if not groups:
+        return False
+    notes = plan.setdefault("absorb_phase_notes", [])
+    placed_any = False
+    for group in groups:
+        members = [sentences[p] for p in group["positions"] if p < len(sentences)]
+        if any(rows.get(s["index"], {}).get("continuity_key") for s in members):
+            continue
+        rejected = qc_rejected_shots(manifest)
+        candidates = []
+        seen_shots = set()
+        for sentence in members:
+            parts = (rows.get(sentence["index"]) or {}).get("parts") or []
+            if len(parts) != 1 or not parts[0].get("shot_id"):
+                continue
+            sid = str(parts[0]["shot_id"])
+            if sid in seen_shots or sid in rejected.get(sentence["index"], set()):
+                continue
+            seen_shots.add(sid)
+            shot = shots.get(sid)
+            if shot:
+                candidates.append(shot)
+        located, shot, phases = None, None, None
+        for candidate in candidates:
+            try:
+                found = phase_timing.locate(candidate, scene, Path(directory))
+            except (OSError, ValueError, TypeError, KeyError):
+                found = {"ok": False, "reason": "PHASE_LOCATE_FAILED"}
+            found_phases = found.get("phases") if isinstance(found, dict) else None
+            if not found.get("ok") or not isinstance(found_phases, dict):
+                continue
+            lo = int(round(float(candidate.get("source_start") or 0) * 1_000_000))
+            hi = int(round(float(candidate.get("source_end") or 0) * 1_000_000))
+            material = candidate.get("material_duration_us")
+            if type(material) is int and material > 0:
+                hi = min(hi, material)
+            if _phase_span_us(found_phases, ("pour", "absorb"), lo, hi) is None:
+                continue
+            located, shot, phases = found, candidate, found_phases
+            break
+        if shot is None:
+            missed = candidates[0]["shot_id"] if candidates else ""
+            notes.append({"indices": [s["index"] for s in members], "shot_id": missed,
+                          "missing_phases": ["pour", "absorb"], "reason": "PHASE_UNLOCATED"})
+            continue
+        lo = int(round(float(shot.get("source_start") or 0) * 1_000_000))
+        hi = int(round(float(shot.get("source_end") or 0) * 1_000_000))
+        material = shot.get("material_duration_us")
+        if type(material) is int and material > 0:
+            hi = min(hi, material)
+        body = _phase_span_us(phases, ("pour", "absorb"), lo, hi)
+        wipe = _phase_span_us(phases, ("wipe",), lo, hi)
+        snapshot = {s["index"]: copy.deepcopy(rows[s["index"]]) for s in members if s["index"] in rows}
+        placed = []
+        cursors = {"absorb": body[0] if body else None, "wipe": wipe[0] if wipe else None}
+        limits = {"absorb": body[1] if body else None, "wipe": wipe[1] if wipe else None}
+        for sentence in members:
+            phase = _absorb_sentence_phase(sentence.get("text"))
+            index = sentence["index"]
+            audio = _line_audio_us(manifest, sentence, narration_timing)
+            if shot.get("shot_id") in rejected.get(index, set()):
+                notes.append({"index": index, "shot_id": shot.get("shot_id"),
+                              "reason": "这句已经排除这条镜头，仍用原镜头"})
+                continue
+            if phase == "wipe" and wipe is None:
+                pressed = _fitting_press_review(plan, sentence, audio)
+                press_shot = shots.get(str(pressed["shot_id"])) if isinstance(pressed, dict) else None
+                if press_shot is None or press_shot.get("shot_id") in rejected.get(index, set()):
+                    notes.append({"index": index, "shot_id": shot.get("shot_id"), "missing_phase": "wipe",
+                                  "reason": "这条实验素材没有纸巾按压，反渗句仍用原镜头"})
+                    continue
+                intervals = [ev for ev in pressed.get("evidence_intervals_us") or []
+                             if isinstance(ev, dict) and type(ev.get("start")) is int]
+                start = min(ev["start"] for ev in intervals)
+                end = max(start + audio, max(ev["end"] for ev in intervals))
+                key = _review_proposed_window(
+                    manifest, plan, directory, sentence, press_shot, (start, end),
+                    attempt_metadata={"mode": "absorb_phase", "phase": "wipe"})
+                if not key:
+                    notes.append({"index": index, "shot_id": press_shot.get("shot_id"), "missing_phase": "wipe",
+                                  "reason": "纸巾按压画面没有复核通过，仍用原镜头"})
+                    continue
+                revised = (plan.get("window_reviews") or {}).get(key) or {}
+                reviews = plan.setdefault("reviews", {}).setdefault(str(index), [])
+                if not any(r.get("shot_id") == press_shot.get("shot_id") and r.get("verdict") == "matched" for r in reviews):
+                    reviews.append(revised)
+                row = rows.get(index)
+                if not isinstance(row, dict):
+                    continue
+                row["parts"] = [{"shot_id": press_shot.get("shot_id"), "source_start_us": start,
+                                 "audio_duration_us": audio, "window_review_key": key, "absorb_phase": "wipe"}]
+                row.pop("continuity_key", None)
+                placed.append(index)
+                continue
+            if phase != "wipe" and body is None:
+                notes.append({"index": index, "shot_id": shot.get("shot_id"), "missing_phase": "absorb",
+                              "reason": "这条实验素材没有倒液吸收，这句仍用原镜头"})
+                continue
+            start = cursors[phase]
+            limit = limits[phase]
+            if type(start) is not int or type(limit) is not int or audio <= 0 or start + audio > limit:
+                notes.append({"index": index, "shot_id": shot.get("shot_id"), "missing_phase": phase,
+                              "reason": "这段实验后面不够原速再播这句，仍用原镜头"})
+                continue
+            key = _review_proposed_window(
+                manifest, plan, directory, sentence, shot, (start, start + audio),
+                attempt_metadata={"mode": "absorb_phase", "phase": phase})
+            if not key:
+                notes.append({"index": index, "shot_id": shot.get("shot_id"), "missing_phase": phase,
+                              "reason": "这段相位画面没有复核通过，仍用原镜头"})
+                continue
+            revised = (plan.get("window_reviews") or {}).get(key) or {}
+            reviews = plan.setdefault("reviews", {}).setdefault(str(index), [])
+            if not any(r.get("shot_id") == shot.get("shot_id") and r.get("verdict") == "matched" for r in reviews):
+                reviews.append(revised)
+            row = rows.get(index)
+            if not isinstance(row, dict):
+                continue
+            row["parts"] = [{"shot_id": shot.get("shot_id"), "source_start_us": start,
+                             "audio_duration_us": audio, "window_review_key": key, "absorb_phase": phase}]
+            row.pop("continuity_key", None)
+            cursors[phase] = start + audio
+            placed.append(index)
+        if not placed:
+            continue
+        try:
+            _assemble(manifest, analysis, plan, narration_timing=narration_timing)
+        except WindowFailure as exc:
+            if exc.index in placed:
+                for index in placed:
+                    rows[index].clear()
+                    rows[index].update(snapshot[index])
+                notes.append({"indices": placed, "shot_id": shot.get("shot_id"),
+                              "reason": f"相位切开后排不开:{exc.reason}"})
+                continue
+        except (ValueError, KeyError, TypeError):
+            for index in placed:
+                rows[index].clear()
+                rows[index].update(snapshot[index])
+            continue
+        placed_any = True
+        plan.setdefault("absorb_groups", []).append({
+            "indices": [s["index"] for s in members], "shot_id": shot.get("shot_id"),
+            "placed": placed, "missing_phases": [] if wipe else ["wipe"]})
+    return placed_any
+
+
+def _speed_fit_reviewed_evidence(manifest, analysis, plan, directory, failure) -> bool:
+    """Play matched evidence up to 2x when a shorter crop is not available.
+
+    The short-window look runs first. If that look cannot be made, and the
+    evidence already reviewed still fits inside twice the spoken line, keep
+    every reviewed frame and speed the cut. Time-sensitive proof and anything
+    over 2x stay blocked. This does not call the model or crop the result.
+    """
+    if failure.reason != timing_contract.REASON_EVIDENCE_SPAN_TOO_LONG:
+        return False
+    sentence = next((s for s in plan.get("sentences") or []
+                     if isinstance(s, dict) and s.get("index") == failure.index), None)
+    row = next((r for r in plan.get("rows") or []
+                if isinstance(r, dict) and r.get("index") == failure.index), None)
+    if sentence is None or row is None or row.get("continuity_key"):
+        return False
+    if sentence.get("kind") != "selling_point" or sentence.get("time_sensitive"):
+        return False
+    parts = row.get("parts") or []
+    if failure.part_index is not None and 0 <= failure.part_index < len(parts):
+        part = parts[failure.part_index]
+    else:
+        matching = [p for p in parts if isinstance(p, dict) and p.get("shot_id") == failure.shot_id]
+        part = matching[0] if len(matching) == 1 else None
+    if not isinstance(part, dict):
+        return False
+    shot = next((s for s in analysis.get("shots") or [] if s.get("shot_id") == failure.shot_id), None)
+    reviews = plan.get("reviews", {}).get(str(failure.index), [])
+    review = next((r for r in reviews if isinstance(r, dict) and r.get("shot_id") == failure.shot_id
+                   and r.get("verdict") == "matched" and r.get("time_sensitive") is not True), None)
+    if shot is None or review is None:
+        return False
+    existing = plan.get("window_reviews", {}).get(part.get("window_review_key")) or {}
+    if existing.get("placement_review") is True:
+        return False
+    intervals = [ev for ev in review.get("evidence_intervals_us") or []
+                 if isinstance(ev, dict) and type(ev.get("start")) is int and type(ev.get("end")) is int
+                 and ev["start"] < ev["end"]]
+    audio = part.get("audio_duration_us")
+    if not intervals or type(audio) is not int or audio <= 0:
+        return False
+    start, end = min(ev["start"] for ev in intervals), max(ev["end"] for ev in intervals)
+    budget = int(round(audio * contract.playback.PROCESS_PREFERRED_MAX))
+    if end - start > budget:
+        return False
+    lo, hi = round(float(shot["source_start"]) * 1e6), round(float(shot["source_end"]) * 1e6)
+    material = shot.get("material_duration_us")
+    if type(material) is int and material > 0:
+        hi = min(hi, material)
+    # The 2x crop stays on the reviewed evidence. A few frames of slack inside
+    # the same shot let the frame grid cover that evidence without clipping it.
+    crop_start, crop_end = start, min(hi, start + budget)
+    if crop_end < end:
+        crop_end = end
+        crop_start = max(lo, end - budget)
+    if not lo <= crop_start <= start < end <= crop_end <= hi:
+        return False
+    key = contract.digest(["speed-fit", failure.index, shot["shot_id"], crop_start, crop_end, audio])[:24]
+    if part.get("window_review_key") == key:
+        return False
+    saved = {k: copy.deepcopy(v) for k, v in review.items()
+             if k not in {"playback_observation", "review_window_us", "placement_review", "continuity_key"}}
+    saved.update(placement_review=True, placement_verdict="suitable", sentence_index=failure.index,
+                 shot_id=shot["shot_id"], verdict="matched", time_sensitive=False,
+                 playback_observation=None, review_window_us={"start": crop_start, "end": crop_end},
+                 evidence_intervals_us=copy.deepcopy(intervals),
+                 source_identity=review.get("source_identity"))
+    plan.setdefault("window_reviews", {})[key] = saved
+    part["window_review_key"] = key
+    part["source_start_us"] = crop_start
+    plan.setdefault("playback_repairs", []).append({
+        "index": failure.index, "shot_id": shot["shot_id"], "reason": failure.reason,
+        "speed_fit": "reviewed evidence within 2x"})
+    _save(directory / "plan.json", plan)
+    return True
+
+
 def _repair_reviewed_rows(manifest, analysis, plan, directory, narration_timing, duplicate_expanded):
     """Drain useful local repairs without spending text-editor retry rounds.
 
@@ -1609,6 +2166,7 @@ def _repair_reviewed_rows(manifest, analysis, plan, directory, narration_timing,
     """
     # Empty OUT_OF_RANGE / SPAN seeds must place before earlier sentences spend
     # the vision budget on their own short-window repairs.
+    _place_absorb_experiment(manifest, analysis, plan, directory, narration_timing)
     _place_empty_matched_evidence(manifest, analysis, plan, directory, narration_timing)
     seen = set()
     for _ in range(1 + 8 * len(plan.get("sentences", []))):
@@ -1634,9 +2192,26 @@ def _repair_reviewed_rows(manifest, analysis, plan, directory, narration_timing,
                 narration_timing, repeated_index, duplicate_expanded):
             continue
         if isinstance(failure, WindowFailure):
+            # A recrop that still cannot hold the evidence used to count as
+            # progress and skip the previous-shot tail. Look at that tail first.
+            sentence = next((s for s in plan.get("sentences") or []
+                             if isinstance(s, dict) and s.get("index") == failure.index), {})
+            short_without_point = (
+                sentence.get("kind") in {"hook", "product_intro"}
+                and not sentence.get("selling_points")
+                and failure.reason == timing_contract.REASON_EVIDENCE_SPAN_TOO_LONG)
+            if short_without_point and _extend_previous_action(
+                    manifest, analysis, plan, directory, failure, narration_timing):
+                continue
             if _repair_selected_window(manifest, analysis, plan, directory, failure):
                 continue
+            if not short_without_point and _speed_fit_reviewed_evidence(
+                    manifest, analysis, plan, directory, failure):
+                continue
             if sentence_continuity.repair(manifest, analysis, plan, directory, failure, narration_timing):
+                continue
+            if not short_without_point and _extend_previous_action(
+                    manifest, analysis, plan, directory, failure, narration_timing):
                 continue
         raise failure
     raise ValueError("AI_EDITOR_REPAIR_PROGRESS_LIMIT")

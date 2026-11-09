@@ -804,6 +804,11 @@ def main() -> int:
                             row["selection_mode"] = claim["selection_mode"]
                             row["degraded_expected"] = claim["degraded"]
                             row["match_level"] = _normalize_match_level(row)
+                            promoted = ai_editor_qc.promote_direct_packaging(
+                                str(claim.get("claim") or ""), str(row.get("observed") or ""),
+                                str(row.get("reason") or ""), row["match_level"])
+                            if promoted != row["match_level"]:
+                                row["match_level"] = promoted
                             row["visual_ok"] = row["match_level"] in {"DIRECT", "ACCEPTABLE_DEGRADED"}
                             visual_rows.append(row)
                             if row["match_level"] == "ACCEPTABLE_DEGRADED":
@@ -845,6 +850,10 @@ def main() -> int:
         if result["draft_metadata_sha256_final"] != result["draft_metadata_sha256"]:
             result["issues"].append("DRAFT_METADATA_CHANGED_DURING_QC")
             result["uncertified"] = True
+        if not result.get("degraded_matches"):
+            result["preview_only_reasons"] = [
+                reason for reason in result.get("preview_only_reasons") or []
+                if not str(reason).startswith("MODEL_PREVIEW:")]
         degraded_count = len(result.get("degraded_matches") or [])
         result["match_grade_counts"] = {
             "degraded": degraded_count,

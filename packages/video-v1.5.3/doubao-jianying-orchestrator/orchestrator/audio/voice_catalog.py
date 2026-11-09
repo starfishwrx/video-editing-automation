@@ -95,6 +95,11 @@ VOICE_ALIASES = {
     "熊二": "zh_male_xionger_stream_gpu",
     # 飞书配音名写「曼波」，剪映音色表的显示名是「曼波讲故事」，全表只有这一条。
     "曼波": "ICL_zh_female_xinmanbo",
+    # 运营把「女声」写成「女生」，且不带 Pro。Pro 必须写明，不能并进这一条。
+    "tvb女生": "BV409_streaming",
+    "TVB女生": "BV409_streaming",
+    # 官方显示名是「台湾腔甜妹」，省略「腔」后全表仍只有这一条。
+    "台湾甜妹": "zh_female_xiaohe_saturn_bigtts",
 }
 
 # 剧情关键词 → 偏好音色 key（命中越多越优先）

@@ -299,6 +299,19 @@ class DefaultHeadlessTests(unittest.TestCase):
                 (r'C:\music.wav',{'path':r'C:\music.wav'}), ({'path':'a.wav','start':2},{'path':'a.wav','start':2})]:
             self.assertEqual(normalize(value), expected)
 
+    def test_plaintext_desktop_timeline_is_read_and_encrypted_index_is_not(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            (root / 'draft_info.json').write_text(json.dumps({'id': 'stale-root', 'tracks': []}), encoding='utf-8')
+            timeline = root / 'Timelines' / 'LINE1'
+            timeline.mkdir(parents=True)
+            (root / 'Timelines' / 'project.json').write_text(json.dumps({'main_timeline_id': 'LINE1'}), encoding='utf-8')
+            (timeline / 'draft_content.json').write_text(json.dumps({'id': 'LINE1', 'tracks': []}), encoding='utf-8')
+            self.assertEqual(draft_documents.timeline(root)['id'], 'LINE1')
+            (timeline / 'draft_content.json').write_bytes(b'\x00not-json')
+            with self.assertRaisesRegex(ValueError, 'UNOWNED_NATIVE_DRAFT_UNSUPPORTED'):
+                draft_documents.timeline(root)
+
     def test_native_read_failure_never_falls_back_to_old_plaintext(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)

@@ -548,6 +548,8 @@ class AIEditorTests(unittest.TestCase):
         frames = ai_editor_qc.frame_plan(claim, [row])
         self.assertGreaterEqual(len(frames), 8)
         self.assertIn(0, [f[2] for f in frames])
+        shifted = {**row, "source_start": segment["source_start"] + .05}
+        self.assertEqual(ai_editor_qc.validate_cut(claim, [shifted]), [])
         row["source_duration"] = .2
         self.assertIn("AI_QC_EVIDENCE_CUT_AWAY", ai_editor_qc.validate_cut(claim, [row]))
 

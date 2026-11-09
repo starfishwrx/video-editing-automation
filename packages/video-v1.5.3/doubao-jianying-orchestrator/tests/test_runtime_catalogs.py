@@ -22,6 +22,10 @@ class RuntimeCatalogTests(unittest.TestCase):
         self.assertEqual((ordinary.sami, ordinary.speed), ("BV409_streaming", 1.2))
         self.assertEqual(professional.sami, "zh_female_tvb_emo_v2_mars_bigtts")
         self.assertNotEqual(ordinary.sami, professional.sami)
+        typed = voice_catalog.resolve_voice("tvb女生1.2")
+        self.assertEqual((typed.sami, typed.speed), ("BV409_streaming", 1.2))
+        self.assertEqual(voice_catalog.resolve_voice("台湾甜妹1.2").sami,
+                         "zh_female_xiaohe_saturn_bigtts")
         self.assertTrue(voice_library.find_exact_name("憨熊"))
 
     def test_missing_or_invalid_tables_fail_after_warmup_and_repair_without_restart(self):

@@ -7,6 +7,70 @@
 
 ## 新增条目
 
+### L-20261106-reviewed-evidence-two-x 复核过的证据放不下就加速到 2 倍
+- status: OPEN
+- hits: 1
+- 模块: selection / ai_editor
+- 现象: 萌睡裤 02903 第 14 句「干干爽爽一整晚」已经选中纸巾按压后仍干爽的镜头。证据 2.28 秒，配音 1.2 秒，大约 1.9 倍就能罩住，却因为这句的短窗次数用在了别的镜头上，被锁在 1 倍并报证据太长。
+- 以后怎么做: 短窗复核先做。复核做不成、短窗仍然放不下时，已复核证据不超过配音的 2 倍就在这段证据上加速，不裁掉按压结果。超过 2 倍、计时证明仍然拒绝。
+- 证据: `test_matched_evidence_within_two_x_speeds_up_without_another_look`。
+
+### L-20261106-structure-and-pack-are-direct 护边和卫生包装本身就是证据
+- status: OPEN
+- hits: 2
+- 模块: quality / ai_editor_qc
+- 现象: 萌睡裤 10402 第 16 句已经撑开看到立体护边，质检仍因没有倒液防漏实验降成可接受降级，正式交付停住。10602 第 18 句「干净卫生」已经是同商品外包装，模型仍标可接受降级，正式只认精确通过所以没发。
+- 以后怎么做: 防侧漏看见立体护边、侧翼或侧边结构就是这句证据，不要求倒液实验；只拉伸腰围不算。干净卫生看见同商品外包装或未拆封包装就是正常匹配，不要求撕开。模型仍写成可接受降级时，解析后改成直接匹配；没有其他降级才算正式通过。吸收、干爽、反渗仍然要看见对应过程，不能用包装代替。
+- 证据: `test_absorption_structure_is_shown_by_the_pour_not_a_cutaway`。
+
+### L-20261106-short-line-continuation 无卖点短句排不开时顺延上一镜
+- status: OPEN
+- hits: 3
+- 模块: selection / ai_editor
+- 现象: 「重点是啊」「很舒服」这类没有卖点的短句，被单独配上一段证据放不下的镜头后，整句判为排不开。当前镜头再裁一次即使仍然放不下，也会被当成这轮已经修好，上一镜尾段根本不会再看。上一句如果已经在连续组里，顺延会直接放弃，即使组的最后一刀后面还有原速画面。相邻的瞬吸、下渗、反渗各自选了一条镜头，吸水实验没有按阶段切开。
+- 以后怎么做: 无卖点短句报证据太长时，先看上一镜切点之后还有没有原速能接上的动作，有就顺延并复核这段画面。上一句是连续组的最后一句时，从这组最后一刀往后接，不占用已经分给组内后句的画面。当前镜头再裁一次不能把这次顺延吃掉。卖点句不顺延。相邻的瞬吸、下渗、渗透和反渗放在同一条实验镜头上，按倒水、吸收、纸巾按压切开。开组那句自己的镜头如果定位不出倒液吸收，改用同组里已经选中、能定位倒液的镜头，从倒液起播，不要退回透光。不粘、不黏走纸巾按压。这条素材里没有的阶段就留在原镜头，并写明缺的是哪一段。
+- 证据: `test_short_line_continues_after_the_last_sentence_of_a_group`，`test_short_line_with_evidence_too_long_tries_the_previous_shot_before_recrop`，`test_adjacent_absorb_lines_share_one_experiment_cut_by_phase`。
+
+### L-20261106-nas-already-connected 共享已经连上时不要再登录失败
+- status: OPEN
+- hits: 1
+- 模块: delivery / ship_distribute
+- 现象: 本机已经连着 NAS 时，再次 `net use` 返回 1219，分发在复制前停下。
+- 以后怎么做: 登录失败但共享目录已经能访问时，沿用现有连接继续复制。登记信息里的 `file_Path` 要和时间轴使用同一条已收集路径，不能留在临时目录。
+- 证据: 天山绒棉解密稿第一次分发 `net use failed`，共享目录当时已经可访问。
+
+### L-20261106-desktop-timeline-index 剪映打开后的时间轴索引要读实际正文
+- status: OPEN
+- hits: 3
+- 模块: runtime / draft_documents
+- 现象: 明文草稿在剪映里打开后会出现 `Timelines/project.json`。质检见到索引就当成无法核验的加密稿，正式分发停住。天山绒棉这条打开后，主时间轴 `draft_content.json` 已是密文，根目录 `draft_info.json` 仍停在打开前。用无头库解出的当前时间轴比打开前明文长约 25 毫秒，正式质检判定窗口和证据被改过。
+- 以后怎么做: 索引指向的主时间轴正文是明文时，核验这份正文。正文不是明文时拒绝，不能退回根目录可能过期的 `draft_info.json`。和解出的正文对照时，100 毫秒以内的入点移动视为同一刀；超过这个容差仍然不能分发。
+- 证据: `test_plaintext_desktop_timeline_is_read_and_encrypted_index_is_not`；天山绒棉解密稿质检 `AI_QC_FINAL_WINDOW_CHANGED`、`AI_QC_EVIDENCE_CUT_AWAY`，未分发。
+
+### L-20261106-legacy-normalized-narration 旧草稿写入要用归一后的旁白
+- status: OPEN
+- hits: 1
+- 模块: application / engine
+- 现象: 恢复任务把原 TTS 标成文件模式后又做响度归一。旧草稿写入按原文件准备素材，放进时间轴时却查找归一后的文件，写稿以 KeyError 停下。
+- 以后怎么做: 准备素材和放上旁白轨使用同一条 `narration_playback_path`。操作方另外指定的文件配音仍保持原文件。
+- 证据: `test_retained_file_narration_uses_the_normalized_file`。
+
+### L-20261106-voice-typo-alias 配音笔误只映射到唯一官方名
+- status: OPEN
+- hits: 1
+- 模块: audio / voice_catalog
+- 现象: 飞书写成「tvb女生」「台湾甜妹」时，解析找不到官方显示名「TVB女声」「台湾腔甜妹」，任务在配音前被拦住。
+- 以后怎么做: 只为能唯一对应一条官方音色的笔误加别名。带 Pro 的名字不能并进不带 Pro 的别名。多个候选仍阻断，不自动挑一个。
+- 证据: `test_real_official_names_preserve_voice_identity_and_tempo`。
+
+### L-20261105-catalog-prefix-recall 目录顺序不能当成召回排序
+- status: OPEN
+- hits: 1
+- 模块: selection / ai_editor
+- 现象: 整库描述一次交给模型时，钩子句和介绍句的展示池会原样返回目录最前面的几条。复核看到像包装展示就停止，排在后面的镜头不会被看。
+- 以后怎么做: 这次保持 main 的 `ai_editor`，不把无卖点句改成目录顺序或描述逐句召回。这两条都对不上人工稿里的实验镜头。整库一次交给模型仍会停在目录前几条，不要靠再跑一轮全库像素复核来补。示例文件名只用于验收，不写进选镜。
+- 证据: 萌睡裤任务 32 的 main 选镜 17 句与示例 0 句同文件；目录顺序和描述召回同样 0 句同文件，改动已撤回。
+
 ### L-20261105-evidence-then-place 找画面与放入时间线必须拆开
 - status: OPEN
 - hits: 5
