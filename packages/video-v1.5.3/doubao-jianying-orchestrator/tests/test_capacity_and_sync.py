@@ -4,6 +4,8 @@ import json
 import sys
 import tempfile
 import unittest
+
+from offline_host import offline_host
 from pathlib import Path
 from unittest import mock
 from types import SimpleNamespace
@@ -114,6 +116,7 @@ class ShipMetadataGateTests(unittest.TestCase):
 
 
 class CapacityTests(unittest.TestCase):
+    @offline_host
     def test_soft_memory_pressure_continues_with_lowest_profile(self):
         profile = {"name": "background_friendly", "analysis_workers": 2,
                    "tts_concurrency": 3, "staging_workers": 2, "process_priority": "below_normal"}
@@ -129,6 +132,7 @@ class CapacityTests(unittest.TestCase):
             self.assertTrue(engine._resource_degraded)
             self.assertEqual(engine.profile.analysis_workers, 1)
 
+    @offline_host
     def test_critical_memory_pressure_pauses(self):
         with mock.patch("orchestrator.engine.capacity.resource_snapshot",
                         return_value={"memory_available_bytes": 128 * 1024 * 1024}), \
@@ -233,6 +237,7 @@ class CapacityTests(unittest.TestCase):
             self.assertEqual(summary["unique_source_count"], 1)
             self.assertEqual(summary["total_bytes"], 5)
 
+    @offline_host
     def test_profile_uses_eighty_percent_with_minimum_thirteen(self):
         with tempfile.TemporaryDirectory() as tmp:
             profile = capacity.create_profile(last_passing_count=26, storage_path=Path(tmp), samples=[])
@@ -240,6 +245,7 @@ class CapacityTests(unittest.TestCase):
             minimum = capacity.create_profile(last_passing_count=13, storage_path=Path(tmp), samples=[])
             self.assertEqual(minimum["safe_source_limit"], 13)
 
+    @offline_host
     def test_admission_blocks_missing_profile_before_work(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -251,6 +257,7 @@ class CapacityTests(unittest.TestCase):
             self.assertEqual(blocker["status"], "CAPACITY_CALIBRATION_REQUIRED")
             self.assertEqual(detail["sources"]["unique_source_count"], 1)
 
+    @offline_host
     def test_admission_blocks_over_limit(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -269,6 +276,7 @@ class CapacityTests(unittest.TestCase):
             self.assertEqual(blocker["status"], "MATERIAL_BATCH_LIMIT_EXCEEDED")
             self.assertEqual(blocker["safe_source_limit"], 1)
 
+    @offline_host
     def test_capacity_check_blocks_before_copy_and_tts(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -300,6 +308,7 @@ class VisualDuplicateGateTests(unittest.TestCase):
         return OrchestrationEngine({"allow_silent": True}, root, root / "report",
                                    capacity_guard=False)
 
+    @offline_host
     def test_adjacent_same_packaging_visual_is_blocked(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -322,6 +331,7 @@ class VisualDuplicateGateTests(unittest.TestCase):
             self.assertEqual(result["status"], "DUPLICATE_VISUAL_SHOT")
             self.assertEqual(result["duplicates"][0]["previous_index"], 1)
 
+    @offline_host
     def test_same_source_window_is_blocked_even_with_different_signatures(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -339,6 +349,7 @@ class VisualDuplicateGateTests(unittest.TestCase):
             result = engine._visual_duplicate_gate(clips)
             self.assertEqual(result["status"], "DUPLICATE_VISUAL_SHOT")
 
+    @offline_host
     def test_different_source_visuals_are_allowed(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -357,6 +368,7 @@ class VisualDuplicateGateTests(unittest.TestCase):
                      for item in raw]
             self.assertIsNone(engine._visual_duplicate_gate(clips))
 
+    @offline_host
     def test_same_source_distinct_audited_signatures_are_allowed(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -376,6 +388,7 @@ class VisualDuplicateGateTests(unittest.TestCase):
                      for item in raw]
             self.assertIsNone(engine._visual_duplicate_gate(clips))
 
+    @offline_host
     def test_non_adjacent_third_copy_of_same_signature_is_blocked(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -533,6 +546,7 @@ class TrackContractTests(unittest.TestCase):
 
 
 class AudioSelectionGateTests(unittest.TestCase):
+    @offline_host
     def test_normal_mode_requires_explicit_confirmation_even_when_values_exist(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -554,6 +568,7 @@ class AudioSelectionGateTests(unittest.TestCase):
             self.assertEqual(result["status"], "AUDIO_SELECTION_REQUIRED")
             self.assertEqual(result["reply_format"], "音色 <序号>")
 
+    @offline_host
     def test_confirmed_normal_mode_can_pass_gate(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -566,6 +581,7 @@ class AudioSelectionGateTests(unittest.TestCase):
                         duration=1, text="测试口播", audio_mode="tts")
             self.assertIsNone(eng.audio_selection_gate([clip]))
 
+    @offline_host
     def test_empty_bgm_does_not_block_voice_confirmation_or_download_previews(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -582,6 +598,7 @@ class AudioSelectionGateTests(unittest.TestCase):
             self.assertEqual(result["missing"], ["voice"])
             self.assertEqual(eng.m["bgm"], {"auto": True})
 
+    @offline_host
     def test_selection_gate_runs_before_video_upload(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

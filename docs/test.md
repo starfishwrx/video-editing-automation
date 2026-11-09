@@ -6,6 +6,8 @@
 
 单模块小改动默认跑对应模块及直接调用方；跨模块、公共合同、正式质量／交付门禁变化才跑完整两套。PR 的 CI 保持全量，发版在最终解压目录跑一次全量。本地已完成对应验证且代码没有再改时，不为提交或安装重复运行同一套全量；发版仍须验证全新解压包。安装后只做入口与依赖回读、必要的实际案例检查。
 
+执行顺序：先准备锁定依赖、FFmpeg/ffprobe 和 UTF-8 控制台；定向检查 → 独立审阅 → 定向修正 → 最终一次全量。新增运行模块/测试辅助文件先加入 Git 索引，再跑 git-tracked-only 冷启动。不要在审阅尚未收敛时提前启动整套；已有最终结果不因 commit、push 或安装而另起同一轮本地全量。
+
 例如修改自动 BGM，执行以下定向回归（当前共35项）：
 
 ```powershell
@@ -39,7 +41,7 @@ uv run --frozen python -X utf8 -m tools.check_architecture
 
 ## 1.1 GitHub 离线 CI 与示例
 
-`.github/workflows/ci.yml` 在 PR、`main` push 和手动触发时使用 Windows / Python 3.11、uv 与冻结锁文件运行上述两套测试，另核对 CLI `--help` 与 `examples/manifest.preview.json` 的 JSON 语法。CI 不注入生产密钥，不执行真实模型/TTS、NAS/飞书或生产部署。workflow 文件不等于仓库已开启必须通过检查的分支保护，维护者需在 Settings 中单独设置。
+`.github/workflows/ci.yml` 在 PR、`main` push 和手动触发时使用 Windows / Python 3.11、uv 与冻结锁文件运行上述两套测试，另核对 CLI `--help` 与 `examples/manifest.preview.json` 的 JSON 语法。两套 discover 在独立 Windows job 并行，`fail-fast: false`；两者固定 checkout 同一个事件 SHA。稳定聚合检查名仍为 `Windows Python 3.11`，使用 always 并仅接受整个矩阵 success，失败/取消/意外跳过不放行。三个触发都全量，不以 PR head 或 artifact 自报替代 main 回归，选择与代价见 [ADR 0011](adr/0011-layered-offline-validation.md)。CI 不注入生产密钥，不执行真实模型/TTS、NAS/飞书或生产部署。workflow 文件不等于仓库已开启必须通过检查的分支保护，维护者需在 Settings 中单独设置。
 
 媒体测试前使用已有 `run.py setup-ffmpeg` 准备绿色 FFmpeg/ffprobe，并将路径传入 runner 后续步骤。依赖准备允许下载可执行文件；离线回归指不调用业务模型/服务，不表示 runner 已预装媒体工具。字幕 ASR 为显式注入，模型权重和真实任务数据不进 CI。
 
@@ -124,3 +126,9 @@ uv run --frozen python -X utf8 -m tools.release_package build --output $releaseO
 新增 test_narration_preparation.py，使用真实PCM和FFmpeg覆盖连续边缘保护、末尾有声的内部停顿、五帧边界、时间轴缺口、静音/损坏、禁止过裁、精确tempo与源内容缓存身份、同资产并发、先定长后选择、最终写稿资产一致和冻结恢复。异常分类分别验证真实超限、工具缺失和TTS准备故障；非纸品保持原入口。test_paper_production.py继续覆盖最终闸门失败关闭。
 
 门禁与共享音频入口变更必须跑两套完整discover和架构检查。冷启动的git-tracked-only测试要求新增模块已加入Git索引；测试台PowerShell输出编码须与测试的UTF-8解码一致，不以乱码失败判断音频行为。真实缓存隔离重放禁止新TTS/视觉请求，保持原音频与生产不变，核对预合成/引擎/写稿计划同字节；数值通过不代表听感或成片验收。
+
+## 8. 测试隔离与性能维护
+
+先按用例计时并统计外部调用，再调整夹具。假字节媒体的逻辑测试不得反复尝试真实解码；只隔离无关识别适配器，重复窗修复、最终组装和门禁断言继续真实执行。需要固定宿主的纯逻辑用例显式使用 `offline_host` 装饰器，不全局 mock subprocess，专门的环境探测和资源策略测试保持独立。
+
+架构故障注入用最小合法图，真实整树至少完整扫描一次；真实抽帧覆盖继续包含带音轨 CFR、VFR、非零 PTS、像素对照与单次批量解码。移除源码字符串/文档数字/退役文件布局断言时，核对仍有实际副作用与拒绝行为覆盖。性能对比使用同机、同工具、同计时口径，披露负载波动及未测 CI 等限制。

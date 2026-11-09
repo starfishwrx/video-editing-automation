@@ -7,6 +7,8 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+
+from offline_host import offline_host
 import shutil
 import wave
 from PIL import ImageFont
@@ -210,6 +212,7 @@ from orchestrator.runtime import draft_documents
 
 class DefaultHeadlessTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which('ffprobe'), 'FFprobe required for real audio measurement')
+    @offline_host
     def test_narration_duration_does_not_inherit_video_one_frame_margin(self):
         from orchestrator.application import cli
         with tempfile.TemporaryDirectory() as raw:
@@ -294,6 +297,7 @@ class DefaultHeadlessTests(unittest.TestCase):
                 self.assertEqual(engine.write_draft(clips, 'music.wav')['reason'], reason)
                 legacy.assert_not_called()
 
+    @offline_host
     def test_empty_bgm_runs_automatically_without_music_preview_confirmation(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)

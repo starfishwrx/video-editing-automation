@@ -1,6 +1,8 @@
 import sys
 import tempfile
 import unittest
+
+from offline_host import offline_host
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -24,6 +26,7 @@ class SubtitleUnitTests(unittest.TestCase):
     def test_plain_characters_still_count(self):
         self.assertEqual(text_units("不会像其他的一擦就抠破了弄一手"), 15)
 
+    @offline_host
     def test_length_gate_uses_units_not_raw_chars(self):
         """含整词的短句 raw 可能 >15，但 units ≤30 时不应被硬闸拦住。"""
         from orchestrator.engine import Clip, OrchestrationEngine

@@ -7,6 +7,14 @@
 
 ## 新增条目
 
+### L-20261109-test-isolation 慢测试先查无关外部调用
+- status: OPEN
+- hits: 1
+- 模块: tests / CI / release
+- 现象: 假字节视频的重复窗逻辑单测进入实验相位识别，产生408次FFmpeg尝试；纯逻辑构造引擎还扫描宿主进程，早启动全量使审阅修正后再次重跑。
+- 以后怎么做: 按用例计时，局部隔离无关入口并保留最终组装/门禁断言，另补轻量联动；固定宿主须显式 opt-in。先定向和审阅，再对最终候选全量一次，安装只做必要检查。CI 并行仍保留全量与失败关闭聚合，不能凭自报SHA跨事件跳过。
+- 证据: ADR 0011、test_selection_recovery.py、offline_host.py、test_bounded_frame_batch.py、ci.yml。
+
 ### L-20261109-narration-boundary 最终音频定长前完成边缘处理
 - status: OPEN
 - hits: 1

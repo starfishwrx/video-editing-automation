@@ -5,6 +5,8 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+
+from offline_host import offline_host
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -324,6 +326,7 @@ class AIEditorTests(unittest.TestCase):
         self.assertNotIn(2, result.get('refill_replaced') or [])
         review.assert_not_called()
 
+    @offline_host
     def test_refill_preserves_fixed_audio_through_engine_clips(self):
         from orchestrator.application import engine
         audio = self.root / "fixed.wav"
@@ -340,6 +343,7 @@ class AIEditorTests(unittest.TestCase):
             clips = engine.OrchestrationEngine(result["manifest"], self.root, self.root).build_clips()
         self.assertEqual([(clip.audio, clip.audio_mode) for clip in clips], [(str(audio.resolve()), "file")])
 
+    @offline_host
     def test_multishot_audio_path_implies_file_mode_for_each_part(self):
         from orchestrator.application import engine
         audio = self.root / "fixed.wav"

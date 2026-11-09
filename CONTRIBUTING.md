@@ -47,7 +47,9 @@ uv run --frozen python -X utf8 -m unittest discover -s doubao-jianying-orchestra
 uv run --frozen python -X utf8 -m tools.check_architecture
 ```
 
-Windows 离线 CI 在 PR、`main` push 和手动触发时运行这两套测试、模块边界及示例 JSON/CLI 检查。它使用锁定依赖，无生产密钥；不调用真实视觉/TTS 服务，不触碰生产队列、NAS 或飞书。AI 测试通过只证明程序合同，不能替代真实图片观察和人工成片验收。
+先定向测试并完成独立审阅与修正，再执行最终一次适用全量；发版将该轮放在干净解压候选，安装只做必要检查。详见 [ADR 0011](docs/adr/0011-layered-offline-validation.md)。
+
+Windows 离线 CI 两套完整套件并行，稳定聚合名仍为 `Windows Python 3.11`，矩阵任一失败、取消或意外跳过都阻断；在 PR、`main` push 和手动触发时运行这两套测试、模块边界及示例 JSON/CLI 检查。它使用锁定依赖，无生产密钥；不调用真实视觉/TTS 服务，不触碰生产队列、NAS 或飞书。AI 测试通过只证明程序合同，不能替代真实图片观察和人工成片验收。
 
 每次改动更新 `docs/working.md`；可复用教训记入 `LESSONS.md`。默认模型写全为 GLM-5.3-Flash（`glm-5.3-flash`），流程默认 `ai_editor` / QC v5；旧行为注明 legacy 或历史适用范围。
 

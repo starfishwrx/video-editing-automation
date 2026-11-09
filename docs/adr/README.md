@@ -17,3 +17,5 @@
 - [0009 冻结输入与有界阶段恢复](0009-frozen-input-recovery.md)
 
 - [0010 纸品最终配音定长与连续静音闸门](0010-final-narration-gate.md)（隔离候选实现，部署和听审待验）
+
+- [0011 按范围验证、并行完整 CI](0011-layered-offline-validation.md)（已采纳；不改变生产质量门禁）

@@ -1100,6 +1100,28 @@ class SelectionRecoveryTests(unittest.TestCase):
         self.assertTrue(all(row.get("continuity_key") for row in plan["rows"]))
         self.assertTrue(editor._assemble(manifest, analysis, plan, narration_timing=None)["ok"])
 
+    def test_phase_repair_and_group_adapter_preserve_jointly_reviewed_cuts(self):
+        manifest, analysis, plan = self._absorb_plan((1_200_000, 1_300_000, 1_400_000))
+        phases = {"pour": [1.0, 2.5], "absorb": [2.5, 7.0], "wipe": [3.5, 5.5]}
+        real_groups = editor.experiment_groups.repair
+        def grouped(*args):
+            self.assertTrue(all(row.get("continuity_key") for row in plan["rows"]))
+            before = copy.deepcopy(plan["rows"])
+            result = real_groups(*args)
+            self.assertEqual(plan["rows"], before)
+            return result
+        with patch("orchestrator.vision.phase_timing.locate", return_value={"ok": True, "phases": phases}), \
+             patch.object(editor, "_review_proposed_window",
+                          side_effect=lambda *a, **kw: self._phase_review(plan, a[3], a[4], a[5])), \
+             patch.object(editor.sentence_continuity, "review_group", side_effect=self._joint_experiment_review), \
+             patch.object(editor.experiment_groups, "repair", side_effect=grouped) as groups, \
+             patch.object(editor.experiment_groups, "observe_pair", side_effect=AssertionError("already reviewed")):
+            result = editor._repair_reviewed_rows(manifest, analysis, plan, self.root, None, set())
+        groups.assert_called_once()
+        self.assertTrue(result["ok"])
+        self.assertFalse(contract.sequence_errors(result["segments"]))
+        self.assertTrue(editor._assemble(manifest, analysis, plan, narration_timing=None, verify_sources=True)["ok"])
+
     def test_a_later_sentence_rejection_does_not_drop_the_pour(self):
         manifest, analysis, plan = self._absorb_plan((1_200_000, 1_300_000, 1_400_000))
         manifest["qc_rejected_shots"] = {"3": ["shot1"]}
@@ -1279,8 +1301,13 @@ class SelectionRecoveryTests(unittest.TestCase):
         plan["rows"][3]["parts"][0]["shot_id"] = "shot3"
         plan["reviews"]["4"].insert(0, {**copy.deepcopy(plan["reviews"]["4"][0]), "shot_id": "shot3",
             "source_identity": contract.source_identity(analysis["shots"][2]["video"])})
-        with patch.object(editor, "_call", return_value={"rows": copy.deepcopy(plan["rows"])}) as call:
+        # Fake byte sources test duplicate repair, not experimental media observation.
+        with patch.object(editor, "_call", return_value={"rows": copy.deepcopy(plan["rows"])}) as call, \
+             patch.object(editor, "_place_absorb_experiment", return_value=False) as phases, \
+             patch.object(editor.experiment_groups, "repair", return_value=False) as groups:
             editor._edit_plan(manifest, analysis, plan, self.root)
+        phases.assert_called_once()
+        groups.assert_called_once()
         self.assertTrue(plan["ok"])
         self.assertEqual(plan["rows"][1]["parts"][0]["shot_id"], "shot2")
         self.assertEqual(plan["rows"][3]["parts"][0]["shot_id"], "shot4")
