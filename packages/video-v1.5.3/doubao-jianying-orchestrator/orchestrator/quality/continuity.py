@@ -14,6 +14,28 @@ def runtime_errors(clips, segments):
     grouped = {i: s for i, s in enumerate(segments) if s.get("continuity_group")}
     for index, segment in grouped.items():
         actual = [c for c in clips if c.raw_index == index]
+        group = segment["continuity_group"]
+        if continuity.is_experiment(group):
+            member = next(m for m in group["input"]["members"] if m["index"] == index + 1)
+            expected = member["parts"]
+            if len(actual) != len(expected):
+                errors.append("CONTINUITY_RUNTIME_MEMBER_MISSING")
+                continue
+            from ..ai_editor_contract import source_identity
+            for clip, cut in zip(actual, expected):
+                try:
+                    valid_source = source_identity(clip.video) == cut["source_identity"]
+                except OSError:
+                    valid_source = False
+                if (not valid_source or clip.continuity_group != group or clip.text != member["text"]
+                        or round(clip.source_start * 1e6) != cut["start_us"]
+                        or round(clip.duration * 1e6) != cut["target_us"]
+                        or abs(clip.video_speed - (cut["end_us"] - cut["start_us"]) / cut["target_us"]) > 1e-8
+                        or clip.transition or clip.transition_in_handle_us or clip.transition_out_handle_us):
+                    errors.append("CONTINUITY_RUNTIME_CHANGED")
+            if abs(sum(c.runtime_audio_us for c in actual) - member["audio_duration_us"]) > len(actual):
+                errors.append("CONTINUITY_RUNTIME_CHANGED")
+            continue
         if len(actual) != 1:
             errors.append("CONTINUITY_RUNTIME_MEMBER_MISSING")
             continue
@@ -39,6 +61,14 @@ def runtime_errors(clips, segments):
                 errors.append("CONTINUITY_RUNTIME_DISCONTINUOUS")
     if any(c.continuity_group and c.raw_index not in grouped for c in clips):
         errors.append("CONTINUITY_RUNTIME_ORPHAN")
+    for group in {s["continuity_group"]["input"]["members"][0]["index"]: s["continuity_group"]
+                  for s in grouped.values()}.values():
+        if not continuity.is_experiment(group):
+            continue
+        indices = {m["index"] - 1 for m in group["input"]["members"]}
+        actual = [c for c in clips if c.raw_index in indices]
+        if any(b.start_us != a.start_us + round(a.duration * 1e6) for a, b in zip(actual, actual[1:])):
+            errors.append("CONTINUITY_RUNTIME_DISCONTINUOUS")
     return list(dict.fromkeys(errors))
 
 
@@ -61,12 +91,14 @@ def draft_errors(draft_dir, clips, *, source_overrides=None):
                 raise ValueError("CONTINUITY_DRAFT_MEMBER_MISSING")
             segment = matching[0]
             duration = round(clip.duration * 1e6)
-            if (segment.get("source_timerange") != {"start": round(clip.source_start * 1e6), "duration": duration}
+            source_duration = round(duration * clip.video_speed)
+            if (segment.get("source_timerange") != {"start": round(clip.source_start * 1e6), "duration": source_duration}
                     or segment.get("target_timerange") != {"start": clip.start_us, "duration": duration}
-                    or segment.get("speed") != 1):
+                    or abs(segment.get("speed", 0) - clip.video_speed) > 1e-8):
                 raise ValueError("CONTINUITY_DRAFT_CUT_CHANGED")
             refs = [materials.get(r, {}) for r in segment.get("extra_material_refs", [])]
-            if any(r.get("type") == "speed" and (r.get("speed") != 1 or r.get("curve_speed")) for r in refs):
+            if any(r.get("type") == "speed" and (abs(r.get("speed", 0) - clip.video_speed) > 1e-8
+                                                  or r.get("curve_speed")) for r in refs):
                 raise ValueError("CONTINUITY_DRAFT_SPEED_CHANGED")
             if any(r.get("type") == "transition" for r in refs):
                 raise ValueError("CONTINUITY_DRAFT_TRANSITION_CHANGED")

@@ -1,7 +1,9 @@
 """Evidence and topic boundaries for the same hygiene experiment."""
 from pathlib import Path
+import json
 import re
 from .. import rulepack
+from ..policy.continuity import adjacent
 
 
 def contract_for(manifest):
@@ -67,7 +69,7 @@ def validate_group(timeline, sentence_ids, roles, rules):
     if not ids or tuple(r["sentence_id"] for r in selected) != ids:
         raise ValueError("EXPERIMENT_GROUP_IDENTITY")
     indices = [i for i,r in enumerate(roles) if r["sentence_id"] in ids]
-    if indices != list(range(indices[0],indices[-1]+1)):
+    if not adjacent(indices):
         raise ValueError("EXPERIMENT_GROUP_NOT_ADJACENT")
     if any(r["role"] not in rules["allowed_roles"] for r in selected):
         raise ValueError("EXPERIMENT_GROUP_TOPIC_CONFLICT")
@@ -144,3 +146,52 @@ def validate_pair(row, visible_ids):
                 and seen["lift"]["last_frame"]<=seen["result"]["first_frame"]):
             raise ValueError("EXPERIMENT_PAIR_PHASE_ORDER_INVALID")
     return row
+
+
+def validate_pair_evidence(manifest, evidence, *, require_disjoint_windows=True):
+    """One paired-source boundary for preview assembly and normal production."""
+    from .. import ai_editor_contract as identity
+    from ..media.temporal_samples import validate as validate_samples
+    from ..vision.experiment_pair_review import input_binding, PROTOCOL
+    if (evidence.get("task_id") != manifest["task_id"] or evidence.get("protocol") != PROTOCOL
+            or evidence.get("rules") != identity.rules_identity(manifest)
+            or evidence.get("context") != {"product": manifest["product"], "category": "weipin"}):
+        raise ValueError("EXPERIMENT_PAIR_RULE_OR_CONTEXT_CHANGED")
+    members = evidence.get("members")
+    if not isinstance(members, list) or [m.get("part") for m in members] != ["A", "B"]:
+        raise ValueError("EXPERIMENT_PAIR_MEMBERS_INVALID")
+    allowed = {str(Path(p).resolve()) for p in manifest["material_sources"]}
+    visible, bounds = {}, []
+    for member in members:
+        samples = validate_samples(member["samples"])
+        if samples["original"]["path"] not in allowed:
+            raise ValueError("EXPERIMENT_PAIR_OUTSIDE_TASK")
+        a, b = member["window_frame_ids"]
+        if type(a) is not int or type(b) is not int or not 0 <= a < b < len(samples["frames"]):
+            raise ValueError("EXPERIMENT_PAIR_WINDOW_INVALID")
+        ids = sorted({round(a + i * (b - a) / 7) for i in range(8)})
+        if member["visible_frame_ids"] != ids:
+            raise ValueError("EXPERIMENT_PAIR_SHOWN_FRAMES_CHANGED")
+        visible[member["part"]] = set(ids)
+        bounds.append((samples["frames"][a]["pts_us"],
+                       min(samples["source_end_us"], samples["frames"][b]["pts_us"] + 16_667)))
+    if identity.source_identity(evidence["sheet"]["path"]) != evidence["sheet"]:
+        raise ValueError("EXPERIMENT_PAIR_SHEET_CHANGED")
+    binding = evidence.get("input_binding") or {}
+    bound_file = binding.get("file") or {}
+    try:
+        valid = (identity.source_identity(bound_file["path"]) == bound_file
+                 and identity.file_sha256(bound_file["path"]) == binding["sha256"]
+                 and json.loads(Path(bound_file["path"]).read_text("utf-8")) ==
+                 input_binding(manifest, members, evidence["sheet"]["path"]))
+    except (KeyError, OSError, ValueError, TypeError):
+        valid = False
+    if not valid:
+        raise ValueError("EXPERIMENT_PAIR_REVIEW_INPUT_CHANGED")
+    row = validate_pair(evidence["observation"], visible)
+    if row["verdict"] != "matched":
+        raise ValueError("EXPERIMENT_PAIR_NOT_CONFIRMED")
+    if (require_disjoint_windows and members[0]["samples"]["original"] == members[1]["samples"]["original"]
+            and bounds[1][0] < bounds[0][1]):
+        raise ValueError("EXPERIMENT_PAIR_SOURCE_ORDER_OR_REPLAY")
+    return bounds

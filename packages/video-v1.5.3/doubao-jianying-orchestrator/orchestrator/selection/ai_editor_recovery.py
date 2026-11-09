@@ -21,6 +21,11 @@ def repairable_index(error: Exception) -> int | None:
 def failure_fields(message: str, *, stage: str = "semantic_match") -> dict:
     """A request outage is not evidence of a material/semantic gap."""
     text = message.upper()
+    if "EXPERIMENT_GROUP_PENDING" in text:
+        return {"status": "SHOT_MATCH_BLOCKED", "failure_class": "semantic",
+                "failure_code": "EXPERIMENT_GROUP_UNCONFIRMED", "reason": message,
+                "retryable": False, "failed_stage": stage, "resume_stage": "semantic_match",
+                "next_action": "review_same_experiment_pair_or_phase_budget"}
     if any(code in text for code in ("WINDOW_INFEASIBLE", "KNOWN_WINDOWS_INFEASIBLE",
                                     "PLAYBACK_SPEED_CONFLICT", "PLAYBACK_TIMING_INVALID", "CONTINUITY_")):
         from ..policy import playback
@@ -49,7 +54,7 @@ def failed_index(error: Exception) -> int | None:
     repeat = re.fullmatch(r"AI_EDITOR_REPEATED_SOURCE_WINDOW:\d+:(\d+)", str(error))
     if repeat:
         return int(repeat[1])
-    match = re.match(r"AI_EDITOR_(?:NO_SELECTION|AUDIO_ALLOCATION_INVALID|UNREVIEWED_SELECTION|POINTS_UNCOVERED):(\d+)", str(error))
+    match = re.match(r"AI_EDITOR_(?:NO_SELECTION|AUDIO_ALLOCATION_INVALID|UNREVIEWED_SELECTION|POINTS_UNCOVERED|EXPERIMENT_GROUP_PENDING):(\d+)", str(error))
     return int(match[1]) if match else None
 
 
