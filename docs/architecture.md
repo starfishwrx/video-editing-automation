@@ -24,7 +24,7 @@ flowchart TD
 1. **输入与环境**：外部注入路径/凭据；`platform_env.environment_report()` 提供缓存的基础工具链事实，`headless.production_environment_report()` 汇总所选写稿后端的即时预检。CLI `env` 默认使用完整生产报告，`--profile base` 显式只查基础环境；不认证云端密钥，也不表示渲染机已升级。
 2. **素材理解**：`shot_analyzer.analyze_manifest` 做场景切分和抽帧；`vision_analyzer.enrich_with_vision` 通过带标记的拼图获得描述、标签、动作和证据区间。有效缓存可复用，错误或缺字段不能补成观察成功。
 3. **AI 选镜**：`cli._temporary_match → ai_editor.prepare → shot_analyzer.match_manifest`。描述只用于全稿分类和候选召回；卖点候选需重新看实际像素。候选不明确时加密观察，未知项与确定缺素材分别报告。AI 负责语义和编排，程序重验实际素材、窗口、证据和音频分配。
-4. **建稿**：引擎依次检查环境、口播/音色、证据、容量、时序、转场/BGM，默认经 `application/headless_production.py` 调用单独安装的无头后端；BGM为空时自动选曲。产出草稿、`report/`、`last_result.json` 和任务事件。`draft_backend=legacy` 仅显式启用旧写稿器，独立时间线仍是另一个开发入口；建稿成功仍需独立 QC 和自动验收。
+4. **建稿**：引擎依次检查环境、口播/音色、证据、容量、时序、转场/BGM，默认经 `application/headless_production.py` 调用单独安装的无头后端；BGM为空时自动选曲。产出草稿、`report/`、`last_result.json` 和任务事件。`draft_backend=legacy` 可显式启用旧写稿器；无头构建明确返回旋转／HDR／像素格式／全范围兼容错误时，也会以新草稿名尝试旧写稿器，准确范围见 [ADR 0005](adr/0005-writing-qc.md)。其他失败不回退，独立时间线仍是另一个开发入口；建稿成功仍需独立 QC 和自动验收。
 5. **独立 QC**：`draft_visual_qc.py` 从实际草稿源窗口重新抽帧；`ai_editor_qc` 使用 `chatcut-visual-qc-response-v5`，按至少一个具体卖点的共享口径独立检查，不接收选镜分数、理由或通过结论。独立指输入与审查调用独立，默认模型仍是同一个视觉后端。worker/Eval 核对报告、草稿和源内容身份，旧v4须重新复核。
 6. **闭环**：整体脚本读取本地队列，由 dispatcher 调用 worker；`tools/acceptance` 验证输入、运行时、草稿包和独立 QC，全部通过后才执行配置的 NAS/表格操作。
 
@@ -40,7 +40,7 @@ legacy 通过 `vision_analyzer.match_sentences` 执行描述语义匹配，保�
 
 - 唯一时钟为 `timing_contract` 的整数微秒。口播段满足 `segment_us == audio_duration_us + tail_pad_us`（容差最多一帧）。
 - 源窗口满足 `0 <= source_start < source_end <= material_duration_us`，最终窗口覆盖当前有效证据；重复或变化后的窗口重新核验。
-- 默认选镜、补选、求解与写稿共用版本化[生产播放规则](production-playback.md)：纯过程优先≤2、最多3倍；关键动作、结果和未知阶段原速；旧计划重验并局部重选。
+- 默认选镜、补选、求解与写稿共用版本化[生产播放规则](production-playback.md)：非 time_sensitive 的完整放置短窗可在已复核窗口内最高 2 倍，不要求标为纯过程；分阶段纯过程优先≤2、最多3倍，关键接触／完成／提起／结果原速。time_sensitive 始终原速，没有过程或完整短窗许可时也保持原速；旧计划重验并局部重选。
 - `formal` 的正式交付只接受规定的真实 `PASS`；预览、证据不足、调用失败或旧报告保持未认证/阻断。体验展示不被解释成物理实验结果。
 - 媒体解码/编码由 `video_decode` / `video_encode` 控制 GPU 与硬件回退；配音响度和 BGM 由各自模块处理。
 - 1.5.4/1.5.5 的索引检索实验是独立包路线，不在本默认数据流中。

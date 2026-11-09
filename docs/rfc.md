@@ -48,6 +48,7 @@
 - 端到端写稿只走 `doubao-jianying-orchestrator`；默认 `headless_production` 使用独立授权后端，空 BGM 自动准备。`jianying-editor` 的 JyProject / vendor API 保留给显式 legacy 与兼容能力，仅无头构建明确返回旋转/HDR、像素格式或全范围不确定等媒体兼容错误时，自动以新草稿名尝试旧写稿器；其他失败不自动回退，最终验收不变。
 - `env` 默认汇总生产环境，包含所选后端；`--input` 读取任务覆盖，`--profile base` 仅报告通用工具链。完整检查失败时返回非零；它不认证云端密钥。
 - 恢复写稿消费 `shot_match_report.json` 中的成功结果与原始输入绑定，裸 `matched_manifest.json` 仅作建稿输入。当前匹配失败会使当前报告失效；输入变化和无绑定旧报告不能自动用于写稿。
+- 任务级重试和阶段恢复分别持久记账；阶段恢复绑定原始运行及冻结的输入、音频和时长，复用已完成观察与成功阶段。输入变化、必要快照损坏或预算耗尽明确阻断，不静默回到完整 build；预检阻断不消耗付费阶段恢复预算。详见 [ADR 0009](adr/0009-frozen-input-recovery.md)。
 - 禁止手改 `draft_content.json` / `draft_info.json` / `draft_meta_info.json`，禁止任务内临时 `gen_*.py`。
 - 共享交付后必须校验时间轴上的**字面绝对路径**与字节；副本哈希一致不等于媒体可打开。
 - 加密编辑会话禁止静默回落旧明文 sidecar；恢复生成版需用户确认 + 成功任务证据 + 新 UUID。

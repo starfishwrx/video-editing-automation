@@ -77,6 +77,8 @@ pwsh -NoProfile -File scripts/install_pipeline_task.ps1 -TaskName VideoAutomatio
 
 ## 状态与恢复
 
+冻结输入、任务级次数与阶段恢复预算的架构选择见 [ADR 0009](adr/0009-frozen-input-recovery.md)；下文维护实际运行合同。
+
 | 文件 | 用途 |
 |---|---|
 | `work/pipeline_runs/<run>.json` | 每轮任务计划、跳过原因、阶段结果和异常 |
