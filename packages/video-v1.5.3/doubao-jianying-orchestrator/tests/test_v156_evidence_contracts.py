@@ -48,6 +48,26 @@ class PurchaseQuantityContractTests(unittest.TestCase):
                     {"description": description, "visual_tags": ["整箱", "多包"]},
                     "赶紧囤一箱", "纸品")[0])
 
+    def test_paper_unspecified_stocking_line_mixes_stack_and_pack_actions(self):
+        text = "多囤几包真不亏"
+        self.assertTrue(da.cta_quantity_eligible(
+            {"description": "多包产品堆叠成一堆", "action": "堆叠产品"}, text, "纸品")[0])
+        self.assertEqual(da.cta_quantity_eligible(
+            {"description": "手持一包产品", "action": "举起单包展示"}, text, "纸品"),
+            (True, "PAPER_UNSPECIFIED_PACK_MIX"))
+        self.assertTrue(da.cta_quantity_eligible(
+            {"description": "两包产品拿在手里", "action": "举起两包对比"}, text, "纸品")[0])
+        self.assertFalse(da.cta_quantity_eligible(
+            {"description": "单包静态特写", "action": "无动作"}, text, "纸品")[0])
+        self.assertFalse(da.cta_quantity_eligible(
+            {"description": "单片巾体展开", "action": "展开巾体"}, text, "纸品")[0])
+        self.assertFalse(da.cta_quantity_eligible(
+            {"description": "手持一包产品", "action": "举起单包展示"}, "趁现在赶紧囤一箱", "纸品")[0])
+        self.assertFalse(da.cta_quantity_eligible(
+            {"description": "背景摆着一包产品", "action": "揉搓巾体"}, text, "纸品")[0])
+        self.assertFalse(da.cta_quantity_eligible(
+            {"description": "手持一包产品", "action": "举起单包展示"}, "囤两包更划算", "纸品")[0])
+
     def test_content_spec_sentence_still_accepts_matching_readable_pack(self):
         self.assertEqual(da.cta_quantity_eligible(
             {"description": "包装正面140PCS特写", "readable_claims": ["140PCS"]},
@@ -82,6 +102,43 @@ class ObservationReliabilityTests(unittest.TestCase):
         for confidence in (float("nan"), float("inf")):
             self.assertFalse(da.packaging_claim_direct(label(analysis_confidence=confidence,
                 text_pass="hires", text_agreed=["4层"], pointed_agreed=["4层"]), "4层")["ok"])
+
+    def test_pointing_must_land_on_the_same_claim(self):
+        spoken = "纸巾是4层加厚的"
+        mismatch = label(analysis_confidence=0.95, text_pass="hires",
+                         text_agreed=["4层", "医护级"], pointed_agreed=["医护级"])
+        self.assertEqual(da.packaging_claim_direct(mismatch, spoken)["reason"],
+                         "PACKAGING_POINTING_MISMATCH")
+        loose = label(description="手指指向包装正面", action="手指指向文字",
+                      readable_claims=["4层"])
+        self.assertEqual(da.packaging_claim_direct(loose, spoken)["reason"],
+                         "PACKAGING_POINTING_MISMATCH")
+        hit = label(analysis_confidence=0.95, text_pass="hires",
+                    text_agreed=["4层", "医护级"], pointed_agreed=["4层"])
+        self.assertTrue(da.packaging_claim_direct(hit, spoken)["ok"])
+        nearby = label(description="手指指向包装正面，旁边这块印着4层",
+                       action="手指指向文字", readable_claims=["4层", "医护级"])
+        self.assertTrue(da.packaging_claim_direct(nearby, spoken)["ok"])
+        other_face = label(description="手指指向包装正面，背面另有4层",
+                           action="手指指向文字", readable_claims=["4层"])
+        self.assertEqual(da.packaging_claim_direct(other_face, spoken)["reason"],
+                         "PACKAGING_POINTING_MISMATCH")
+        block = label(analysis_confidence=0.95, text_pass="hires",
+                      text_agreed=["4层", "医护级", "加厚"],
+                      pointed_agreed=["加厚", "4层"])
+        self.assertTrue(da.packaging_claim_direct(block, spoken)["ok"])
+        contract = da.sentence_contract(spoken, category="纸品")
+        self.assertEqual(da.shot_fit(
+            {"description": "手指指向包装正面", "action": "手指指向文字",
+             "pointing_to_text": True, "readable_claims": ["4层"], "has_subject": True},
+            contract), 0)
+        self.assertEqual(da.shot_fit(
+            {"description": "手指指向包装上的4层字样", "pointing_to_text": True,
+             "readable_claims": ["4层"], "has_subject": True},
+            contract), 2)
+        self.assertEqual(da.shot_fit(
+            {"description": "包装侧面印着4层", "readable_claims": ["4层"], "has_subject": True},
+            contract), 2)
 
     def test_old_missing_confidence_retains_narrow_packaging_compatibility(self):
         self.assertTrue(da.packaging_claim_direct(label(), "4层加厚")["ok"])

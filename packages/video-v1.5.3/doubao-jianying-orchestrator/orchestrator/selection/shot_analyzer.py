@@ -640,9 +640,9 @@ def build_analysis_prompt(manifest: dict[str, Any], shots: list[dict[str, Any]])
     return ("请只分析本次商品任务的临时镜头候选，不读取历史素材库。\n"
             "对每个抽帧文件输出一句客观画面描述、visual_tags、可证明的卖点 evidence_tags、"
             "action_complete、head_waste、tail_waste。没有看到的卖点不要填写。\n"
-            "若画面有手指/手势明确指向包装上的可读卖点文字或标识，额外输出"
-            "readable_claims（逐字记录可读文字）、pointing_to_text=true、"
-            "pointing_action/gesture；没有明确指向或文字不可读时必须为 false/空。"
+            "若指尖附近有一块可读卖点文案，额外输出 readable_claims（逐字记录可读文字）、"
+            "pointing_to_text=true，并在 pointing_action/gesture 里写下这块文案的原文。"
+            "指着包装其他位置、卖点在另一块，或看不清附近文案时，pointing_to_text 必须为 false。"
             "包装文字只能支持同一条包装卖点，不能证明产品真实性或吸收/柔软等功能。\n"
             "对于 CTA/促销/划算/囤货/数量话术，记录 multi_pack、row_display、carton、"
             "stack、visible_quantity 等真实量感证据；单包静态特写不得填写量感证据。\n"
@@ -1235,6 +1235,11 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
                       and (semantic_ok or tier > 0 or row.get("display_carry_ok", False)
                                            or row.get("scene_context_ok", False)))
             role_fit = demo_actions.intent_role_score(row["shot"], intents)
+            if (demo_actions.paper_unspecified_pack_line(text, category)
+                    and row.get("cta_visual_reason") in {
+                        "VISIBLE_MULTI_PACK_OR_QUANTITY", "VISIBLE_PURCHASE_UNIT_COUNT",
+                        "PAPER_UNSPECIFIED_PACK_MIX"}):
+                role_fit = max(role_fit, 6)
             if row.get("display_carry_ok"):
                 role_fit = 6 + sum(demo_actions.opening_display_rank(row["shot"]))
             # 多样性只做同等匹配候选的最后一级 tie-break：优先换源、换机位/构图
