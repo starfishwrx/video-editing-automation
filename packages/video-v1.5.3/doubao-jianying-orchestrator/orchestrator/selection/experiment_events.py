@@ -80,7 +80,7 @@ def compile_events(row,member):
     return validate_motion(observation,member)
 
 
-def fit_phase_windows(members,observations,result_frames,target_us,phase_boundary_us,*,fps=30):
+def fit_phase_windows(members,observations,result_frames,target_us,phase_boundary_us,*,fps=30,max_speed=3.0):
     """Select a continuous absorption-focused tail, then solve each clause's budget.
 
     This never omits an internal interval or claims to show the full pour.
@@ -99,15 +99,15 @@ def fit_phase_windows(members,observations,result_frames,target_us,phase_boundar
             'selected_window_frame_ids':b_row['effective_window_frame_ids'],'internal_omissions':False}
     clips=windows(members,observed,result_frames,fps=fps)
     if phase_boundary_us is None or observations[0].get('coverage')!='absorption_focus':
-        plans=fit_group(clips,target_us,fps=fps,phase_boundary_us=phase_boundary_us)
+        plans=fit_group(clips,target_us,fps=fps,phase_boundary_us=phase_boundary_us,max_speed=max_speed)
         if b_selection:plans[1]['source_selection']=b_selection
         return plans
     if not 0<phase_boundary_us<target_us:raise ValueError('EXPERIMENT_PHASE_BOUNDARY_INVALID')
-    b=fit_group([clips[1]],target_us-phase_boundary_us,fps=fps)
+    b=fit_group([clips[1]],target_us-phase_boundary_us,fps=fps,max_speed=max_speed)
     if b_selection:b[0]['source_selection']=b_selection
     original=observations[0];first=original['effective_window_frame_ids'][0]
     last=max(s['last_frame'] for s in original['segments'] if s['kind']=='pour')-3
-    for cap in (2,3):
+    for cap in dict.fromkeys((min(2,max_speed),max_speed)):
         for start in range(first,last+1):
             cropped=deepcopy(original);cropped['effective_window_frame_ids'][0]=start
             cropped['segments']=[{**s,'first_frame':max(start,s['first_frame'])}
@@ -119,11 +119,12 @@ def fit_phase_windows(members,observations,result_frames,target_us,phase_boundar
                     cropped['segments'].insert(1,{**head,'first_frame':start+1})
                 head.update(last_frame=start,can_speed=False)
             clip=windows(members,[cropped,observed[1]],result_frames,fps=fps)[0]
-            try:a=fit_group([clip],phase_boundary_us,fps=fps)
+            try:a=fit_group([clip],phase_boundary_us,fps=fps,max_speed=cap)
             except ValueError:continue
             if max(p['speed'] for p in a[0]['retiming']['parts'])>cap:continue
             a[0]['source_selection']={'coverage':'absorption_focus','observed_window_frame_ids':original['effective_window_frame_ids'],
                 'selected_window_frame_ids':cropped['effective_window_frame_ids'],
                 'omitted_pour_prefix_frame_ids':[first,start-1] if start>first else [],'internal_omissions':False}
             return a+b
-    raise ValueError(f'EXPERIMENT_PHASE_DURATION_CONFLICT:part=0;budget_us={phase_boundary_us};3X_CAP')
+    limit='3X_CAP' if max_speed==3 else 'TASK_CAP'
+    raise ValueError(f'EXPERIMENT_PHASE_DURATION_CONFLICT:part=0;budget_us={phase_boundary_us};{limit}')

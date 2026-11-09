@@ -26,13 +26,36 @@ def task_runtime_overrides(task: dict) -> dict:
     if not isinstance(nested, dict):
         raise ValueError("INVALID_TASK_MANIFEST")
     result = {}
-    for key in ("selection_mode", "draft_backend", "subtitle_font_path"):
+    for key in ("selection_mode", "draft_backend", "subtitle_font_path", "max_absorb_demo_speed", "max_source_reuse"):
         value = task.get(key)
         if value is None or (isinstance(value, str) and not value.strip()):
             value = nested.get(key)
         if value is not None and not (isinstance(value, str) and not value.strip()):
             result[key] = value
     return result
+
+
+def task_shot_note_overrides(task: dict, *, remark_field: str, new_task: bool) -> dict:
+    """New tasks freeze natural-sentence numbering; old retries retain their input."""
+    if not new_task:
+        return {}
+    nested = task.get("manifest") or {}
+    if not isinstance(nested, dict):
+        raise ValueError("INVALID_TASK_MANIFEST")
+    value = None
+    for container in (task, nested):
+        for key in ("shot_notes", remark_field):
+            if container.get(key):
+                value = container[key]
+                break
+        if value is not None:
+            break
+    if value is None:
+        return {}
+    basis = task.get("shot_notes_index_basis") or nested.get("shot_notes_index_basis") or "original_sentence"
+    if basis not in {"original_sentence", "split", "segment"}:
+        raise ValueError("SHOT_NOTES_INDEX_BASIS_INVALID")
+    return {"shot_notes": value, "shot_notes_index_basis": basis}
 
 
 def task_product_fields(task: dict) -> dict:

@@ -673,6 +673,8 @@ def run_build(manifest: dict, report_dir: pathlib.Path, draft_name: str, *,
            "--input", str(mpath), "--report-dir", str(report_dir),
            "--delivery-mode", manifest["delivery_mode"]]
     env = dict(os.environ, PYTHONUTF8="1")
+    if manifest.get("record_id") and not manifest.get("source_reuse_policy"):
+        env["JY_PRESERVE_UNVERSIONED_QUEUE_REUSE"] = "1"
     if str(SKILL) not in sys.path:
         sys.path.insert(0, str(SKILL))
     from orchestrator.runtime import vision_config
@@ -964,6 +966,57 @@ def _save_frozen_task(task_dir: pathlib.Path, task: dict, frozen: dict) -> None:
         raise ValueError("TASK_CONTRACT_CONTENT_MISMATCH")
     from orchestrator.file_safety import atomic_write_text
     atomic_write_text(task_dir / "task.json", json.dumps(task, ensure_ascii=False, indent=2))
+
+
+def _frozen_shot_note_overrides(task_dir: pathlib.Path, task: dict, remark_field: str) -> dict:
+    """Carry new selection policy and numbering through retries without reinterpreting old tasks."""
+    path = task_dir / "shot_notes_binding.json"
+    force_rebuild = bool(task.get("force_rebuild"))
+    if path.exists():
+        try:
+            raw = path.read_bytes()
+            frozen = json.loads(raw.decode("utf-8"))
+            if (not isinstance(frozen, dict) or frozen.get("schema") != "shot-notes-binding-v1"
+                    or not isinstance(frozen.get("remark_field"), str)
+                    or not isinstance(frozen.get("overrides"), dict)):
+                raise ValueError("SHOT_NOTES_BINDING_INVALID")
+            if not force_rebuild:
+                expected = queue_contracts.task_shot_note_overrides(task,
+                    remark_field=frozen["remark_field"], new_task=True)
+                actual = {k: v for k, v in frozen["overrides"].items() if k != "source_reuse_policy"}
+                if expected != actual or frozen["overrides"].get("source_reuse_policy") != "strict-v1":
+                    raise ValueError("SHOT_NOTES_INPUT_CHANGED")
+                return dict(frozen["overrides"])
+            archive = task_dir / "selection_policy_history"
+            archive.mkdir(parents=True, exist_ok=True)
+            target = archive / (hashlib.sha256(raw).hexdigest() + ".json")
+            try:
+                with target.open("xb") as stream:
+                    stream.write(raw)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+            except FileExistsError:
+                if target.read_bytes() != raw:
+                    raise OSError("SHOT_NOTES_BINDING_ARCHIVE_CONFLICT")
+        except (OSError, UnicodeDecodeError, TypeError, json.JSONDecodeError) as exc:
+            raise ValueError("SHOT_NOTES_BINDING_INVALID") from exc
+    # Tasks frozen by older workers did not forward these notes; preserve their
+    # existing manifest and recovery identity. Dispatcher writes task.json even
+    # for a brand-new record, so only actual run checkpoints prove prior work.
+    report = task_dir / "report"
+    done = _read_json(task_dir / "done.json")
+    old_generation = (bool(done.get("drafts") or done.get("local_only_drafts") or done.get("qc_reports"))
+                      or (task_dir / "eval" / "active_contract.json").exists()
+                      or (report.is_dir() and any(report.rglob("selection_resume.json")))
+                      or (report.is_dir() and any(report.rglob("shot_match_report.json"))))
+    if old_generation and not force_rebuild:
+        return {}
+    result = {"source_reuse_policy": "strict-v1", **queue_contracts.task_shot_note_overrides(
+        task, remark_field=remark_field, new_task=True)}
+    from orchestrator.file_safety import atomic_write_text
+    atomic_write_text(path, json.dumps({"schema": "shot-notes-binding-v1", "remark_field": remark_field,
+                                      "overrides": result}, ensure_ascii=False, indent=2))
+    return result
 
 
 def finalize_closed_loop(task_dir: pathlib.Path, task: dict, drafts: list[str],
@@ -1514,7 +1567,16 @@ def process_task(task: dict, *, retry_partial: bool = False,
             "head_trim_s": 0.3,
             "tail_trim_s": 0,
         }
-        manifest.update(queue_contracts.task_runtime_overrides(task))
+        from orchestrator.selection import shot_notes
+        generation = _frozen_shot_note_overrides(tdir, task, shot_notes.remark_field())
+        overrides = queue_contracts.task_runtime_overrides(task)
+        if generation.get("source_reuse_policy") != "strict-v1":
+            # Older queue snapshots never forwarded these two task fields.
+            # A resumed selection must keep its original logical input.
+            overrides.pop("max_source_reuse", None)
+            overrides.pop("max_absorb_demo_speed", None)
+        manifest.update(overrides)
+        manifest.update(generation)
         if fixed_narration is not None:
             manifest["segments"] = fixed_narration
         task_id = str(manifest["task_id"])

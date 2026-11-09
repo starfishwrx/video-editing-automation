@@ -133,9 +133,30 @@ The optional `max_absorb_demo_speed` bounds the legacy scene planner's pour,
 absorption and wipe speeds (finite value from 1 to 20). If a full observed
 action does not fit, the scene must try another candidate or remain unresolved;
 the limit never authorizes inventing or silently clipping the missing action.
-The default AI editor does not yet enforce this task-specific field. Its shared
-production playback policy still caps reviewed process windows at 3x and keeps
-unknown or critical phases at 1x; do not rely on this field for a lower AI limit.
+The default AI editor and AI refill intersect this explicit cap with the shared
+playback policy. Since a general observation cannot prove a window is unrelated
+to absorption, the explicit cap conservatively applies to all AI windows;
+this can make an otherwise usable non-absorption window infeasible. Without
+the field, the existing policy is unchanged: reviewed process windows are at
+most 3x, separately reviewed complete placement windows can reach 2x, and
+critical experiment phases stay at 1x. Windows without either permission stay
+at 1x. The cap is bound to each
+new selection receipt and rechecked against the actual editable draft's source
+and target times, segment speed and speed material during independent QC.
+
+New queue tasks freeze `source_reuse_policy=strict-v1`: `max_source_reuse`
+limits uses of the same source (default 2 in the queue); a validated continuous
+group counts once for each source it actually uses, and preview-only missing-footage placeholders
+do not consume source uses. A task can select a smaller positive integer; when
+no eligible alternative exists, it is blocked rather than silently exceeding
+the limit. Legacy frozen runs retain their previous recovery behavior.
+
+New queue tasks forward `shot_notes` or the configured remark field. Numbered
+notes refer to original sentences and are mapped to the verified spoken
+segments; fragment notes use the text. The chosen basis is frozen on retry.
+Unversioned raw manifests retain split-segment numbering, while explicitly
+supplied segments can use `shot_notes_index_basis=segment` or `split`.
+Ambiguous frozen sentence/audio boundaries are blocked instead of being moved.
 An explicitly enabled `retain_related_on_unmet_scene` keeps a relevant, already
 observed shot in preview when a complete group cannot fit; the scene remains
 unresolved and cannot be represented as complete evidence.

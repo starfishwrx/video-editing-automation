@@ -1007,24 +1007,31 @@ def _split_oversized_sentence(text: str) -> list[str]:
     return out
 
 
-def split_sentences(manifest: Any) -> list[dict[str, Any]]:
-    """全流水线**唯一**的切句口径（规划层 `_sentences` 与 pre-TTS 共用）。
-
-    两边各切一次必然会出现「规划层按 A 切、TTS 按 B 切」的错位，于是真值表
-    的键对不上段落、估出来的时长套到了别的句子上。所以切句只留这一份实现。
-    """
+def sentence_groups(manifest: Any) -> tuple[list[dict[str, Any]], list[list[int]]]:
+    """Split once and retain each original sentence's one-based output indices."""
     m = manifest if isinstance(manifest, dict) else {}
     if m.get("segments"):
-        return [dict(s) for s in m.get("segments", [])
-                if isinstance(s, dict)
-                and str(s.get("text", s.get("caption", ""))).strip()]
+        segments = [dict(s) for s in m.get("segments", [])
+                    if isinstance(s, dict)
+                    and str(s.get("text", s.get("caption", ""))).strip()]
+        return segments, [[i] for i in range(1, len(segments) + 1)]
     text = str(m.get("full_script") or m.get("script") or "")
     parts = [part.strip() for part in _SENTENCE_SPLIT_RE.split(text) if part.strip()]
     from ..ai_editor_contract import selection_mode
-    if selection_mode(m) in ("ai_editor", "rule_then_ai"):
-        parts = [piece for part in parts for clause in _spoken_clauses(part)
-                 for piece in _split_oversized_sentence(clause)]
-    return [{"text": part} for part in parts]
+    split_clauses = selection_mode(m) in ("ai_editor", "rule_then_ai")
+    rows, groups = [], []
+    for part in parts:
+        pieces = ([piece for clause in _spoken_clauses(part)
+                   for piece in _split_oversized_sentence(clause)] if split_clauses else [part])
+        indices = list(range(len(rows) + 1, len(rows) + len(pieces) + 1))
+        rows.extend({"text": piece} for piece in pieces)
+        groups.append(indices)
+    return rows, groups
+
+
+def split_sentences(manifest: Any) -> list[dict[str, Any]]:
+    """全流水线唯一的切句口径，规划和 pre-TTS 使用同一个实现。"""
+    return sentence_groups(manifest)[0]
 
 
 def sentence_key(item: Any, index: int) -> str:

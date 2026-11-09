@@ -933,6 +933,18 @@ def cmd_build(args) -> int:
     if logger.runtime.get("selection_configuration_error"):
         return _emit(_compact_build_result(finalize({"status": "ENV_ERROR",
             "failure_class": "environment", "reason": logger.runtime["selection_configuration_error"]})), 1)
+    from .. import ai_editor_contract
+    from ..policy import playback
+    try:
+        if (manifest.get("max_source_reuse") is not None and not manifest.get("source_reuse_policy")
+                and not os.environ.get("JY_PRESERVE_UNVERSIONED_QUEUE_REUSE")):
+            manifest["source_reuse_policy"] = "strict-v1"
+        playback.task_absorb_speed_cap(manifest)
+        ai_editor_contract.source_reuse_limit(manifest)
+    except ValueError as exc:
+        return _emit(_compact_build_result(finalize({"status": "ENV_ERROR",
+            "failure_class": "environment", "reason": str(exc),
+            "message": "速度或素材复用设置无效，未开始配音或视觉分析。"})), 1)
     for warning in logger.runtime.get("configuration_warnings") or []:
         print("WARNING: " + warning, file=sys.stderr)
 
@@ -1010,11 +1022,11 @@ def cmd_build(args) -> int:
             "message": "指定背景音乐不可读取，未开始视觉分析或配音。"})), 1)
 
     # Freeze one verified text plan before narration, matching and note binding.
-    # Existing segment/audio mappings and explicit notes are never reindexed.
+    # Previously bound notes stay frozen; new natural-sentence notes map from
+    # original character spans onto the verified semantic plan.
     from .. import ai_editor_contract
     from ..selection import sentence_planner
-    if (not manifest.get("segments") and not shot_notes._notes_of(manifest)
-            and not manifest.get("shot_notes_by_index")
+    if (not manifest.get("segments") and shot_notes.permits_semantic_planning(manifest)
             and (manifest.get("temporary_material_analysis") or manifest.get("auto_match_shots"))
             and ai_editor_contract.selection_mode(manifest) in ("ai_editor", "rule_then_ai")
             and manifest.get("semantic_sentence_planning", True)):
@@ -1030,7 +1042,12 @@ def cmd_build(args) -> int:
                 "message": "语义分句失败或未完整保留原文，未开始配音和选镜。",
                 "error": str(exc),
             })), 1)
-    manifest = shot_notes.apply(manifest)
+    try:
+        manifest = shot_notes.apply(manifest)
+    except (ValueError, TypeError) as exc:
+        return _emit(_compact_build_result(finalize({"status": "SHOT_NOTES_BINDING_INVALID",
+            "failure_class": "semantic", "retryable": False, "reason": str(exc),
+            "message": "画面备注无法安全绑定到原文，未开始配音或选镜。"})), 1)
 
     # 音色先锁一次并回写 manifest：全流程只在这里决议音色，引擎后续只读锁。
     # 必须在 TTS 之前，否则「按哪个音色合成」和「按哪个音色选镜」可能不是同一个。
@@ -1170,11 +1187,26 @@ def cmd_analyze_shots(args) -> int:
 def cmd_match_shots(args) -> int:
     input_path = Path(args.input).expanduser().resolve()
     manifest = _read(input_path)
+    from .. import ai_editor_contract
+    from ..policy import playback
     matching_input = copy.deepcopy(manifest)
     report_dir = Path(args.report_dir).expanduser().resolve()
     analysis_path = Path(args.analysis).expanduser().resolve()
     completed = False
     try:
+        try:
+            if manifest.get("max_source_reuse") is not None and not manifest.get("source_reuse_policy"):
+                manifest["source_reuse_policy"] = "strict-v1"
+            playback.task_absorb_speed_cap(manifest)
+            ai_editor_contract.source_reuse_limit(manifest)
+        except ValueError as exc:
+            return _emit({"status": "ENV_ERROR", "reason": str(exc),
+                          "message": "速度或素材复用设置无效，未开始视觉分析。"}, 1)
+        try:
+            manifest = shot_notes.apply(manifest)
+        except (ValueError, TypeError) as exc:
+            return _emit({"status": "SHOT_NOTES_BINDING_INVALID", "reason": str(exc),
+                          "message": "画面备注无法安全绑定到原文，未开始选镜。"}, 1)
         try:
             analysis = _read(analysis_path)
         except (OSError, ValueError) as exc:
@@ -1235,6 +1267,18 @@ def cmd_recover(args) -> int:
         return _emit({"status": "RECOVERY_MANIFEST_REQUIRED",
                       "message": "manifest 缺少 material_sources、segments 或 videos，无法安全恢复。"}, 1)
     stage = str(getattr(args, "stage", "draft_write") or "draft_write").strip().lower()
+    if stage in {"semantic_match", "draft_write"}:
+        from .. import ai_editor_contract
+        from ..policy import playback
+        try:
+            playback.task_absorb_speed_cap(manifest)
+            ai_editor_contract.source_reuse_limit({**manifest, "recovery_stage": stage})
+        except ValueError as exc:
+            if stage == "semantic_match":
+                _invalidate_match_report(Path(args.report_dir).expanduser().resolve(), recovery_input,
+                                         {"status": "SHOT_MATCH_BLOCKED", "message": str(exc)})
+            return _emit({"status": "ENV_ERROR", "reason": str(exc),
+                          "message": "速度或素材复用设置无效，未开始恢复。"}, 1)
     parent_run_id = str(manifest.get("parent_run_id") or manifest.get("run_id") or
                         manifest.get("task_id") or "").strip() or None
     manifest = dict(manifest)
@@ -1372,8 +1416,8 @@ def cmd_recover(args) -> int:
                                    "failure_class": "semantic",
                                    "message": "语义分句恢复需要与每句对应的原始配音时长文件。"})
                 return _emit(_compact_control_result(result), 1)
-        elif (not manifest.get("segments") and not shot_notes._notes_of(manifest)
-              and not manifest.get("shot_notes_by_index")
+        elif (not manifest.get("segments") and not shot_notes.has_frozen_binding(manifest)
+              and (not shot_notes._notes_of(manifest) or manifest.get("shot_notes_index_basis") == "original_sentence")
               and (manifest.get("temporary_material_analysis") or manifest.get("auto_match_shots"))
               and ai_editor_contract.selection_mode(manifest) in ("ai_editor", "rule_then_ai")
               and manifest.get("semantic_sentence_planning", True)):
@@ -1381,6 +1425,12 @@ def cmd_recover(args) -> int:
                                "failure_class": "semantic",
                                "message": "请使用原任务 sentence_planning/planned_manifest.json 恢复，避免分句错位。"})
             return _emit(_compact_control_result(result), 1)
+        try:
+            manifest = shot_notes.apply(manifest)
+        except (ValueError, TypeError) as exc:
+            return _emit(_compact_control_result(finalize({"status": "SHOT_NOTES_BINDING_INVALID",
+                "failure_class": "semantic", "retryable": False, "reason": str(exc),
+                "message": "画面备注无法安全绑定到原文，未开始恢复选镜。"})), 1)
         analysis = str(manifest.get("shot_analysis_file") or "").strip()
         analysis_path = Path(analysis).expanduser() if analysis else report_dir / "shot_candidates.json"
         if not analysis_path.is_absolute():

@@ -145,8 +145,11 @@ def _context(manifest, analysis, members, narration_timing, pair, motion, shot_i
                                                         if s["experiment_role"] == "rewet")])
     total = sum(s["target_us"] for s in allocated)
     fps = float(manifest.get("fps", 30))
+    task_cap = identity.playback.task_absorb_speed_cap(manifest)
+    max_speed = min(identity.playback.PROCESS_MAX, task_cap if task_cap is not None else identity.playback.PROCESS_MAX)
     planned = experiment_events.fit_phase_windows(pair["members"], observations,
-        experiment_contract.contract_for(scoped)["minimum_result_frames"], total, boundary, fps=fps)
+        experiment_contract.contract_for(scoped)["minimum_result_frames"], total, boundary,
+        fps=fps, max_speed=max_speed)
     sources = {}
     for sid, member in zip(shot_ids, pair["members"]):
         shot = shots[sid]
@@ -181,10 +184,13 @@ def _context(manifest, analysis, members, narration_timing, pair, motion, shot_i
     paired_paths = tuple(m["samples"]["original"]["path"] for m in pair["members"])
     continuity.source_chain([(p["source_identity"]["path"], p["start_us"], p["end_us"])
                              for m in allocated for p in m["parts"]], (paired_paths,))
-    return {"product": manifest.get("product"), "category": manifest.get("category"),
+    context = {"product": manifest.get("product"), "category": manifest.get("category"),
         "rules": identity.rules_identity(manifest), "pair_shot_ids": list(shot_ids), "sources": sources,
         "members": allocated, "fps": fps,
         "source_selection": [p.get("source_selection") for p in planned]}
+    if task_cap is not None:
+        context["task_absorb_speed_cap"] = task_cap
+    return context
 
 
 def review_group(manifest, context, directory):
@@ -291,7 +297,8 @@ def assemble_member(manifest, plan, group, index, original):
                 "claim": fact["observation"], "evidence_source": "ai_editor_pixel_review"}
                 for e in fact["evidence_intervals_us"]]}
         item["ai_selection"] = identity.make_receipt(item, index=index, sentence=member,
-            observation=observation, source_identity=cut["source_identity"], identity=plan["identity"])
+            observation=observation, source_identity=cut["source_identity"], identity=plan["identity"],
+            task_speed_cap=identity.playback.task_absorb_speed_cap(manifest))
         parts.append(item)
     segment = {**original, **parts[0], "selection_mode": "ai_editor", "sentence_kind": member["kind"],
         "claim_text": member["text"], "audio_duration_us": member["audio_duration_us"], "timing_certainty": "audio",
@@ -303,7 +310,8 @@ def assemble_member(manifest, plan, group, index, original):
         observation = {**observed, **observed["parts"][0], "confidence": group["review"]["confidence"],
                        "playback_observation": parts[0]["playback_observation"]}
         segment["ai_selection"] = identity.make_receipt(segment, index=index, sentence=member,
-            observation=observation, source_identity=member["parts"][0]["source_identity"], identity=plan["identity"])
+            observation=observation, source_identity=member["parts"][0]["source_identity"], identity=plan["identity"],
+            task_speed_cap=identity.playback.task_absorb_speed_cap(manifest))
     check = identity.validate_segment_receipt(segment, index=index, manifest=manifest, verify_source=True)
     if not check["ok"]:
         raise ValueError("CONTINUITY_" + ";".join(check["reasons"]))
@@ -399,9 +407,13 @@ def repair(manifest, analysis, plan, directory, narration_timing):
                 try:
                     editor._assemble(manifest, analysis, trial, narration_timing=narration_timing, verify_sources=True)
                 except (ValueError, KeyError, TypeError, OSError) as exc:
-                    from .ai_editor_recovery import repairable_index
-                    if repairable_index(exc) in indices or repairable_index(exc) is None:
-                        raise
+                    from .ai_editor_recovery import repairable_index, only_outside_sequence_conflicts
+                    other_index = repairable_index(exc)
+                    if other_index in indices or other_index is None:
+                        checked = editor._assemble(manifest, analysis, trial, narration_timing=narration_timing,
+                                                   verify_sources=True, validate_sequence=False)
+                        if not only_outside_sequence_conflicts(checked["segments"], manifest, set(indices)):
+                            raise exc
                 plan.update(trial)
                 plan["experiment_attempts"][scope][key]["status"] = "accepted"
                 plan.setdefault("continuity_repairs", []).append({"indices": indices, "review_key": group_key,
@@ -438,29 +450,34 @@ def refill_groups(manifest, analysis, by_index, wanted, directory, narration_tim
         plan_path = directory / ("group-" + identity.digest(sorted(indices))[:16])
         try:
             for i, item in by_index.items():
-                if not identity.validate_segment_receipt(item, index=i, manifest=manifest, verify_source=True)["ok"]:
+                if (i in indices or identity.is_ai_segment(item)) and not identity.validate_segment_receipt(
+                        item, index=i, manifest=manifest, verify_source=True)["ok"]:
                     raise ValueError("AI_REFILL_FROZEN_INVALID")
             sentences, rows, reviews = [], [], {}
             old_members = {m["index"]: m for m in old["input"]["members"]}
             for index, original in enumerate(originals, 1):
                 selected = by_index[index]
-                receipt = selected["ai_selection"]
                 member = old_members.get(index)
-                sentence = {"index": index, "text": timing.sentence_text(original),
-                    "kind": receipt["sentence_kind"], "selling_points": receipt["selling_points"],
-                    "scene_ids": receipt["sentence_scene_ids"],
-                    "experiment_role": member["experiment_role"] if member else "other",
-                    "candidate_ids": list(shots)}
+                receipt = selected.get("ai_selection")
+                if receipt:
+                    sentence = {"index": index, "text": timing.sentence_text(original),
+                        "kind": receipt["sentence_kind"], "selling_points": receipt["selling_points"],
+                        "scene_ids": receipt["sentence_scene_ids"]}
+                else:
+                    sentence = editor._heuristic_sentence(index, timing.sentence_text(original))
+                sentence.update(experiment_role=member["experiment_role"] if member else "other",
+                    candidate_ids=list(shots))
                 sentences.append(sentence)
                 duration, _ = timing.duration_for(narration_timing, index, segment=original)
                 physical = selected.get("span_parts") or [selected]
                 rows.append({"index": index, "parts": [{"shot_id": p["ai_selection"]["shot_id"],
-                    "audio_duration_us": max(1, round(duration / len(physical)))} for p in physical]})
+                    "audio_duration_us": max(1, round(duration / len(physical)))} for p in physical] if receipt else []})
                 reviews[str(index)] = [{**p["ai_selection"], "verdict": "matched", "same_product": True}
-                                      for p in physical]
+                                      for p in physical] if receipt else []
             plan = {"sentences": sentences, "rows": rows, "reviews": reviews, "display_reviews": [],
                 "coverage": {}, "identity": {"model": editor._editor_model(),
                     "editorial_rules": identity.rules_identity(manifest)},
+                "_allow_frozen_rule_segments": True,
                 "_frozen_segments": {i: copy.deepcopy(row) for i, row in by_index.items() if i not in indices},
                 "_locked_members": {m["index"]: copy.deepcopy(m["parts"]) for m in old["input"]["members"]
                                     if m["index"] not in targets}}

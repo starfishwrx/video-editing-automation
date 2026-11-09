@@ -165,9 +165,13 @@ def _preview_delivery(manifest: dict[str, Any] | None) -> bool:
 def _fit_speed_range(shot: dict[str, Any], *, manifest: dict[str, Any] | None,
                      time_sensitive: bool) -> tuple[float, float]:
     """Use the shared production policy; role labels cannot grant acceleration."""
-    return timing_contract.effective_speed_range(demo_actions.visual_role(shot),
+    bounds = timing_contract.effective_speed_range(demo_actions.visual_role(shot),
         time_sensitive=time_sensitive, override=shot.get("speed_range_override"),
         playback_observation=shot.get("playback_observation"))
+    if shot.get("selection_mode") == "ai_editor":
+        cap = timing_contract.playback.task_absorb_speed_cap(manifest)
+        return timing_contract.playback.capped_range(bounds, cap)
+    return bounds
 
 
 def _absorb_text_role(manifest: dict[str, Any], text: str) -> str:

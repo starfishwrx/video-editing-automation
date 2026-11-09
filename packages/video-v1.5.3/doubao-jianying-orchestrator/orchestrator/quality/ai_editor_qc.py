@@ -98,9 +98,13 @@ def claim_batches(claims, size):
 
 def validate_cut(claim: dict, rows: list[dict], prepared_sources=None) -> list[str]:
     item = claim["ai_segment"]
-    check = contract.validate_segment_receipt(item, index=claim["index"], manifest={
-        "category": claim.get("category"), "product": claim.get("product")}
-        if claim.get("category") or claim.get("product") else None)
+    context = {"category": claim.get("category"), "product": claim.get("product")}
+    if claim.get("max_absorb_demo_speed") is not None:
+        context["max_absorb_demo_speed"] = claim["max_absorb_demo_speed"]
+    if not (claim.get("category") or claim.get("product") or "max_absorb_demo_speed" in context
+            or (item.get("ai_selection") or {}).get("task_absorb_speed_cap") is not None):
+        context = None
+    check = contract.validate_segment_receipt(item, index=claim["index"], manifest=context)
     issues = list(check["reasons"])
     expected = item.get("span_parts") if item.get("multi_shot") else [item]
     if len(expected) != len(rows):
@@ -128,6 +132,40 @@ def validate_cut(claim: dict, rows: list[dict], prepared_sources=None) -> list[s
                     or not isinstance(speed, (int, float)) or speed <= 0
                     or abs(actual["source_duration"] / speed - target) > .04):
                 issues.append("AI_QC_FINAL_SPEED_CHANGED")
+        try:
+            recorded_cap = contract.playback.task_absorb_speed_cap(
+                {"max_absorb_demo_speed": receipt.get("task_absorb_speed_cap")})
+            current_cap = contract.playback.task_absorb_speed_cap(context)
+            cap = min(recorded_cap, current_cap) if recorded_cap is not None and current_cap is not None else (
+                recorded_cap if recorded_cap is not None else current_cap)
+            if cap is not None:
+                target_us = round(float(actual["target_duration"]) * 1e6)
+                segment = actual.get("segment") or {}
+                speed = segment.get("speed")
+                problems = contract.playback.conflicts(start_us=start, end_us=end, target_us=target_us,
+                    speed=speed, time_sensitive=receipt.get("time_sensitive"),
+                    observation=receipt.get("playback_observation"), task_speed_cap=cap, index=claim["index"])
+                if problems:
+                    issues.append("AI_QC_FINAL_PLAYBACK_POLICY_CONFLICT")
+                if (type(speed) not in (int, float) or not math.isfinite(speed) or target_us <= 0
+                        or abs(speed - (end - start) / target_us) > max(1e-8, 2 / target_us)):
+                    issues.append("AI_QC_FINAL_SPEED_CHANGED")
+                materials = actual.get("speed_materials") or []
+                if not isinstance(materials, list) or len(materials) != 1:
+                    issues.append("AI_QC_FINAL_SPEED_MATERIAL_MISSING")
+                    materials = []
+                for material in materials:
+                    value = material.get("speed") if isinstance(material, dict) else None
+                    if (not isinstance(material, dict) or material.get("type") != "speed"
+                            or (material.get("mode") is not None and
+                                (type(material["mode"]) is not int or material["mode"] != 0))
+                            or material.get("curve_speed")
+                            or type(value) not in (int, float) or not math.isfinite(value)
+                            or type(speed) not in (int, float) or not math.isfinite(speed)
+                            or abs(value - speed) > max(1e-8, 2 / target_us)):
+                        issues.append("AI_QC_FINAL_SPEED_MATERIAL_CHANGED")
+        except (KeyError, ValueError, TypeError, OverflowError, ZeroDivisionError):
+            issues.append("AI_QC_FINAL_SPEED_UNVERIFIABLE")
         for ev in receipt.get("evidence_intervals_us", []):
             if (ev["end"] <= start or ev["start"] >= end
                     or ev["start"] < start - 100000 or ev["end"] > end + 100000):

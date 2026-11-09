@@ -131,11 +131,100 @@ def is_ai_segment(item: dict) -> bool:
     return item.get("selection_mode") == "ai_editor" or "ai_selection" in item
 
 
-def sequence_conflict_details(segments: list[dict]) -> list[tuple]:
+def _old_queue_reuse(manifest: dict) -> bool:
+    selection = manifest.get("clip_selection_policy") or {}
+    return (bool(manifest.get("record_id")) and isinstance(selection, dict)
+            and selection.get("mode") == "script_driven_semantic_match")
+
+
+def max_source_reuse(manifest: dict | None) -> int | None:
+    """An explicit task limit counts physical cuts; a validated continuity group is one use."""
+    m = manifest or {}
+    raw = m.get("max_source_reuse")
+    if raw is None:
+        return None
+    legacy = (selection_mode(m) == "legacy" or (m.get("source_reuse_policy") is None
+              and (_old_queue_reuse(m) or m.get("recovery_stage"))))
+    if legacy:
+        try:
+            return max(1, int(raw or 2))
+        except (ValueError, TypeError, OverflowError) as exc:
+            raise ValueError("MAX_SOURCE_REUSE_INVALID") from exc
+    if type(raw) is int:
+        value = raw
+    elif type(raw) is float and math.isfinite(raw) and raw.is_integer():
+        value = int(raw)
+    elif isinstance(raw, str) and raw.strip().isascii() and raw.strip().isdigit():
+        value = int(raw.strip())
+    else:
+        raise ValueError("MAX_SOURCE_REUSE_INVALID")
+    if value < 1:
+        raise ValueError("MAX_SOURCE_REUSE_INVALID")
+    return value
+
+
+def source_reuse_limit(manifest: dict | None) -> int | None:
+    """Old queue defaults and unversioned recovery retain their original AI behavior."""
+    m = manifest or {}
+    limit = max_source_reuse(m)
+    policy = m.get("source_reuse_policy")
+    if policy is not None and policy != "strict-v1":
+        raise ValueError("SOURCE_REUSE_POLICY_INVALID")
+    if policy == "strict-v1":
+        return limit
+    # Historical workers inserted exactly 2 even when no operator requested
+    # a limit. A different explicit value in a fresh build still takes effect.
+    if (_old_queue_reuse(m) and limit == 2) or m.get("recovery_stage"):
+        return None
+    return limit
+
+
+def source_reuse_conflict_details(segments: list[dict], limit: int | None) -> list[tuple]:
+    if limit is None:
+        return []
+    counts: dict[str, int] = {}
+    groups: set[tuple[str, str]] = set()
+    errors = []
+    for position, segment in enumerate(segments, 1):
+        original_index = segment.get("_source_reuse_index")
+        index = original_index if type(original_index) is int and original_index > 0 else position
+        for part_index, part in enumerate(segment.get("span_parts") or [segment], 1):
+            source = str((part.get("ai_selection") or {}).get("video") or part.get("video") or "")
+            if not source:
+                return [("AI_EDITOR_SEQUENCE_RECEIPT_INVALID",)]
+            source = os.path.normcase(str(Path(source).expanduser().resolve()))
+            group = part.get("continuity_group") or segment.get("continuity_group")
+            if group:
+                group_key = (source, digest(group))
+                if group_key in groups:
+                    continue
+                groups.add(group_key)
+            counts[source] = counts.get(source, 0) + 1
+            if counts[source] > limit:
+                errors.append((f"AI_EDITOR_SOURCE_REUSE_LIMIT:{index}", source, part_index))
+    return errors
+
+
+def source_reuse_indices(segments: list[dict], source: str) -> list[int]:
+    """Return original sentence positions using an already normalized source."""
+    indices = []
+    for index, segment in enumerate(segments, 1):
+        for part in segment.get("span_parts") or [segment]:
+            path = str((part.get("ai_selection") or {}).get("video") or part.get("video") or "")
+            if path and os.path.normcase(str(Path(path).expanduser().resolve())) == source:
+                indices.append(index)
+                break
+    return indices
+
+
+def sequence_conflict_details(segments: list[dict], *, source_reuse_limit: int | None = None,
+                              ai_only: bool = False) -> list[tuple]:
     """Identify exact conflicting parts/windows so a repair cannot swap one conflict for another."""
     errors: list[tuple] = []
     used: dict[str, list[tuple[int, int, int, int, bool]]] = {}
     for index, segment in enumerate(segments, 1):
+        if ai_only and not is_ai_segment(segment):
+            continue
         for part_index, part in enumerate(segment.get("span_parts") or [segment], 1):
             receipt = part.get("ai_selection") or {}
             source = str(receipt.get("video") or part.get("video") or "")
@@ -155,16 +244,17 @@ def sequence_conflict_details(segments: list[dict]) -> list[tuple]:
                 if sensitive and was_sensitive and index <= previous + 1 and start < a - 40000:
                     errors.append((f"AI_EDITOR_EXPERIMENT_TIME_REVERSED:{previous}:{index}", *detail))
             used.setdefault(source, []).append((index, part_index, start, end, sensitive))
-    return errors
+    return errors + source_reuse_conflict_details(segments, source_reuse_limit)
 
 
-def sequence_errors_all(segments: list[dict]) -> list[str]:
-    return continuity.sequence_errors(segments) + [detail[0] for detail in sequence_conflict_details(segments)]
+def sequence_errors_all(segments: list[dict], *, manifest: dict | None = None, ai_only: bool = False) -> list[str]:
+    return continuity.sequence_errors(segments) + [detail[0] for detail in sequence_conflict_details(
+        segments, source_reuse_limit=source_reuse_limit(manifest), ai_only=ai_only)]
 
 
-def sequence_errors(segments: list[dict]) -> list[str]:
+def sequence_errors(segments: list[dict], *, manifest: dict | None = None, ai_only: bool = False) -> list[str]:
     """Preserve the public first-error contract."""
-    return sequence_errors_all(segments)[:1]
+    return sequence_errors_all(segments, manifest=manifest, ai_only=ai_only)[:1]
 
 
 def _window(item: dict) -> dict[str, int]:
@@ -179,7 +269,7 @@ def _window(item: dict) -> dict[str, int]:
 
 
 def make_receipt(segment: dict, *, index: int, sentence: dict, observation: dict,
-                 source_identity: dict, identity: dict) -> dict:
+                 source_identity: dict, identity: dict, task_speed_cap: float | None = None) -> dict:
     """Record the actual observation and solved cut without a self-signature."""
     receipt = {
         "schema": RECEIPT_SCHEMA, "policy_version": POLICY_VERSION,
@@ -203,6 +293,8 @@ def make_receipt(segment: dict, *, index: int, sentence: dict, observation: dict
         "evidence_intervals_us": observation["evidence_intervals_us"],
         "identity": identity, "judgment": "matched",
     }
+    if task_speed_cap is not None:
+        receipt["task_absorb_speed_cap"] = task_speed_cap
     return receipt
 
 
@@ -250,9 +342,16 @@ def validate_segment_receipt(item: dict, *, text: str | None = None,
             target = round((window["end"] - window["start"]) / speed)
         # The parent of a multi-shot sentence summarizes semantic coverage;
         # playback belongs to each physical part, checked recursively below.
+        recorded_cap = playback.task_absorb_speed_cap({"max_absorb_demo_speed": receipt.get("task_absorb_speed_cap")})
+        current_cap = playback.task_absorb_speed_cap(manifest)
+        if recorded_cap is not None and manifest is not None and current_cap != recorded_cap:
+            reasons.append("AI_SELECTION_TASK_SPEED_LIMIT_CHANGED")
+        cap = min(recorded_cap, current_cap) if recorded_cap is not None and current_cap is not None else (
+            recorded_cap if recorded_cap is not None else current_cap)
         problems = [] if item.get("multi_shot") else playback.conflicts(
             start_us=window["start"], end_us=window["end"], target_us=target, speed=speed,
-            time_sensitive=receipt.get("time_sensitive"), observation=receipt.get("playback_observation"), index=index)
+            time_sensitive=receipt.get("time_sensitive"), observation=receipt.get("playback_observation"),
+            task_speed_cap=cap, index=index)
         reasons.extend(p["code"] for p in problems)
         if item.get("playback_observation") != receipt.get("playback_observation"):
             reasons.append("PLAYBACK_OBSERVATION_CHANGED")

@@ -19,6 +19,33 @@ PROMPT = """生产画面速度规则：计时证明保持原速；普通完整�
 不能用后台支持的更高倍率、旧缓存或preview绕过规则。"""
 
 
+def task_absorb_speed_cap(manifest) -> float | None:
+    """Validate an explicit task cap without widening any playback permission.
+
+    Ordinary AI observations do not yet establish whether every physical
+    window is unrelated to an absorb demonstration. Callers must conservatively
+    apply this cap to unknown AI windows rather than classify from keywords.
+    """
+    raw = (manifest or {}).get("max_absorb_demo_speed")
+    if raw is None:
+        return None
+    try:
+        cap = float(raw)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("SCENE_SPEED_LIMIT_INVALID") from exc
+    if not math.isfinite(cap) or not 1 <= cap <= 20:
+        raise ValueError("SCENE_SPEED_LIMIT_INVALID")
+    return cap
+
+
+def capped_range(bounds: tuple[float, float], cap: float | None) -> tuple[float, float]:
+    if cap is None:
+        return bounds
+    lo, hi = bounds
+    hi = min(hi, cap)
+    return (lo, hi) if lo <= hi else (0.0, 0.0)
+
+
 def process_window(value) -> tuple[int, int] | None:
     if not isinstance(value, dict) or value.get("schema") != OBSERVATION_SCHEMA:
         return None
@@ -63,7 +90,7 @@ def speed_range(*, time_sensitive=False, observation=None, override=None) -> tup
 
 
 def conflicts(*, start_us, end_us, target_us, speed, time_sensitive=False,
-              observation=None, index=None) -> list[dict]:
+              observation=None, index=None, task_speed_cap=None) -> list[dict]:
     """Use actual source/output durations, not a cached policy/version claim."""
     base = {"index": index, "policy_version": VERSION,
             "source_start_us": start_us, "source_end_us": end_us, "target_us": target_us}
@@ -73,6 +100,7 @@ def conflicts(*, start_us, end_us, target_us, speed, time_sensitive=False,
         return [{**base, "code": "PLAYBACK_TIMING_INVALID"}]
     actual = (end_us - start_us) / target_us
     lo, hi = speed_range(time_sensitive=time_sensitive, observation=observation)
+    lo, hi = capped_range((lo, hi), task_speed_cap)
     window = process_window(observation) or placement_fit_window(observation)
     if window and not window[0] <= start_us < end_us <= window[1]:
         hi = lo = 1.0

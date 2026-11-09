@@ -18,6 +18,30 @@ def repairable_index(error: Exception) -> int | None:
     return int(missing[1]) if missing else None
 
 
+def only_outside_sequence_conflicts(segments: list[dict], manifest: dict, members: set[int]) -> bool:
+    """Defer only sequence conflicts that can be caused by an outside row.
+
+    The public assembly error reports only the first conflict. Inspect every
+    sequence error before deferring it, so a group conflict cannot be hidden.
+    """
+    from .. import ai_editor_contract as contract
+    errors = contract.sequence_errors_all(segments, manifest=manifest, ai_only=True)
+    reuse_details = contract.source_reuse_conflict_details(segments, contract.source_reuse_limit(manifest))
+    if not errors:
+        return False
+    for error in errors:
+        repeat = re.fullmatch(r"AI_EDITOR_REPEATED_SOURCE_WINDOW:(\d+):(\d+)", error)
+        reuse = re.fullmatch(r"AI_EDITOR_SOURCE_REUSE_LIMIT:(\d+)", error)
+        if repeat and not members.intersection(map(int, repeat.groups())):
+            continue
+        if reuse:
+            detail = next((d for d in reuse_details if d[0] == error), None)
+            if detail and any(i not in members for i in contract.source_reuse_indices(segments, detail[1])):
+                continue
+        return False
+    return True
+
+
 def failure_fields(message: str, *, stage: str = "semantic_match") -> dict:
     """A request outage is not evidence of a material/semantic gap."""
     text = message.upper()
@@ -54,6 +78,9 @@ def failed_index(error: Exception) -> int | None:
     repeat = re.fullmatch(r"AI_EDITOR_REPEATED_SOURCE_WINDOW:\d+:(\d+)", str(error))
     if repeat:
         return int(repeat[1])
+    reuse = re.fullmatch(r"AI_EDITOR_SOURCE_REUSE_LIMIT:(\d+)", str(error))
+    if reuse:
+        return int(reuse[1])
     match = re.match(r"AI_EDITOR_(?:NO_SELECTION|AUDIO_ALLOCATION_INVALID|UNREVIEWED_SELECTION|POINTS_UNCOVERED|EXPERIMENT_GROUP_PENDING):(\d+)", str(error))
     return int(match[1]) if match else None
 

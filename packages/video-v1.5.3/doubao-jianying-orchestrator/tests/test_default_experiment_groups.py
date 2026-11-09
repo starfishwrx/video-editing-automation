@@ -71,6 +71,24 @@ class DefaultExperimentGroupTests(unittest.TestCase):
         self.assertEqual(observe.call_count, 1)
         return result
 
+    def promotion_before_group(self):
+        order = [2, 0, 1]
+        self.manifest["segments"] = [copy.deepcopy(self.manifest["segments"][i]) for i in order]
+        sentences = [copy.deepcopy(self.plan["sentences"][i]) for i in order]
+        rows = [copy.deepcopy(self.plan["rows"][i]) for i in order]
+        reviews = copy.deepcopy(self.plan["reviews"])
+        for index, sentence in enumerate(sentences, 1): sentence["index"] = index
+        for index, row in enumerate(rows, 1): row["index"] = index
+        self.plan.update(sentences=sentences, rows=rows,
+            reviews={str(index + 1): reviews[str(old + 1)] for index, old in enumerate(order)})
+
+    def mixed_group(self):
+        self.promotion_before_group()
+        matched = self.repair()
+        matched["segments"][0].pop("ai_selection")
+        matched["segments"][0]["selection_mode"] = "rule"
+        return matched
+
     def test_default_repair_pairs_files_and_keeps_voice_and_unrelated_row(self):
         original = copy.deepcopy(self.manifest)
         old = editor._assemble(self.manifest, self.analysis, self.plan, narration_timing=None)
@@ -92,6 +110,96 @@ class DefaultExperimentGroupTests(unittest.TestCase):
         self.plan["rows"][0]["parts"] = []
         self.plan["reviews"]["1"] = []
         self.assertTrue(self.repair()["ok"])
+
+    def test_experiment_receipts_and_output_qc_bind_explicit_task_cap(self):
+        self.manifest["max_absorb_demo_speed"] = 3.0
+        result = self.repair()
+        for index, row in enumerate(result["segments"][:2], 1):
+            self.assertEqual(row["ai_selection"]["task_absorb_speed_cap"], 3.0)
+            self.assertTrue(all(p["ai_selection"]["task_absorb_speed_cap"] == 3.0 for p in row["span_parts"]))
+            missing = {k: v for k, v in self.manifest.items() if k != "max_absorb_demo_speed"}
+            self.assertIn("AI_SELECTION_TASK_SPEED_LIMIT_CHANGED",
+                contract.validate_segment_receipt(row, index=index, manifest=missing)["reasons"])
+            actual = [{"source": p["video"], "source_start": p["source_start"], "source_duration": p["duration"],
+                "target_duration": p["segment_s"], "segment": {"speed": p["video_speed"]},
+                "speed_materials": [{"type": "speed", "speed": p["video_speed"]}]} for p in row["span_parts"]]
+            claim = {"index": index, "product": self.manifest["product"], "category": "weipin",
+                "ai_segment": row, "max_absorb_demo_speed": 3.0}
+            self.assertFalse(ai_editor_qc.validate_cut(claim, actual))
+            claim.pop("max_absorb_demo_speed")
+            self.assertIn("AI_SELECTION_TASK_SPEED_LIMIT_CHANGED", ai_editor_qc.validate_cut(claim, actual))
+            actual[0]["speed_materials"] = []
+            self.assertIn("AI_QC_FINAL_SPEED_MATERIAL_MISSING", ai_editor_qc.validate_cut(claim, actual))
+
+    def test_outside_reuse_conflict_does_not_reject_experiment_pair(self):
+        self.manifest.update(source_reuse_policy="strict-v1", max_source_reuse=1)
+        self.manifest["segments"].append({"text": "额外展示", "audio_duration_us": 2_000_000})
+        self.shots.append({**self.shots[2], "shot_id": "shot4"})
+        self.plan["sentences"].append({"index": 4, "text": "额外展示", "kind": "selling_point",
+            "selling_points": [{"id": "p1", "text": "额外展示"}], "scene_ids": [],
+            "experiment_role": "promotion", "candidate_ids": ["shot4"]})
+        self.plan["reviews"]["4"] = [{**copy.deepcopy(self.plan["reviews"]["3"][0]), "shot_id": "shot4",
+            "evidence_intervals_us": [{"start": 5_000_000, "end": 5_500_000}]}]
+        self.plan["rows"].append({"index": 4, "parts": [{"shot_id": "shot4",
+            "audio_duration_us": 2_000_000, "source_start_us": 5_000_000}]})
+        with patch.object(groups, "observe_pair", return_value=(self.fixture.evidence, self.fixture.motion)), \
+             patch.object(groups, "review_group", side_effect=self.observed_group):
+            self.assertTrue(groups.repair(self.manifest, self.analysis, self.plan, self.root, None))
+        with self.assertRaisesRegex(ValueError, "SOURCE_REUSE_LIMIT:4"):
+            editor._assemble(self.manifest, self.analysis, self.plan, narration_timing=None)
+        replacement = self.root / "replacement.mp4"; replacement.write_bytes(b"synthetic replacement")
+        self.shots[3]["video"] = str(replacement)
+        self.plan["reviews"]["4"][0]["source_identity"] = contract.source_identity(replacement)
+        result = editor._assemble(self.manifest, self.analysis, self.plan, narration_timing=None, verify_sources=True)
+        self.assertTrue(result["ok"])
+        self.assertFalse(contract.source_reuse_conflict_details(result["segments"], 1))
+
+    def test_earlier_ordinary_row_can_fix_reuse_conflict_reported_on_group(self):
+        self.promotion_before_group()
+        self.manifest.update(source_reuse_policy="strict-v1", max_source_reuse=1)
+        alternate = copy.deepcopy(self.plan["reviews"]["1"][0])
+        same_as_experiment = {**copy.deepcopy(alternate), "shot_id": "shot1",
+            "source_identity": contract.source_identity(self.shots[0]["video"]),
+            "evidence_intervals_us": [{"start": 6_000_000, "end": 6_500_000}]}
+        self.plan["reviews"]["1"] = [same_as_experiment, alternate]
+        self.plan["sentences"][0]["candidate_ids"] = ["shot1", "shot3"]
+        self.plan["rows"][0]["parts"] = [{"shot_id": "shot1", "audio_duration_us": 2_000_000,
+                                           "source_start_us": 6_000_000}]
+        result = self.repair()
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["segments"][0]["shot_id"], "shot3")
+        self.assertFalse(contract.source_reuse_conflict_details(result["segments"], 1))
+
+    def test_refill_experiment_group_keeps_prior_rule_row_and_other_member(self):
+        matched = self.mixed_group(); prior = copy.deepcopy(matched["segments"])
+        with patch.object(groups, "observe_pair", return_value=(self.fixture.evidence, self.fixture.motion)), \
+             patch.object(groups, "review_group", side_effect=self.observed_group):
+            result = editor.refill_indices({**self.manifest, "ai_refill_indices": [2]}, self.analysis,
+                                           matched, [2], self.root / "mixed-group-refill")
+        self.assertTrue(result["ok"], result.get("refill_errors"))
+        self.assertEqual(result["refill_replaced"], [2])
+        self.assertEqual(result["segments"][0], prior[0])
+        cuts = lambda row: [(p["video"], p["source_start"], p["source_end"], p["segment_us"], p["video_speed"])
+                            for p in row["span_parts"]]
+        self.assertEqual(cuts(result["segments"][2]), cuts(prior[2]))
+        self.assertEqual(result["selection_mode"], "rule_then_ai")
+
+    def test_refill_after_rule_row_and_experiment_group_keeps_original_indices(self):
+        matched = self.mixed_group(); prior = copy.deepcopy(matched["segments"])
+        self.manifest["segments"].append({"text": "新文案", "audio_duration_us": 2_000_000})
+        matched["segments"].append({"index": 4, "text": "新文案"})
+        source = self.root / "new-refill.mp4"; source.write_bytes(b"new synthetic footage")
+        shot = {**self.shots[2], "shot_id": "new", "video": str(source)}
+        self.shots.append(shot)
+        review = {**copy.deepcopy(self.plan["reviews"]["1"][0]), "shot_id": "new",
+                  "source_identity": contract.source_identity(source)}
+        with patch.object(editor, "_review_pool", return_value=([review], {"feasible": True})):
+            result = editor.refill_indices({**self.manifest, "ai_refill_indices": [4]}, self.analysis,
+                                           matched, [4], self.root / "mixed-outside-refill")
+        self.assertTrue(result["ok"], result.get("refill_errors"))
+        self.assertEqual(result["refill_replaced"], [4])
+        self.assertEqual(result["segments"][:3], prior)
+        self.assertEqual(result["selection_mode"], "rule_then_ai")
 
     def test_frozen_group_resumes_without_new_observation(self):
         result = self.repair()

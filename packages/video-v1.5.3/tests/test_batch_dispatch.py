@@ -28,6 +28,25 @@ class BatchDispatchTests(unittest.TestCase):
         self.preflight.start()
         self.addCleanup(self.preflight.stop)
 
+    def test_task_speed_cap_is_forwarded_from_top_level_and_nested_manifest(self):
+        from tools.queueing.contracts import task_runtime_overrides
+        self.assertEqual(task_runtime_overrides({'max_absorb_demo_speed': 1.5,
+            'manifest': {'max_absorb_demo_speed': 2}})['max_absorb_demo_speed'], 1.5)
+        self.assertEqual(task_runtime_overrides({'manifest': {'max_absorb_demo_speed': 2}})
+                         ['max_absorb_demo_speed'], 2)
+        self.assertNotIn('max_absorb_demo_speed', task_runtime_overrides({}))
+        self.assertEqual(task_runtime_overrides({'manifest': {'max_source_reuse': 1}})
+                         ['max_source_reuse'], 1)
+
+    def test_new_note_input_has_versioned_numbering_and_old_retry_is_unchanged(self):
+        from tools.queueing.contracts import task_shot_note_overrides
+        task = {'画面备注': '第2句：展示包装'}
+        self.assertEqual(task_shot_note_overrides(task, remark_field='画面备注', new_task=True),
+            {'shot_notes': '第2句：展示包装', 'shot_notes_index_basis': 'original_sentence'})
+        self.assertEqual(task_shot_note_overrides(task, remark_field='画面备注', new_task=False), {})
+        self.assertEqual(task_shot_note_overrides({'manifest': {'自定义备注': '说明'}},
+            remark_field='自定义备注', new_task=True)['shot_notes'], '说明')
+
     def test_task_writer_preflight_blocks_before_any_material_preparation(self):
         self.preflight.stop()
         from orchestrator.application import cli

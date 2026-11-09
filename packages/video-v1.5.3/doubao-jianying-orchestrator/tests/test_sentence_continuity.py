@@ -270,6 +270,17 @@ class SentenceContinuityTests(unittest.TestCase):
         sharing.install(self.plan, contract.digest(group['input'])[:24], group)
         return editor._assemble(self.manifest, self.analysis, self.plan, narration_timing=None, verify_sources=True)
 
+    def test_verified_continuity_group_counts_as_one_source_use(self):
+        self.manifest['max_source_reuse'] = 1
+        result = self.install()
+        self.assertTrue(result['ok'])
+        self.assertEqual(contract.sequence_errors(result['segments'], manifest=self.manifest), [])
+        engine, clips = self.clips(result)
+        from orchestrator.application import headless_production
+        with patch.object(headless_production, 'write_draft', return_value={'status': 'SUCCESS'}) as writer:
+            self.assertEqual(engine.write_draft(clips, None)['status'], 'SUCCESS')
+        writer.assert_called_once()
+
     def clips(self, result):
         engine = OrchestrationEngine.__new__(OrchestrationEngine)
         engine.m = result['manifest']

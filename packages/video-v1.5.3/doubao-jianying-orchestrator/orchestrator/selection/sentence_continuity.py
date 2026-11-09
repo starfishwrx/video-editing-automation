@@ -3,8 +3,6 @@ from __future__ import annotations
 
 import copy
 import json
-import re
-
 from .. import ai_editor_contract as contract
 from ..policy import continuity
 from . import timing_contract as timing
@@ -223,18 +221,19 @@ def repair(manifest, analysis, plan, directory, failure, narration_timing, *, me
         except (ValueError, KeyError, TypeError, OSError) as other:
             other_index = repairable_index(other)
             members = {m["index"] for m in context["members"]}
-            repeated = re.fullmatch(r"AI_EDITOR_REPEATED_SOURCE_WINDOW:(\d+):(\d+)", str(other))
-            outside_repeat = repeated and not members.intersection(int(i) for i in repeated.groups())
-            if outside_repeat:
+            if other_index is None or other_index in members:
+                if not str(other).startswith(("AI_EDITOR_REPEATED_SOURCE_WINDOW:", "AI_EDITOR_SOURCE_REUSE_LIMIT:")):
+                    continue
                 # The public error shows only the first conflict. A hidden
                 # group/structure conflict must not ride along with this exception.
-                checked = editor._assemble(manifest, analysis, trial, narration_timing=narration_timing,
-                                           verify_sources=True, validate_sequence=False)
-                errors = contract.sequence_errors_all(checked["segments"])
-                matches = [re.fullmatch(r"AI_EDITOR_REPEATED_SOURCE_WINDOW:(\d+):(\d+)", text) for text in errors]
-                outside_repeat = bool(matches) and all(m and not members.intersection(int(i) for i in m.groups()) for m in matches)
-            if not outside_repeat and (other_index is None or other_index in members):
-                continue
+                try:
+                    checked = editor._assemble(manifest, analysis, trial, narration_timing=narration_timing,
+                                               verify_sources=True, validate_sequence=False)
+                except (ValueError, KeyError, TypeError, OSError):
+                    continue
+                from .ai_editor_recovery import only_outside_sequence_conflicts
+                if not only_outside_sequence_conflicts(checked["segments"], manifest, members):
+                    continue
         plan.update(trial)
         plan.setdefault("continuity_repairs", []).append({"indices": [m["index"] for m in context["members"]],
                                                           "reason": str(failure), "review_key": key})

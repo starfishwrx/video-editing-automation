@@ -62,6 +62,14 @@ class ExperimentRetimingTests(unittest.TestCase):
     def test_too_short_target_stops_at_three_instead_of_hiding_required_actions(self):
         with self.assertRaisesRegex(ValueError,'3X_CAP'):fit_group(self.clips(),2_500_000)
 
+    def test_task_cap_is_applied_to_all_phase_parts(self):
+        plans=fit_group(self.clips(),6_500_000,max_speed=1.5)
+        parts=[part for plan in plans for part in plan['retiming']['parts']]
+        self.assertTrue(all(part['speed'] <= 1.5 for part in parts))
+        self.assertTrue(all(part['speed'] == 1 for part in parts if part['locked']))
+        with self.assertRaisesRegex(ValueError,'TASK_CAP'):
+            fit_group(self.clips(),4_000_000,max_speed=1.5)
+
     def test_complete_press_and_result_cannot_be_marked_speedable(self):
         b=self.motion['observations'][1];b['segments'][0]['can_speed']=True
         with self.assertRaisesRegex(ValueError,'CONTACT_OR_COMPLETION'):self.clips()
