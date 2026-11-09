@@ -1,10 +1,11 @@
-# Local v1.5 runtime contract
+# Current runtime contract
 
-This source package's tool, orchestrator, and editor version is 1.5.6; read the active installed version from the deployment host. Visual policy stays at 1.4.1. v1.5.6 defaults remote vision to Volc Ark `glm-5.3-flash` direct HTTP (20-way concurrency) and GPU decode for all codecs; formal no-settled gates from 1.5.3 remain. See CHANGELOG and [production_quality_and_lessons.md](production_quality_and_lessons.md). Preview fills remain uncertified.
+Read this source package's tool, orchestrator and editor version from [VERSION](../../VERSION); verify the active installed version and actual files on the deployment host separately. The maintained directory name is historical, not a version selector. Visual policy is defined by [RULES.md](../../RULES.md). Remote vision defaults to Volc Ark `glm-5.3-flash` direct HTTP, with concurrency governed by the runtime policy. GPU decode remains preferred across codecs, with CPU fallback on resource or slot limits. Formal no-settled gates remain; see CHANGELOG and [production_quality_and_lessons.md](production_quality_and_lessons.md). Preview fills remain uncertified.
 
 The full model name is **GLM-5.3-Flash**, distinct from GLM-5.3 and ChatGLM3.
 The default `ai_editor` rechecks candidate pixels, plans the full script and
-uses independent final-cut QC v4. Explicit `legacy` retains the old Top3,
+uses independent final-cut QC v5. Old v4 reports cannot certify current drafts.
+Explicit `legacy` retains the old Top3,
 scene-swap and QC v3 contracts; its reports cannot certify an AI-editor draft.
 All selection modes, including `rule_then_ai` and `legacy`, use GLM
 (`volc_glm` / `glm` / `volc`) or Qwen (`qwen` / `qwen_compatible`) direct HTTP.
@@ -29,8 +30,10 @@ Use the installed sibling skills for standalone operations. The deployed pipelin
 
 The historical JyPoll/JyRun execution chain is retired: `jy_poll.ps1` and
 `run_task.template.ps1` fail immediately without loading credentials or starting
-a task. Use the manifest CLI for a single task or the complete Windows pipeline
-entrypoint above for an explicitly configured local queue. Updating source does
+a task. Single-record, batch and scheduled production all use the complete
+Windows pipeline entrypoint above; `scripts/run_pipeline.ps1 -RecordId <id>`
+selects one configured queue record. The manifest CLI is a lower-level build or
+diagnostic interface and does not replace independent QC and delivery. Updating source does
 not enable queues, change host scheduled tasks or replace already generated
 production scripts. The scheduled entrypoint uses a cross-process lock and saves
 `pipeline_runs/` plus `pipeline_state.json` under its configured work root.

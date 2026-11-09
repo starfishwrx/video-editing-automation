@@ -29,6 +29,9 @@
 - 写后：独立再读 `draft_info.json/draft_meta_info.json`、验证时间线无重叠、媒体存在、视频/音频不越界、字幕样式位置、BGM 跟随、草稿索引同步（`root_meta_info.json`）
 
 ## 5. 只读诊断与分阶段恢复（`diagnostics.py`, `cli.recover`）
+
+冻结输入与有界阶段恢复的选择、原因和关联见 [ADR 0009](../adr/0009-frozen-input-recovery.md)。
+
 - 诊断：不驱动 UI，只读草稿/媒资/磁盘状态/包签名/依赖，报告 `DESKTOP_IMPORT_BLOCKED` 等
 - 恢复：`preflight`（素材/环境就绪）→ `semantic_match`（消费已有 `shot_candidates.json` 与匹配报告）→ `draft_write`（严格只消费匹配缓存）→ `ui_acceptance`（只读桌面可见性诊断，保留 UNCERTIFIED，不授予正式交付）
 - 默认 worker 对选镜服务超时/限流保留原始错误，并指向 `semantic_match`。开始选镜前冻结 `selection_resume.json` 中的任务、真实配音、句长和文件状态；恢复复用已完成观察，不重合成配音或重扫全库。写稿绑定原音频，同时更新匹配报告与片段，使草稿和独立QC消费同一结果。

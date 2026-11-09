@@ -33,7 +33,7 @@ flowchart LR
 
 默认选镜为 `ai_editor`，默认 AI 选镜的最终视觉 QC 使用 v5 合同。`rule_then_ai` 和 `legacy` 是显式选择的选镜策略，与 GLM/Qwen 调用通道分别配置。模型完整名称、图片输入及覆盖顺序见[模型与视觉流程](docs/model-and-vision.md)。
 
-运行不依赖编码 Agent、Mac 交接或人工 prepare/collect。默认无头建稿不控制剪映界面；历史写稿方式仅能显式选择，不会自动回退。
+运行不依赖编码 Agent、Mac 交接或人工 prepare/collect。默认无头建稿不控制剪映界面；旧写稿器可显式选择，也仅在无头构建返回明确的旋转／HDR／像素格式／全范围兼容错误时以新草稿名自动尝试。其他失败不自动回退，正式验收不变；准确错误范围见 [ADR 0005](docs/adr/0005-writing-qc.md)。
 
 ## 快速开始
 

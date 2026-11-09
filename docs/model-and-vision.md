@@ -22,7 +22,7 @@
 2. `vision_analyzer.enrich_with_vision`：把有编号/时间标记的帧拼成 contact sheet，发送图片与任务要求，获得描述、动作、结果和证据窗口，并保存缓存。
 3. `ai_editor._inventory`：只读取上述描述和全稿文字，用于分类和候选召回；描述不作为已看清画面的证据。
 4. `ai_editor._review`：对候选源窗口重新抽 8 帧，必要时加密到 16 帧，发送拼图逐项核对卖点。模型不能确认或调用失败时保留未知状态；AI 编排后由程序重验源内容、音频分配和窗口。
-5. `draft_visual_qc`：从最终草稿使用的源窗口重新抽帧，以新调用进行视觉审稿。默认 AI 模式使用 v4；旧 v3 只供 legacy。独立 QC 不意味着自动换成另一个模型。
+5. `draft_visual_qc`：从最终草稿使用的源窗口重新抽帧，以新调用进行视觉审稿。默认 AI 模式使用 v5；旧 v3 只供 legacy，旧 v4 报告不能直接认证当前草稿。独立 QC 不意味着自动换成另一个模型。
 
 因此，同一个多模态模型可以承担“纯文字规划”和“看图检查”两种调用。某个调用只有文字输入，并不代表整个项目只使用文本模型。
 
@@ -37,7 +37,7 @@
 - base URL：`JY_VOLC_BASE_URL` → 上面的 Ark 地址；填写 base URL 时不重复附加 `/chat/completions`。
 - 默认直连的批次工作线程和跨进程槽位均为 20，分别由 `JY_VISION_BATCH_WORKERS`、`JY_VISION_SLOTS` 覆盖。
 - 抽帧/拼图先以独立的媒体并发完成（`JY_VISION_PREP_WORKERS`、跨进程 `JY_VISION_PREP_SLOTS` 均默认 2），随后 API 按任务并发；文字复核也先拼图再请求，默认跟随批次并发，QC 使用同一批次并发配置。请求完成即校验保存，不等待最慢批次。
-- 账户预算统一读取 `JY_CONCURRENCY_POLICY_FILE`；起点为制作4、媒体2、每任务API20、账户API20。没有策略文件时，旧环境变量只能收紧默认值。额度未确认前保持账户20；媒体并发独立校准。
+- 账户预算统一读取 `JY_CONCURRENCY_POLICY_FILE`；起点为制作3、媒体2、每任务API20、账户API20。没有策略文件时，旧环境变量只能收紧默认值。额度未确认前保持账户20；媒体并发独立校准。默认值以 `runtime/runtime_policy.py` 和随包 `examples/concurrency-policy.json` 为准，宿主显式策略另核验。
 - 请求行为固定：GLM 发送 `reasoning_effort=low`，Qwen 兼容接口发送 `enable_thinking=false`；没有单独的思考模式环境开关。相关预算、超时和缓存变量见 [`ENVIRONMENT.md`](../packages/video-v1.5.3/ENVIRONMENT.md)。
 
 通用配置从进程环境变量读取，没有通用 `.env` 自动加载器。PowerShell 示例见[配置模板](../packages/video-v1.5.3/examples/config.example.ps1)，本机副本和任务数据放在忽略的 `work/`。
