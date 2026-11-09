@@ -8,8 +8,9 @@
 2. **文档入口**：先读 [`docs/README.md`](docs/README.md)。子系统文档与代码路径一律指向 `packages/video-v1.5.3/`。`packages/video-v1.5.2/` 及更早是历史归档，禁止修改。
 3. **凭据**：只能来自环境变量 `JY_SKILL_ROOT` `JY_DRAFT_ROOT` `JY_INSTALL_ROOT` `JY_NAS_SHARE` `JY_NAS_USER` `NAS_PASSWORD` `LARK_BASE_TOKEN` 等（完整列表见包内 `ENVIRONMENT.md`）。不得写进代码、测试、日志或提交。
 4. **闸门**：`RULES.md` 的成片证据要求继续生效；formal 模式只认 `PASS`。素材缺失、窗口越界、字幕内容不符或独立 QC 失败必须拦住。哈希、签名或逐文件发布清单不是成片质量证据，禁止为普通修改新增这类门槛。
-5. **提交习惯**：小步 commit；改完更新 `docs/working.md`；可复用教训写入 `LESSONS.md`。不 push `main`，只开 PR。
-6. **分支命名**：功能或功能重构用 `feat/<topic>`，缺陷修复用 `fix/<topic>`，纯文档用 `docs/<topic>`；topic 使用小写英文和连字符，不以 Agent 名命名。
+5. **架构决策**：重大架构决策变更时更新 [ADR](docs/adr/README.md) 及必要总览；普通修复不要求另写 ADR。
+6. **提交习惯**：小步 commit；改完更新 `docs/working.md`；可复用教训写入 `LESSONS.md`。不 push `main`，只开 PR。
+7. **分支命名**：功能或功能重构用 `feat/<topic>`，缺陷修复用 `fix/<topic>`，纯文档用 `docs/<topic>`；topic 使用小写英文和连字符，不以 Agent 名命名。
 
 ## 1. 按任务找文档
 
