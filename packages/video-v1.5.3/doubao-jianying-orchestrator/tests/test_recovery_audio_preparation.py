@@ -23,7 +23,7 @@ class RecoveryPreparationTests(unittest.TestCase):
             record = {"path": str(root / "final.wav"), "duration_us": 800000}
             with patch("orchestrator.rulepack.for_manifest", return_value={
                      "category": "zhipin", "voice": {"acceptance_max_gap_frames": 5}}), \
-                 patch("orchestrator.platform_env.find_ffmpeg", return_value=("ffmpeg", "ffprobe")), \
+                 patch("orchestrator.runtime.platform_env.find_ffmpeg", return_value=("ffmpeg", "ffprobe")), \
                  patch.object(preparation, "frozen", return_value=None), \
                  patch.object(preparation, "prepare", return_value=record) as prepare, \
                  patch.object(preparation, "preflight") as gate:
@@ -40,7 +40,7 @@ class RecoveryPreparationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary, \
              patch("orchestrator.rulepack.for_manifest", return_value={
                  "category": "zhipin", "voice": {"acceptance_max_gap_frames": 5}}), \
-             patch("orchestrator.platform_env.find_ffmpeg", return_value=("ffmpeg", "ffprobe")), \
+             patch("orchestrator.runtime.platform_env.find_ffmpeg", return_value=("ffmpeg", "ffprobe")), \
              patch.object(preparation, "frozen", return_value={"path": "final.wav", "duration_us": 9}), \
              patch.object(preparation, "prepare") as prepare, \
              patch.object(preparation, "preflight", side_effect=preparation.NarrationError("bad")):
@@ -56,7 +56,7 @@ class RecoveryPreparationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary, \
              patch("orchestrator.rulepack.for_manifest", return_value={
                  "category": "zhipin", "voice": {"acceptance_max_gap_frames": 5}}), \
-             patch("orchestrator.platform_env.find_ffmpeg", return_value=("ffmpeg", "ffprobe")), \
+             patch("orchestrator.runtime.platform_env.find_ffmpeg", return_value=("ffmpeg", "ffprobe")), \
              patch.object(preparation, "prepare") as prepare, \
              patch.object(preparation, "preflight") as gate, \
              patch("orchestrator.audio.narration_probe.probe_audio", return_value={"duration": 0.002}):
@@ -72,7 +72,7 @@ class RecoveryPreparationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary, \
              patch("orchestrator.rulepack.for_manifest", return_value={
                  "category": "zhipin", "voice": {"acceptance_max_gap_frames": 5}}), \
-             patch("orchestrator.platform_env.find_ffmpeg", return_value=("ffmpeg", "ffprobe")):
+             patch("orchestrator.runtime.platform_env.find_ffmpeg", return_value=("ffmpeg", "ffprobe")):
             manifest = {"segments": [{"text": "same", "audio": "B.wav", "audio_mode": "file"}]}
             with self.assertRaisesRegex(ValueError, "RECOVERY_SENTENCE_AUDIO_CHANGED"):
                 recovery_audio.prepare_for_selection(manifest, {"rows": [{"tts_path": "A.wav"}]},

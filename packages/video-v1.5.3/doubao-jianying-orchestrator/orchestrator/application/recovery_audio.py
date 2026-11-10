@@ -68,7 +68,7 @@ def prepare_for_selection(manifest: dict, timing: dict, report_dir: Path, *, sou
     from .. import rulepack
     from ..audio import narration_preparation
     from ..audio.narration_probe import probe_audio
-    from ..platform_env import find_ffmpeg
+    from ..runtime.platform_env import find_ffmpeg
 
     policy = rulepack.for_manifest(manifest)
     if policy.get("category") != "zhipin":
