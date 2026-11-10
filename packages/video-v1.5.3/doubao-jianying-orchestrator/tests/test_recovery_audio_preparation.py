@@ -63,7 +63,7 @@ class RecoveryPreparationTests(unittest.TestCase):
             manifest = {"segments": [{"text": "text", "audio": "operator.wav", "audio_mode": "file"}]}
             timing = {"rows": [{"tts_path": "operator.wav", "audio_duration_us": 1234}]}
             result = recovery_audio.prepare_for_selection(manifest, timing, Path(temporary))
-            self.assertEqual(result["rows"][0]["tts_path"], "operator.wav")
+            self.assertEqual(result["rows"][0]["tts_path"], str(Path("operator.wav").resolve()))
             self.assertEqual(result["rows"][0]["audio_duration_us"], 2000)
             prepare.assert_not_called()
             gate.assert_called_once()
