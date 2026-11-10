@@ -32,7 +32,7 @@ class ClosedLoopEntrypointsTests(unittest.TestCase):
         self.draft = self.root / "draft"
         (self.draft / "media").mkdir(parents=True)
         (self.draft / "media" / "fixture.bin").write_bytes(b"synthetic")
-        for name in ("draft_info.json", "fix_local.bat", "fix_local.ps1"):
+        for name in ("draft_info.json",):
             (self.draft / name).write_text("{}", encoding="utf-8")
         task = {"task_id": "fixture", "record_id": "rec-fixture", "script": "Synthetic script",
                 "category": "paper", "sku": "fixture-sku", "title": "Fixture"}
