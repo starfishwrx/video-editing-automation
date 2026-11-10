@@ -381,6 +381,15 @@ def _review_media(shot: dict, directory: Path, *, dense: bool = False, fit: bool
     count = 16 if dense else 8
     last = end - min(.04, (end - start) / 10)
     times = [start + (last - start) * n / (count - 1) for n in range(count)]
+    protocol = f"candidate-even-window-{count}-v1"
+    focus = shot.get("_review_focus_window")
+    if isinstance(focus, (list, tuple)) and len(focus) == 2:
+        lo, hi = map(float, focus)
+        if not (math.isfinite(lo + hi) and start <= lo < hi <= end):
+            raise ValueError("AI_EDITOR_REVIEW_FOCUS_INVALID")
+        focus_last = hi - min(.04, (hi - lo) / 10)
+        times = sorted(set([*times, lo, (lo + focus_last) / 2, focus_last]))
+        protocol = f"candidate-focus-window-{count}-v1:{lo}:{hi}"
     def prepare_frames(frame_dir):
         ffmpeg, _ = platform_env.find_ffmpeg()
         if not ffmpeg:
@@ -400,7 +409,7 @@ def _review_media(shot: dict, directory: Path, *, dense: bool = False, fit: bool
                 frames.append({"path": str(target), "timestamp": timestamp})
         return frames
     frames = material_cache.cached_frames(shot, directory, prepare_frames,
-        protocol=f"candidate-even-window-{count}-v1")
+        protocol=protocol)
     tiles = [{**frame, "label": f"t={frame['timestamp']:.3f}s"} for frame in frames]
     sheet_parameters = ({"columns": 4, "tile_width": 270, "tile_height": 514, "fit": True}
                         if fit else {"columns": 4, "tile_width": 420, "tile_height": 300})
@@ -3017,7 +3026,7 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
         observed = _observed_text_shortlist(sentence["text"], allowed)
         feedbacks = manifest.get("ai_refill_feedback")
         feedback = feedbacks.get(str(index)) if isinstance(feedbacks, dict) else None
-        recalled, previous, window_hints = [], set(), {}
+        recalled, previous, window_hints, recut_id = [], set(), {}, None
         if (allowed and isinstance(feedback, dict) and feedback.get("claim") == sentence["text"]
                 and all(isinstance(feedback.get(k), str) and feedback[k].strip() for k in ("observed", "reason"))):
             sentence["qc_feedback"] = copy.deepcopy(feedback)
@@ -3029,8 +3038,20 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
                 "segments": [{"text": sentence["text"], "visual_requirements": hint}],
                 "revision_feedback": (str(manifest.get("revision_feedback") or "") +
                     "\n本句旧稿质检仅供定位待核查缺口，可能有误；与生效业务规则冲突时不要采纳额外要求：" + hint)}
+            recut = feedback.get("same_shot_recut")
+            if isinstance(recut, dict) and recut.get("shot_id") in previous and recut.get("shot_id") in allowed:
+                target = allowed[recut["shot_id"]]
+                try:
+                    a, b = float(recut["start"]), float(recut["end"])
+                    if (math.isfinite(a + b) and float(target["source_start"]) <= a < b <= float(target["source_end"])
+                            and any(isinstance(s, dict) and float(s["start"]) < b and float(s["end"]) > a
+                                    for s in target.get("action_segments") or [])):
+                        recut_id = recut["shot_id"]
+                except (ValueError, TypeError, KeyError, OverflowError):
+                    pass
             try:
-                inventory = _inventory(retrieval_manifest, list(allowed.values()), directory / f"qc_recall_{index:02d}")
+                inventory = ([{"candidate_ids": [recut_id], "candidate_windows": [recut]}] if recut_id else
+                    _inventory(retrieval_manifest, list(allowed.values()), directory / f"qc_recall_{index:02d}"))
             except (ValueError, KeyError, TypeError, OSError) as exc:
                 errors.append(str(exc))
                 continue
@@ -3060,6 +3081,8 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
                     window_start = max(lo, min(start - .35, window_end - desired))
                     window_end = min(hi, max(window_end, window_start + desired))
                     window_hints[sid] = {**shot, "source_start": window_start, "source_end": window_end}
+                    if sid == recut_id:
+                        window_hints[sid]["_review_focus_window"] = [start, end]
                 except (ValueError, TypeError, KeyError, OverflowError):
                     continue
         # Give both retrieval signals room in the first review round. Existing
@@ -3081,7 +3104,23 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
             review_manifest = ({**manifest, "allow_partial_selling_points": False}
                                if explicit and len(sentence["selling_points"]) > 1 else manifest)
             review_shots = {**shots, **window_hints}
-            reviews, coverage = _review_pool(review_manifest, sentence, review_shots, directory, narration_timing or {})
+            if recut_id in window_hints:
+                # Re-look at the actual omitted source interval first. A hint
+                # neither certifies the action nor forces it into the final cut.
+                focused = {**sentence, "candidate_ids": [recut_id]}
+                reviews, coverage = _review_pool(review_manifest, focused, review_shots, directory, narration_timing or {})
+                alternatives = [sid for sid in sentence["candidate_ids"] if sid != recut_id]
+                if not coverage.get("feasible") and alternatives:
+                    alternate_reviews, alternate_coverage = _review_pool(
+                        review_manifest, {**sentence, "candidate_ids": alternatives},
+                        review_shots, directory, narration_timing or {})
+                    # A confirmed same-shot action may still need the existing
+                    # short-window/retiming placement repair. Do not discard it
+                    # just because the alternative pool has no usable match.
+                    if alternate_coverage.get("feasible") or not any(r.get("verdict") == "matched" for r in reviews):
+                        reviews, coverage = alternate_reviews, alternate_coverage
+            else:
+                reviews, coverage = _review_pool(review_manifest, sentence, review_shots, directory, narration_timing or {})
             good = [r for r in reviews if r.get("verdict") == "matched"
                     and r.get("shot_id") in allowed]
             partial = manifest.get("delivery_mode") == "preview" and manifest.get("allow_partial_selling_points") is True

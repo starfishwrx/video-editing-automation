@@ -125,6 +125,36 @@ class ContinuityRefillTests(unittest.TestCase):
         self.assertFalse(result["ok"])
 
 
+class FocusFrameTests(unittest.TestCase):
+    def test_long_shot_extracts_target_window_not_only_even_samples(self):
+        from contextlib import nullcontext
+        from types import SimpleNamespace
+        from orchestrator.vision import material_cache
+        from orchestrator.runtime import platform_env, runtime_policy
+        from orchestrator.selection import shot_analyzer
+        seen = []
+        def extract(source, requests, **kwargs):
+            seen.extend(t for t, _ in requests)
+            for _, target in requests:
+                target.write_bytes(b"decoded frame")
+            return [True] * len(requests)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source.mp4"
+            source.write_bytes(b"fixture")
+            shot = {"shot_id": "s", "video": str(source), "source_start": 0, "source_end": 100,
+                    "_review_focus_window": [90, 91]}
+            with patch.object(material_cache, "cached_frames", side_effect=lambda s, d, prepare, **kw: prepare(root)) as cache, \
+                 patch.object(material_cache, "cached_sheet", return_value=root / "sheet.jpg"), \
+                 patch.object(platform_env, "find_ffmpeg", return_value=("ffmpeg", "ffprobe")), \
+                 patch.object(runtime_policy, "media_slot", return_value=nullcontext(SimpleNamespace(acquired=True))), \
+                 patch.object(shot_analyzer, "extract_frames_batch", side_effect=extract):
+                media = ai_editor._review_media(shot, root)
+        self.assertGreaterEqual(len([v for v in seen if 90 <= v < 91]), 3)
+        self.assertEqual(media["times"], seen)
+        self.assertIn("focus", cache.call_args.kwargs["protocol"])
+
+
 class SourceFrameRateTests(unittest.TestCase):
     def test_unknown_or_failed_probe_has_no_tolerance_and_is_not_cached(self):
         from types import SimpleNamespace

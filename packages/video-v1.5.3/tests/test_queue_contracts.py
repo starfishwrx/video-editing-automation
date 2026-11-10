@@ -35,6 +35,25 @@ class QueueContractTests(unittest.TestCase):
         self.assertTrue(classified["deterministic_block"])
         self.assertIn("503", classified["markers"])
 
+    def test_nonretryable_stage_failure_survives_draft_log_paths(self):
+        for kind, code in (("timing", "TIMING_INFEASIBLE"), ("semantic", "EXPERIMENT_GROUP_UNCONFIRMED"),
+                           ("vision", "VISION_CALL_FAILED")):
+            with self.subTest(kind=kind):
+                result = contracts.batch_result_contract("ERROR", pipeline_version="test-runtime", run_id="r",
+                    failures=[{"type": "transient", "draft": "example", "message": "build rc=1 log=draft.log timeout",
+                               "retryable": False, "resume_stage": "semantic_match",
+                               "failure_class": kind, "failure_code": code}])
+                self.assertEqual((result["failure_class"], result["failure_code"]), (kind, code))
+                self.assertFalse(result["retryable"])
+                self.assertFalse(result["safe_to_continue"])
+
+    def test_structured_failure_does_not_override_changed_source_guard(self):
+        result = contracts.batch_result_contract("ERROR", pipeline_version="test-runtime", run_id="r",
+            failures=[{"message": "MATERIAL_SOURCE_CHANGED_DURING_PREPARATION timeout", "retryable": True,
+                       "resume_stage": "semantic_match", "failure_class": "vision", "failure_code": "VISION_CALL_FAILED"}])
+        self.assertEqual(result["failure_code"], "MATERIAL_DURATION_UNAVAILABLE")
+        self.assertFalse(result["retryable"])
+
     def test_network_retry_does_not_certify_task(self):
         classified = contracts.classify_build_failure(
             "VISION_CALL_FAILED: 503 network timeout")

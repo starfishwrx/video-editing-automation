@@ -239,6 +239,58 @@ class UnauditableReaskTests(_ProductBase):
         self.assertEqual(result["material_cache"]["shots_excluded_unauditable"], [BAD_ID])
         self.assertTrue(result["material_cache"]["ready"])
 
+    def test_same_product_handoff_reuses_bound_exclusion_without_model_calls(self):
+        result, _ = self.run_product([BLACK, BLACK, BLACK])
+        self.assertTrue(result["ok"])
+        with mock.patch.object(vision, "_run_vision_with_retry", side_effect=AssertionError("repeated paid ask")):
+            reused = vision.enrich_with_vision(self.manifest, result, self.root / "handoff")
+        self.assertTrue(reused["ok"])
+        self.assertEqual(vision.logged_pool_exclusions(reused), {BAD_ID})
+        self.assertEqual(self.bad_row(reused)["status"], "pending_analysis")
+        self.assertFalse(vision._reusable_visual_observation(self.bad_row(reused)))
+
+    def test_changed_source_or_missing_binding_requires_new_observation(self):
+        import copy
+        result, _ = self.run_product([BLACK, BLACK, BLACK])
+        for change in ("binding", "source"):
+            changed = copy.deepcopy(result)
+            if change == "binding":
+                self.bad_row(changed).pop("exclusion_cache_key")
+            else:
+                self.videos[1].write_bytes(b"different source bytes")
+            with self.subTest(change=change), \
+                    mock.patch.object(vision, "_sample_frames", return_value=[{
+                        "path": str(self.frame), "timestamp": 1.0, "suffix": "t1"}]), \
+                    mock.patch.object(vision, "_orientation", return_value="portrait"), \
+                    mock.patch.object(vision, "_write_sheet", return_value=True), \
+                    mock.patch.object(vision, "_run_vision_with_retry", return_value=(False, "network failure")) as ask:
+                failed = vision.enrich_with_vision(self.manifest, changed, self.root / ("changed_" + change))
+            self.assertTrue(ask.called)
+            self.assertFalse(failed["ok"])
+            self.assertNotIn("excluded_from_pool", self.bad_row(failed))
+
+    def test_handoff_exclusion_consumes_total_product_budget(self):
+        import copy
+        result, _ = self.run_product([BLACK, BLACK, BLACK])
+        source = self.root / "third.MOV"
+        source.write_bytes(b"third source")
+        row = copy.deepcopy(result["shots"][0])
+        row.update(shot_id="third", video=str(source), status="pending_analysis")
+        row.pop("analysis_cache_key", None)
+        result["shots"].append(row)
+        manifest = {**self.manifest, "material_sources": [*self.manifest["material_sources"], str(source)]}
+        with mock.patch.object(vision, "_sample_frames", return_value=[{
+                "path": str(self.frame), "timestamp": 1.0, "suffix": "t1"}]), \
+             mock.patch.object(vision, "_orientation", return_value="portrait"), \
+             mock.patch.object(vision, "_write_sheet", return_value=True), \
+             mock.patch.object(vision, "_run_vision_with_retry", return_value=(True,
+                json.dumps({"shots": [{"shot_id": "third", **BLACK}]}))) as ask:
+            failed = vision.enrich_with_vision(manifest, result, self.root / "budget")
+        self.assertFalse(failed["ok"])
+        self.assertEqual(vision.logged_pool_exclusions(failed), {BAD_ID})
+        self.assertEqual(ask.call_count, 1)
+        self.assertNotIn("excluded_from_pool", next(r for r in failed["shots"] if r["shot_id"] == "third"))
+
     def test_reask_transport_failure_keeps_blocking(self):
         result, calls = self.run_product([BLACK, "FAIL"])
         self.assertEqual(len(calls), 2)

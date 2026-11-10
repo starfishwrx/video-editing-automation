@@ -1373,6 +1373,9 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
     if not shots:
         return analysis
     stage_seconds: dict[str, float] = {}
+    prior_exclusions = logged_pool_exclusions(analysis)
+    prior_exclusion_warnings = {str(w.get("shot_id")): w for w in analysis.get("warnings") or []
+        if isinstance(w, dict) and w.get("type") == UNAUDITABLE_WARNING}
     if analysis.get("warnings"):
         analysis["warnings"] = [w for w in analysis["warnings"]
                                 if not (isinstance(w, dict) and w.get("type") == UNAUDITABLE_WARNING)]
@@ -1403,6 +1406,17 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
         key = _vision_cache_key(manifest, shot)
         if key:
             cache_keys[shot_id] = key
+        # Reusing a product analysis within a batch must not re-ask an already
+        # excluded shot for every task. This is a bound negative observation,
+        # never a ready candidate or a positive shared-cache entry.
+        if (key and _reask_limit() > 0 and shot_id in prior_exclusions
+                and not _reusable_visual_observation(cache.get(key) or {})
+                and len(prior_exclusions) <= _reask_max_shots(len(shots))
+                and shot.get("exclusion_cache_key") == key
+                and shot.get("exclusion_reason") == "VISION_UNAUDITABLE_AFTER_REASK"
+                and prior_exclusion_warnings[shot_id].get("reasks") in (1, 2)):
+            analysis.setdefault("warnings", []).append(prior_exclusion_warnings[shot_id])
+            continue
         cached = cache.get(key) if key else None
         prior_origin = None
         cached_key = key
@@ -1512,6 +1526,7 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
         shot["analysis_cache_hit"] = False
         shot.pop("excluded_from_pool", None)
         shot.pop("exclusion_reason", None)
+        shot.pop("exclusion_cache_key", None)
         if key:
             shot["analysis_cache_key"] = key
         cache_misses += 1
@@ -1559,7 +1574,11 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
         apply_cross_shot_text(shots)
         _set_cache_summary(_vision_summary([], [], [], partial=False))
         analysis["pending_items"] = list(analysis.get("pending_items", []))
-        analysis["ok"] = not any(needs_vision(row) for row in shots)
+        excluded = logged_pool_exclusions(analysis)
+        analysis["ok"] = (bool(shots) and len(excluded) < len(shots)
+                          and len(excluded) <= _reask_max_shots(len(shots)) and not analysis["pending_items"]
+                          and not any(needs_vision(row) for row in shots
+                                      if str(row.get("shot_id")) not in excluded))
         _persist(report_dir, analysis)
         _progress(report_dir, phase="done", vision_left=0, text_left=0)
         return analysis
@@ -1755,6 +1774,7 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
                     continue
                 row.pop("excluded_from_pool", None)
                 row.pop("exclusion_reason", None)
+                row.pop("exclusion_cache_key", None)
                 row.update({
                     "description": description,
                     "visual_description": description,
@@ -1864,7 +1884,8 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
         reask_log: list[dict[str, Any]] = []
         targets = [sid for sid in dict.fromkeys(unauditable)
                    if by_id[sid].get("analysis_error") == UNAUDITABLE_ERROR and shot_frames.get(sid)]
-        budget = _reask_max_shots(len(shots))
+        retained_exclusions = len(logged_pool_exclusions(analysis))
+        budget = max(0, _reask_max_shots(len(shots)) - retained_exclusions)
         limit = _reask_limit()
         stage_started = time.monotonic()
         for shot_id in (targets[:budget] if limit else []):
@@ -1915,6 +1936,7 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
             if entry["outcome"] == "unauditable" and row.get("analysis_error") == UNAUDITABLE_ERROR:
                 row.update({"status": "pending_analysis", "excluded_from_pool": True,
                             "exclusion_reason": "VISION_UNAUDITABLE_AFTER_REASK",
+                            "exclusion_cache_key": cache_keys.get(shot_id),
                             "analysis_error": UNAUDITABLE_ERROR + f"（单独重问 {limit} 次仍不可审计，已移出候选池）"})
                 analysis.setdefault("warnings", []).append({
                     "type": UNAUDITABLE_WARNING, "shot_id": shot_id, "video": row.get("video"),
@@ -1927,7 +1949,9 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
             reask_log.append({"shot_id": shot_id, "attempts": [], "outcome": "not_reasked_over_budget"
                               if limit else "reask_disabled"})
         if reask_log:
-            analysis["vision_reask"] = {"limit": limit, "max_shots": budget, "shots": reask_log}
+            analysis["vision_reask"] = {"limit": limit, "max_shots": _reask_max_shots(len(shots)),
+                                        "available_shots": budget, "retained_exclusions": retained_exclusions,
+                                        "shots": reask_log}
             stage_seconds["vision_reask"] = round(time.monotonic() - stage_started, 3)
         if batches:
             _checkpoint()
@@ -2029,8 +2053,11 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
     _set_cache_summary(_vision_summary(batches, responses,
                                        vision_errors, partial=False), partial=False)
     analysis["pending_items"] = list(analysis.get("pending_items", [])) + vision_errors
-    analysis["ok"] = bool(shots) and not analysis["pending_items"] and not any(
-        needs_vision(row) for row in shots)
+    excluded = logged_pool_exclusions(analysis)
+    analysis["ok"] = (bool(shots) and len(excluded) < len(shots)
+                          and len(excluded) <= _reask_max_shots(len(shots)) and not analysis["pending_items"]
+                      and not any(needs_vision(row) for row in shots
+                                  if str(row.get("shot_id")) not in excluded))
     _persist(report_dir, analysis)
     _progress(report_dir, phase="done", vision_left=0, text_left=0,
               finished_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"))

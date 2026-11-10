@@ -179,10 +179,11 @@ def analyze_product(manifest: dict, base_dir: Path, report_dir: Path, *, ffmpeg=
         if vision and shots:
             result = vision_analyzer.enrich_with_vision(manifest, result, report_dir, ffmpeg=ffmpeg)
         excluded = vision_analyzer.logged_pool_exclusions(result)
-        complete = bool(shots) and not issues and len(excluded) < len(result["shots"]) and all(
+        complete = (bool(shots) and not issues and len(excluded) < len(result["shots"])
+                    and len(excluded) <= vision_analyzer._reask_max_shots(len(result["shots"])) and all(
             str(row.get("shot_id")) in excluded or (
                 vision_analyzer._reusable_visual_observation(row)
-                and not vision_analyzer._needs_text_backfill(row)) for row in result["shots"])
+                and not vision_analyzer._needs_text_backfill(row)) for row in result["shots"]))
         result["material_cache"] = {"product_key": product, "source_inventory": inventory,
                                     "sources_hit": hits, "sources_prepared": len(inventory) - hits,
                                     "sources_skipped_not_video": sum(
