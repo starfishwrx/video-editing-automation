@@ -49,6 +49,16 @@ class SelectionRecoveryTests(unittest.TestCase):
                 "timing_sha256": contract.digest(None), "analysis_sha256": contract.digest(self.analysis),
                 "editorial_rules": contract.rules_identity(self.manifest)}}
 
+    def test_continuation_inpoint_cannot_reopen_unreviewed_source_prefix(self):
+        self.manifest["segments"][1]["audio_duration_us"] = 4_000_000
+        self.shots[1].update(source_end=20, material_duration_us=20_000_000)
+        plan = self.plan()
+        plan["rows"][1]["parts"][0].update(audio_duration_us=4_000_000, source_start_us=0)
+        plan["reviews"]["2"][0].update(review_window_us={"start": 8_500_000, "end": 10_500_000},
+            evidence_intervals_us=[{"start": 9_000_000, "end": 10_000_000}])
+        with self.assertRaisesRegex(ValueError, "SOURCE_TOO_SHORT"):
+            editor._assemble(self.manifest, self.analysis, plan, narration_timing=None, verify_sources=True)
+
     def broken_window(self):
         plan = self.plan()
         plan["reviews"]["2"][0]["evidence_intervals_us"] = [{"start": 1_000_000, "end": 8_000_000}]

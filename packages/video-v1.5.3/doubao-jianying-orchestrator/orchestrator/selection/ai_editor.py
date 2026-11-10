@@ -898,6 +898,15 @@ def _placement_fit_observation(review: dict) -> dict | None:
 
 
 def _observed_shot(shot: dict, review: dict) -> dict:
+    window = review.get("review_window_us")
+    if window is not None:
+        if (not isinstance(window, dict) or any(type(window.get(k)) is not int for k in ("start", "end"))
+                or not round(float(shot["source_start"]) * 1e6) <= window["start"] < window["end"]
+                   <= round(float(shot["source_end"]) * 1e6)):
+            raise ValueError("AI_EDITOR_REVIEW_WINDOW_INVALID")
+        # Local pixel review certifies only this source window. Both the
+        # candidate solver and final assembly must use those same boundaries.
+        shot = {**shot, "source_start": window["start"] / 1e6, "source_end": window["end"] / 1e6}
     evidence = [{"start": ev["start"] / 1e6, "end": ev["end"] / 1e6,
                  "claim": review["observation"], "evidence_source": "ai_editor_pixel_review"}
                 for ev in review["evidence_intervals_us"]]
@@ -1027,7 +1036,7 @@ def _assemble(manifest: dict, analysis: dict, plan: dict, *, narration_timing: d
             if "source_start_us" in part:
                 if type(part["source_start_us"]) is not int:
                     raise ValueError("AI_EDITOR_INPOINT_INVALID")
-                observed["source_start"] = max(float(shot["source_start"]), part["source_start_us"] / 1e6)
+                observed["source_start"] = max(float(observed["source_start"]), part["source_start_us"] / 1e6)
             cfg = {**manifest, "tail_pad_s": manifest.get("tail_pad_s", 0) if n == len(parts) - 1 else 0}
             if "source_start_us" in part or window_key:
                 # The guard belongs to the original scene, not the requested in-point.
@@ -1524,7 +1533,7 @@ def _single_part_end(manifest, analysis, plan, narration_timing, index):
     if "source_start_us" in part:
         if type(part["source_start_us"]) is not int:
             return None
-        observed["source_start"] = max(float(shot["source_start"]), part["source_start_us"] / 1e6)
+        observed["source_start"] = max(float(observed["source_start"]), part["source_start_us"] / 1e6)
     cfg = dict(manifest)
     if "source_start_us" in part or window_key:
         guard = max(0.0, shot_analyzer._number(manifest.get("head_trim_s"), shot_analyzer.DEFAULT_HEAD_TRIM_S))
