@@ -1,4 +1,5 @@
 """Observe event facts in numbered video, then refine boundaries against actual source frames."""
+import copy
 import json
 from pathlib import Path
 
@@ -24,6 +25,95 @@ def _frame_sheet(member, ids, target, *, ffmpeg, ffprobe, font_path):
         canvas.paste(im,(x,y+30));draw.text((x+5,y+4),f'{member["part"]} frame {index}',font=font,fill='white')
     sheet=target.with_suffix('.jpg');canvas.save(sheet,quality=95)
     return sheet
+
+
+BOUNDARY_SNAP_FRAMES=1
+_MARKERS=(('contact_first_frame','press'),('release_first_frame','lift'),('result_first_frame','result'))
+
+
+def boundary_ids(row):
+    """Boundaries the observer chooses: every event start plus the final end.
+
+    The contiguity rule fixes each interior ``last_frame`` to the next
+    ``first_frame - 1``; that derived frame need not itself be displayed.
+    Returns None when the chain is not contiguous (compile_events rejects it).
+    """
+    events=row.get('events') if isinstance(row,dict) else None
+    if not isinstance(events,list) or not events or not all(isinstance(e,dict) for e in events):return None
+    for left,right in zip(events,events[1:]):
+        if (type(left.get('last_frame')) is not int or type(right.get('first_frame')) is not int
+                or left['last_frame']!=right['first_frame']-1):
+            return None
+    ids=[e.get('first_frame') for e in events]+[events[-1].get('last_frame')]
+    return ids if all(type(i) is int for i in ids) else None
+
+
+def unshown_boundaries(row,shown):
+    ids=boundary_ids(row)
+    if ids is None:return ['contiguity']
+    shown=set(shown)
+    return sorted({i for i in ids if i not in shown})
+
+
+def snap_boundaries(row,shown,tolerance=BOUNDARY_SNAP_FRAMES):
+    """Move an undisplayed boundary by at most ``tolerance`` frames onto a shown id.
+
+    The contiguity rule is preserved (previous last = new first - 1), and the
+    B contact/release/result markers and window edges follow their boundary.
+    Returns (row, moves) or (None, reason) when no consistent snap exists.
+    """
+    if boundary_ids(row) is None:return None,'contiguity'
+    shown=sorted(set(shown))
+    if not shown:return None,'no_shown'
+    row=copy.deepcopy(row);events=row['events'];window=row.get('effective_window_frame_ids');moves=[]
+    def near(x):
+        if x in shown:return x
+        best=min(shown,key=lambda v:(abs(v-x),v))
+        return best if abs(best-x)<=tolerance else None
+    for i,event in enumerate(events):
+        old=event['first_frame'];new=near(old)
+        if new is None:return None,'first_frame %s beyond %d frame' % (old,tolerance)
+        if new==old:continue
+        if i>0 and new-1<events[i-1]['first_frame']:return None,'collapses previous event'
+        if new>event['last_frame']:return None,'collapses event'
+        event['first_frame']=new
+        if i>0:events[i-1]['last_frame']=new-1
+        for marker,kind in _MARKERS:
+            if event.get('kind')==kind and row.get(marker)==old:row[marker]=new
+        if isinstance(window,list) and len(window)==2 and window[0]==old:window[0]=new
+        moves.append({'kind':event.get('kind'),'edge':'first_frame','from':old,'to':new})
+    last=events[-1];old=last['last_frame'];new=near(old)
+    if new is None:return None,'last_frame %s beyond %d frame' % (old,tolerance)
+    if new!=old:
+        if new<last['first_frame']:return None,'collapses last event'
+        last['last_frame']=new
+        if isinstance(window,list) and len(window)==2 and window[1]==old:window[1]=new
+        moves.append({'kind':last.get('kind'),'edge':'last_frame','from':old,'to':new})
+    return row,moves
+
+
+def settle_boundaries(row,shown,validate,reask):
+    """Accept shown boundaries, snap a <=1 frame miss, else ask once more."""
+    missing=unshown_boundaries(row,shown)
+    if not missing:return row,None
+    snapped,moves=snap_boundaries(row,shown)
+    if snapped is not None and not unshown_boundaries(snapped,shown):
+        try:
+            validate(snapped)
+            return snapped,{'action':'snapped','moves':moves,'original':row}
+        except ValueError:
+            pass
+    retry=reask(missing)
+    validate(retry)
+    if unshown_boundaries(retry,shown):
+        raise ValueError('EXPERIMENT_EVENTS_BOUNDARY_NOT_SHOWN')
+    return retry,{'action':'reasked','unshown':missing,'original':row}
+
+
+def _reask_note(missing,shown):
+    return ('\n上次返回的边界编号%s不在本次展示编号内。每段first_frame与最后一段last_frame必须从已展示编号中选；'
+            '中间段last_frame按规则等于下一段first_frame-1，不需要是展示编号。请重新只输出JSON。' % json.dumps(missing)
+            +json.dumps({'shown_frame_ids':shown}))
 
 
 def review(manifest,pair,output,*,focus='complete_pour',ffmpeg='ffmpeg',ffprobe='ffprobe',font_path,
@@ -73,11 +163,13 @@ complete_pour须保留倒液的开始和完成；absorption_focus允许从实际
             anchors={round(left+i*(right-left)/15) for i in range(16)}
             shown=sorted({max(left,min(right,i+d)) for i in anchors for d in (-1,0,1)})
             sheet=_frame_sheet(member,shown,target,ffmpeg=ffmpeg,ffprobe=ffprobe,font_path=font_path)
-            row=ai_editor._call(prompt+'\n本次为实际顺序源帧，未提供连续视频；边界只使用已展示编号。'+
-                json.dumps({'shown_frame_ids':shown}),target,sheet)
+            frames_prompt=(prompt+'\n本次为实际顺序源帧，未提供连续视频；边界只使用已展示编号。'
+                '中间段last_frame按规则等于下一段first_frame-1。'+json.dumps({'shown_frame_ids':shown}))
+            row=ai_editor._call(frames_prompt,target,sheet)
             validate(row)
-            if any(e[k] not in shown for e in row['events'] for k in ('first_frame','last_frame')):
-                raise ValueError('EXPERIMENT_EVENTS_BOUNDARY_NOT_SHOWN')
+            row,settled=settle_boundaries(row,shown,validate,lambda missing,p=frames_prompt,t=target,s=sheet,sh=shown:
+                ai_editor._call(p+_reask_note(missing,sh),t.with_name(t.stem+'-reask.json'),s))
+            if settled:save(target.with_name(target.stem+'-boundary.json'),settled)
         else:
             row=temporal_video.review(window,prompt,target,fps=10,validator=validate)
         # Only uncertain boundaries and a few intervening context frames need
@@ -95,8 +187,9 @@ complete_pour须保留倒液的开始和完成；absorption_focus允许从实际
             {'video_observation':row,'shown_frame_ids':ids},ensure_ascii=False)
         refined=ai_editor._call(detail_prompt,target,sheet)
         validate(refined)
-        if any(e[k] not in ids for e in refined['events'] for k in ('first_frame','last_frame')):
-            raise ValueError('EXPERIMENT_EVENTS_BOUNDARY_NOT_SHOWN')
+        refined,settled=settle_boundaries(refined,ids,validate,lambda missing,p=detail_prompt,t=target,s=sheet,sh=ids:
+            ai_editor._call(p+_reask_note(missing,sh),t.with_name(t.stem+'-reask.json'),s))
+        if settled:save(target.with_name(target.stem+'-boundary.json'),settled)
         validate_samples(member['samples']);observations.append(compile_events(refined,member))
         facts.append({'video':row,'frame_refinement':refined,'shown_frame_ids':ids,'sheet':identity.source_identity(sheet)})
     artifact={'protocol':PROTOCOL,'task_id':manifest['task_id'],'rules':identity.rules_identity(manifest),

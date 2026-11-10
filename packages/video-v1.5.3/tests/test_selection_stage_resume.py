@@ -50,6 +50,25 @@ class WorkerSelectionRecoveryTests(unittest.TestCase):
         self.write("shot_candidates.json", {"shots": [{"shot_id": "retained"}]})
         self.write("last_result.json", {"status": "VISION_CALL_FAILED", "retryable": True, "resume_stage": "semantic_match"})
 
+    def test_worker_handoff_preserves_bound_exclusion_warning(self):
+        cached = self.root / "shared.json"
+        warning = {"type": "shot_skipped_unauditable", "shot_id": "bad", "reasks": 2}
+        good = {"shot_id": "good", "description": "No action", "visual_tags": ["paper"],
+                "evidence_tags": [], "analysis_confidence": .9, "visual_observation_complete": True,
+                "action_complete": False, "status": "pending_analysis"}
+        bad = {"shot_id": "bad", "status": "pending_analysis", "excluded_from_pool": True,
+               "exclusion_cache_key": "bound-input", "exclusion_reason": "VISION_UNAUDITABLE_AFTER_REASK"}
+        cached.write_text(json.dumps({"shots": [good, bad], "warnings": [warning]}))
+        with patch.object(selection_recovery, "pending", return_value=False), \
+             patch.object(selection_recovery, "draft_pending", return_value=False), \
+             patch.object(worker, "SKILL", ROOT / "doubao-jianying-orchestrator"), \
+             patch.object(worker, "log"), \
+             patch.object(worker.subprocess, "run", return_value=SimpleNamespace(returncode=1, stdout="", stderr="")):
+            result = worker.run_build(self.manifest, self.report, "handoff", timeout=60, reuse_analysis=str(cached))
+        supplied = json.loads(Path(result["manifest"]).read_text(encoding="utf-8"))["shot_analysis"]
+        self.assertEqual(supplied["warnings"], [warning])
+        self.assertEqual(supplied["shots"][1], bad)
+
     def write(self, name, value):
         path = self.report / name
         path.parent.mkdir(parents=True, exist_ok=True)

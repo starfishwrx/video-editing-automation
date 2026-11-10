@@ -35,6 +35,25 @@ class QueueContractTests(unittest.TestCase):
         self.assertTrue(classified["deterministic_block"])
         self.assertIn("503", classified["markers"])
 
+    def test_nonretryable_stage_failure_survives_draft_log_paths(self):
+        for kind, code in (("timing", "TIMING_INFEASIBLE"), ("semantic", "EXPERIMENT_GROUP_UNCONFIRMED"),
+                           ("vision", "VISION_CALL_FAILED")):
+            with self.subTest(kind=kind):
+                result = contracts.batch_result_contract("ERROR", pipeline_version="test-runtime", run_id="r",
+                    failures=[{"type": "transient", "draft": "example", "message": "build rc=1 log=draft.log timeout",
+                               "retryable": False, "resume_stage": "semantic_match",
+                               "failure_class": kind, "failure_code": code}])
+                self.assertEqual((result["failure_class"], result["failure_code"]), (kind, code))
+                self.assertFalse(result["retryable"])
+                self.assertFalse(result["safe_to_continue"])
+
+    def test_structured_failure_does_not_override_changed_source_guard(self):
+        result = contracts.batch_result_contract("ERROR", pipeline_version="test-runtime", run_id="r",
+            failures=[{"message": "MATERIAL_SOURCE_CHANGED_DURING_PREPARATION timeout", "retryable": True,
+                       "resume_stage": "semantic_match", "failure_class": "vision", "failure_code": "VISION_CALL_FAILED"}])
+        self.assertEqual(result["failure_code"], "MATERIAL_DURATION_UNAVAILABLE")
+        self.assertFalse(result["retryable"])
+
     def test_network_retry_does_not_certify_task(self):
         classified = contracts.classify_build_failure(
             "VISION_CALL_FAILED: 503 network timeout")
@@ -216,6 +235,44 @@ class QCRejectionRecoveryTests(unittest.TestCase):
             self.assertEqual(self.worker.qc_refill_feedback_from_report(self.report_dir, report, {1}, expected_sources=[identity]), {})
         with patch.object(self.worker.production_eval.visual_qc_contract, 'report_matches_draft', return_value=False):
             self.assertEqual(self.worker.qc_refill_feedback_from_report(self.report_dir, report, {1}, expected_sources=[identity]), {})
+
+    def test_localized_media_copy_binds_when_qc_reviewed_that_copy(self):
+        original = self.worker.qc_rejection_identity(self.manifest)['sources'][0]
+        copy = self.root / 'draft' / 'media' / 'source_copy.mp4'
+        copy.parent.mkdir(parents=True)
+        copy.write_bytes(self.source.read_bytes())
+        copy_identity = self.worker.production_eval.visual_qc_contract._source_identity(str(copy))
+        self.latest_failure('shot-A', source=original)
+        row = {'index': 1, 'claim': 'First sentence.', 'match_level': 'MISMATCH',
+               'visual_ok': False, 'observed': 'lab equipment', 'reason': 'object mismatch', 'confidence': .8}
+        report = {'draft': str(self.root / 'draft'), 'response_contract': {'status': 'VALIDATED', 'errors': []},
+                  'source_bindings': [{'path': str(copy), 'identity': copy_identity}],
+                  'model_review': [row], 'segment_map': [{'claim_index': 1, 'draft_segments': [1]}]}
+        other = self.root / 'other.mp4'
+        other.write_bytes(self.source.read_bytes())
+        with patch.object(self.worker.production_eval.visual_qc_contract, 'report_matches_draft', return_value=True), \
+             patch('orchestrator.quality.draft_visual_qc._load_json', return_value={}), \
+             patch('orchestrator.quality.draft_visual_qc._timeline_items', return_value=([{'index': 1, 'source': str(copy)}], [])), \
+             patch('orchestrator.media.source_normalization.read_prepared_sources', return_value=[]):
+            result = self.worker.qc_refill_feedback_from_report(self.report_dir, report, {1}, expected_sources=[original])
+            self.assertEqual(result['1']['prior_shot_ids'], ['shot-A'])
+            self.assertEqual(result['1']['reason'], 'object mismatch')
+        with patch.object(self.worker.production_eval.visual_qc_contract, 'report_matches_draft', return_value=True), \
+             patch('orchestrator.quality.draft_visual_qc._load_json', return_value={}), \
+             patch('orchestrator.quality.draft_visual_qc._timeline_items', return_value=([{'index': 1, 'source': str(other)}], [])), \
+             patch('orchestrator.media.source_normalization.read_prepared_sources', return_value=[]):
+            self.assertEqual(self.worker.qc_refill_feedback_from_report(
+                self.report_dir, report, {1}, expected_sources=[original]), {})
+
+    def test_same_shot_recut_moves_to_the_uncovered_action(self):
+        segment = {"shot_id": "shot-A", "source_start": 0.0, "source_end": 2.0, "audio_duration_us": 2_000_000}
+        shot = {"shot_id": "shot-A", "source_start": 0.0, "source_end": 10.0,
+                "action_segments": [{"start": 0.0, "end": 6.0}]}
+        self.assertEqual(self.worker.same_shot_recut_window(segment, shot),
+                         {"shot_id": "shot-A", "start": 4.0, "end": 6.0})
+        covered = {**segment, "source_start": 4.0, "source_end": 6.0}
+        self.assertIsNone(self.worker.same_shot_recut_window(covered, shot))
+        self.assertIsNone(self.worker.same_shot_recut_window({**segment, "span_parts": [{}]}, shot))
 
     def test_degraded_report_restores_target_without_excluding_source(self):
         report = self.latest_failure('shot-A')

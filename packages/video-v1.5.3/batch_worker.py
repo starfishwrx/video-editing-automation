@@ -659,6 +659,8 @@ def run_build(manifest: dict, report_dir: pathlib.Path, draft_name: str, *,
                 # `shot_analysis_file` manifest key was ignored, so retries
                 # re-ran vision despite a persisted candidate report.
                 manifest["shot_analysis"] = {"shots": cached_shots}
+                if isinstance(cached_payload.get("warnings"), list):
+                    manifest["shot_analysis"]["warnings"] = cached_payload["warnings"]
                 log("reuse partial shot analysis rows=%d/%d from %s" % (
                     len(reusable), len(cached_shots), reuse_analysis))
         except (OSError, ValueError, TypeError, AttributeError):
@@ -1159,9 +1161,10 @@ def qc_rejected_shots_from_report(rd: pathlib.Path, report: dict | None = None, 
     segments = _read_json(rd / "shot_match_report.json").get("segments") or []
     out = {}
     for row in (report or {}).get("model_review") or []:
-        # Only an explicit semantic mismatch can reject the source. An
-        # insufficient or degraded observation may be caused by the cut,
-        # visibility or a service limitation rather than the underlying shot.
+        # Only an explicit semantic mismatch excludes the source. An
+        # insufficient or degraded cut stays on the same shot: the action
+        # may continue past the window, so the sentence is re-looked at
+        # instead of the material being discarded.
         if not isinstance(row, dict):
             continue
         level = row.get("match_level")
@@ -1195,11 +1198,118 @@ def qc_rejected_shots_from_report(rd: pathlib.Path, report: dict | None = None, 
     return out
 
 
+def same_shot_recut_window(segment: dict, shot: dict) -> dict | None:
+    """Move one sentence to the part of the same shot that the cut left out.
+
+    The returned interval is evidence the next window has to cover. It is not
+    a rejected shot. A cut that already reaches the action result returns None.
+    """
+    if not isinstance(segment, dict) or not isinstance(shot, dict):
+        return None
+    if segment.get("shot_id") and shot.get("shot_id") and str(segment["shot_id"]) != str(shot["shot_id"]):
+        return None
+    if segment.get("span_parts"):
+        return None
+    try:
+        cut_start = float(segment["source_start"])
+        cut_end = float(segment["source_end"])
+        audio_s = float(segment.get("audio_duration_us") or 0) / 1_000_000
+        lo = float(shot["source_start"])
+        hi = float(shot["source_end"])
+    except (TypeError, ValueError, KeyError):
+        return None
+    if audio_s <= 0.05:
+        audio_s = cut_end - cut_start
+    if not (audio_s > 0.05 and lo - 0.02 <= cut_start < cut_end <= hi + 0.02):
+        return None
+    actions = []
+    for row in shot.get("action_segments") or []:
+        if not isinstance(row, dict):
+            continue
+        try:
+            start, end = float(row["start"]), float(row["end"])
+        except (TypeError, ValueError, KeyError):
+            continue
+        if start < end and lo - 0.05 <= start and end <= hi + 0.05:
+            actions.append((start, end))
+    actions.sort()
+    target = None
+    for start, end in actions:
+        overlaps = start < cut_end - 0.05 and end > cut_start + 0.05
+        if overlaps and end > cut_end + 0.20:
+            target = (start, end, "finish")
+            break
+        if start >= cut_end - 0.05:
+            target = (start, end, "next")
+            break
+    if target is None:
+        return None
+    start, end, kind = target
+    if kind == "finish":
+        evidence_end = min(hi, end)
+        evidence_start = max(lo, cut_end, evidence_end - audio_s)
+    else:
+        evidence_start = max(lo, start)
+        evidence_end = min(hi, end, evidence_start + audio_s)
+    if evidence_end - evidence_start < 0.20:
+        return None
+    if abs(evidence_start - cut_start) < 0.05 and abs(evidence_end - cut_end) < 0.05:
+        return None
+    return {"shot_id": str(shot.get("shot_id") or segment.get("shot_id")),
+            "start": round(evidence_start, 3), "end": round(evidence_end, 3)}
+
+
+def same_shot_recut_windows(rd: pathlib.Path, report: dict | None, *, expected_sources=None) -> dict:
+    """Sentences whose same source continues past the cut that QC reviewed."""
+    levels = {"INSUFFICIENT_EVIDENCE", "ACCEPTABLE_DEGRADED"}
+    segments = _read_json(rd / "shot_match_report.json").get("segments") or []
+    shots = {str(row.get("shot_id")): row
+             for row in (_read_json(rd / "shot_candidates.json").get("shots") or [])
+             if isinstance(row, dict) and row.get("shot_id")}
+    out = {}
+    for row in (report or {}).get("model_review") or []:
+        if not isinstance(row, dict) or row.get("match_level") not in levels:
+            continue
+        try:
+            index = int(row.get("index"))
+        except (TypeError, ValueError):
+            continue
+        if not 1 <= index <= len(segments) or not isinstance(segments[index - 1], dict):
+            continue
+        segment = segments[index - 1]
+        if str(row.get("claim") or "").strip() != str(segment.get("text") or "").strip():
+            continue
+        shot = shots.get(str(segment.get("shot_id") or ""))
+        if shot is None:
+            continue
+        if expected_sources is not None:
+            identity = (segment.get("ai_selection") or {}).get("source_identity") if isinstance(segment.get("ai_selection"), dict) else None
+            if identity not in expected_sources:
+                continue
+        window = same_shot_recut_window(segment, shot)
+        if window:
+            out[index] = window
+    return out
+
+
+def _qc_binding_covers_source(actual_path: str, selection_identity, bound_rows) -> bool:
+    """The selector's original file, or the draft-local copy QC actually reviewed."""
+    identities = [row.get("identity") for row in bound_rows if isinstance(row, dict)]
+    if selection_identity in identities:
+        return True
+    try:
+        actual_identity = production_eval.visual_qc_contract._source_identity(str(actual_path))
+    except (OSError, RuntimeError, ValueError, TypeError):
+        return False
+    return actual_identity in identities
+
+
 def qc_refill_feedback_from_report(rd: pathlib.Path, report: dict, targets, *, expected_sources) -> dict:
     """Use only a validated QC bound to its draft and the target's real source.
 
-    Observations guide candidate retrieval and pixel review; they never certify
-    another shot or change the QC grade.
+    A localized media copy counts when QC bound that copy and its bytes match
+    the selector's original file. Observations guide candidate retrieval and
+    pixel review; they never certify another shot or change the QC grade.
     """
     if not isinstance(report, dict) or not targets:
         return {}
@@ -1209,7 +1319,6 @@ def qc_refill_feedback_from_report(rd: pathlib.Path, report: dict, targets, *, e
             or not production_eval.visual_qc_contract.report_matches_draft(report, draft)):
         return {}
     segments = _read_json(rd / "shot_match_report.json").get("segments") or []
-    bound_sources = [row.get("identity") for row in report.get("source_bindings") or [] if isinstance(row, dict)]
     try:
         from orchestrator.quality import draft_visual_qc, ai_editor_qc
         from orchestrator.media.source_normalization import read_prepared_sources
@@ -1234,8 +1343,7 @@ def qc_refill_feedback_from_report(rd: pathlib.Path, report: dict, targets, *, e
             continue
         parts = segment.get("span_parts") or [segment]
         if any(not isinstance(part, dict) or not isinstance(part.get("ai_selection"), dict)
-               or part["ai_selection"].get("source_identity") not in expected_sources
-               or part["ai_selection"].get("source_identity") not in bound_sources for part in parts):
+               or part["ai_selection"].get("source_identity") not in expected_sources for part in parts):
             continue
         maps = [item for item in mapping if isinstance(item, dict) and item.get("claim_index") == index]
         if len(maps) != 1 or not isinstance(maps[0].get("draft_segments"), list):
@@ -1245,7 +1353,9 @@ def qc_refill_feedback_from_report(rd: pathlib.Path, report: dict, targets, *, e
                 or len(set(actual_indices)) != len(actual_indices)
                 or any(i not in actual_by_index for i in actual_indices)):
             continue
-        if any(not ai_editor_qc.source_matches_receipt(actual_by_index[i]["source"],
+        if any(not _qc_binding_covers_source(actual_by_index[i]["source"],
+                   part["ai_selection"]["source_identity"], report.get("source_bindings") or [])
+               or not ai_editor_qc.source_matches_receipt(actual_by_index[i]["source"],
                    part["ai_selection"]["source_identity"], prepared_sources)
                for i, part in zip(actual_indices, parts)):
             continue
@@ -1715,9 +1825,11 @@ def process_task(task: dict, *, retry_partial: bool = False,
             if qc_rejected:
                 log("restore post-draft QC rejections: %s" % {
                     k: sorted(v) for k, v in sorted(qc_rejected.items())})
+            seen_recut_windows = set()
             for attempt in range(1, MAX_DRAFT_ATTEMPTS + 1):
                 applied_repair_indices = frozenset(repair_visual_missing_indices)
                 applied_rejections = frozenset((k, s) for k, v in qc_rejected.items() for s in v)
+                applied_recuts = set(seen_recut_windows)
                 # Escalating strategies so one broken build never repeats
                 # identically.  The first draft may scan the pool once; all
                 # later drafts reuse that validated analysis, and retries
@@ -1892,6 +2004,13 @@ def process_task(task: dict, *, retry_partial: bool = False,
                                     expected_sources=rejection_identity["sources"]))
                                 repair_feedback = {key: value for key, value in repair_feedback.items()
                                     if value.get("match_level") in {"MISMATCH", "INSUFFICIENT_EVIDENCE", "ACCEPTABLE_DEGRADED", "MATERIAL_GAP"}}
+                            recut_windows = same_shot_recut_windows(
+                                rd, qc_result.get("report") or {},
+                                expected_sources=rejection_identity["sources"])
+                            for index, window in recut_windows.items():
+                                row = repair_feedback.get(str(index))
+                                if isinstance(row, dict):
+                                    row["same_shot_recut"] = window
                             save_qc_rejections(rd, rejection_identity, qc_rejected,
                                                repair_visual_missing_indices, repair_feedback)
                         log("DRAFT %d/%d attempt %d failed (%s): %s" % (
@@ -1901,14 +2020,22 @@ def process_task(task: dict, *, retry_partial: bool = False,
                         if res.get("stage_retry_exhausted"):
                             log("selection stage recovery stopped; no full-build fallback")
                             break
-                        # A post-draft visual mismatch is actionable: the QC
-                        # report has already identified the bad sentence(s),
-                        # and the next build will turn those exact segments
-                        # into intentional gaps. Allow one final repair pass;
-                        # do not keep retrying deterministic match failures.
+                        # A new sentence, a semantic mismatch, or the same shot
+                        # continuing past this cut can all open another look.
+                        # The same material is kept. The attempt cap still stops
+                        # a sentence whose window no longer has anything left.
+                        fresh_recuts = {index: window for index, window in recut_windows.items()
+                                        if (index, window["shot_id"], window["start"], window["end"]) not in applied_recuts
+                                        and isinstance(repair_feedback.get(str(index)), dict)} if qc_result else {}
                         qc_repairable = bool(qc_result and (
                             repair_visual_missing_indices.difference(applied_repair_indices)
-                            or {(k, s) for k, v in qc_rejected.items() for s in v}.difference(applied_rejections)))
+                            or {(k, s) for k, v in qc_rejected.items() for s in v}.difference(applied_rejections)
+                            or fresh_recuts))
+                        if fresh_recuts:
+                            seen_recut_windows.update((index, window["shot_id"], window["start"], window["end"])
+                                                      for index, window in fresh_recuts.items())
+                            log("same-shot recut: re-look at %s" % {index: (window["start"], window["end"])
+                                                                    for index, window in sorted(fresh_recuts.items())})
                         if qc_result and not qc_repairable:
                             last_failure.update(phase="post_draft_qc", resume_stage="qc",
                                                 failed_stage="qc", draft=a_name)

@@ -52,8 +52,6 @@ class AcceptanceDeliveryGateTests(unittest.TestCase):
         self.write(self.draft / "draft_info.json", {"id": "draft-a-id", "tracks": [
             {"name": "Video", "type": "video", "segments": [{"material_id": "source"}]}],
             "materials": {"videos": [{"id": "source", "path": str(source), "name": source.name}]}})
-        for name in ("fix_local.bat", "fix_local.ps1"):
-            (self.draft / name).write_text("fixture", encoding="utf-8")
         self.report = self.task_dir / "qc.json"
         self.valid_report = qc_report(draft=self.draft)
         self.valid_report["source_bindings"] = [{"path": str(source), "identity": pe.ai_editor_contract.source_identity(source)}]

@@ -20,3 +20,15 @@
 ## 证据
 
 [RFC 流水线](../rfc.md)、[模型与视觉](../model-and-vision.md)、[卖点信息价值](../shot-selling-point-value.md)、[匹配合同](../../packages/video-v1.5.3/doubao-jianying-orchestrator/orchestrator/ai_editor_contract.py)、[独立 QC](../../packages/video-v1.5.3/doubao-jianying-orchestrator/orchestrator/quality/ai_editor_qc.py)。
+
+## 2026-11-09 纸品包装与囤货细化
+
+纸品未点明箱、提、包或抽数的囤货/价格展示句，可在堆量、单包动作及两包动作间匹配；明确规格与功能主张仍遵循各自合同。静态包装、单片动作或背景里的一包，不能借用另一动作的动词获得包装动作资格。
+
+包装直证所需的指向必须落在同一块可读文案。显式未指向和否定观察优先；已完成的高清 pointed_agreed（包括空结果）不能被旧描述或其他字段翻案。普通视觉的 pointing_action/gesture 可按提示词保留指尖附近文案原文，不强制其中重复“指向”动词。兼容描述只能定位明确的同块观察，任意相邻句、另一面或别处的字样不能补成该块证据。
+
+选择原因是允许有实际信息的包装动作承接普通话术，同时保持指向、规格和功能证据边界。代价是旧缓存可能缺少定位事实；仅作历史诊断重放，不能自动认证当前规则下的AI选镜或QC。验证见 test_v156_evidence_contracts.py、包级 test_visual_governance_rules.py 及本次PR历史缓存回放记录。
+
+### 2026-11-10 同镜头补看
+
+QC证据不足/降级可提出同镜头遗漏窗提示；实际抽取目标帧并重新判断，不能凭提示认定动作完整。语义不符仍排除来源，独立QC继续验证新切片。详见[ADR0012](0012-bounded-material-recovery.md)。

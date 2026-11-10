@@ -17,7 +17,8 @@ from . import experiment_contract, experiment_events, timing_contract as timing
 
 ROLES = {"absorption", "rewet", "followup", "bridge", "breathability", "fluorescence",
          "sku_change", "promotion", "other", "uncertain"}
-PAIR_LIMIT = 3
+PAIR_LIMIT = 6
+ADJACENT_EXTRA = 4
 
 
 def groups(sentences, *, require_rewet=True):
@@ -66,6 +67,32 @@ def _window(shot, samples):
     return ids[0], ids[-1]
 
 
+def _pour_focus_ranges(manifest, first, directory):
+    """Located pour range of the A source, used only to choose which frames to show.
+
+    The phase locator is a retrieval hint; the pair observer still has to see
+    and report the pour itself. Any locator failure falls back to even sampling.
+    """
+    try:
+        from .. import rulepack
+        from ..vision import phase_timing
+        scene = next((s for s in rulepack.for_manifest(manifest)["scenes"] if s.get("id") == "absorb_test"), None)
+        if scene is None:
+            return {}
+        report = Path(directory)
+        report = report.parents[2] if len(report.parents) > 2 else report
+        located = phase_timing.locate(first, scene, report)
+        pour = (located.get("phases") or {}).get("pour") if isinstance(located, dict) else None
+        if not isinstance(pour, (list, tuple)) or len(pour) != 2:
+            return {}
+        lo, hi = float(pour[0]), float(pour[1])
+        if not lo <= hi:
+            return {}
+        return {"A": [(round((lo - 0.5) * 1e6), round((hi + 0.5) * 1e6))]}
+    except (OSError, ValueError, TypeError, KeyError, StopIteration, IndexError):
+        return {}
+
+
 def observe_pair(manifest, analysis, first, second, directory, *, focus="complete_pour"):
     """Pair actual source frames, then locate/refine events on the configured route."""
     from ..runtime.platform_env import find_ffmpeg
@@ -96,6 +123,7 @@ def observe_pair(manifest, analysis, first, second, directory, *, focus="complet
                   "source_end": min(second["source_end"], phases["wipe"][1])}
     samples = [_samples(s, directory, ffmpeg=ffmpeg, ffprobe=ffprobe, font_path=font)
                for s in (first, second)]
+    focus_ranges = _pour_focus_ranges(manifest, first, directory) if first["shot_id"] != second["shot_id"] else {}
     saved_pair = directory / "pair.pair.json"
     if saved_pair.is_file():
         pair = json.loads(saved_pair.read_text("utf-8"))
@@ -105,7 +133,7 @@ def observe_pair(manifest, analysis, first, second, directory, *, focus="complet
     else:
         pair = experiment_pair_review.review(scoped, *samples, _window(first, samples[0]),
             _window(second, samples[1]), directory / "pair.json",
-            ffmpeg=ffmpeg, ffprobe=ffprobe, font_path=font)
+            ffmpeg=ffmpeg, ffprobe=ffprobe, font_path=font, focus_ranges_us=focus_ranges)
     experiment_contract.validate_pair_evidence(scoped, pair, require_disjoint_windows=False)
     # GLM and Qwen both use the existing image client; no implicit switch to a
     # separate Qwen video service is needed by the default production entry.
@@ -357,19 +385,37 @@ def repair(manifest, analysis, plan, directory, narration_timing):
                     narration_timing, member_indices=indices):
                 changed = True
                 continue
+        # Consecutive files in one folder (IMG_218 -> IMG_219) are usually the
+        # pour and its verification. Retrieve them even when the per-sentence
+        # shortlist missed one side; the joint pixel review still decides.
+        def neighbours(ids, forward):
+            found = []
+            for sid in ids:
+                for other, shot in shots.items():
+                    if other in ids or other in found or any(other in rejected.get(i, set()) for i in indices):
+                        continue
+                    a, b = (shots[sid]["video"], shot["video"]) if forward else (shot["video"], shots[sid]["video"])
+                    if experiment_contract.adjacency_hint(a, b)["adjacent"]:
+                        found.append(other)
+            return found[:ADJACENT_EXTRA]
+        first_base, second_base = list(first_ids), list(second_ids)
+        second_ids = second_base + neighbours(first_base, True)
+        first_ids = first_base + neighbours(second_base, False)
         # A bounded search should cover different hypotheses rather than spend
-        # every review on one pour paired with several verification sources.
-        pending_pairs = [(a, b) for a in first_ids for b in second_ids]
+        # every review on one pour paired with several verification sources;
+        # adjacent-file pairs are tried first.
+        pending_pairs = [(a, b) for a in first_ids for b in second_ids if a != b]
         pairs, seen_a, seen_b = [], set(), set()
         while pending_pairs:
             chosen = min(pending_pairs, key=lambda p: (
-                (p[0] in seen_a) + (p[1] in seen_b),
                 not experiment_contract.adjacency_hint(shots[p[0]]["video"], shots[p[1]]["video"])["adjacent"],
+                (p[0] in seen_a) + (p[1] in seen_b),
                 first_ids.index(p[0]) + second_ids.index(p[1])))
             pending_pairs.remove(chosen); pairs.append(chosen)
             seen_a.add(chosen[0]); seen_b.add(chosen[1])
         scope = identity.digest({"indices": indices, "sentences": members,
-                                 "rules": identity.rules_identity(manifest)})[:24]
+                                 "rules": identity.rules_identity(manifest),
+                                 "sampling_protocol": "dense-pair-v2"})[:24]
         attempts = plan.setdefault("experiment_attempts", {}).setdefault(scope, {})
         for first, second in pairs:
             key = identity.digest([first, second, identity.source_identity(shots[first]["video"]),

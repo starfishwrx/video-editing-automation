@@ -37,9 +37,6 @@ def ensure_video_draft(draft: Path) -> None:
         write(path, payload)
         if (draft / "draft_content.json").is_file():
             write(draft / "draft_content.json", payload)
-    for name in ("fix_local.bat", "fix_local.ps1"):
-        if not (draft / name).exists():
-            (draft / name).write_text("synthetic tool fixture; not executed", encoding="utf-8")
     if not (draft / "draft_meta_info.json").exists():
         write(draft / "draft_meta_info.json", {
             "draft_id": payload["id"], "draft_name": draft.name,

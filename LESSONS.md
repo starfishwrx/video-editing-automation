@@ -7,6 +7,22 @@
 
 ## 新增条目
 
+### L-20261110-material-preparation 素材坏项按确证原因处理
+- status: OPEN
+- hits: 1
+- 模块: vision / material cache / experiment selection
+- 现象: 视频后缀的静态缩略图与少量不可审计视觉回答阻断整批；事件连续性推导的末帧也曾被误当成模型必须单独看过的边界。
+- 以后怎么做: 仅成功探测确证的非视频可带警告跳过；网络和未知探测错误保持阻断。不可审计回答按有界单镜头重问、剔除警告及预算审计处理，不写成有效视觉缓存；事件独立边界与连续性推导帧分开校验。
+- 证据: ADR 0012、test_material_preparation_recovery.py、test_overnight_selection_recovery.py。
+
+### L-20261109-pointed-copy 包装定位保持字段语义与否定优先
+- status: OPEN
+- hits: 1
+- 模块: demo_actions / vision_analyzer / shot_analyzer
+- 现象: 描述中残留指向词可覆盖显式false；提示词要求文案原文而解析器要求动作词；同一字段里背景单包和纸张动作也被拼成包装动作。
+- 以后怎么做: 显式否定和高清复核空结果优先，普通原文字段须能被消费者识别；动作绑定同一子句内的包装对象。正反回归覆盖否定、跨对象、背景和提示词实际字段形状，再用历史缓存及原图核对。
+- 证据: ADR0002、test_v156_evidence_contracts.py、test_visual_governance_rules.py。
+
 ### L-20261109-test-isolation 慢测试先查无关外部调用
 - status: OPEN
 - hits: 1

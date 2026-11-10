@@ -98,10 +98,6 @@ def package_check(draft: pathlib.Path) -> dict[str, Any]:
     for required in ("draft_info.json", "media"):
         if not (draft / required).exists():
             issues.append("MISSING_" + required.upper())
-    if not any((draft / name).is_file() for name in ("素材本地化修复.bat", "fix_local.bat")):
-        issues.append("LOCALIZE_BAT_MISSING")
-    if not (draft / "fix_local.ps1").is_file():
-        issues.append("FIX_LOCAL_PS1_MISSING")
     media = [item for item in (draft / "media").rglob("*") if item.is_file()] if (draft / "media").is_dir() else []
     if not media:
         issues.append("MEDIA_EMPTY")

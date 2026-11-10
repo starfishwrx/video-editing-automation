@@ -201,6 +201,31 @@ class DefaultExperimentGroupTests(unittest.TestCase):
         self.assertEqual(result["segments"][:3], prior)
         self.assertEqual(result["selection_mode"], "rule_then_ai")
 
+
+    def test_legacy_pair_and_motion_caches_do_not_poison_new_sampling_scope(self):
+        import json
+        members = next(groups.groups(self.plan["sentences"]))
+        legacy_scope = contract.digest({"indices": [m["index"] for m in members],
+            "sentences": members, "rules": contract.rules_identity(self.manifest)})[:24]
+        self.plan["experiment_attempts"] = {legacy_scope: {
+            str(i): {"status": "rejected"} for i in range(groups.PAIR_LIMIT)}}
+        legacy_root = self.root / "experiments" / legacy_scope / "old-pair"
+        legacy_root.mkdir(parents=True)
+        old_pair = legacy_root / "pair.pair.json"
+        old_motion = legacy_root / "events-complete_pour.motion.json"
+        old_pair.write_text(json.dumps({"old_sampling": "8 frames"}))
+        old_motion.write_text(json.dumps({"old_motion": True}))
+        before = (old_pair.read_bytes(), old_motion.read_bytes())
+        with patch.object(editor, "_place_absorb_experiment", return_value=False), \
+             patch.object(groups, "observe_pair", return_value=(self.fixture.evidence, self.fixture.motion)) as observe, \
+             patch.object(groups, "review_group", side_effect=self.observed_group):
+            result = editor._repair_reviewed_rows(self.manifest, self.analysis, self.plan, self.root, None, set())
+        self.assertTrue(result["ok"])
+        self.assertEqual(observe.call_count, 1)
+        self.assertNotEqual(observe.call_args.args[4].parent.name, legacy_scope)
+        self.assertEqual((old_pair.read_bytes(), old_motion.read_bytes()), before)
+        self.assertEqual(len(self.plan["experiment_attempts"][legacy_scope]), groups.PAIR_LIMIT)
+
     def test_frozen_group_resumes_without_new_observation(self):
         result = self.repair()
         with patch.object(groups, "observe_pair", side_effect=AssertionError("paid call forbidden")), \
@@ -375,8 +400,10 @@ class DefaultExperimentGroupTests(unittest.TestCase):
         with patch.object(groups, "observe_pair", side_effect=ValueError("EXPERIMENT_PAIR_NOT_CONFIRMED")) as observe:
             with self.assertRaisesRegex(ValueError, "EXPERIMENT_GROUP_PENDING"):
                 groups.repair(self.manifest, self.analysis, self.plan, self.root, None)
-        self.assertEqual(observe.call_count, 3)
-        self.assertEqual({call.args[2]["shot_id"] for call in observe.call_args_list}, {"shot1", "shot4", "shot5"})
+        # PAIR_LIMIT 3 -> 6 (fix_rerun_20261109): all 3x2 hypotheses fit the budget; the
+        # first three reviews still cover every distinct pour source.
+        self.assertEqual(observe.call_count, min(groups.PAIR_LIMIT, 6))
+        self.assertEqual({call.args[2]["shot_id"] for call in observe.call_args_list[:3]}, {"shot1", "shot4", "shot5"})
 
     def test_overlapping_observation_windows_are_refined_before_selected_source_check(self):
         from orchestrator.selection.experiment_contract import validate_pair_evidence

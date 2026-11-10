@@ -235,7 +235,21 @@ def prepare_product(task: dict, product_dir: Path, env: dict) -> str:
     output = product_dir / "shot_candidates.json"
     payload = _read(output)
     if proc.returncode or not payload.get("material_cache", {}).get("ready"):
-        raise RuntimeError("MATERIAL_PREP_INCOMPLETE: " + (proc.stderr or proc.stdout or "not ready")[-1200:])
+        from tools.queueing.contracts import is_reusable_analysis_row
+        from orchestrator.vision.vision_analyzer import logged_pool_exclusions
+        excluded = logged_pool_exclusions(payload)
+        problems = [{k: row[k] for k in ("type", "shot_id", "message") if k in row}
+                    for row in [*(payload.get("issues") or []), *(payload.get("pending_items") or [])]
+                    if isinstance(row, dict)]
+        problems.extend({"type": "shot_not_ready", "shot_id": row.get("shot_id"),
+                         "message": str(row.get("analysis_error") or "no validated observation")[:300]}
+                        for row in payload.get("shots") or [] if isinstance(row, dict)
+                        and str(row.get("shot_id")) not in excluded and not is_reusable_analysis_row(row))
+        # The previous stdout tail contained the end of a huge source inventory,
+        # hiding the actual bad source/answer from every dependent task.
+        summary = {"analysis_file": str(output), "returncode": proc.returncode,
+                   "problem_count": len(problems), "problems": problems[:8]}
+        raise RuntimeError("MATERIAL_PREP_INCOMPLETE: " + json.dumps(summary, ensure_ascii=False))
     return str(output)
 
 

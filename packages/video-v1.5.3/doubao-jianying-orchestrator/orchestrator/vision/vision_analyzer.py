@@ -775,6 +775,38 @@ def _reusable_visual_observation(row: dict[str, Any]) -> bool:
             and _number(row.get("analysis_confidence")) > 0)
 
 
+UNAUDITABLE_ERROR = "vision response lacks auditable description/tags/confidence"
+UNAUDITABLE_WARNING = "shot_skipped_unauditable"
+
+
+def _reask_limit() -> int:
+    """Extra single-shot asks for an unauditable answer (bounded: 0..2)."""
+    return max(0, min(2, env_int("JY_VISION_REASK_LIMIT", 2, minimum=0)))
+
+
+def _reask_max_shots(total: int) -> int:
+    """At most this many shots per product may be re-asked or excluded.
+
+    One or two odd answers are a model slip; many are a systemic fault that must
+    stay blocking rather than be re-asked or hidden shot by shot.
+    """
+    return max(1, min(24, total // 100))
+
+
+def logged_pool_exclusions(analysis: dict[str, Any]) -> set[str]:
+    """Shot ids removed from the candidate pool with a logged, non-blocking warning.
+
+    A row only counts when the row itself is flagged *and* the analysis carries
+    the matching warning; neither alone relaxes readiness.
+    """
+    warned = {str(w.get("shot_id")) for w in analysis.get("warnings") or []
+              if isinstance(w, dict) and w.get("type") == UNAUDITABLE_WARNING}
+    return {str(row.get("shot_id")) for row in analysis.get("shots") or []
+            if isinstance(row, dict) and row.get("excluded_from_pool") is True
+            and row.get("status") != "ready_for_matching"
+            and str(row.get("shot_id")) in warned}
+
+
 def _apply_cached_visual(row: dict[str, Any], cached: dict[str, Any], key: str) -> None:
     for field in _VISION_CACHE_FIELDS:
         if field in cached:
@@ -1197,8 +1229,8 @@ def _vision_prompt(items: list[dict[str, Any]], batch_index: int, batch_count: i
     - has_subject：画面里是否存在本商品主体（true/false）。**整段都是背景、看不到产品本体时填 false**（空镜）。判断主体是否存在要看整段，不能只看某一帧；白色产品也算主体，不要因为颜色浅就判 false。
     - readable_claims：只有在包装文字/标识实际可读时逐字记录；看不清就填空数组。
     - text_tiles：包装正面或侧面文字正对镜头、最适合放大读字的格子编号（最多 2 个，如 [3, 5]）；画面里看不到包装文字就填空数组。之后会用这些格子的高清原图单独读字。
-    - pointing_to_text：只有手指/手势明确指向该可读包装文字或标识才为 true；普通拿包装、展示包装、手在旁边不算指向。
-    - pointing_action/gesture：简短描述指向动作；没有明确指向时填空。包装文字只可支持脚本中同一条包装卖点，不能证明真实性或吸收、柔软等功能。
+    - pointing_to_text：指尖附近有一块可读包装文案才为 true。指着包装其他位置、卖点在另一块，必须为 false。普通拿包装、展示包装、手在旁边不算指向。
+    - pointing_action/gesture：写下指尖附近那一块的原文，可以是这块里的几条短语。不要把包装其他位置的文字写进来，也不要只写「指向文字」。包装文字只可支持脚本中同一条包装卖点，不能证明真实性或吸收、柔软等功能。
     - 对 CTA、促销、划算、囤货、数量话术，只有多包、成排、整箱、堆叠或清晰数量关系才填写对应量感标签；单包静态特写不得当作 CTA 量感证据。
 - action_complete：判断这个镜头里有没有一段可以直接用作口播证据的画面。判据是主体状态，不是画面里有没有人、有没有手：
   * 有人手拿着、举着、托着、指着、按着产品做展示——属于展示，只要产品主体完整可见就为 true；手入镜本身不构成 false 的理由。
@@ -1221,7 +1253,7 @@ def _text_prompt(shot_id: str, items: list[dict[str, Any]]) -> str:
     return f"""你只做一件事：逐字抄录图中产品包装上清晰可读的文字。图里是同一个镜头 shot_id={shot_id} 的高清画面（{frames}）。
 - 抄录品名、卖点短语、规格数字、图标旁边的文字，每条一个短语，保持原文用字，不翻译、不改写。
 - 只写确实看清的字；看不清、被遮挡或反光的部分不要猜，也不要用字形相近的词替代。
-- 手指或笔明确指着某条文字时，把那条文字写进 pointed_text；没有明确指向就填空数组。
+- 指尖附近那一块文案写进 pointed_text，可以是这块里的几条短语。包装其他位置的文字只放 readable_claims；没有指到一块可读文案就让 pointed_text 为空数组。
 不要裁剪、放大或使用任何工具，严格只输出 JSON 对象：{{"shot_id": "{shot_id}", "readable_claims": ["..."], "pointed_text": ["..."]}}
 """
 
@@ -1341,6 +1373,12 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
     if not shots:
         return analysis
     stage_seconds: dict[str, float] = {}
+    prior_exclusions = logged_pool_exclusions(analysis)
+    prior_exclusion_warnings = {str(w.get("shot_id")): w for w in analysis.get("warnings") or []
+        if isinstance(w, dict) and w.get("type") == UNAUDITABLE_WARNING}
+    if analysis.get("warnings"):
+        analysis["warnings"] = [w for w in analysis["warnings"]
+                                if not (isinstance(w, dict) and w.get("type") == UNAUDITABLE_WARNING)]
     cache_path = _vision_cache_path(report_dir)
     cache = _load_vision_cache(cache_path)
     changed_cache_keys: set[str] = set()
@@ -1368,6 +1406,17 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
         key = _vision_cache_key(manifest, shot)
         if key:
             cache_keys[shot_id] = key
+        # Reusing a product analysis within a batch must not re-ask an already
+        # excluded shot for every task. This is a bound negative observation,
+        # never a ready candidate or a positive shared-cache entry.
+        if (key and _reask_limit() > 0 and shot_id in prior_exclusions
+                and not _reusable_visual_observation(cache.get(key) or {})
+                and len(prior_exclusions) <= _reask_max_shots(len(shots))
+                and shot.get("exclusion_cache_key") == key
+                and shot.get("exclusion_reason") == "VISION_UNAUDITABLE_AFTER_REASK"
+                and prior_exclusion_warnings[shot_id].get("reasks") in (1, 2)):
+            analysis.setdefault("warnings", []).append(prior_exclusion_warnings[shot_id])
+            continue
         cached = cache.get(key) if key else None
         prior_origin = None
         cached_key = key
@@ -1475,6 +1524,9 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
                          "analysis_error": "旧观察与当前输入签名不一致或复核帧缺失，重新分析"})
             shot.pop("text_pass", None)
         shot["analysis_cache_hit"] = False
+        shot.pop("excluded_from_pool", None)
+        shot.pop("exclusion_reason", None)
+        shot.pop("exclusion_cache_key", None)
         if key:
             shot["analysis_cache_key"] = key
         cache_misses += 1
@@ -1522,7 +1574,11 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
         apply_cross_shot_text(shots)
         _set_cache_summary(_vision_summary([], [], [], partial=False))
         analysis["pending_items"] = list(analysis.get("pending_items", []))
-        analysis["ok"] = not any(needs_vision(row) for row in shots)
+        excluded = logged_pool_exclusions(analysis)
+        analysis["ok"] = (bool(shots) and len(excluded) < len(shots)
+                          and len(excluded) <= _reask_max_shots(len(shots)) and not analysis["pending_items"]
+                          and not any(needs_vision(row) for row in shots
+                                      if str(row.get("shot_id")) not in excluded))
         _persist(report_dir, analysis)
         _progress(report_dir, phase="done", vision_left=0, text_left=0)
         return analysis
@@ -1636,8 +1692,7 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
             identity = hashlib.sha256((prompt + "\n" + str(sheet) + route).encode("utf-8")).hexdigest()
             return cache_path.parent / "calls" / f"{prefix}_{identity}.txt"
 
-        def _call_batch(job: tuple[int, list[dict[str, Any]], Path]) -> tuple[int, tuple[bool, str]]:
-            batch_index, batch, response_file = job
+        def _batch_validator(batch: list[dict[str, Any]]):
             def validate(data):
                 rows = data if isinstance(data, list) else data.get("shots") if isinstance(data, dict) else None
                 expected = {str(item["shot_id"]) for item in batch}
@@ -1646,6 +1701,11 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
                             and isinstance(row.get("description"), str) and bool(row["description"].strip())
                             and type(row.get("action_complete")) is bool for row in rows)
                     and {str(row.get("shot_id")) for row in rows} == expected)
+            return validate
+
+        def _call_batch(job: tuple[int, list[dict[str, Any]], Path]) -> tuple[int, tuple[bool, str]]:
+            batch_index, batch, response_file = job
+            validate = _batch_validator(batch)
             result = _run_vision_with_retry(
                 sheets[batch_index],
                 _vision_prompt(batch, batch_index, len(batches), analysis_rules),
@@ -1684,26 +1744,9 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
                   requests_finished=0, vision_left=len(jobs))
         _checkpoint()
 
-        stage_started = time.monotonic()
-        for done, (batch_index, (ok, text)) in enumerate(_iter_indexed(jobs, _call_batch, workers), 1):
-            _, batch, _ = prepared[batch_index]
-            _progress(report_dir, requests_finished=done, vision_left=len(jobs) - done)
-            if not ok:
-                vision_errors.append({"type": "VISION_CALL_FAILED", "batch": batch_index,
-                                      "message": text[-4000:]})
-                _checkpoint()
-                continue
-            try:
-                payload = _json_from_text(text)
-                rows = payload if isinstance(payload, list) else payload.get("shots", [])
-                if not isinstance(rows, list):
-                    raise ValueError("response JSON is not a shot array")
-            except (ValueError, TypeError, AttributeError) as exc:
-                vision_errors.append({"type": "VISION_JSON_INVALID", "batch": batch_index,
-                                      "message": str(exc), "response": text[-2000:]})
-                _checkpoint()
-                continue
-            responses.append({"batch": batch_index, "shot_count": len(rows)})
+        def _ingest_rows(rows: list[Any], batch: list[dict[str, Any]]) -> list[str]:
+            """Apply one validated response; return shot ids whose answer was unauditable."""
+            flagged: list[str] = []
             tile_map = {n: item for n, item in enumerate(batch, 1)}
             batch_shots = {str(item["shot_id"]) for item in batch}
             seen: set[str] = set()
@@ -1726,8 +1769,12 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
                 empty_rejection = raw.get("action_complete") is False and raw.get("evidence_tags") == []
                 if not description or not visual_tags or (not evidence_tags and not empty_rejection) or confidence <= 0:
                     row["status"] = "pending_analysis"
-                    row["analysis_error"] = "vision response lacks auditable description/tags/confidence"
+                    row["analysis_error"] = UNAUDITABLE_ERROR
+                    flagged.append(shot_id)
                     continue
+                row.pop("excluded_from_pool", None)
+                row.pop("exclusion_reason", None)
+                row.pop("exclusion_cache_key", None)
                 row.update({
                     "description": description,
                     "visual_description": description,
@@ -1800,11 +1847,112 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
                     row["text_pass"] = "not_applicable" if _text_pass_enabled() else "disabled"
                 # Store visual success independently, even if OCR later fails.
                 _remember(shot_id)
+            return flagged
+
+        unauditable: list[str] = []
+        stage_started = time.monotonic()
+        for done, (batch_index, (ok, text)) in enumerate(_iter_indexed(jobs, _call_batch, workers), 1):
+            _, batch, _ = prepared[batch_index]
+            _progress(report_dir, requests_finished=done, vision_left=len(jobs) - done)
+            if not ok:
+                vision_errors.append({"type": "VISION_CALL_FAILED", "batch": batch_index,
+                                      "message": text[-4000:]})
+                _checkpoint()
+                continue
+            try:
+                payload = _json_from_text(text)
+                rows = payload if isinstance(payload, list) else payload.get("shots", [])
+                if not isinstance(rows, list):
+                    raise ValueError("response JSON is not a shot array")
+            except (ValueError, TypeError, AttributeError) as exc:
+                vision_errors.append({"type": "VISION_JSON_INVALID", "batch": batch_index,
+                                      "message": str(exc), "response": text[-2000:]})
+                _checkpoint()
+                continue
+            responses.append({"batch": batch_index, "shot_count": len(rows)})
+            unauditable.extend(_ingest_rows(rows, batch))
             # Persist after every completed vision batch so a later timeout
             # does not discard the understanding work that already finished.
             _flush_cache()
             _checkpoint()
         stage_seconds["vision_api_and_checkpoint"] = round(time.monotonic() - stage_started, 3)
+        # Fix 2026-11-10: an answer without auditable description/tags/confidence
+        # is never accepted. Re-ask that shot alone on its own sheet (new call
+        # identity, sequential = low concurrency), at most _reask_limit() times.
+        # If every answer stays unauditable, the shot leaves the candidate pool
+        # with a logged warning; a transport failure keeps it blocking.
+        reask_log: list[dict[str, Any]] = []
+        targets = [sid for sid in dict.fromkeys(unauditable)
+                   if by_id[sid].get("analysis_error") == UNAUDITABLE_ERROR and shot_frames.get(sid)]
+        retained_exclusions = len(logged_pool_exclusions(analysis))
+        budget = max(0, _reask_max_shots(len(shots)) - retained_exclusions)
+        limit = _reask_limit()
+        stage_started = time.monotonic()
+        for shot_id in (targets[:budget] if limit else []):
+            group = list(shot_frames[shot_id])
+            entry: dict[str, Any] = {"shot_id": shot_id, "attempts": [], "outcome": "unauditable"}
+            for attempt in range(1, limit + 1):
+                tiles = [{**item, "label": f"#{n} {item['timestamp']:.1f}s"}
+                         for n, item in enumerate(group, 1)]
+                parameters = {"fit": True, "font_size": 22, **_sheet_geometry(group)}
+                sheet = material_cache.cached_sheet(tiles, report_dir, prefix="sheet",
+                    parameters=parameters, prepare=lambda target: _write_sheet(tiles, target,
+                        ffmpeg=ffmpeg, **parameters))
+                if sheet is None:
+                    entry["attempts"].append({"attempt": attempt, "result": "sheet_failed"})
+                    entry["outcome"] = "call_failed"
+                    break
+                prompt = (_vision_prompt(group, 1, 1, analysis_rules)
+                          + f"\n单独复核（第 {attempt} 次）：本图只有 shot_id={shot_id} 这一个镜头的 "
+                            f"#1-#{len(group)} 格，编号格子都是该镜头的真实素材帧。逐格核对后按上面的字段完整作答，"
+                            "visual_tags 与 confidence 必须依据实际看见的画面填写。\n")
+                ok, text = _run_vision_with_retry(
+                    sheet, prompt, _call_path(prompt, sheet, f"vision_reask{attempt}"),
+                    timeout=timeout, validator=_batch_validator(group),
+                    on_attempt=_attempts(f"vision_reask_{attempt}", 1, 1, [shot_id]))
+                if not ok:
+                    entry["attempts"].append({"attempt": attempt, "result": "call_failed",
+                                              "message": str(text)[-300:]})
+                    entry["outcome"] = "call_failed"
+                    break
+                try:
+                    payload = _json_from_text(text)
+                    rows = payload if isinstance(payload, list) else payload.get("shots", [])
+                    if not isinstance(rows, list):
+                        raise ValueError("response JSON is not a shot array")
+                except (ValueError, TypeError, AttributeError) as exc:
+                    entry["attempts"].append({"attempt": attempt, "result": "json_invalid",
+                                              "message": str(exc)[-300:]})
+                    entry["outcome"] = "call_failed"
+                    break
+                responses.append({"batch": f"reask:{shot_id}:{attempt}", "shot_count": len(rows)})
+                still = _ingest_rows(rows, group)
+                if shot_id not in still:
+                    entry["attempts"].append({"attempt": attempt, "result": "auditable"})
+                    entry["outcome"] = "recovered"
+                    break
+                entry["attempts"].append({"attempt": attempt, "result": "unauditable"})
+            row = by_id[shot_id]
+            if entry["outcome"] == "unauditable" and row.get("analysis_error") == UNAUDITABLE_ERROR:
+                row.update({"status": "pending_analysis", "excluded_from_pool": True,
+                            "exclusion_reason": "VISION_UNAUDITABLE_AFTER_REASK",
+                            "exclusion_cache_key": cache_keys.get(shot_id),
+                            "analysis_error": UNAUDITABLE_ERROR + f"（单独重问 {limit} 次仍不可审计，已移出候选池）"})
+                analysis.setdefault("warnings", []).append({
+                    "type": UNAUDITABLE_WARNING, "shot_id": shot_id, "video": row.get("video"),
+                    "blocking": False, "reasks": limit,
+                    "message": "vision answer stayed unauditable after single-shot re-asks; shot left out of the candidate pool"})
+            reask_log.append(entry)
+            _flush_cache()
+            _checkpoint()
+        for shot_id in targets[budget:] if limit else targets:
+            reask_log.append({"shot_id": shot_id, "attempts": [], "outcome": "not_reasked_over_budget"
+                              if limit else "reask_disabled"})
+        if reask_log:
+            analysis["vision_reask"] = {"limit": limit, "max_shots": _reask_max_shots(len(shots)),
+                                        "available_shots": budget, "retained_exclusions": retained_exclusions,
+                                        "shots": reask_log}
+            stage_seconds["vision_reask"] = round(time.monotonic() - stage_started, 3)
         if batches:
             _checkpoint()
         text_total = len(text_requests)
@@ -1905,8 +2053,11 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
     _set_cache_summary(_vision_summary(batches, responses,
                                        vision_errors, partial=False), partial=False)
     analysis["pending_items"] = list(analysis.get("pending_items", [])) + vision_errors
-    analysis["ok"] = bool(shots) and not analysis["pending_items"] and not any(
-        needs_vision(row) for row in shots)
+    excluded = logged_pool_exclusions(analysis)
+    analysis["ok"] = (bool(shots) and len(excluded) < len(shots)
+                          and len(excluded) <= _reask_max_shots(len(shots)) and not analysis["pending_items"]
+                      and not any(needs_vision(row) for row in shots
+                                  if str(row.get("shot_id")) not in excluded))
     _persist(report_dir, analysis)
     _progress(report_dir, phase="done", vision_left=0, text_left=0,
               finished_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"))

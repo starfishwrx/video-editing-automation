@@ -148,6 +148,38 @@ def validate_pair(row, visible_ids):
     return row
 
 
+PAIR_BASE_FRAMES = 8
+PAIR_MAX_UNIFORM_FRAMES = 14
+PAIR_UNIFORM_GAP_US = 4_000_000
+PAIR_MAX_FOCUS_FRAMES = 6
+
+
+def pair_sample_ids(samples, a, b, focus=()):
+    """Frames shown to the pair observer.
+
+    Short windows keep the original 8 evenly spaced frames. Long windows get up
+    to 14 evenly spaced frames (<= ~4 s apart where possible), plus at most six
+    frames inside a located pour region, so a short pour is not skipped.
+    """
+    frames = samples["frames"]
+    span = max(0, int(frames[b]["pts_us"]) - int(frames[a]["pts_us"]))
+    count = max(PAIR_BASE_FRAMES, min(PAIR_MAX_UNIFORM_FRAMES, -(-span // PAIR_UNIFORM_GAP_US) + 1))
+    ids = {round(a + i * (b - a) / (count - 1)) for i in range(count)}
+    ids.update(i for i in (focus or ()) if type(i) is int and a <= i <= b)
+    return sorted(ids)
+
+
+def focus_frame_ids(samples, a, b, ranges_us, limit=PAIR_MAX_FOCUS_FRAMES):
+    """Evenly spaced frame ids inside located phase ranges (retrieval hint only)."""
+    inside = []
+    for lo, hi in ranges_us or ():
+        inside += [i for i in range(a, b + 1) if lo <= samples["frames"][i]["pts_us"] <= hi]
+    inside = sorted(set(inside))
+    if len(inside) <= limit:
+        return inside
+    return sorted({inside[round(i * (len(inside) - 1) / (limit - 1))] for i in range(limit)})
+
+
 def validate_pair_evidence(manifest, evidence, *, require_disjoint_windows=True):
     """One paired-source boundary for preview assembly and normal production."""
     from .. import ai_editor_contract as identity
@@ -169,7 +201,7 @@ def validate_pair_evidence(manifest, evidence, *, require_disjoint_windows=True)
         a, b = member["window_frame_ids"]
         if type(a) is not int or type(b) is not int or not 0 <= a < b < len(samples["frames"]):
             raise ValueError("EXPERIMENT_PAIR_WINDOW_INVALID")
-        ids = sorted({round(a + i * (b - a) / 7) for i in range(8)})
+        ids = pair_sample_ids(samples, a, b, member.get("focus_frame_ids") or ())
         if member["visible_frame_ids"] != ids:
             raise ValueError("EXPERIMENT_PAIR_SHOWN_FRAMES_CHANGED")
         visible[member["part"]] = set(ids)
