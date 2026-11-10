@@ -101,6 +101,8 @@ pwsh -NoProfile -File scripts/install_pipeline_task.ps1 -TaskName VideoAutomatio
 
 Mac 交接、人工 prepare/collect、Gold 对照放行和旧批准文件已退出运行链。旧合同不能自动转为新合同；缺少构建模式或源绑定的历史报告需要补本次独立 QC，不能手改字段伪造正式来源。离线句级反馈工具仍可用于维护规则，与自动交付无关。
 
+人工审阅只按具体任务要求执行；任务明确要求时MUST完成相应审阅并记录结果，MUST NOT将人审恢复为所有任务的默认分发前提，也MUST NOT用四项自动PASS冒认已完成实际人工审阅。上述关键词按[要求用语与适用范围](../packages/video-v1.5.3/doubao-jianying-orchestrator/references/requirement_levels.md)解释。
+
 运行时身份绑定当前包内文件字节、配置的无头后端及策略元数据，仍不证明成片质量。离线测试和合成草稿验证同样不替代真实画面、声音与剪映可编辑性的观察。
 
 ### 夜间故障恢复补充

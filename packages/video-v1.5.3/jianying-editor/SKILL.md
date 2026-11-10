@@ -5,27 +5,29 @@ description: Create and inspect editable Jianying drafts through the bundled JyP
 
 # Jianying Editor
 
+Normative keywords follow [RFC 2119 / RFC 8174 and the existing scope rules](../doubao-jianying-orchestrator/references/requirement_levels.md). Defaults remain overridable under the existing task/category contract.
+
 Use the bundled `scripts/jy_wrapper.py` and `pyJianYingDraft` vendor package for editable draft creation. Keep media references valid and use integer microseconds for timeline values.
 
 For missing-media delivery or encrypted historical drafts, read
 [`draft_delivery_and_recovery.md`](../doubao-jianying-orchestrator/references/draft_delivery_and_recovery.md).
 Use the package's `tools.draft_delivery` entrypoints; an encrypted current
-timeline must never silently fall back to an old plaintext sidecar. Restoring
-the original generated version requires explicit user confirmation and a
+timeline from a historical edited session MUST NOT silently fall back to an old plaintext sidecar. Current native drafts use their documented codec contract. Restoring
+the original generated version MUST require explicit user confirmation and a
 matching successful run, and creates a new project through the bundled writer.
 
 ## Quality rules
 
-- Preserve source media and write to a new draft. Do not close, switch, or overwrite a draft while Jianying is running.
-- Keep audio inside its matching video/full-timeline boundary; never leave trailing narration after the picture ends.
-- Check the saved draft for readable media, valid timing and visible subtitles before reporting success. Source hashes or receipt signatures do not prove these results.
-- Prefer cached metadata and generated assets; do not repeat expensive probes or TTS synthesis unnecessarily.
-- For end-to-end generation, always hand the manifest to the sibling
+- MUST preserve source media and write to a new draft. MUST NOT close, switch, or overwrite a draft while Jianying is running.
+- MUST keep audio inside its matching video/full-timeline boundary; MUST NOT leave trailing narration after the picture ends.
+- MUST check the saved draft for readable media, valid timing and visible subtitles before reporting success. Source hashes or receipt signatures do not prove these results; MUST NOT report actual playback or editing acceptance without observing it.
+- SHOULD reuse valid cached metadata and generated assets, avoiding unnecessary probes or TTS synthesis. Frozen-run recovery MUST also obey its input-identity and stage-budget contract.
+- For end-to-end generation, MUST hand the manifest to the sibling
   `doubao-jianying-orchestrator` and run `run.py build`. This skill supplies
   the writer API; it is not a fallback writer for agent-created JSON.
-- `byted-mediakit` may assist with understanding or audio processing, but must
-  not create, install, copy, or patch JianYing draft JSON.
-- Never create task-local `gen_*.py` or `install_*.py` draft scripts and never
+- `byted-mediakit` MAY assist with understanding or audio processing, but MUST NOT
+  create, install, copy, or patch JianYing draft JSON.
+- MUST NOT create task-local `gen_*.py` or `install_*.py` draft scripts or
   manually edit `draft_content.json`, `draft_info.json`, or
   `draft_meta_info.json`.
 
@@ -37,9 +39,10 @@ matching successful run, and creates a new project through the bundled writer.
 - Displayed subtitle text removes Chinese and English punctuation while
   retaining letters, numbers, and necessary spaces.
 - Subtitle clip position defaults to `X=0`, `Y=-0.55` in JianYing's half-canvas-
-  height coordinate system. A caller may override these values explicitly; the
-  orchestrator's generated drafts use the defaults and validate them after
-  saving.
+  height coordinate system. A caller MAY override these values explicitly under
+  the task/category contract; the orchestrator MUST validate the effective
+  values after saving. Paper defaults use pixel coordinates from the paper rules:
+  `Y=-528` becomes `-0.55` at 1080×1920 (`-528 / (1920 / 2)`).
 
 For the end-to-end manifest workflow, use the sibling `doubao-jianying-orchestrator` skill. Advanced delivery/recovery notes live under `../doubao-jianying-orchestrator/references/`; this editor package has no separate `rules/` or `references/` tree.
 
