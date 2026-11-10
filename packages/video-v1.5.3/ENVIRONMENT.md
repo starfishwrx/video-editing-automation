@@ -133,30 +133,43 @@ The optional `max_absorb_demo_speed` bounds the legacy scene planner's pour,
 absorption and wipe speeds (finite value from 1 to 20). If a full observed
 action does not fit, the scene must try another candidate or remain unresolved;
 the limit never authorizes inventing or silently clipping the missing action.
-The default AI editor and AI refill intersect this explicit cap with the shared
-playback policy. Since a general observation cannot prove a window is unrelated
-to absorption, the explicit cap conservatively applies to all AI windows;
+The task MAY configure `max_absorb_demo_speed`. The default AI editor and AI
+refill MUST intersect this explicit cap with the shared playback policy, including
+experiment-phase solving, physical cuts and both draft writers. Since a general
+observation cannot prove a window is unrelated to absorption, the explicit cap
+MUST conservatively apply to all AI windows;
 this can make an otherwise usable non-absorption window infeasible. Without
 the field, the existing policy is unchanged: reviewed process windows are at
 most 3x, separately reviewed complete placement windows can reach 2x, and
 critical experiment phases stay at 1x. Windows without either permission stay
-at 1x. The cap is bound to each
-new selection receipt and rechecked against the actual editable draft's source
-and target times, segment speed and speed material during independent QC.
+at 1x. The cap MUST be bound to each new selection receipt and rechecked against
+the actual editable draft's source and target times, segment speed and speed
+material during independent QC; unverifiable or inconsistent results MUST NOT
+be certified. Configuring a task cap MUST NOT widen the shared permissions.
 
-New queue tasks freeze `source_reuse_policy=strict-v1`: `max_source_reuse`
-limits uses of the same source (default 2 in the queue); a validated continuous
-group counts once for each source it actually uses, and preview-only missing-footage placeholders
-do not consume source uses. A task can select a smaller positive integer; when
-no eligible alternative exists, it is blocked rather than silently exceeding
-the limit. Legacy frozen runs retain their previous recovery behavior.
+New queue tasks MUST freeze `source_reuse_policy=strict-v1`: `max_source_reuse`
+limits uses of the same source in one output video, with a queue default of 2
+when omitted. A task MAY explicitly override this default with any positive
+integer, including a value greater than 2. A validated continuous group MUST
+count once for each source it actually uses; preview-only missing-footage
+placeholders do not consume source uses. Once strict-v1 applies, actual uses
+MUST respect the frozen effective limit; when no eligible alternative exists,
+the task MUST be blocked rather than silently exceed it. Legacy frozen runs
+MUST retain their previous recovery behavior. This is output-footage reuse,
+not the reuse of cached visual observations or a model-call budget.
 
-New queue tasks forward `shot_notes` or the configured remark field. Numbered
-notes refer to original sentences and are mapped to the verified spoken
-segments; fragment notes use the text. The chosen basis is frozen on retry.
-Unversioned raw manifests retain split-segment numbering, while explicitly
-supplied segments can use `shot_notes_index_basis=segment` or `split`.
-Ambiguous frozen sentence/audio boundaries are blocked instead of being moved.
+New queue tasks forward `shot_notes` or the configured remark field, defaulting
+to `shot_notes_index_basis=original_sentence`; the task MAY explicitly select
+the existing `original_sentence`, `segment` or `split` basis. Natural-sentence
+numbering MUST map to verified spoken segments; fragment notes use the text.
+The original notes and chosen basis MUST be frozen on retry. Unversioned raw
+manifests MUST retain split-segment numbering, while explicitly supplied
+segments keep their existing contract. Ambiguous sentence/audio mappings MUST
+be blocked instead of moved; individual unmatched notes retain their reported
+unmatched status. Free-text notes MUST NOT become hard visual requirements.
+Detailed scope and keyword definitions are in the
+[AI-editor contract](docs/AI_EDITOR.md#新队列与ai编辑的规则边界) and
+[requirement levels](doubao-jianying-orchestrator/references/requirement_levels.md).
 An explicitly enabled `retain_related_on_unmet_scene` keeps a relevant, already
 observed shot in preview when a complete group cannot fit; the scene remains
 unresolved and cannot be represented as complete evidence.

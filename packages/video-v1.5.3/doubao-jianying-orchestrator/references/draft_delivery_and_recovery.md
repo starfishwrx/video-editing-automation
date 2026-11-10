@@ -2,22 +2,24 @@
 
 适用版本读取[包内 VERSION](../../VERSION)；当前原生稿与旧加密编辑会话的边界分别见下文。
 
+规范性关键词见[要求用语与适用范围](requirement_levels.md)。正式成功门禁、明确授权的未认证预览和文件级修复分别适用，MAY不表示新增交付授权。
+
 ## 交付成功的含义
 
-同事在可访问同一 NAS 的电脑上复制或解压草稿后，工程里的每一个媒体路径都能直接读取素材。仅有文件数、ZIP 完整或复制哈希一致，不能证明这一点。
+共享交付成功时，同事在可访问同一 NAS 的电脑上复制或解压草稿后，工程里的每一个媒体路径MUST能直接读取素材。MUST NOT仅凭文件数、ZIP完整或复制哈希一致声明这一检查通过。
 
-`ship_distribute.py --style unc` 仍是正式 finalizer 的分发入口。它在原有源/目标哈希检查后，额外核验主目录和分发目录中所有可读时间轴的**实际绝对路径、素材字节和草稿注册信息**；失败返回非零，不产生成功分发回执。分发、归档及业务成功回写前必须通过当前输入、运行时身份、草稿包和独立视觉 QC 四项自动验收。
+`ship_distribute.py --style unc` 仍是正式 finalizer 的分发入口。它在原有源/目标哈希检查后，MUST额外核验主目录和分发目录中所有可读时间轴的**实际绝对路径、素材字节和草稿注册信息**；失败MUST返回非零，MUST NOT产生成功分发回执。正式分发、归档及业务成功回写前MUST通过当前输入、运行时身份、草稿包和独立视觉 QC 四项自动验收，并核对formal构建来源。明确授权的未认证预览MAY按自身合同单独交付，MUST NOT据此写成正式成功。
 
-历史人工 prepare/collect、Gold 对照和旧批准文件已退出默认运行链，不能恢复为分发前提。业务明确要求的审核按该任务授权执行；真实播放、声音和剪映编辑验收也须分别记录，四项自动 PASS 不代表这些实际检查已经完成。合同见[自动验收边界](../../../../docs/windows-pipeline.md#自动验收边界)。
+历史人工 prepare/collect、Gold 对照和旧批准文件已退出默认运行链，MUST NOT恢复为默认分发前提。人工审阅仅按具体任务要求执行，任务明确要求时MUST完成并记录；真实播放、声音和剪映编辑验收MUST分别记录，MUST NOT用四项自动 PASS冒认这些实际检查已经完成。合同见[自动验收边界](../../../../docs/windows-pipeline.md#自动验收边界)。
 
-worker 的正常分发与修复入口共用官方素材收集流程；复制到 NAS 同级隐藏目录并读回核验后才重命名发布。多版本归档重新绑定最终目录内的媒体，不能沿用旧目录引用。部署时必须核验 pipeline 与 skills 两个执行位置的依赖和哈希，详见包根 [NAS 分发稳定性说明](../../docs/NAS_DELIVERY_STABILITY.md)。
+worker 的正常分发与修复入口MUST共用官方素材收集流程；MUST在复制到 NAS 同级隐藏目录并读回核验后才重命名发布。多版本归档MUST重新绑定最终目录内的媒体，MUST NOT沿用旧目录引用。部署时MUST核验 pipeline 与 skills 两个执行位置的依赖和哈希，详见包根 [NAS 分发稳定性说明](../../docs/NAS_DELIVERY_STABILITY.md)。此条只约束已授权的部署，不触发安装。
 
 两种包必须区分：
 
 - **共享路径交付稿**：引用 `JY_NAS_SHARE` 下固定目录的绝对 UNC 路径。接收方连接同一 NAS 后可直接使用，无需 Python；移动或删除 NAS 原目录会使这些引用失效。
-- **相对路径运输包**：`nas_portable export` 的 `media/...` 加哈希清单，用于受控 import。本身不承诺剪映直接识别相对路径。需要离线本地稿时先用官方 `nas_portable import` 导入到最终位置。
+- **相对路径运输包**：`nas_portable export` 的 `media/...` 加哈希清单，用于受控 import。本身不承诺剪映直接识别相对路径。需要离线本地稿时MUST先用官方 `nas_portable import` 导入到最终位置。
 
-目录结构沿用调用方批准的交付规则。修复入口要求每份草稿独立命名；两条生成结果可分别命名为 `<名称>`、`<名称>-2`，无需新增“版本1/版本2”父目录。
+目录结构沿用调用方批准的交付规则。修复入口MUST为每份草稿独立命名；两条生成结果MAY分别命名为 `<名称>`、`<名称>-2`，无需新增“版本1/版本2”父目录。
 
 ## 诊断与核验
 
@@ -28,7 +30,7 @@ uv run --frozen python -m tools.nas_portable inspect --help
 uv run --frozen python -m tools.draft_delivery verify-shared --draft $receivedDraft --reference-root $nasMainDraft
 ```
 
-`verify-shared` 读取根目录和 `Timelines` 下的实际时间轴，拒绝加密文件。校验引用必须直接命中 `$nasMainDraft/media`，不能靠“文件名相同，在包内找到了另一个文件”的兜底通过。分发副本或接收方副本的注册路径仍应指向主 NAS 目录。
+`verify-shared` 读取根目录和 `Timelines` 下的实际时间轴；当前原生稿分流至匹配codec核验，MUST拒绝不属于该原生合同的旧加密编辑会话。校验引用MUST直接命中 `$nasMainDraft/media`，MUST NOT靠“文件名相同，在包内找到了另一个文件”的兜底通过。分发副本或接收方副本的注册路径仍应指向主 NAS 目录。
 
 ## 已有可读草稿重新交付
 
@@ -49,25 +51,25 @@ uv run --frozen python -m tools.draft_delivery publish-shared --source $sourceDr
 执行和单侧复制中断可恢复。原生标识不授予视觉质量 PASS，正式交付继续经过
 当前输入、运行包、草稿包及独立 QC 四项门禁。
 
-以下历史限制针对不属于该原生合同的旧加密编辑会话；不能自动接管或覆盖它们。
+以下历史限制针对不属于该原生合同的旧加密编辑会话；MUST NOT自动接管或覆盖它们。
 
 剪映打开草稿后，实际 `draft_content.json`、`Timelines/<主时间轴>/draft_content.json` 或元数据可能加密，而旁边 `draft_info.json` 仍是旧明文。改旧明文不能修复当前加密时间轴。普通分发仍须阻断；工具不解密、不迁移加密编辑会话。
 
-只有用户明确确认**没有后续编辑需要保留，并同意恢复该原始生成快照**，才能执行：
+调用方MUST先取得用户明确确认：**没有后续编辑需要保留，并同意恢复该原始生成快照**，随后才MAY执行：
 
 ```powershell
 uv run --frozen python -m tools.draft_delivery restore-generated --source $encryptedDraft --task $originalTaskJson --result $originalResultJson --destination $newLocalDraft --confirm-generated-version
 ```
 
-任务和成功结果必须与快照名称、时长一致。工具以 bundled `JyProject` / `ScriptFile` 模板 API 创建新 UUID，要求全部轨道、素材和时长保持一致，并保留源目录。返回的 JSON 应由调用方保存到外部证据目录；随后用 `publish-shared` 分发恢复稿。
+任务和成功结果MUST与快照名称、时长一致。工具MUST以 bundled `JyProject` / `ScriptFile` 模板 API 创建新 UUID，MUST保持全部轨道、素材和时长一致，并保留源目录。返回的 JSON 应由调用方保存到外部证据目录；随后按原有授权用 `publish-shared` 分发恢复稿。
 
-成功记录的名称、时长不是对任意明文文件真实性的密码学证明；调用方必须先确认它确实是对应原始生成快照。快照、任务、结果与源树哈希进入回执。存在人工编辑、证据不一致或快照损坏时停止恢复。
+成功记录的名称、时长不是对任意明文文件真实性的密码学证明；调用方MUST先确认它确实是对应原始生成快照。快照、任务、结果与源树哈希进入回执。存在人工编辑、证据不一致或快照损坏时MUST停止恢复。
 
 不要逐轨重导历史模板：可能裁掉未直接引用的字幕/效果素材，或因历史悬空引用失败。完整模板容器导入后要比较所有轨道和素材。
 
 ## 验收边界
 
-`SHARED_MEDIA_VERIFIED` / `GENERATED_VERSION_RESTORED` 只证明各自文件级合同；`desktop_playback_verified` 和 `visual_verified` 保持 false。需要另做接收方剪映打开与播放验证。恢复稿继承原任务的 preview/formal 事实，不能新增质量 PASS。
+`SHARED_MEDIA_VERIFIED` / `GENERATED_VERSION_RESTORED` 只证明各自文件级合同；工具结果中的`desktop_playback_verified` 和 `visual_verified` MUST保持 false。需要另做接收方剪映打开与播放验证，才能报告实际播放通过。恢复稿MUST继承原任务的 preview/formal 事实，MUST NOT因恢复成功新增质量 PASS。
 
 回归命令：
 

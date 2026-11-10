@@ -7,6 +7,15 @@
 
 ## 新增条目
 
+### L-20261110-contract-scope 规范要求用语前先核对范围和维护源
+- status: OPEN
+- hits: 2
+- 模块: skills / runtime contracts / documentation
+- 现象: 实验组配对预算实现已为6，入口文档仍写3；“任何视觉失败阻断”未区分候选unknown、有界不可审计排除和当前产物最终证据。
+- 以后怎么做: 先核对实现、ADR和当前合同，再标注MUST/SHOULD/MAY；保留模式、品类、恢复作用域及默认值覆盖。像素坐标与归一化坐标写明单位，预算区分候选组合、组输入与请求次数；不以用语改写新增人工审批或签名门槛。
+- 证据: AI_EDITOR执行流程及素材准备的有界恢复、references/requirement_levels.md、docs/subtitle-layout.md、ADR0012。
+- 追加证据: ENVIRONMENT曾将正整数覆盖描述为只能调小，而实现允许大于2；视觉匹配曾笼统要求正式交付人工审阅。现统一默认每源2次、显式正整数覆盖及按任务执行人审；新增可选观察不得升级为字段必填，编号默认值不得覆盖历史绑定。见AI_EDITOR新队列与AI编辑的规则边界、自动验收边界、ADR0002/0007/0009。
+
 ### L-20261110-material-preparation 素材坏项按确证原因处理
 - status: OPEN
 - hits: 1

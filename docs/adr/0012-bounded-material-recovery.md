@@ -32,4 +32,4 @@
 
 源码候选整合既有同镜头重裁和本地媒体副本QC绑定；非原生分发包不再强制要求无用途的fix_local脚本，但实际媒体、当前草稿、独立QC及正式交付验收仍需通过。详见[夜间恢复验证](../plans/20261110-overnight-recovery.md)。
 
-补看后的候选求解和最终组装都必须受review_window_us约束，continuation入点只能进一步收窄，不能重新打开原素材中未复看的前缀；旧无局部窗口的观察保留原范围，非法或越界局部窗拒绝。
+补看后的候选求解和最终组装MUST受有效review_window_us约束，continuation入点只能进一步收窄，MUST NOT重新打开原素材中未复看的前缀；旧无局部窗口的观察MUST保留原范围，非法或越界局部窗MUST拒绝。关键词及详细边界见[AI编辑合同](../../packages/video-v1.5.3/docs/AI_EDITOR.md#补看窗口边界)。
