@@ -535,6 +535,79 @@ def _boundaries(duration: float, scene_times: Iterable[float], *, min_shot_s: fl
     return windows
 
 
+# Still-image codecs/demuxers: a file whose only video stream is one of these,
+# with no stream/container duration, is a picture saved under a video suffix.
+_STILL_IMAGE_CODECS = frozenset({"mjpeg", "png", "bmp", "gif", "webp", "tiff", "jpeg2000",
+                                 "jpegls", "targa", "ppm", "pgm", "pbm", "qoi", "jpegxl"})
+
+
+def _known_duration(value: Any) -> bool:
+    try:
+        return float(value) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _decodable_single_image(path: Path) -> bool:
+    """Require actual complete single-image decoding, not just a demuxer header."""
+    from PIL import Image
+    try:
+        with Image.open(path) as image:
+            if getattr(image, "n_frames", 1) != 1:
+                return False
+            image.load()
+            return image.width > 0 and image.height > 0
+    except (OSError, ValueError, SyntaxError):
+        return False
+
+
+def classify_non_video_source(path: Path, *, ffprobe: str | None = None) -> dict[str, Any] | None:
+    """Positively identify a source that is not a video at all (fix 2026-11-10).
+
+    Only called after the duration probe failed. Returns a description when
+    ffprobe *successfully* reads the file and it is a still image (e.g. a 90x160
+    JPEG thumbnail saved as ``.MOV``) or has no video stream. Any probe error,
+    timeout, non-zero exit or ambiguous answer returns ``None`` so the caller
+    keeps the blocking ``source_probe_failed`` -- NAS read errors and broken
+    videos are never silently skipped.
+    """
+    if not ffprobe:
+        return None
+    try:
+        proc = subprocess.run(
+            [str(ffprobe), "-v", "error", "-show_entries",
+             "stream=codec_type,codec_name,nb_frames,duration,width,height:format=format_name,duration",
+             "-of", "json", str(path)],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        data = json.loads(proc.stdout or "{}")
+    except ValueError:
+        return None
+    streams = [s for s in (data.get("streams") or []) if isinstance(s, dict)]
+    fmt = data.get("format") if isinstance(data.get("format"), dict) else {}
+    format_name = str(fmt.get("format_name") or "")
+    if not streams:
+        return None
+    video = [s for s in streams if s.get("codec_type") == "video"]
+    detail = {"format_name": format_name,
+              "streams": [{k: s.get(k) for k in ("codec_type", "codec_name", "width", "height")}
+                          for s in streams]}
+    if not video:
+        return {"reason": "no_video_stream", **detail}
+    still_codec = all(str(s.get("codec_name") or "").lower() in _STILL_IMAGE_CODECS for s in video)
+    no_duration = (not _known_duration(fmt.get("duration"))
+                   and not any(_known_duration(s.get("duration")) for s in video))
+    single_frame = all(str(s.get("nb_frames") or "N/A") in {"N/A", "0", "1"} for s in video)
+    image_demuxer = format_name.endswith("_pipe") or format_name.startswith("image2")
+    if still_codec and no_duration and single_frame and image_demuxer and _decodable_single_image(path):
+        return {"reason": "still_image", **detail}
+    return None
+
+
 def _existing_shot_map(payload: Any) -> dict[tuple[str, int], dict[str, Any]]:
     rows = payload.get("shots", []) if isinstance(payload, dict) else payload
     result: dict[tuple[str, int], dict[str, Any]] = {}
@@ -561,6 +634,7 @@ def analyze_manifest(manifest: dict[str, Any], base_dir: Path, report_dir: Path,
     old = _existing_shot_map(existing)
     shots: list[dict[str, Any]] = []
     issues: list[dict[str, Any]] = []
+    warnings: list[dict[str, Any]] = []
     sources = manifest_sources(manifest, base_dir)
     for source_index, video in enumerate(sources, 1):
         if not video.is_file():
@@ -572,6 +646,13 @@ def analyze_manifest(manifest: dict[str, Any], base_dir: Path, report_dir: Path,
             video, ffprobe=ffprobe, ffmpeg=ffmpeg)
         duration_us = int(probe.get("duration_us") or 0)
         if duration_us <= 0:
+            not_video = classify_non_video_source(video, ffprobe=ffprobe)
+            if not_video is not None:
+                # A picture under a video suffix is not material: leave it out of
+                # the candidate pool, keep it visible as a non-blocking warning.
+                warnings.append({"type": "source_skipped_not_video", "video": str(video),
+                                 "blocking": False, **not_video})
+                continue
             issues.append({"type": "source_probe_failed", "video": str(video)})
             continue
         # 探测来源/置信度必须跟着每一行 shot 落盘：LOW（容器降级）的值不得
@@ -626,7 +707,7 @@ def analyze_manifest(manifest: dict[str, Any], base_dir: Path, report_dir: Path,
     prompt = build_analysis_prompt(manifest, shots)
     result = {
         "version": _skill_version(), "scope": "task_local", "sources": [str(p) for p in sources],
-        "shots": shots, "issues": issues, "pending_items": issues,
+        "shots": shots, "issues": issues, "pending_items": issues, "warnings": warnings,
         "analysis_prompt": prompt, "library_write": [],
         "ok": bool(shots) and not issues and all(s["frame_exists"] for s in shots),
     }

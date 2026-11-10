@@ -6,7 +6,7 @@
     "machine-specific paths",
     "knowledge-base bodies"
   ],
-  "file_count": 461,
+  "file_count": 463,
   "files": [
     {
       "path": ".gitignore"
@@ -720,6 +720,9 @@
       "path": "doubao-jianying-orchestrator/tests/test_material_cache.py"
     },
     {
+      "path": "doubao-jianying-orchestrator/tests/test_material_preparation_recovery.py"
+    },
+    {
       "path": "doubao-jianying-orchestrator/tests/test_media_boundary.py"
     },
     {
@@ -736,6 +739,9 @@
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_opening_hook.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/tests/test_overnight_selection_recovery.py"
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_paper_action_events.py"

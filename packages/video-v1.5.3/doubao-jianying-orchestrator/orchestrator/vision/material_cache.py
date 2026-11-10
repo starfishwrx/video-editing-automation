@@ -119,7 +119,7 @@ def analyze_product(manifest: dict, base_dir: Path, report_dir: Path, *, ffmpeg=
     product = product_key(manifest, sources)
     report_dir.mkdir(parents=True, exist_ok=True)
     with file_lock(root / "products" / product, timeout=float(os.environ.get("JY_VISION_CACHE_WAIT_TIMEOUT", "7200"))):
-        shots, issues, inventory = [], [], []
+        shots, issues, inventory, warnings = [], [], [], []
         hits = 0
         for index, source in enumerate(sources, 1):
             try:
@@ -169,19 +169,25 @@ def analyze_product(manifest: dict, base_dir: Path, report_dir: Path, *, ffmpeg=
                     row["shot_id"] = f"source_{index:03d}_shot_{number:03d}"
                     shots.append(row)
                 issues.extend(result.get("issues", []))
+                warnings.extend(result.get("warnings", []))
             inventory.append(signature)
         result = {"version": shot_analyzer._skill_version(), "scope": "shared_product",
                   "sources": [str(p) for p in sources], "shots": shots, "issues": issues,
-                  "pending_items": list(issues), "library_write": [],
+                  "pending_items": list(issues), "warnings": list(warnings), "library_write": [],
                   "analysis_prompt": shot_analyzer.build_analysis_prompt(manifest, shots),
                   "ok": bool(shots) and not issues}
         if vision and shots:
             result = vision_analyzer.enrich_with_vision(manifest, result, report_dir, ffmpeg=ffmpeg)
-        complete = bool(shots) and not issues and all(
-            vision_analyzer._reusable_visual_observation(row)
-            and not vision_analyzer._needs_text_backfill(row) for row in result["shots"])
+        excluded = vision_analyzer.logged_pool_exclusions(result)
+        complete = bool(shots) and not issues and len(excluded) < len(result["shots"]) and all(
+            str(row.get("shot_id")) in excluded or (
+                vision_analyzer._reusable_visual_observation(row)
+                and not vision_analyzer._needs_text_backfill(row)) for row in result["shots"])
         result["material_cache"] = {"product_key": product, "source_inventory": inventory,
                                     "sources_hit": hits, "sources_prepared": len(inventory) - hits,
+                                    "sources_skipped_not_video": sum(
+                                        w.get("type") == "source_skipped_not_video" for w in warnings),
+                                    "shots_excluded_unauditable": sorted(excluded),
                                     "ready": complete if vision else bool(shots) and not issues}
         _save(report_dir / "shot_candidates.json", result)
         atomic_write_text(report_dir / "shot_analysis_prompt.md", result["analysis_prompt"])

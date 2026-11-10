@@ -6,7 +6,7 @@ from .. import ai_editor_contract as identity
 from ..media.temporal_samples import validate as validate_samples,guard_outputs
 from ..media import action_frames
 from ..selection import ai_editor
-from ..selection.experiment_contract import validate_pair,adjacency_hint
+from ..selection.experiment_contract import validate_pair,adjacency_hint,pair_sample_ids,focus_frame_ids
 from .purpose_review import policy,save
 
 PROTOCOL="weipin-same-experiment-pair-v1"
@@ -20,7 +20,8 @@ def input_binding(manifest,members,sheet):
             "window_frame_ids":m["window_frame_ids"],"visible_frame_ids":m["visible_frame_ids"]}for m in members]}
 
 
-def review(manifest,first,second,first_window,second_window,output,*,ffmpeg="ffmpeg",ffprobe="ffprobe",font_path):
+def review(manifest,first,second,first_window,second_window,output,*,ffmpeg="ffmpeg",ffprobe="ffprobe",font_path,
+           focus_ranges_us=None):
     from PIL import Image,ImageDraw,ImageFont
     output=Path(output);output.parent.mkdir(parents=True,exist_ok=True)
     allowed={str(Path(p).resolve())for p in manifest["material_sources"]}
@@ -29,22 +30,30 @@ def review(manifest,first,second,first_window,second_window,output,*,ffmpeg="ffm
         if samples["original"]["path"]not in allowed:raise ValueError("EXPERIMENT_PAIR_OUTSIDE_TASK")
         guard_outputs(samples,output,(".jpg",".prompt.txt",".request.json",".pair.json",".binding.json"))
     font=ImageFont.truetype(str(font_path),20)
-    canvas=Image.new("RGB",(1080,2040),"#222222");draw=ImageDraw.Draw(canvas)
-    members=[];visible={}
-    for part,samples,window,offset in (("A",first,first_window,0),("B",second,second_window,8)):
+    members=[];visible={};tiles=[]
+    for part,samples,window in (("A",first,first_window),("B",second,second_window)):
         a,b=window
         if type(a)is not int or type(b)is not int or not 0<=a<b<len(samples["frames"]):
             raise ValueError("EXPERIMENT_PAIR_WINDOW_INVALID")
-        ids=sorted({round(a+i*(b-a)/7)for i in range(8)})
+        focus=focus_frame_ids(samples,a,b,(focus_ranges_us or {}).get(part))
+        ids=pair_sample_ids(samples,a,b,focus)
         metadata=action_frames.probe(samples["source"]["path"],output.parent,ffprobe=ffprobe)
         frames=action_frames.extract(samples["source"]["path"],metadata,
             [samples["frames"][i]["source_frame"]for i in ids],output.parent,ffmpeg=ffmpeg,width=270)
+        member={"part":part,"samples":samples,"window_frame_ids":[a,b],"visible_frame_ids":ids}
+        if focus:member["focus_frame_ids"]=focus
+        members.append(member);tiles.append((part,ids,frames))
+        visible[part]=set(ids)
+    columns=4 if all(len(t[1])<=8 for t in tiles) else 6
+    rows=[-(-len(t[1])//columns) for t in tiles]
+    canvas=Image.new("RGB",(columns*270,sum(rows)*510),"#222222");draw=ImageDraw.Draw(canvas)
+    top=0
+    for (part,ids,frames),count in zip(tiles,rows):
         for j,(index,frame)in enumerate(zip(ids,frames)):
             im=Image.open(frame["path"]).convert("RGB");im.thumbnail((270,480))
-            x=(j+offset)%4*270;y=(j+offset)//4*510
+            x=j%columns*270;y=top+j//columns*510
             canvas.paste(im,(x,y+30));draw.text((x+6,y+4),f"{part} frame {index}",font=font,fill="white")
-        members.append({"part":part,"samples":samples,"window_frame_ids":[a,b],"visible_frame_ids":ids})
-        visible[part]=set(ids)
+        top+=count*510
     sheet=output.with_suffix(".jpg");canvas.save(sheet,quality=95)
     binding=input_binding(manifest,members,sheet)
     binding_path=output.with_suffix(".binding.json");save(binding_path,binding)
