@@ -156,11 +156,13 @@ def batch_result_contract(status: str, *, pipeline_version: str, run_id: str, fa
     else:
         failure_class, failure_code = None, None
 
-    if first.get("retryable") is True and first.get("resume_stage") in {"semantic_match", "draft_write", "delivery"}:
-        if first.get("failure_class"):
-            failure_class = str(first["failure_class"])
-        if first.get("failure_code"):
-            failure_code = str(first["failure_code"])
+    # Canonical stage failures remain useful even when non-retryable. Log tails
+    # contain "draft" paths and must not relabel a timing/semantic failure.
+    structured_class, structured_code = first.get("failure_class"), first.get("failure_code")
+    if (structured_class in {"environment", "semantic", "timing", "draft", "vision", "provider"}
+            and isinstance(structured_code, str) and re.fullmatch(r"[A-Z][A-Z0-9_]+", structured_code)
+            and (failure_class != "environment" or structured_class == "environment")):
+        failure_class, failure_code = structured_class, structured_code
 
     retryable = bool(
         failure_class in {"vision", "provider"}

@@ -125,6 +125,20 @@ class CaptionLayoutTests(unittest.TestCase):
 
 
 class LegacyCaptionLayoutTests(unittest.TestCase):
+    def test_layout_outer_whitespace_matches_reader_without_hiding_text_or_wrap_changes(self):
+        import json
+        from orchestrator.quality.draft_safety import _subtitle_style_issues
+        text = "关键不是花瓶 "
+        material = {"alignment": 1, "line_max_width": .8, "force_apply_line_max_width": True,
+                    "content": json.dumps({"text": text, "styles": [{"size": 8, "bold": True}]})}
+        segment = {"clip": {"transform": {"x": 0, "y": -.55}}}
+        layout = {"text": text, "size": 8, "x": 0, "y": -.55, "alignment": 1, "max_line_width": .8}
+        expected = {"subtitle_style_required": True, "subtitle_layout": [layout]}
+        self.assertEqual(_subtitle_style_issues(material, segment, 1, expected), [])
+        for wrong in ("关键是花瓶", "关键不是\n花瓶"):
+            material["content"] = json.dumps({"text": wrong, "styles": [{"size": 8, "bold": True}]})
+            self.assertIn("字幕第 1 条排版文本不符", _subtitle_style_issues(material, segment, 1, expected))
+
     def test_long_plain_and_large_rich_captions_roundtrip_inside_safe_bounds(self):
         import tempfile
         import json

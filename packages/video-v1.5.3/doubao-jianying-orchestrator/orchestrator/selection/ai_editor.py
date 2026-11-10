@@ -146,6 +146,44 @@ def _editor_model() -> str:
     return os.environ.get("JY_VISION_MODEL") or "glm-5.3-flash"
 
 
+_FRAME_US_CACHE: dict[str, int] = {}
+
+
+def _source_frame_us(shot: dict) -> int:
+    """Duration of one source frame from ffprobe (fastest stream rate).
+
+    Unknown rates return zero: no endpoint adjustment is permitted.
+    """
+    path = str(shot.get("video") or "")
+    if path in _FRAME_US_CACHE:
+        return _FRAME_US_CACHE[path]
+    value = 0
+    import subprocess
+    try:
+        from ..runtime.platform_env import find_ffmpeg
+        ffprobe = find_ffmpeg()[1]
+        if ffprobe and path:
+            out = subprocess.run([ffprobe, "-v", "error", "-select_streams", "v:0", "-show_entries",
+                                  "stream=avg_frame_rate,r_frame_rate", "-of", "csv=p=0", path],
+                                 capture_output=True, text=True, timeout=60, check=True).stdout
+            rates = []
+            for token in re.split(r"[,\s]+", out.strip()):
+                if "/" in token:
+                    num, den = token.split("/", 1)
+                    if float(den) > 0:
+                        rates.append(float(num) / float(den))
+                elif token:
+                    rates.append(float(token))
+            rates = [r for r in rates if 1.0 <= r <= 240.0]
+            if rates:
+                value = int(round(1e6 / max(rates)))
+    except (OSError, ValueError, ImportError, subprocess.SubprocessError):
+        pass
+    if value:
+        _FRAME_US_CACHE[path] = value
+    return value
+
+
 def _call(prompt: str, path: Path, sheet: Path | None = None) -> dict:
     from ..vision import vision_analyzer as vision
     from ..vision import material_cache
@@ -343,6 +381,15 @@ def _review_media(shot: dict, directory: Path, *, dense: bool = False, fit: bool
     count = 16 if dense else 8
     last = end - min(.04, (end - start) / 10)
     times = [start + (last - start) * n / (count - 1) for n in range(count)]
+    protocol = f"candidate-even-window-{count}-v1"
+    focus = shot.get("_review_focus_window")
+    if isinstance(focus, (list, tuple)) and len(focus) == 2:
+        lo, hi = map(float, focus)
+        if not (math.isfinite(lo + hi) and start <= lo < hi <= end):
+            raise ValueError("AI_EDITOR_REVIEW_FOCUS_INVALID")
+        focus_last = hi - min(.04, (hi - lo) / 10)
+        times = sorted(set([*times, lo, (lo + focus_last) / 2, focus_last]))
+        protocol = f"candidate-focus-window-{count}-v1:{lo}:{hi}"
     def prepare_frames(frame_dir):
         ffmpeg, _ = platform_env.find_ffmpeg()
         if not ffmpeg:
@@ -362,7 +409,7 @@ def _review_media(shot: dict, directory: Path, *, dense: bool = False, fit: bool
                 frames.append({"path": str(target), "timestamp": timestamp})
         return frames
     frames = material_cache.cached_frames(shot, directory, prepare_frames,
-        protocol=f"candidate-even-window-{count}-v1")
+        protocol=protocol)
     tiles = [{**frame, "label": f"t={frame['timestamp']:.3f}s"} for frame in frames]
     sheet_parameters = ({"columns": 4, "tile_width": 270, "tile_height": 514, "fit": True}
                         if fit else {"columns": 4, "tile_width": 420, "tile_height": 300})
@@ -399,10 +446,34 @@ def _iter_review_round(ids, shots, directory, review, *, dense=False, on_error=N
                       api_workers=min(policy.api_workers, len(ids)), on_error=error)
 
 
+def _feedback_for_shot(sentence: dict, shot_id) -> dict:
+    """Scope old QC feedback to the shot it was written about.
+
+    A same-shot recut window and the old cut's observation describe the
+    previous shot only. Another candidate must be judged from its own pixels,
+    so the recut window is removed and the feedback is marked as foreign.
+    """
+    feedback = sentence.get("qc_feedback")
+    if not isinstance(feedback, dict):
+        return sentence
+    recut = feedback.get("same_shot_recut")
+    recut_shot = str(recut.get("shot_id")) if isinstance(recut, dict) and recut.get("shot_id") else None
+    prior = {str(s) for s in feedback.get("prior_shot_ids") or []}
+    if recut_shot is not None:
+        prior.add(recut_shot)
+    if str(shot_id) in prior or (not prior and recut_shot is None):
+        return sentence
+    scoped = {k: v for k, v in feedback.items() if k != "same_shot_recut"}
+    scoped["applies_to"] = ("旧稿质检反馈描述的是旧镜头" + (",".join(sorted(prior)) if prior else "") +
+        "，不是本镜头；本镜头的observation与evidence_intervals_us只能来自附图，不得沿用旧镜头的描述或时间区间。")
+    return {**sentence, "qc_feedback": scoped}
+
+
 def _review(manifest: dict, sentence: dict, shot: dict, directory: Path, *, dense: bool = False) -> dict:
     media = _review_media(shot, directory, dense=dense)
     start, end, before, times, sheet = (media[k] for k in ("start", "end", "before", "times", "sheet"))
     key = contract.digest([sentence["index"], shot["shot_id"], before, start, end, dense])[:24]
+    sentence = _feedback_for_shot(sentence, shot["shot_id"])
     feedback_instruction = ("\n本句旧稿质检反馈仅作定位和待核查缺口线索，不是当前素材证据，也可能有误。"
         "判断必须遵守生效业务规则；反馈与规则冲突时不得把反馈中的额外要求变成新规则。"
         "对实际适用的缺口复看当前像素，不得凭反馈或素材描述补造动作与结果。\n") if sentence.get("qc_feedback") else ""
@@ -1098,10 +1169,30 @@ suitable=裁切内是一段完整、未拦腰切断关键动作/结果的可用�
     if verdict == "suitable":
         if not isinstance(intervals, list) or not intervals:
             raise ValueError("AI_EDITOR_PLACEMENT_EVIDENCE_INVALID")
+        lo_us, hi_us = round(start * 1e6), round(end * 1e6)
+        frame_us, clamps = None, []
         for ev in intervals:
-            if (not isinstance(ev, dict) or any(type(ev.get(k)) is not int for k in ("start", "end"))
-                    or not round(start * 1e6) <= ev["start"] < ev["end"] <= round(end * 1e6)):
+            if not isinstance(ev, dict) or any(type(ev.get(k)) is not int for k in ("start", "end")):
                 raise ValueError("AI_EDITOR_PLACEMENT_EVIDENCE_INVALID")
+            s, e = ev["start"], ev["end"]
+            if s < lo_us or e > hi_us:
+                # A boundary at most one source frame outside the reviewed crop
+                # names the crop's own edge frame; clamp it. Larger overshoot
+                # means the action continues past the crop: still rejected.
+                frame_us = frame_us or _source_frame_us(shot)
+                if lo_us - frame_us <= s < lo_us:
+                    s = lo_us
+                if hi_us < e <= hi_us + frame_us:
+                    e = hi_us
+            if not lo_us <= s < e <= hi_us:
+                raise ValueError("AI_EDITOR_PLACEMENT_EVIDENCE_INVALID")
+            if (s, e) != (ev["start"], ev["end"]):
+                clamps.append({"from": {"start": ev["start"], "end": ev["end"]},
+                               "to": {"start": s, "end": e}, "frame_us": frame_us})
+                ev["start"], ev["end"] = s, e
+        if clamps:
+            _save(directory / "reviews" / f"placement_{key}.clamp.json",
+                  {"review_window_us": {"start": lo_us, "end": hi_us}, "clamps": clamps})
         playback_observation = result.get("playback_observation")
         if playback_observation is not None:
             process = contract.playback.process_window(playback_observation)
@@ -2000,6 +2091,8 @@ def _place_absorb_experiment(manifest, analysis, plan, directory, narration_timi
             if shot:
                 candidates.append(shot)
         located, shot, phases = None, None, None
+        needed = ["pour", "absorb"] + (["wipe"] if any(phase_by_index[s["index"]] == "wipe" for s in members) else [])
+        missing_by_shot = {}
         for candidate in candidates:
             try:
                 found = phase_timing.locate(candidate, scene, Path(directory))
@@ -2007,7 +2100,14 @@ def _place_absorb_experiment(manifest, analysis, plan, directory, narration_timi
                 found = {"ok": False, "reason": "PHASE_LOCATE_FAILED"}
             found_phases = found.get("phases") if isinstance(found, dict) else None
             if not found.get("ok") or not isinstance(found_phases, dict):
+                missing_by_shot[candidate["shot_id"]] = list(needed)
                 continue
+            _lo = int(round(float(candidate.get("source_start") or 0) * 1_000_000))
+            _hi = int(round(float(candidate.get("source_end") or 0) * 1_000_000))
+            if type(candidate.get("material_duration_us")) is int and candidate["material_duration_us"] > 0:
+                _hi = min(_hi, candidate["material_duration_us"])
+            missing_by_shot[candidate["shot_id"]] = [p for p in needed
+                                                     if _phase_span_us(found_phases, (p,), _lo, _hi) is None]
             lo = int(round(float(candidate.get("source_start") or 0) * 1_000_000))
             hi = int(round(float(candidate.get("source_end") or 0) * 1_000_000))
             material = candidate.get("material_duration_us")
@@ -2024,7 +2124,7 @@ def _place_absorb_experiment(manifest, analysis, plan, directory, narration_timi
         if shot is None:
             missed = candidates[0]["shot_id"] if candidates else ""
             notes.append({"indices": [s["index"] for s in members], "shot_id": missed,
-                          "missing_phases": ["pour", "absorb"], "reason": "PHASE_UNLOCATED"})
+                          "missing_phases": missing_by_shot.get(missed, list(needed)), "reason": "PHASE_UNLOCATED"})
             continue
         lo = int(round(float(shot.get("source_start") or 0) * 1_000_000))
         hi = int(round(float(shot.get("source_end") or 0) * 1_000_000))
@@ -2889,6 +2989,19 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
                     "refill_errors": [reason], "pending_items": [*(matched.get("pending_items") or []),
                         {"type": "AI_EDITOR_UNCERTIFIED", "message": reason}]}
         by_index[index] = row
+    # A reviewed sentence-continuity group is one allocation of one source
+    # across its members. Replacing any member releases the binding for all of
+    # them and re-plans each, instead of leaving neighbours bound to a group
+    # that no longer exists (CONTINUITY_GROUP_INCOMPLETE).
+    from ..policy import continuity as continuity_policy
+    expanded = set(wanted)
+    for index in wanted:
+        group = (by_index.get(index) or {}).get("continuity_group")
+        if isinstance(group, dict) and not continuity_policy.is_experiment(group):
+            for member in (group.get("input") or {}).get("members") or []:
+                if isinstance(member, dict) and type(member.get("index")) is int and 1 <= member["index"] <= len(original):
+                    expanded.add(member["index"])
+    wanted = sorted(expanded)
     directory = report_dir / "ai_editor_refill"
     directory.mkdir(parents=True, exist_ok=True)
     grouped_replaced, grouped_errors = experiment_groups.refill_groups(
@@ -2913,7 +3026,7 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
         observed = _observed_text_shortlist(sentence["text"], allowed)
         feedbacks = manifest.get("ai_refill_feedback")
         feedback = feedbacks.get(str(index)) if isinstance(feedbacks, dict) else None
-        recalled, previous, window_hints = [], set(), {}
+        recalled, previous, window_hints, recut_id = [], set(), {}, None
         if (allowed and isinstance(feedback, dict) and feedback.get("claim") == sentence["text"]
                 and all(isinstance(feedback.get(k), str) and feedback[k].strip() for k in ("observed", "reason"))):
             sentence["qc_feedback"] = copy.deepcopy(feedback)
@@ -2925,8 +3038,20 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
                 "segments": [{"text": sentence["text"], "visual_requirements": hint}],
                 "revision_feedback": (str(manifest.get("revision_feedback") or "") +
                     "\n本句旧稿质检仅供定位待核查缺口，可能有误；与生效业务规则冲突时不要采纳额外要求：" + hint)}
+            recut = feedback.get("same_shot_recut")
+            if isinstance(recut, dict) and recut.get("shot_id") in previous and recut.get("shot_id") in allowed:
+                target = allowed[recut["shot_id"]]
+                try:
+                    a, b = float(recut["start"]), float(recut["end"])
+                    if (math.isfinite(a + b) and float(target["source_start"]) <= a < b <= float(target["source_end"])
+                            and any(isinstance(s, dict) and float(s["start"]) < b and float(s["end"]) > a
+                                    for s in target.get("action_segments") or [])):
+                        recut_id = recut["shot_id"]
+                except (ValueError, TypeError, KeyError, OverflowError):
+                    pass
             try:
-                inventory = _inventory(retrieval_manifest, list(allowed.values()), directory / f"qc_recall_{index:02d}")
+                inventory = ([{"candidate_ids": [recut_id], "candidate_windows": [recut]}] if recut_id else
+                    _inventory(retrieval_manifest, list(allowed.values()), directory / f"qc_recall_{index:02d}"))
             except (ValueError, KeyError, TypeError, OSError) as exc:
                 errors.append(str(exc))
                 continue
@@ -2956,6 +3081,8 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
                     window_start = max(lo, min(start - .35, window_end - desired))
                     window_end = min(hi, max(window_end, window_start + desired))
                     window_hints[sid] = {**shot, "source_start": window_start, "source_end": window_end}
+                    if sid == recut_id:
+                        window_hints[sid]["_review_focus_window"] = [start, end]
                 except (ValueError, TypeError, KeyError, OverflowError):
                     continue
         # Give both retrieval signals room in the first review round. Existing
@@ -2977,7 +3104,23 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
             review_manifest = ({**manifest, "allow_partial_selling_points": False}
                                if explicit and len(sentence["selling_points"]) > 1 else manifest)
             review_shots = {**shots, **window_hints}
-            reviews, coverage = _review_pool(review_manifest, sentence, review_shots, directory, narration_timing or {})
+            if recut_id in window_hints:
+                # Re-look at the actual omitted source interval first. A hint
+                # neither certifies the action nor forces it into the final cut.
+                focused = {**sentence, "candidate_ids": [recut_id]}
+                reviews, coverage = _review_pool(review_manifest, focused, review_shots, directory, narration_timing or {})
+                alternatives = [sid for sid in sentence["candidate_ids"] if sid != recut_id]
+                if not coverage.get("feasible") and alternatives:
+                    alternate_reviews, alternate_coverage = _review_pool(
+                        review_manifest, {**sentence, "candidate_ids": alternatives},
+                        review_shots, directory, narration_timing or {})
+                    # A confirmed same-shot action may still need the existing
+                    # short-window/retiming placement repair. Do not discard it
+                    # just because the alternative pool has no usable match.
+                    if alternate_coverage.get("feasible") or not any(r.get("verdict") == "matched" for r in reviews):
+                        reviews, coverage = alternate_reviews, alternate_coverage
+            else:
+                reviews, coverage = _review_pool(review_manifest, sentence, review_shots, directory, narration_timing or {})
             good = [r for r in reviews if r.get("verdict") == "matched"
                     and r.get("shot_id") in allowed]
             partial = manifest.get("delivery_mode") == "preview" and manifest.get("allow_partial_selling_points") is True

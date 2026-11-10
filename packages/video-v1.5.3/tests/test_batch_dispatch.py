@@ -401,6 +401,26 @@ class BatchDispatchTests(unittest.TestCase):
         with patch.dict(dispatch.os.environ, {"JY_OPERATOR_VOICE": "憨熊1.2"}):
             self.assertIsNone(dispatch._voice_error({"voice": ""}))
 
+    def test_material_failure_reports_bad_rows_instead_of_inventory_tail(self):
+        directory = self.root / "product"
+        directory.mkdir()
+        (directory / "shot_candidates.json").write_text(json.dumps({
+            "issues": [{"type": "source_probe_failed", "video": "bad.MOV"}],
+            "shots": [{"shot_id": "bad-shot", "status": "pending_analysis", "analysis_error": "unauditable"}],
+            "material_cache": {"ready": False, "source_inventory": [{"path": "irrelevant-tail"}] * 100}}))
+        import batch_worker
+        with patch.object(batch_worker, "task_video_files", return_value=["fixture.MOV"]), \
+             patch.object(dispatch.subprocess, "run", return_value=SimpleNamespace(
+                 returncode=0, stdout="irrelevant inventory tail", stderr="")):
+            with self.assertRaisesRegex(RuntimeError, "MATERIAL_PREP_INCOMPLETE") as raised:
+                dispatch.prepare_product({"record_id": "r", "script": "test"}, directory,
+                                         {"JY_TASK_DEADLINE_EPOCH": str(time.time() + 60)})
+        message = str(raised.exception)
+        self.assertIn("source_probe_failed", message)
+        self.assertIn("bad-shot", message)
+        self.assertEqual(json.loads(message.split(": ", 1)[1])["analysis_file"], str(directory / "shot_candidates.json"))
+        self.assertNotIn("irrelevant", message)
+
     def test_missing_music_blocks_auto_bgm_but_local_path_and_qc_resume_continue(self):
         from orchestrator.audio import library_resources
         catalog = library_resources.CATALOGS_ROOT

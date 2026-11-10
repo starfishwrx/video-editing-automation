@@ -214,7 +214,10 @@ def _subtitle_style_issues(material: dict, segment: dict, index: int,
         if (material.get('line_max_width') != layout['max_line_width']
                 or material.get('force_apply_line_max_width') is not layout.get('force_apply_line_max_width', True)):
             issues.append(f'字幕第 {index} 条缺少安全区行宽限制')
-        if _text_from_material(material) != layout['text']:
+        # The material reader already strips outer whitespace. Apply the same
+        # display normalization to the expected layout, preserving words and
+        # internal line breaks exactly.
+        if _text_from_material(material) != layout['text'].strip():
             issues.append(f'字幕第 {index} 条排版文本不符')
     content = material.get("content")
     if isinstance(content, str):

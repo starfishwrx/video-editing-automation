@@ -311,6 +311,44 @@ class SelectionRecoveryTests(unittest.TestCase):
         before.pop('timing_certainty', None)
         self.assertEqual(preserved, before)
 
+    def test_confirmed_recut_is_retained_when_alternative_pool_has_no_match(self):
+        baseline = editor._assemble(self.manifest, self.analysis, self.plan(), narration_timing=None, verify_sources=True)
+        self.shots[1].update(source_end=100, action_segments=[{"start": 90, "end": 91}])
+        path = self.root / "third.mp4"
+        path.write_bytes(b"different alternative")
+        self.shots.append({**self.shots[1], "shot_id": "third", "video": str(path)})
+        review = {**self.reviews["2"][0], "evidence_intervals_us": [{"start": 90_200_000, "end": 90_700_000}]}
+        request = {**self.manifest, "ai_refill_indices": [2], "ai_refill_feedback": {"2": {
+            "claim": self.manifest["segments"][1]["text"], "observed": "omitted result", "reason": "incomplete",
+            "prior_shot_ids": ["shot2"], "same_shot_recut": {"shot_id": "shot2", "start": 90, "end": 91}}}}
+        def observe(_manifest, sentence, *args, **kwargs):
+            if sentence["candidate_ids"] == ["shot2"]:
+                return [review], {"feasible": False, "reason": "KNOWN_WINDOWS_INFEASIBLE"}
+            return [], {"feasible": False, "reason": "NO_SUPPORT_AFTER_REVIEW"}
+        with patch.object(editor, "_review_pool", side_effect=observe) as observed:
+            result = editor.refill_indices(request, self.analysis, baseline, [2], self.root)
+        self.assertEqual(observed.call_count, 2)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["segments"][1]["shot_id"], "shot2")
+
+    def test_same_shot_recut_is_targeted_before_retrieval_or_alternatives(self):
+        baseline = editor._assemble(self.manifest, self.analysis, self.plan(), narration_timing=None, verify_sources=True)
+        self.shots[1].update(source_end=100, action_segments=[{"start": 90, "end": 91}])
+        request = {**self.manifest, "ai_refill_indices": [2], "ai_refill_feedback": {"2": {
+            "claim": self.manifest["segments"][1]["text"], "observed": "result beyond old cut", "reason": "incomplete",
+            "prior_shot_ids": ["shot2"], "same_shot_recut": {"shot_id": "shot2", "start": 90, "end": 91}}}}
+        def review(_manifest, sentence, shots, _directory, _audio, **kwargs):
+            self.assertEqual(sentence["candidate_ids"], ["shot2"])
+            self.assertEqual(shots["shot2"]["_review_focus_window"], [90, 91])
+            self.assertLessEqual(shots["shot2"]["source_start"], 90)
+            self.assertGreaterEqual(shots["shot2"]["source_end"], 91)
+            raise ValueError("focused pixels still unconfirmed")
+        with patch.object(editor, "_inventory", side_effect=AssertionError("unnecessary inventory call")), \
+             patch.object(editor, "_review_pool", side_effect=review) as observed:
+            result = editor.refill_indices(request, self.analysis, baseline, [2], self.root)
+        self.assertEqual(observed.call_count, 1)
+        self.assertFalse(result["ok"])
+
     def test_refill_uses_qc_gap_tail_window_and_current_draft_through_writer(self):
         from orchestrator.application import engine, headless_production
         self.manifest['head_trim_s'] = .3

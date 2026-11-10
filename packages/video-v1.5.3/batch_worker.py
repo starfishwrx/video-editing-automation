@@ -659,6 +659,8 @@ def run_build(manifest: dict, report_dir: pathlib.Path, draft_name: str, *,
                 # `shot_analysis_file` manifest key was ignored, so retries
                 # re-ran vision despite a persisted candidate report.
                 manifest["shot_analysis"] = {"shots": cached_shots}
+                if isinstance(cached_payload.get("warnings"), list):
+                    manifest["shot_analysis"]["warnings"] = cached_payload["warnings"]
                 log("reuse partial shot analysis rows=%d/%d from %s" % (
                     len(reusable), len(cached_shots), reuse_analysis))
         except (OSError, ValueError, TypeError, AttributeError):
