@@ -254,6 +254,7 @@ def _call(prompt: str, path: Path, sheet: Path | None = None) -> dict:
 
 
 def _inventory(manifest: dict, shots: list[dict], directory: Path) -> list[dict]:
+    from . import shot_notes
     rows = timing_contract.split_sentences(manifest)
     catalog = [{"shot_id": s["shot_id"], "description": s.get("visual_description") or s.get("description"),
                 "action": s.get("action"), "object": s.get("object"), "result": s.get("result"),
@@ -266,7 +267,8 @@ def _inventory(manifest: dict, shots: list[dict], directory: Path) -> list[dict]
         "full_script_context": [{"index": i, "text": timing_contract.sentence_text(s)}
                                 for i, s in enumerate(rows, 1)],
         "sentences": [{"index": i, "text": timing_contract.sentence_text(s),
-                       "notes": s.get("shot_note") or s.get("visual_requirements")} for i, s in sentence_rows],
+                       "notes": shot_notes.note_for(manifest, i, s) or s.get("visual_requirements")}
+                      for i, s in sentence_rows],
         "catalog": catalog}, ensure_ascii=False) + """
 输出JSON对象 {"sentences":[{"index":1,"kind":"selling_point|product_intro|hook",
 "selling_points":[{"id":"p1","text":"本句具体卖点"}],"candidate_ids":["最相关shot_id", "其余候选"],"scene_ids":[],
@@ -446,6 +448,22 @@ def _iter_review_round(ids, shots, directory, review, *, dense=False, on_error=N
                       api_workers=min(policy.api_workers, len(ids)), on_error=error)
 
 
+def _shot_value_request(sentence: dict) -> dict | None:
+    """Only exact spoken phrases may be assessed; paraphrases remain unscored."""
+    text = str(sentence.get("text") or "")
+    if sentence.get("index") == 0 and sentence.get("kind") == "product_intro":
+        return {"text": text, "display_goal": "general_product",
+                "checks": [{"id": "general_display", "type": "display", "claim_text": text}]}
+    if sentence.get("kind") != "selling_point":
+        return None
+    points = sentence.get("selling_points") or []
+    if not points or any(not isinstance(p, dict) or not p.get("id") or
+            not isinstance(p.get("text"), str) or not p["text"].strip() or p["text"] not in text for p in points):
+        return None
+    return {"text": text, "display_goal": "visible_feature",
+            "checks": [{"id": p["id"], "type": "display", "claim_text": p["text"]} for p in points]}
+
+
 def _feedback_for_shot(sentence: dict, shot_id) -> dict:
     """Scope old QC feedback to the shot it was written about.
 
@@ -477,9 +495,11 @@ def _review(manifest: dict, sentence: dict, shot: dict, directory: Path, *, dens
     feedback_instruction = ("\n本句旧稿质检反馈仅作定位和待核查缺口线索，不是当前素材证据，也可能有误。"
         "判断必须遵守生效业务规则；反馈与规则冲突时不得把反馈中的额外要求变成新规则。"
         "对实际适用的缺口复看当前像素，不得凭反馈或素材描述补造动作与结果。\n") if sentence.get("qc_feedback") else ""
+    value_request = _shot_value_request(sentence)
     prompt = contract.policy_prompt(manifest) + feedback_instruction + "\n只根据附图判断，所有时间戳均为原素材秒数。\n" + json.dumps({
         "product": manifest.get("product"), "category": manifest.get("category"),
         "sentence": sentence, "shot_id": shot["shot_id"],
+        "shot_value_request": value_request,
         "whole_script": [timing_contract.sentence_text(s) for s in timing_contract.split_sentences(manifest)],
         "scene_us": {"start": round(start * 1e6), "end": round(end * 1e6)}}, ensure_ascii=False) + """
 输出JSON对象：{"verdict":"matched|mismatch|uncertain", "same_product":true,
@@ -500,6 +520,17 @@ sentence.audio_durations_us是真实配音时长。请给最短但足够支持�
 轻薄/柔软/舒适展示不要求从第一次持握一直播到最后一次抚摸，也不要为凑配音时长裁掉关键动作与结果。
 evidence_intervals_us内各区间会被当作全部必须保留，不能把多个可替代的重复演示都列入；选最贴切的一次。
 性能实验仍要保留本句必要过程和可见结果，无法在时长内支持时如实返回不确定或部分卖点，不为缩短而删除必需证据。
+shot_value_request非空时，可额外返回shot_value_observation，逐项评估镜头传达了哪些原文信息；只依据实际画面，不能把清晰、运动或一般包装当成具体功能证据。
+格式为{"all_spoken_claims_checked":false,"uncovered_spoken_claims":[],"claims":[{"check_id":"原请求id","claim_text":"原请求的原文",
+"role":"direct_demonstration|feature_presentation|general_product|generic_motion|unrelated|uncertain","coverage":"full|partial|none",
+"adds_claim_information":true,"specific_link":true,"action_or_presentation":"画面动作","visible_change_or_feature":"实际可见特征",
+"claim_link":"画面如何对应这项原文","missing_information":"未看到什么","evidence_intervals_us":[{"start":1000000,"end":2000000}]}]}。
+共享展示池只评价同商品一般展示，不证明任何具体口播。shot_value_observation只是排序参考，不替代上面的逐句证据判断或最终独立质检；不确定就省略。
+可另返回shot_usability_observation，仅描述产品主体的实际可见性，不判断具体卖点：
+{"view_kind":"stable_display|complete_demonstration|handling_or_setup|uncertain","subject_visibility":"clear|partial|blocked|uncertain",
+"demonstration_complete":false,"information_point":"实际看见的主体或特征","limitations":"观察限制",
+"clear_intervals_us":[{"start":1000000,"end":2000000,"observed":"这段为何看得清"}]}。
+区间只填实际看清主体的时间，只用附图和原素材时间；遮挡或不确定须如实说。主体清晰不意味着支持功能或本句卖点。
 """
     result = _call(prompt, directory / "reviews" / f"{key}.json", sheet)
     if result.get("verdict") not in {"matched", "mismatch", "uncertain"} or type(result.get("same_product")) is not bool:
@@ -541,6 +572,37 @@ evidence_intervals_us内各区间会被当作全部必须保留，不能把多�
             process = contract.playback.process_window(playback_observation)
             if process is None or not round(start * 1e6) <= process[0] < process[1] <= round(end * 1e6):
                 raise ValueError("AI_EDITOR_PLAYBACK_OBSERVATION_INVALID")
+    raw_value = result.pop("shot_value_observation", None)
+    result.pop("selling_point_value", None)  # Only our validated assessment may use this key.
+    usability = result.pop("shot_usability_observation", None)
+    result.pop("usability", None)
+    if value_request is not None and raw_value is not None and result["verdict"] == "matched":
+        from . import shot_value
+        try:
+            value = shot_value.assess(raw_value, value_request,
+                {"start": round(start * 1e6), "end": round(end * 1e6)})
+            # The optional assessment cannot invent support not present in the
+            # main review. Generic display is deliberately not a spoken claim.
+            if (sentence.get("index") == 0 or
+                    set(value["supported_ids"]) <= set(result.get("supported_point_ids") or [])):
+                result["selling_point_value"] = value
+                observed_ids = {r["check_id"] for r in raw_value["claims"]}
+                claimed_ids = ({"general_display"} if sentence.get("index") == 0
+                               else set(result.get("supported_point_ids") or []))
+                contradicts = (observed_ids & claimed_ids) - set(value["supported_ids"])
+                if contradicts:
+                    result["shot_value_conflict"] = sorted(contradicts)
+                    result["verdict"] = "uncertain"
+        except (ValueError, TypeError, KeyError):
+            pass  # Older or uncertain observations remain usable, unranked.
+    if usability is not None and result["verdict"] == "matched":
+        from . import shot_usability
+        try:
+            bounds = {"start": round(start * 1e6), "end": round(end * 1e6)}
+            shot_usability.assess(usability, {"display_goal": "general_product"}, bounds, check_relation=False)
+            result["shot_usability_observation"] = usability
+        except (ValueError, TypeError, KeyError, ZeroDivisionError):
+            pass
     durations = sentence.get("audio_durations_us") or []
     valid_durations = [v for v in durations if type(v) is int and v > 0]
     intervals = result.get("evidence_intervals_us") or []
@@ -836,6 +898,15 @@ def _placement_fit_observation(review: dict) -> dict | None:
 
 
 def _observed_shot(shot: dict, review: dict) -> dict:
+    window = review.get("review_window_us")
+    if window is not None:
+        if (not isinstance(window, dict) or any(type(window.get(k)) is not int for k in ("start", "end"))
+                or not round(float(shot["source_start"]) * 1e6) <= window["start"] < window["end"]
+                   <= round(float(shot["source_end"]) * 1e6)):
+            raise ValueError("AI_EDITOR_REVIEW_WINDOW_INVALID")
+        # Local pixel review certifies only this source window. Both the
+        # candidate solver and final assembly must use those same boundaries.
+        shot = {**shot, "source_start": window["start"] / 1e6, "source_end": window["end"] / 1e6}
     evidence = [{"start": ev["start"] / 1e6, "end": ev["end"] / 1e6,
                  "claim": review["observation"], "evidence_source": "ai_editor_pixel_review"}
                 for ev in review["evidence_intervals_us"]]
@@ -886,9 +957,12 @@ def _assemble(manifest: dict, analysis: dict, plan: dict, *, narration_timing: d
         row = indexed[index]
         frozen = plan.get("_frozen_segments", {}).get(index)
         if frozen is not None:
-            check = contract.validate_segment_receipt(frozen, index=index, manifest=manifest, verify_source=True)
-            if not check["ok"]:
-                raise ValueError("AI_REFILL_FROZEN_INVALID:" + ";".join(check["reasons"]))
+            if contract.is_ai_segment(frozen):
+                check = contract.validate_segment_receipt(frozen, index=index, manifest=manifest, verify_source=True)
+                if not check["ok"]:
+                    raise ValueError("AI_REFILL_FROZEN_INVALID:" + ";".join(check["reasons"]))
+            elif not plan.get("_allow_frozen_rule_segments"):
+                raise ValueError("AI_REFILL_FROZEN_INVALID:NON_AI_SEGMENT")
             output.append(copy.deepcopy(frozen))
             continue
         group = continuity_groups.get(row.get("continuity_key"))
@@ -955,12 +1029,14 @@ def _assemble(manifest: dict, analysis: dict, plan: dict, *, narration_timing: d
             if verify_sources and review["source_identity"] != contract.source_identity(shot["video"]):
                 raise ValueError("AI_EDITOR_SOURCE_CONTENT_CHANGED")
             observed = _observed_shot(shot, review)
+            observed["speed_range_override"] = list(shot_analyzer._fit_speed_range(
+                observed, manifest=manifest, time_sensitive=review["time_sensitive"]))
             # A continuation requests a later in-point; it must retain every
             # evidence interval, otherwise the technical check rejects it.
             if "source_start_us" in part:
                 if type(part["source_start_us"]) is not int:
                     raise ValueError("AI_EDITOR_INPOINT_INVALID")
-                observed["source_start"] = max(float(shot["source_start"]), part["source_start_us"] / 1e6)
+                observed["source_start"] = max(float(observed["source_start"]), part["source_start_us"] / 1e6)
             cfg = {**manifest, "tail_pad_s": manifest.get("tail_pad_s", 0) if n == len(parts) - 1 else 0}
             if "source_start_us" in part or window_key:
                 # The guard belongs to the original scene, not the requested in-point.
@@ -996,7 +1072,8 @@ def _assemble(manifest: dict, analysis: dict, plan: dict, *, narration_timing: d
                             audio_duration_us=audio_us, selling_points=sentence["selling_points"])
             part_sentence = {**sentence, "selling_points": [p for p in sentence["selling_points"] if p["id"] in review.get("supported_point_ids", [])]}
             item["ai_selection"] = contract.make_receipt(item, index=index, sentence=part_sentence,
-                observation=review, source_identity=review["source_identity"], identity=plan["identity"])
+                observation=review, source_identity=review["source_identity"], identity=plan["identity"],
+                task_speed_cap=contract.playback.task_absorb_speed_cap(manifest))
             assembled.append(item)
             used_reviews.append(review)
             supported.update(review.get("supported_point_ids", []))
@@ -1025,7 +1102,8 @@ def _assemble(manifest: dict, analysis: dict, plan: dict, *, narration_timing: d
         segment["time_sensitive"] = overall_review["time_sensitive"]
         receipt_sentence = sentence  # Keep requirements even in an uncertified partial preview.
         segment["ai_selection"] = contract.make_receipt(segment, index=index, sentence=receipt_sentence,
-            observation=overall_review, source_identity=good[first["shot_id"]]["source_identity"], identity=plan["identity"])
+            observation=overall_review, source_identity=good[first["shot_id"]]["source_identity"], identity=plan["identity"],
+            task_speed_cap=contract.playback.task_absorb_speed_cap(manifest))
         check = contract.validate_segment_receipt(segment, index=index, manifest=manifest)
         if not check["ok"]:
             # A single-shot playback conflict belongs to this sentence. Keep
@@ -1036,21 +1114,23 @@ def _assemble(manifest: dict, analysis: dict, plan: dict, *, narration_timing: d
             raise ValueError(";".join(check["reasons"]))
         output.append(segment)
     out_manifest = {**manifest, "selection_mode": "ai_editor", "segments": output,
-                    "temporary_material_analysis": True, "temporary_shot_ids": [s["temporary_shot_id"] for s in output]}
+                    "temporary_material_analysis": True,
+                    "temporary_shot_ids": [s.get("temporary_shot_id") or s.get("shot_id") for s in output]}
     out_manifest["claim_gate_coverage"] = {"mode": "ai_editor", "certification": "UNCERTIFIED" if unresolved else "CERTIFIED",
         "point_coverage_policy": contract.POINT_COVERAGE_POLICY,
-        "uncovered_selling_points": [{"index": i, "points": s["uncovered_selling_points"]}
-                                     for i, s in enumerate(output, 1) if s["uncovered_selling_points"]],
+        "uncovered_selling_points": [{"index": i, "points": s.get("uncovered_selling_points")}
+                                     for i, s in enumerate(output, 1) if s.get("uncovered_selling_points")],
         "validation_passed": not bool(unresolved), "uncertified_reasons": [f"PARTIAL_SELLING_POINTS:{x['index']}" for x in unresolved],
         "scope": "source_observation_only_independent_qc_required"}
     if unresolved:
         out_manifest["preview_unresolved"] = unresolved
-    overlap = contract.sequence_errors(output) if validate_sequence else []
+    overlap = contract.sequence_errors(output, manifest=manifest,
+        ai_only=bool(plan.get("_allow_frozen_rule_segments"))) if validate_sequence else []
     if overlap:
         raise ValueError(";".join(overlap))
     return {"ok": True, "selection_policy": "ai_editor_selling_points_first", "selection_mode": "ai_editor",
             "segments": output, "manifest": out_manifest, "pending_items": unresolved,
-            "accepted_shots": [p.get("shot_id", s["temporary_shot_id"]) for s in output for p in (s.get("span_parts") or [s])],
+            "accepted_shots": [p.get("shot_id") or s.get("temporary_shot_id") for s in output for p in (s.get("span_parts") or [s])],
             "recommendations": [{"index": s["index"], "text": s["text"], "sentence_kind": s["kind"],
                 "candidates": plan["reviews"].get(str(s["index"]), []) if s["kind"] == "selling_point" else plan["display_reviews"]} for s in sentences],
             "degraded_matches": [], "degraded_count": 0, "material_gaps": [], "material_gap_count": 0,
@@ -1088,6 +1168,41 @@ def _build_edit_inventory(manifest: dict, analysis: dict, plan: dict,
                 "within_preferred_speed": solution.ok and solution.speed <= contract.playback.PROCESS_PREFERRED_MAX,
                 "original_scene_start_us": round(float(shot["source_start"]) * 1e6),
                 "original_scene_end_us": round(float(shot["source_end"]) * 1e6)}
+            value = review.get("selling_point_value")
+            # A broad reviewed scene cannot lend its value to a different crop.
+            intervals = value.get("evidence_intervals_us") if isinstance(value, dict) else None
+            allowed_ids = {p["id"] for p in sentence.get("selling_points", [])}
+            if sentence.get("kind") != "selling_point":
+                allowed_ids = {"general_display"}
+            supported = value.get("supported_ids") if isinstance(value, dict) else None
+            if (solution.ok and isinstance(value, dict) and type(value.get("strength")) is int
+                    and 0 <= value["strength"] <= 3 and isinstance(supported, list)
+                    and all(isinstance(i, str) for i in supported)
+                    and set(supported) <= allowed_ids and isinstance(intervals, list) and bool(intervals)
+                    and all(isinstance(e, dict) and type(e.get("start")) is int and type(e.get("end")) is int
+                            and solution.source_start_us <= e["start"] < e["end"] <= solution.source_end_us
+                            for e in intervals)):
+                candidate["selling_point_value"] = value
+            blind = review.get("shot_usability_observation")
+            reviewed = review.get("review_window_us")
+            if solution.ok and isinstance(blind, dict) and isinstance(reviewed, dict):
+                from . import shot_usability
+                try:
+                    actual = {"start": solution.source_start_us, "end": solution.source_end_us}
+                    if not (type(reviewed.get("start")) is int and type(reviewed.get("end")) is int
+                            and reviewed["start"] <= actual["start"] < actual["end"] <= reviewed["end"]):
+                        raise ValueError("SHOT_USABILITY_REVIEW_WINDOW_CHANGED")
+                    candidate["usability"] = shot_usability.assess(blind,
+                        {"display_goal": "general_product"}, actual, reviewed_window=reviewed, check_relation=False)
+                except (ValueError, TypeError, KeyError, ZeroDivisionError):
+                    pass
+        from . import shot_value, shot_usability
+        def quality_rank(candidate):
+            quality = candidate.get("usability") or {}
+            status = quality.get("status")
+            clarity = 0 if status == "USABLE_FOR_COMPARISON" else 2 if status == "REJECTED" else 1
+            return shot_value.rank({"plan": candidate}), clarity, shot_usability.rank(candidate)[1:]
+        candidates.sort(key=quality_rank)
         inventory.append({"index": sentence["index"], "text": sentence["text"],
             "kind": sentence["kind"], "selling_points": sentence["selling_points"],
             "audio_duration_us": duration, "candidates": candidates})
@@ -1418,7 +1533,7 @@ def _single_part_end(manifest, analysis, plan, narration_timing, index):
     if "source_start_us" in part:
         if type(part["source_start_us"]) is not int:
             return None
-        observed["source_start"] = max(float(shot["source_start"]), part["source_start_us"] / 1e6)
+        observed["source_start"] = max(float(observed["source_start"]), part["source_start_us"] / 1e6)
     cfg = dict(manifest)
     if "source_start_us" in part or window_key:
         guard = max(0.0, shot_analyzer._number(manifest.get("head_trim_s"), shot_analyzer.DEFAULT_HEAD_TRIM_S))
@@ -1710,7 +1825,8 @@ def _repair_repeated_window(manifest: dict, analysis: dict, plan: dict, director
     try:
         baseline = _assemble(manifest, analysis, plan, narration_timing=narration_timing,
                              verify_sources=True, validate_sequence=False)
-        before = set(contract.sequence_conflict_details(baseline["segments"]))
+        before = set(contract.sequence_conflict_details(baseline["segments"],
+            source_reuse_limit=contract.source_reuse_limit(manifest)))
     except (ValueError, KeyError, TypeError, OSError):
         return False
     if not before:
@@ -1731,8 +1847,12 @@ def _repair_repeated_window(manifest: dict, analysis: dict, plan: dict, director
             try:
                 checked = _assemble(manifest, analysis, proposal, narration_timing=narration_timing,
                                     verify_sources=True, validate_sequence=False)
-                after = set(contract.sequence_conflict_details(checked["segments"]))
-                if not after < before:
+                after = set(contract.sequence_conflict_details(checked["segments"],
+                    source_reuse_limit=contract.source_reuse_limit(manifest)))
+                reuse = lambda details: {d for d in details if d[0].startswith("AI_EDITOR_SOURCE_REUSE_LIMIT:")}
+                improved_reuse = (len(reuse(after)) < len(reuse(before))
+                    and (after - reuse(after)) <= (before - reuse(before)))
+                if not (after < before or improved_reuse):
                     continue
             except (ValueError, KeyError, TypeError, OSError):
                 continue
@@ -1743,10 +1863,13 @@ def _repair_repeated_window(manifest: dict, analysis: dict, plan: dict, director
 
     if try_reviewed():
         return True
+    # A different window in the same file cannot repair a per-source limit.
+    reuse_failure = any(d[0].startswith("AI_EDITOR_SOURCE_REUSE_LIMIT:") and
+        index in contract.source_reuse_indices(baseline["segments"], d[1]) for d in before)
     if any(r.get("index") == index and r.get("reviewed_candidates") for r in plan.get("duplicate_repair_reviews", [])):
         expanded.add(index)
     if index in expanded:
-        return _repair_distinct_window(manifest, analysis, plan, directory, narration_timing, index, baseline, before)
+        return False if reuse_failure else _repair_distinct_window(manifest, analysis, plan, directory, narration_timing, index, baseline, before)
     expanded.add(index)
     display = sentence["kind"] != "selling_point"
     reviews = plan.get("display_reviews", []) if display else plan.get("reviews", {}).get(str(index), [])
@@ -1754,7 +1877,7 @@ def _repair_repeated_window(manifest: dict, analysis: dict, plan: dict, director
     all_ids = list(dict.fromkeys(sentence.get("candidate_ids") or []))
     new_ids = [sid for sid in all_ids if sid not in seen][:ROUND_SIZE]
     if not new_ids:
-        return _repair_distinct_window(manifest, analysis, plan, directory, narration_timing, index, baseline, before)
+        return False if reuse_failure else _repair_distinct_window(manifest, analysis, plan, directory, narration_timing, index, baseline, before)
     # Keep all previous observations, and cap newly reviewed candidates to one round.
     retained = [r for r in reviews if isinstance(r, dict)
                 and not failure_fields(str(r.get("error", ""))).get("retryable")]
@@ -1776,8 +1899,8 @@ def _repair_repeated_window(manifest: dict, analysis: dict, plan: dict, director
     plan.setdefault("duplicate_repair_reviews", []).append({"index": index, "new_candidates": new_ids,
         "reviewed_candidates": [r["shot_id"] for r in fresh]})
     _save(directory / "plan.json", plan)
-    return try_reviewed() or _repair_distinct_window(
-        manifest, analysis, plan, directory, narration_timing, index, baseline, before)
+    return try_reviewed() or (not reuse_failure and _repair_distinct_window(
+        manifest, analysis, plan, directory, narration_timing, index, baseline, before))
 
 
 def _short_complete_rows(manifest, analysis, plan, index, narration_timing):
@@ -1926,6 +2049,9 @@ def _retrieve_empty_selection(manifest, analysis, plan, failure, narration_timin
 
 
 def _duplicate_repair_focus(plan, failure):
+    reuse = re.fullmatch(r'AI_EDITOR_SOURCE_REUSE_LIMIT:(\d+)', str(failure))
+    if reuse:
+        return int(reuse[1])
     match = re.fullmatch(r'AI_EDITOR_REPEATED_SOURCE_WINDOW:(\d+):(\d+)', str(failure))
     if not match:
         return None
@@ -2390,9 +2516,22 @@ def _repair_reviewed_rows(manifest, analysis, plan, directory, narration_timing,
         if _retrieve_empty_selection(manifest, analysis, plan, failure, narration_timing):
             continue
         repeated_index = _duplicate_repair_focus(plan, failure)
-        if repeated_index is not None and _repair_repeated_window(manifest, analysis, plan, directory,
-                narration_timing, repeated_index, duplicate_expanded):
-            continue
+        if repeated_index is not None:
+            repair_indices = [repeated_index]
+            if str(failure).startswith("AI_EDITOR_SOURCE_REUSE_LIMIT:"):
+                try:
+                    baseline = _assemble(manifest, analysis, plan, narration_timing=narration_timing,
+                                         verify_sources=True, validate_sequence=False)
+                    details = contract.source_reuse_conflict_details(
+                        baseline["segments"], contract.source_reuse_limit(manifest))
+                    for detail in details:
+                        if detail[0] == str(failure):
+                            repair_indices.extend(contract.source_reuse_indices(baseline["segments"], detail[1]))
+                except (ValueError, KeyError, TypeError, OSError):
+                    pass
+            if any(_repair_repeated_window(manifest, analysis, plan, directory, narration_timing,
+                                           index, duplicate_expanded) for index in dict.fromkeys(repair_indices)):
+                continue
         if isinstance(failure, WindowFailure):
             # A recrop that still cannot hold the evidence used to count as
             # progress and skip the previous-shot tail. Look at that tail first.
@@ -2491,11 +2630,16 @@ def _edit_plan(manifest: dict, analysis: dict, plan: dict, directory: Path,
 单镜或多镜根据句意与实际配音节奏选择：当一段口播包含不同卖点或存在多个贴切画面，且每个镜头有足够时间清楚呈现时，优先考虑句内多镜，避免机械地每句一镜；不要为了镜头数量裁掉动作、重复播放或制造闪帧。
 同源连续实验顺接后续区间，不每句重播。source_start_us可省略，提供时不得裁掉必需证据。
 镜头变化和去重只是质量接近时的偏好，不得抢走唯一卖点候选。没有合格候选返回空parts，不编造支持。
+候选若带selling_point_value，它是本次画面中具体原文信息的辅助判断：同等匹配时优先能展示相关特征或直接演示的镜头；一般包装只适合无具体卖点的展示句。无此字段不代表不合格，不得把它当成独立质检或编造未展示的卖点。
+候选若带usability，仅表示所选实际窗口内主体的可见性与清晰时长；质量接近时优先主体清楚、呈现充分者。主体清晰不等于证明卖点；未返回该字段表示未知。
 technical_option是按本句完整配音求出的实际可行窗口；分配多镜后程序会重新求解，不可用单镜无解淘汰组合。
 匹配质量相近时优先within_preferred_speed=true；普通完整放置短窗保留最高2倍许可，2到3倍仅限已复看的纯过程。实验分相的关键动作结果原速，无许可时原速。technical_option无解时必须换完整短窗口或如实报告冲突。
 根据source_identity、源区间及可见动作描述减少近重复。优先中后段，但完整证据和唯一卖点先于取段偏好。
 确实只有一个实际支持的候选、卖点不得不复用时，可在该row写scarce_reuse_reason解释；介绍/钩子和有替代候选时不允许此例外，相关实验仍须顺接而非相邻重播。
 """
+    source_limit = contract.source_reuse_limit(manifest)
+    if source_limit is not None:
+        instructions += f"\n本任务每个源素材最多使用{source_limit}次；经验证的连续实验组按一次计算，不得以稀缺复用理由突破此上限。"
     def make_prompt() -> str:
         current_inventory = _build_edit_inventory(manifest, analysis, plan, narration_timing)
         return (contract.policy_prompt(manifest) + "\n你是整稿剪辑师。以下候选均已经实际看图。先保留卖点稀缺候选，再给介绍和钩子分配展示池。\n"
@@ -2607,6 +2751,8 @@ def _edit_with_review_fallback(manifest, analysis, plan, directory, narration_ti
 
 
 def prepare(manifest: dict, analysis: dict, report_dir: Path, *, narration_timing: dict | None = None) -> dict:
+    contract.playback.task_absorb_speed_cap(manifest)
+    contract.max_source_reuse(manifest)
     directory = report_dir / "ai_editor"
     directory.mkdir(parents=True, exist_ok=True)
     plan: dict = {"schema": contract.PLAN_SCHEMA, "policy_version": contract.POLICY_VERSION,
@@ -3010,6 +3156,12 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
                 for index, row in by_index.items() if index not in wanted
                 for part in (row.get("span_parts") or [row])}
     replaced, errors, refill_unresolved = list(grouped_replaced), list(grouped_errors.values()), []
+    reuse_limit = contract.source_reuse_limit(manifest)
+
+    def retained_rows():
+        return [{**row, "_source_reuse_index": i} for i, row in sorted(by_index.items()) if (i not in wanted or i in replaced)
+                and not row.get("visual_missing") and (row.get("video") or row.get("span_parts"))]
+
     for index in wanted:
         if index in grouped_replaced or index in grouped_errors:
             continue
@@ -3020,7 +3172,10 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
         audio_us, certainty = timing_contract.duration_for(narration_timing, index,
                                                           segment=original[index - 1])
         excluded = qc_rejected_shots(manifest).get(index, set())
-        allowed = {sid: shot for sid, shot in shots.items() if sid not in reserved and sid not in excluded}
+        retained = retained_rows()
+        allowed = {sid: shot for sid, shot in shots.items() if sid not in reserved and sid not in excluded
+                   and not contract.source_reuse_conflict_details(
+                       retained + [{"video": shot.get("video")}], reuse_limit)}
         preferred = [sid for sid in _rule_shortlist_ids(matched, analysis, index, limit=max(ROUND_SIZE, 16))
                      if sid in allowed]
         observed = _observed_text_shortlist(sentence["text"], allowed)
@@ -3200,6 +3355,10 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
                                                                  manifest=manifest)
                     if not checked["ok"]:
                         raise ValueError(";".join(checked["reasons"]))
+                    reuse_errors = contract.source_reuse_conflict_details(
+                        retained + [{**row, "_source_reuse_index": index}], reuse_limit)
+                    if reuse_errors:
+                        raise ValueError(reuse_errors[0][0])
                     by_index[index] = row
                     reserved.update(str(review["shot_id"]) for review in group)
                     replaced.append(index)
@@ -3239,6 +3398,13 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
                     if source.get("timing_certainty"):
                         row["timing_certainty"] = source["timing_certainty"]
         ordered.append(row)
+    reuse_errors = contract.source_reuse_conflict_details(
+        [{**row, "_source_reuse_index": i} for i, row in sorted(by_index.items())
+         if not row.get("visual_missing") and (row.get("video") or row.get("span_parts"))],
+        reuse_limit)
+    errors.extend(detail[0] for detail in reuse_errors if detail[0] not in errors)
+    sequence_errors = contract.sequence_errors_all(ordered, ai_only=True)
+    errors.extend(error for error in sequence_errors if error not in errors)
     def keep(row):
         return not isinstance(row, dict) or row.get("index") not in replaced
     output_manifest = dict(matched.get("manifest") or manifest)
@@ -3265,8 +3431,7 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
     if errors:
         result.update(failure_fields(";".join(errors)))
     result["ok"] = (bool(ordered) and len(ordered) == len(original) and not result["pending_items"]
-                    and set(wanted) <= set(replaced)
-                    and not contract.sequence_errors([s for s in ordered if contract.is_ai_segment(s)]))
+                    and set(wanted) <= set(replaced) and not sequence_errors)
     for counter, field in (("material_gap_count", "material_gaps"), ("degraded_count", "degraded_matches"),
                            ("visual_missing_count", "visual_missing_matches"), ("preview_unresolved_count", "preview_unresolved")):
         result[counter] = len(result[field])

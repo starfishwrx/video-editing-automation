@@ -152,6 +152,10 @@ def _timeline_items(info: dict[str, Any], draft: pathlib.Path) -> tuple[list[dic
     if not track:
         return [], ["VIDEO_TRACK_MISSING"]
     materials = _material_map(draft, info)
+    speeds: dict[str, list[dict[str, Any]]] = {}
+    for item in (info.get("materials") or {}).get("speeds") or []:
+        if isinstance(item, dict) and item.get("id"):
+            speeds.setdefault(str(item["id"]), []).append(item)
     rows: list[dict[str, Any]] = []
     issues: list[str] = []
     for idx, segment in enumerate(track.get("segments") or [], 1):
@@ -186,6 +190,8 @@ def _timeline_items(info: dict[str, Any], draft: pathlib.Path) -> tuple[list[dic
             "intentional_gap": material_name.startswith("visual_missing_placeholder")
             or source.name.startswith("visual_missing_placeholder"),
             "segment": segment,
+            "speed_materials": [node for ref in segment.get("extra_material_refs") or []
+                                for node in speeds.get(str(ref), [])],
         })
     rows.sort(key=lambda r: (r["target_start"], r["index"]))
     for left, right in zip(rows, rows[1:]):
@@ -244,6 +250,7 @@ def _expected_claims(report_dir: pathlib.Path) -> list[dict[str, Any]]:
             "ai_segment": row if row.get("selection_mode") == "ai_editor" else None,
             "product": (data.get("manifest") or {}).get("product", ""),
             "category": (data.get("manifest") or {}).get("category", ""),
+            "max_absorb_demo_speed": (data.get("manifest") or {}).get("max_absorb_demo_speed"),
         })
     return result
 

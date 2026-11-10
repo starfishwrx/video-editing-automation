@@ -1426,6 +1426,15 @@ class OrchestrationEngine:
             start = span_start - (target - (span_end - span_start)) / 2.0
         return max(earliest, min(start, latest_end - target))
 
+    def _task_speed_cap_for_clip(self, clip: Clip) -> float | None:
+        """Unknown AI windows conservatively obey an explicit experiment cap."""
+        from .. import ai_editor_contract
+        raw = self._raw_segment_for(clip)
+        if (ai_editor_contract.selection_mode(self.m) == "ai_editor" or raw.get("selection_mode") == "ai_editor"
+                or isinstance(raw.get("ai_selection"), dict)):
+            return timing_contract.playback.task_absorb_speed_cap(self.m)
+        return None
+
     # ---------- 需求6+补3：音画严格对齐，以声音定长，多余画面舍弃 ----------
     def _timing_request(self, clip: Clip, sound_us: int) -> timing_contract.WindowRequest:
         """把段落 + 真实音频时长组装成一次窗口求解请求（v1.3.27 统一口径）。
@@ -1452,6 +1461,8 @@ class OrchestrationEngine:
             time_sensitive=bool(getattr(clip, "time_sensitive", False)),
             override=getattr(clip, "speed_range_override", None),
             playback_observation=getattr(clip, "playback_observation", None))
+        speed_min, speed_max = timing_contract.playback.capped_range(
+            (speed_min, speed_max), self._task_speed_cap_for_clip(clip))
         # 可用源区间 = **被分析过的场景窗口**，不是整条素材。规划阶段抽帧、AI 打
         # 标签都只覆盖这一段；窗口越过 scene_source_end 会播到没分析过的画面，
         # 会被 final_visual_evidence_gate 拦下。段落没写 source_end 时才退回整条素材。
@@ -1937,6 +1948,8 @@ class OrchestrationEngine:
                 self._clip_role(c), time_sensitive=bool(c.time_sensitive),
                 override=getattr(c, "speed_range_override", None),
                 playback_observation=getattr(c, "playback_observation", None))
+            speed_min, speed_max = timing_contract.playback.capped_range(
+                (speed_min, speed_max), self._task_speed_cap_for_clip(c))
             speed = float(c.video_speed or 1.0)
             # 源出点优先取**求解器给的那个数**（`solved_window`），拿不到才按
             # 「入点 + 输出时长 × 速度」回算。回算本身没错，但它是用吸附后的速度
@@ -2404,6 +2417,7 @@ class OrchestrationEngine:
         for index, clip in enumerate(clips):
             solved = clip.solved_window if isinstance(clip.solved_window, dict) else {}
             try:
+                task_speed_cap = self._task_speed_cap_for_clip(clip)
                 start = to_us(clip.source_start)
                 target = to_us(clip.duration)
                 # Both writers consume this exact integer source length. A
@@ -2413,11 +2427,16 @@ class OrchestrationEngine:
                     conflicts.append({"code": "PLAYBACK_SOLVED_WINDOW_CHANGED",
                                       "index": clip.raw_index + 1 if clip.raw_index >= 0 else index + 1,
                                       "actual_end_us": end, "solved_end_us": to_us(float(solved["source_end"]))})
-            except (ValueError, TypeError, OverflowError):
+            except (ValueError, TypeError, OverflowError) as exc:
+                if str(exc) == "SCENE_SPEED_LIMIT_INVALID":
+                    return {"status": "ENV_ERROR", "failure_class": "environment",
+                            "failure_code": "SCENE_SPEED_LIMIT_INVALID", "retryable": False,
+                            "draft_path": None, "formal_delivery_allowed": False}
                 start = end = target = None
+                task_speed_cap = None
             conflicts.extend(playback.conflicts(start_us=start, end_us=end, target_us=target,
                 speed=clip.video_speed, time_sensitive=clip.time_sensitive,
-                observation=clip.playback_observation,
+                observation=clip.playback_observation, task_speed_cap=task_speed_cap,
                 index=clip.raw_index + 1 if clip.raw_index >= 0 else index + 1))
         if conflicts:
             return {"status": "TIMING_INFEASIBLE", "failure_class": "timing",
@@ -2433,6 +2452,23 @@ class OrchestrationEngine:
         if errors:
             return {"status": "TIMING_INFEASIBLE", "failure_code": "CONTINUITY_CONFLICT",
                     "issues": errors, "resume_stage": "semantic_match", "formal_delivery_allowed": False}
+        from .. import ai_editor_contract
+        try:
+            limit = ai_editor_contract.source_reuse_limit(self.m)
+            if limit is not None and ai_editor_contract.selection_mode(self.m) != "legacy":
+                preview = self.m.get("delivery_mode") in {"preview", "preview_only", "预览"}
+                actual = [{"video": c.video, "continuity_group": c.continuity_group,
+                           "_source_reuse_index": c.raw_index + 1 if c.raw_index >= 0 else i + 1}
+                          for i, c in enumerate(clips)
+                          if not (preview and c.visual_missing)]
+                errors = ai_editor_contract.source_reuse_conflict_details(actual, limit)
+                if errors:
+                    return {"status": "SHOT_MATCH_BLOCKED", "failure_code": "MAX_SOURCE_REUSE_EXCEEDED",
+                            "issues": [e[0] for e in errors], "resume_stage": "semantic_match",
+                            "draft_path": None, "formal_delivery_allowed": False}
+        except ValueError as exc:
+            return {"status": "ENV_ERROR", "failure_code": str(exc), "retryable": False,
+                    "draft_path": None, "formal_delivery_allowed": False}
         gate = self._playback_gate(clips)
         if gate:
             return gate

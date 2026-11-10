@@ -111,6 +111,14 @@ class ExperimentEventsTests(unittest.TestCase):
         self.assertEqual(sum(p['target_duration_us'] for p in plans),4_300_000)
         self.assertEqual(observations[0]['effective_window_frame_ids'],[0,40])
 
+    def test_focused_solver_finds_shorter_reviewed_window_under_task_cap(self):
+        observations=[compile_events(facts(m['part']),m) for m in self.pair['members']]
+        observations[0]['coverage']='absorption_focus'
+        plans=fit_phase_windows(self.pair['members'],observations,15,5_000_000,1_800_000,max_speed=1.5)
+        self.assertEqual(plans[0]['source_selection']['selected_window_frame_ids'],[17,40])
+        self.assertTrue(all(p['speed'] <= 1.5 for plan in plans for p in plan['retiming']['parts']))
+        self.assertTrue(all(p['speed'] == 1 for plan in plans for p in plan['retiming']['parts'] if p['locked']))
+
     def test_preparation_is_removed_before_anchoring_actual_tissue_contact(self):
         raw=facts('B');raw['contact_first_frame']=5;raw['events'][0]['first_frame']=5
         raw['events'].insert(0,{'kind':'context','first_frame':0,'last_frame':4,'observed':'pad only; tissue has not contacted'})

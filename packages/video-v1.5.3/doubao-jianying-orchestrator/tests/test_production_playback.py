@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from orchestrator import ai_editor_contract as contract
 from orchestrator.application.engine import OrchestrationEngine
 from orchestrator.application import headless_production
+from orchestrator.quality import ai_editor_qc, draft_visual_qc
 from orchestrator.domain.clips import Clip
 from orchestrator.policy import playback
 from orchestrator.selection import ai_editor as editor, shot_analyzer, timing_contract as timing
@@ -157,6 +158,88 @@ class ProductionPlaybackTests(unittest.TestCase):
         self.assertEqual(review.call_count, 1)
         self.assertEqual(self.plan['rows'], before)
         self.assertFalse(self.plan.get('window_reviews'))
+
+    def test_explicit_reuse_limit_selects_an_independently_reviewed_alternative(self):
+        self.display_duplicate_fixture()
+        self.manifest['max_source_reuse'] = 1
+        self.plan['display_reviews'][1]['evidence_intervals_us'] = [
+            {'start': 1_000_000, 'end': 2_000_000}]
+        self.assertTrue(editor._repair_repeated_window(self.manifest, self.analysis,
+            self.plan, self.root, None, 2, set()))
+        result = editor._assemble(self.manifest, self.analysis, self.plan,
+                                  narration_timing=None, verify_sources=True)
+        self.assertEqual([r['temporary_shot_id'] for r in result['segments']], ['long', 'other'])
+
+    def test_explicit_reuse_limit_counts_different_cuts_of_same_source(self):
+        source = str(self.root / 'source.mp4')
+        segments = [{'video': source, 'ai_selection': {'video': source,
+            'window_us': {'start': start, 'end': start + 1_000_000}}}
+            for start in (0, 2_000_000)]
+        self.assertEqual(contract.sequence_errors_all(segments), [])
+        self.assertEqual(contract.sequence_errors_all(segments, manifest={'max_source_reuse': 1}),
+                         ['AI_EDITOR_SOURCE_REUSE_LIMIT:2'])
+        multi = [{'span_parts': [segments[0], segments[1]]}]
+        self.assertEqual(contract.sequence_errors_all(multi, manifest={'max_source_reuse': 1}),
+                         ['AI_EDITOR_SOURCE_REUSE_LIMIT:1'])
+        self.assertIsNone(contract.max_source_reuse({}))
+        self.assertEqual(contract.max_source_reuse({'max_source_reuse': 2.0}), 2)
+        self.assertEqual(contract.max_source_reuse({'max_source_reuse': 0, 'selection_mode': 'legacy'}), 2)
+        self.assertEqual(contract.max_source_reuse({'max_source_reuse': 0, 'recovery_stage': 'draft_write'}), 2)
+        for invalid in (0, -1, 'bad', 1.5, True):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, 'MAX_SOURCE_REUSE_INVALID'):
+                contract.max_source_reuse({'max_source_reuse': invalid})
+
+    def test_reuse_limit_checks_actual_cuts_before_either_writer(self):
+        for backend in ('headless', 'legacy'):
+            with self.subTest(backend=backend):
+                engine = OrchestrationEngine.__new__(OrchestrationEngine)
+                engine.m = {'draft_backend': backend, 'max_source_reuse': 1}
+                clips = [Clip('same.mp4', 0, 1), Clip('same.mp4', 3, 1)]
+                with patch.object(headless_production, 'write_draft') as native, \
+                        patch.object(engine, '_write_legacy_draft') as legacy:
+                    result = engine.write_draft(clips, None)
+                self.assertEqual(result['failure_code'], 'MAX_SOURCE_REUSE_EXCEEDED')
+                native.assert_not_called()
+                legacy.assert_not_called()
+
+    def test_reuse_limit_does_not_count_explicit_preview_placeholders(self):
+        clips = [Clip('placeholder.mp4', 0, 1, visual_missing=True) for _ in range(3)]
+        engine = OrchestrationEngine.__new__(OrchestrationEngine)
+        engine.m = {'draft_backend': 'headless', 'delivery_mode': 'preview', 'max_source_reuse': 2}
+        with patch.object(headless_production, 'write_draft', return_value={'status': 'SUCCESS'}) as writer:
+            self.assertEqual(engine.write_draft(clips, None)['status'], 'SUCCESS')
+        writer.assert_called_once()
+        engine.m['delivery_mode'] = 'formal'
+        with patch.object(headless_production, 'write_draft') as writer:
+            self.assertEqual(engine.write_draft(clips, None)['failure_code'], 'MAX_SOURCE_REUSE_EXCEEDED')
+        writer.assert_not_called()
+
+    def test_reuse_limit_reports_original_sentence_after_preview_placeholder(self):
+        engine = OrchestrationEngine.__new__(OrchestrationEngine)
+        engine.m = {'delivery_mode': 'preview', 'max_source_reuse': 1}
+        clips = [Clip('placeholder.mp4', 0, 1, visual_missing=True, raw_index=0),
+                 Clip('same.mp4', 0, 1, raw_index=1), Clip('same.mp4', 2, 1, raw_index=2)]
+        with patch.object(headless_production, 'write_draft') as writer:
+            result = engine.write_draft(clips, None)
+        self.assertEqual(result['issues'], ['AI_EDITOR_SOURCE_REUSE_LIMIT:3'])
+        writer.assert_not_called()
+
+    def test_old_queue_and_recovery_keep_unversioned_ai_reuse_policy(self):
+        clips = [Clip('same.mp4', start, 1) for start in (0, 3, 6)]
+        old = {'max_source_reuse': 2, 'record_id': 'old',
+               'clip_selection_policy': {'mode': 'script_driven_semantic_match'}}
+        self.assertEqual(contract.source_reuse_limit({**old, 'max_source_reuse': 1}), 1)
+        self.assertIsNone(contract.source_reuse_limit({**old, 'max_source_reuse': 1,
+                                                       'recovery_stage': 'draft_write'}))
+        engine = OrchestrationEngine.__new__(OrchestrationEngine)
+        for manifest in (old, {'max_source_reuse': 2, 'recovery_stage': 'draft_write'}):
+            engine.m = manifest
+            with patch.object(headless_production, 'write_draft', return_value={'status': 'SUCCESS'}):
+                self.assertEqual(engine.write_draft(clips, None)['status'], 'SUCCESS')
+            engine.m = {**manifest, 'source_reuse_policy': 'strict-v1'}
+            with patch.object(headless_production, 'write_draft') as writer:
+                self.assertEqual(engine.write_draft(clips, None)['failure_code'], 'MAX_SOURCE_REUSE_EXCEEDED')
+            writer.assert_not_called()
 
     def test_display_duplicate_review_respects_physical_video_boundary(self):
         baseline, conflicts = self.display_duplicate_fixture()
@@ -330,6 +413,113 @@ class ProductionPlaybackTests(unittest.TestCase):
         self.assertGreaterEqual(solution.source_end_us, 5_000_000)
         self.assertFalse(shot_analyzer.candidate_window(shot, audio_duration_us=2_000_000,
                                                        manifest=self.manifest, time_sensitive=True).ok)
+
+    def test_explicit_task_cap_is_applied_during_candidate_and_engine_solve(self):
+        shot = editor._observed_shot(self.shots[0], {**self.reviews[0],
+            'evidence_intervals_us': [{'start': 0, 'end': 5_000_000}],
+            'playback_observation': process(0, 6_000_000)})
+        self.assertTrue(shot_analyzer.candidate_window(shot, audio_duration_us=2_000_000,
+                                                       manifest=self.manifest).ok)
+        self.manifest['max_absorb_demo_speed'] = 1.5
+        self.assertFalse(shot_analyzer.candidate_window(shot, audio_duration_us=2_000_000,
+                                                        manifest=self.manifest).ok)
+        engine = OrchestrationEngine.__new__(OrchestrationEngine)
+        engine.m = self.manifest
+        clip = Clip('synthetic', 0, 2, source_end=6, video_duration=12,
+            evidence_intervals=[{'start': 0, 'end': 5}], speed_range_override=[1, 20],
+            playback_observation=process(0, 6_000_000))
+        request = engine._timing_request(clip, 2_000_000)
+        self.assertEqual((request.speed_min, request.speed_max), (1, 1.5))
+        self.assertFalse(timing.solve_window(request).ok)
+        clip.time_sensitive = True
+        self.assertEqual(engine._timing_request(clip, 2_000_000).speed_max, 1)
+        self.manifest['max_absorb_demo_speed'] = 20
+        clip.time_sensitive = False
+        self.assertEqual(engine._timing_request(clip, 2_000_000).speed_max, 3)
+
+    def test_task_cap_rechecks_saved_cut_before_either_writer(self):
+        for backend in ('headless', 'legacy'):
+            with self.subTest(backend=backend):
+                engine = OrchestrationEngine.__new__(OrchestrationEngine)
+                engine.m = {'draft_backend': backend, 'max_absorb_demo_speed': 1.5}
+                clip = Clip('frozen.mp4', 0, 2, video_speed=2,
+                            playback_observation=process(0, 6_000_000))
+                with patch.object(headless_production, 'write_draft') as native, \
+                        patch.object(engine, '_write_legacy_draft') as legacy:
+                    result = engine.write_draft([clip], None)
+                self.assertEqual(result['status'], 'TIMING_INFEASIBLE')
+                self.assertEqual(result['conflicts'][0]['allowed'], [1, 1.5])
+                native.assert_not_called()
+                legacy.assert_not_called()
+
+    def test_invalid_task_cap_is_rejected_and_default_remains_unchanged(self):
+        self.assertIsNone(playback.task_absorb_speed_cap({}))
+        for bad in ('unlimited', 0, -1, 21, float('nan'), float('inf')):
+            with self.subTest(value=bad), self.assertRaisesRegex(ValueError, 'SCENE_SPEED_LIMIT_INVALID'):
+                playback.task_absorb_speed_cap({'max_absorb_demo_speed': bad})
+        self.assertEqual(playback.task_absorb_speed_cap({'max_absorb_demo_speed': '1.5'}), 1.5)
+
+    def test_receipt_rechecks_task_cap_for_each_physical_part(self):
+        self.manifest['segments'] = self.manifest['segments'][:1]
+        self.plan['sentences'] = self.plan['sentences'][:1]
+        self.plan['rows'] = [{'index': 1, 'parts': [
+            {'shot_id': 'long', 'audio_duration_us': 1_000_000},
+            {'shot_id': 'short', 'audio_duration_us': 1_000_000}]}]
+        self.reviews[0].update(evidence_intervals_us=[{'start': 0, 'end': 2_000_000}],
+                               playback_observation=process(0, 3_000_000))
+        result = editor._assemble(self.manifest, self.analysis, self.plan, narration_timing=None)
+        item = result['segments'][0]
+        self.assertTrue(contract.validate_segment_receipt(item, manifest=self.manifest)['ok'])
+        capped = {**self.manifest, 'max_absorb_demo_speed': 1.5}
+        check = contract.validate_segment_receipt(item, manifest=capped)
+        self.assertFalse(check['ok'])
+        self.assertIn('PLAYBACK_SPEED_CONFLICT', str(check))
+
+    def test_post_draft_qc_checks_actual_speed_and_bound_task_cap(self):
+        self.manifest.update(max_absorb_demo_speed=1.5, segments=self.manifest['segments'][:1])
+        self.plan['sentences'] = self.plan['sentences'][:1]
+        self.plan['rows'] = [{'index': 1, 'parts': [{'shot_id': 'long', 'audio_duration_us': 2_000_000}]}]
+        self.reviews[0].update(evidence_intervals_us=[{'start': 0, 'end': 2_950_000}],
+                               playback_observation=process(0, 6_000_000))
+        item = editor._assemble(self.manifest, self.analysis, self.plan, narration_timing=None)['segments'][0]
+        self.assertEqual(item['ai_selection']['task_absorb_speed_cap'], 1.5)
+        track_segment = {'material_id': 'video', 'speed': item['video_speed'], 'extra_material_refs': ['speed'],
+            'source_timerange': {'start': round(item['source_start'] * 1e6), 'duration': round(item['duration'] * 1e6)},
+            'target_timerange': {'start': 0, 'duration': 2_000_000}}
+        info = {'materials': {'videos': [{'id': 'video', 'path': item['video']}],
+                              'speeds': [{'id': 'speed', 'type': 'speed', 'mode': 0, 'speed': item['video_speed']}]},
+                'tracks': [{'name': 'Video_BRoll', 'type': 'video', 'segments': [track_segment]}]}
+        claim = {'index': 1, 'ai_segment': item, 'product': self.manifest['product'],
+                 'max_absorb_demo_speed': 1.5}
+        def validate(document, claim_data=claim):
+            rows, issues = draft_visual_qc._timeline_items(document, self.root)
+            self.assertEqual(issues, [])
+            return ai_editor_qc.validate_cut(claim_data, rows)
+        self.assertEqual(validate(info), [])
+        changed = copy.deepcopy(info)
+        changed['tracks'][0]['segments'][0]['source_timerange']['duration'] += 40_000
+        self.assertIn('AI_QC_FINAL_PLAYBACK_POLICY_CONFLICT', validate(changed))
+        changed = copy.deepcopy(info)
+        changed['tracks'][0]['segments'][0]['speed'] = 2.0
+        self.assertIn('AI_QC_FINAL_PLAYBACK_POLICY_CONFLICT', validate(changed))
+        changed = copy.deepcopy(info)
+        changed['materials']['speeds'][0]['speed'] = 2.0
+        self.assertIn('AI_QC_FINAL_SPEED_MATERIAL_CHANGED', validate(changed))
+        changed['materials']['speeds'][0].update(speed=item['video_speed'], curve_speed={'points': [1, 2]})
+        self.assertIn('AI_QC_FINAL_SPEED_MATERIAL_CHANGED', validate(changed))
+        changed = copy.deepcopy(info)
+        changed['materials']['speeds'] = []
+        self.assertIn('AI_QC_FINAL_SPEED_MATERIAL_MISSING', validate(changed))
+        changed = copy.deepcopy(info)
+        changed['materials']['speeds'].insert(0, {'id': 'speed', 'type': 'speed', 'mode': 0, 'speed': 2.0})
+        self.assertIn('AI_QC_FINAL_SPEED_MATERIAL_MISSING', validate(changed))
+        changed = copy.deepcopy(info)
+        changed['materials']['speeds'][0]['mode'] = 1
+        self.assertIn('AI_QC_FINAL_SPEED_MATERIAL_CHANGED', validate(changed))
+        changed['materials']['speeds'][0].pop('mode')
+        self.assertEqual(validate(changed), [])  # Supported by existing headless export contract.
+        no_cap = {k: v for k, v in claim.items() if k != 'max_absorb_demo_speed'}
+        self.assertIn('AI_SELECTION_TASK_SPEED_LIMIT_CHANGED', validate(info, no_cap))
 
     def test_unknown_stages_and_old_overrides_do_not_authorize_acceleration(self):
         for mode in ('ai_editor', 'legacy', 'rule_then_ai'):

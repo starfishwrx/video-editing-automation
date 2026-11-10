@@ -125,6 +125,37 @@ class ContinuityRefillTests(unittest.TestCase):
         self.assertFalse(result["ok"])
 
 
+class ReviewWindowScopeTests(unittest.TestCase):
+    shot = {"video": "fixture.mp4", "source_start": 0, "source_end": 20, "material_duration_us": 20_000_000}
+    review = {"observation": "observed action", "time_sensitive": False,
+              "evidence_intervals_us": [{"start": 9_000_000, "end": 10_000_000}],
+              "review_window_us": {"start": 6_150_000, "end": 10_150_000}}
+
+    def test_solver_cannot_extend_past_the_locally_reviewed_window(self):
+        from orchestrator.selection import shot_analyzer
+        observed = ai_editor._observed_shot(self.shot, self.review)
+        solution = shot_analyzer.candidate_window(observed, audio_duration_us=4_000_000,
+            manifest={"head_trim_s": 0, "tail_trim_s": 0, "tail_pad_s": 0})
+        self.assertTrue(solution.ok, solution.reason)
+        self.assertGreaterEqual(solution.source_start_us, 6_150_000)
+        self.assertLessEqual(solution.source_end_us, 10_150_000)
+        self.assertEqual(solution.source_end_us - solution.source_start_us, 4_000_000)
+
+    def test_short_reviewed_window_blocks_long_narration(self):
+        from orchestrator.selection import shot_analyzer
+        review = {**self.review, "review_window_us": {"start": 8_500_000, "end": 10_500_000}}
+        solution = shot_analyzer.candidate_window(ai_editor._observed_shot(self.shot, review),
+            audio_duration_us=4_000_000, manifest={"head_trim_s": 0, "tail_trim_s": 0, "tail_pad_s": 0})
+        self.assertFalse(solution.ok)
+
+    def test_invalid_review_window_is_rejected_and_legacy_window_is_preserved(self):
+        with self.assertRaisesRegex(ValueError, "REVIEW_WINDOW_INVALID"):
+            ai_editor._observed_shot(self.shot, {**self.review, "review_window_us": {"start": 0, "end": 21_000_000}})
+        review = {k: v for k, v in self.review.items() if k != "review_window_us"}
+        observed = ai_editor._observed_shot(self.shot, review)
+        self.assertEqual((observed["source_start"], observed["source_end"]), (0, 20))
+
+
 class FocusFrameTests(unittest.TestCase):
     def test_long_shot_extracts_target_window_not_only_even_samples(self):
         from contextlib import nullcontext

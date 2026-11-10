@@ -29,6 +29,8 @@
 
 默认视觉后端为火山 Ark GLM-5.3-Flash（`glm-5.3-flash`）。运行时只保留 GLM（`volc_glm` / `glm` / `volc`）与 Qwen（`qwen` / `qwen_compatible`）直连；Codex CLI、Anthropic 和 CCSwitch 通道已移除，旧值和未知值明确拒绝。文字复核与 `JY_AI_EDITOR_QWEN` 保留。模型名称与覆盖优先级见[模型说明](model-and-vision.md)。显式 `legacy` 沿用旧 Top3、场景换镜和 QC v3；默认 AI 的单源分相可以复用 `phase_timing`，历史无角色计划可用旧词表作召回，但必须重新看图并取得完整组认证。新计划按语义角色分组，不能靠关键词裁决支持。QC v3 不能认证新模式草稿。
 
+本次候选将已有展示价值与主体可读观察并入既有候选排序，仍须证据检查及独立 QC；跨文件实验组与普通 AI 选镜共同受显式任务速度上限约束。新队列冻结自然句备注与素材复用策略，历史无版本恢复保留原合同；连续组按每个实际源各计一次，整稿复用超限不得交付。见 [ADR 0002](adr/0002-ai-selection.md)、[ADR 0007](adr/0007-experiment-groups.md)、[ADR 0009](adr/0009-frozen-input-recovery.md)。
+
 ## 3. Formal vs Preview
 
 - **formal**：只接受完整证据与 `PASS`；动作放不下记 `unmet`，不得用 `settled` / `lead_in` / `pool_fill` 冒充正式完整动作。

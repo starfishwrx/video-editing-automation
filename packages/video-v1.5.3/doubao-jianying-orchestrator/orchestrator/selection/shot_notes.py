@@ -60,7 +60,7 @@ def _sentences_for(key: str, normalized: list[str]) -> list[int]:
     return hits
 
 
-def parse(notes: Any, sentences: list[str]) -> dict[str, Any]:
+def parse(notes: Any, sentences: list[str], *, index_groups: list[list[int]] | None = None) -> dict[str, Any]:
     """返回 ``{"by_index": {1: "..."}, "general": [...], "unmatched": [...]}``（句号从 1 开始）。"""
     normalized = [_norm(s) for s in sentences]
     by_index: dict[int, list[str]] = {}
@@ -73,8 +73,10 @@ def parse(notes: Any, sentences: list[str]) -> dict[str, Any]:
         if match:
             index = int(match.group(1) or match.group(2))
             body = line[match.end():].strip()
-            if 1 <= index <= len(sentences) and body:
-                by_index.setdefault(index, []).append(body)
+            groups = index_groups if index_groups is not None else [[i] for i in range(1, len(sentences) + 1)]
+            if 1 <= index <= len(groups) and body and groups[index - 1]:
+                for target in groups[index - 1]:
+                    by_index.setdefault(target, []).append(body)
             else:
                 unmatched.append(line)
             continue
@@ -103,17 +105,73 @@ def _notes_of(manifest: dict[str, Any]) -> Any:
     return None
 
 
+def has_frozen_binding(manifest: dict[str, Any]) -> bool:
+    binding = manifest.get("shot_notes_by_index")
+    return isinstance(binding, dict) and bool(binding or manifest.get("shot_notes_binding_version") == "v1"
+        or "shot_notes_unmatched" in manifest or "shot_notes_general" in manifest)
+
+
+def permits_semantic_planning(manifest: dict[str, Any]) -> bool:
+    if has_frozen_binding(manifest):
+        return False
+    notes = _notes_of(manifest)
+    if not notes or manifest.get("shot_notes_index_basis") == "original_sentence":
+        return True
+    return not any(_INDEX_PREFIX.match(line) or ":" in line or "：" in line for line in _lines(notes))
+
+
+def has_numbered_notes(manifest: dict[str, Any]) -> bool:
+    return any(_INDEX_PREFIX.match(line) for line in _lines(_notes_of(manifest)))
+
+
+def _original_sentence_groups(manifest: dict[str, Any], sentences: list[str]) -> list[list[int]]:
+    """Map original-sentence character spans onto verified semantic segments."""
+    text = str(manifest.get("full_script") or manifest.get("script") or "")
+    original = [_norm(p) for p in timing_contract._SENTENCE_SPLIT_RE.split(text) if _norm(p)]
+    pieces = [_norm(s) for s in sentences]
+    if not original or "".join(original) != "".join(pieces):
+        raise ValueError("SHOT_NOTES_SOURCE_SEGMENTS_CHANGED")
+    spans, cursor = [], 0
+    for piece in pieces:
+        spans.append((cursor, cursor + len(piece)))
+        cursor += len(piece)
+    groups, cursor = [], 0
+    for part in original:
+        end = cursor + len(part)
+        groups.append([i for i, (a, b) in enumerate(spans, 1) if a < end and b > cursor])
+        cursor = end
+    if has_numbered_notes(manifest):
+        numbered = {int(match.group(1) or match.group(2)) for line in _lines(_notes_of(manifest))
+                    if (match := _INDEX_PREFIX.match(line))}
+        bound = [index for group in groups for index in group]
+        if any(bound.count(index) > 1 for n in numbered if 1 <= n <= len(groups) for index in groups[n - 1]):
+            raise ValueError("SHOT_NOTES_SEGMENT_CROSSES_ORIGINAL_SENTENCES")
+    return groups
+
+
 def apply(manifest: dict[str, Any]) -> dict[str, Any]:
     notes = _notes_of(manifest)
     if not notes:
         return manifest
     out = dict(manifest)
     segments = out.get("segments")
+    # An existing mapping is a frozen decision (including resumed work); do
+    # not silently reinterpret it after changing the numbering convention.
+    if has_frozen_binding(out):
+        return out
     if isinstance(segments, list) and segments:
         sentences = [timing_contract.sentence_text(s) for s in segments]
+        groups = (_original_sentence_groups(out, sentences)
+                  if out.get("shot_notes_index_basis") == "original_sentence"
+                  else [[i] for i in range(1, len(sentences) + 1)])
     else:
-        sentences = [timing_contract.sentence_text(s) for s in timing_contract.split_sentences(out)]
-    parsed = parse(notes, sentences)
+        split, groups = timing_contract.sentence_groups(out)
+        sentences = [timing_contract.sentence_text(s) for s in split]
+        # Unversioned raw manifests historically numbered the split segments.
+        # Only new inputs explicitly marked by their adapter use original sentences.
+        if out.get("shot_notes_index_basis") != "original_sentence":
+            groups = [[i] for i in range(1, len(sentences) + 1)]
+    parsed = parse(notes, sentences, index_groups=groups)
     if isinstance(segments, list) and segments:
         new_segments = []
         for i, seg in enumerate(segments, 1):
@@ -125,6 +183,9 @@ def apply(manifest: dict[str, Any]) -> dict[str, Any]:
     out["shot_notes_by_index"] = {str(i): v for i, v in parsed["by_index"].items()}
     out["shot_notes_general"] = parsed["general"]
     out["shot_notes_unmatched"] = parsed["unmatched"]
+    out["shot_notes_binding_version"] = "v1"
+    out["shot_notes_index_basis"] = out.get("shot_notes_index_basis") or (
+        "segment" if isinstance(segments, list) and segments else "split")
     return out
 
 

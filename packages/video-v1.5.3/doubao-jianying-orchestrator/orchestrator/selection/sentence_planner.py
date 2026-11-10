@@ -63,4 +63,13 @@ def plan(manifest: dict, directory: Path, call: Callable | None = None) -> dict:
     feedback = str(manifest.get('revision_feedback') or '').strip()
     instruction = ("\n旧稿修订反馈（仅用于修订当前断句，不允许改写原文）：\n" + feedback + "\n") if feedback else ""
     response = call(PROMPT + text + instruction, directory / 'sentence_plan.json')
-    return {**manifest, 'segments': validate(text, response), 'sentence_plan_version': 'semantic-v1'}
+    segments = validate(text, response)
+    from . import shot_notes
+    if manifest.get('shot_notes_index_basis') == 'original_sentence' and shot_notes.has_numbered_notes(manifest):
+        # A semantic segment must not merge two separately numbered natural
+        # sentences. Split only on source punctuation, then run the same token
+        # and exact-text validation again.
+        pieces = [part for segment in segments
+                  for part in re.split(r'(?<=[。！？!?；;\n\r])(?![。！？!?；;\n\r])', segment['text']) if part.strip()]
+        segments = validate(text, {'segments': pieces})
+    return {**manifest, 'segments': segments, 'sentence_plan_version': 'semantic-v1'}

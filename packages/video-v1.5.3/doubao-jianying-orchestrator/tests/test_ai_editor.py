@@ -69,6 +69,33 @@ class AIEditorTests(unittest.TestCase):
         # The rejection is sentence-scoped and never applies to other sentences.
         self.assertEqual(editor.qc_rejected_shots({"qc_rejected_shots": {"1": ["handfeel"]}}), {1: {"handfeel"}})
 
+    def test_refill_respects_retained_source_limit_and_uses_other_reviewed_source(self):
+        other_video = self.root / 'other.mp4'
+        other_video.write_bytes(b'other-source')
+        alias = {**self.shot, 'shot_id': 'same-file-new-shot'}
+        alternative = {**self.shot, 'shot_id': 'different-file', 'video': str(other_video)}
+        manifest = {'selection_mode': 'rule_then_ai', 'max_source_reuse': 1, 'source_reuse_policy': 'strict-v1',
+            'head_trim_s': 0, 'tail_trim_s': 0, 'tail_pad_s': 0, 'ai_refill_indices': [2],
+            'segments': [{'text': '其他介绍', 'audio_duration_us': 2_000_000},
+                         {'text': self.sentence['text'], 'audio_duration_us': 2_000_000}]}
+        matched = {'segments': [{'index': 1, 'text': '其他介绍', 'video': str(self.video), 'shot_id': 'old'},
+                                {'index': 2, 'text': self.sentence['text']}],
+                   'pending_items': [], 'recommendations': []}
+        def review_pool(_manifest, sentence, shots, directory, timing):
+            self.assertNotIn('same-file-new-shot', sentence['candidate_ids'])
+            self.assertIn('different-file', sentence['candidate_ids'])
+            return ([{**self.review, 'shot_id': 'different-file',
+                      'source_identity': contract.source_identity(other_video)}], {'feasible': True})
+        with mock.patch.object(editor, '_review_pool', side_effect=review_pool):
+            result = editor.refill_indices(manifest, {'shots': [alias, alternative]}, matched, [2], self.root)
+        self.assertTrue(result['ok'], result)
+        self.assertEqual(result['segments'][1]['temporary_shot_id'], 'different-file')
+        with mock.patch.object(editor, '_review_pool') as review:
+            blocked = editor.refill_indices(manifest, {'shots': [alias]}, matched, [2], self.root)
+        review.assert_not_called()
+        self.assertFalse(blocked['ok'])
+        self.assertEqual(blocked['segments'][0], matched['segments'][0])
+
     def test_review_pool_skips_qc_rejected_candidates(self):
         sentence = {**self.sentence, "candidate_ids": ["handfeel", "alt"], "audio_durations_us": [2_000_000]}
         alt = {**self.shot, "shot_id": "alt"}
@@ -105,6 +132,24 @@ class AIEditorTests(unittest.TestCase):
         self.assertEqual(result[0]['candidate_windows'][0]['start'], 5.7)
         self.assertIn('仅作定位线索', captured[0])
 
+    def test_inventory_receives_the_note_bound_to_a_split_script(self):
+        from orchestrator.selection import shot_notes
+        manifest = shot_notes.apply({"selection_mode": "ai_editor", "product": "合成商品",
+            "full_script": "纸张厚实亲肤，湿水不破。立即下单",
+            "shot_notes": "湿水不破：展示完整实验"})
+        response = {"sentences": [{"index": index, "kind": "product_intro", "selling_points": [],
+                     "candidate_ids": ["handfeel"], "scene_ids": []} for index in (1, 2, 3)],
+                    "display_pool_ids": ["handfeel"]}
+        prompts = []
+        with mock.patch.object(editor, "_call", side_effect=lambda prompt, path: prompts.append(prompt) or response):
+            editor._inventory(manifest, [self.shot], self.root)
+        payload = prompts[0].split("\n你负责整稿用途分类和宽召回，本轮描述只是索引，不是画面证据。\n", 1)[1]
+        payload = json.loads(payload.split("\n输出JSON对象", 1)[0])
+        self.assertIsNone(payload["sentences"][0]["notes"])
+        self.assertEqual(payload["sentences"][1]["text"], "湿水不破")
+        self.assertEqual(payload["sentences"][1]["notes"], "展示完整实验")
+        self.assertIsNone(payload["sentences"][2]["notes"])
+
     def test_inventory_discards_unknown_ids_without_promoting_them(self):
         model = {"sentences": [{**self.sentence, "candidate_ids": ["invented", "handfeel"]}],
                  "display_pool_ids": ["invented-display", "handfeel"]}
@@ -122,6 +167,89 @@ class AIEditorTests(unittest.TestCase):
             result = editor._review(self.manifest, self.sentence, self.shot, self.root)
         self.assertEqual(result["evidence_intervals_us"], [{"start": 2_000_000, "end": 3_000_000}])
         self.assertIn("不能证明某种具体香型", call.call_args.args[0])
+
+    def test_shot_value_uses_original_words_and_reviewed_pixels_only(self):
+        media = {"start": 0, "end": 6, "before": contract.source_identity(self.video),
+                 "times": [0, 3, 5], "sheet": self.root / "sheet.jpg"}
+        sentence = {**self.sentence, "selling_points": [{"id": "p1", "text": "薄薄的一层"}]}
+        observation = {"all_spoken_claims_checked": False, "uncovered_spoken_claims": [], "claims": [{
+            "check_id": "p1", "claim_text": "薄薄的一层", "role": "feature_presentation", "coverage": "full",
+            "adds_claim_information": True, "specific_link": True, "action_or_presentation": "手持边缘",
+            "visible_change_or_feature": "边缘薄", "claim_link": "画面显示产品薄边", "missing_information": "无量化厚度",
+            "evidence_intervals_us": [{"start": 2_000_000, "end": 3_000_000}]}]}
+        model = {**self.review, "scene_ids": [], "shot_value_observation": observation}
+        with mock.patch.object(editor, "_review_media", return_value=media), \
+             mock.patch.object(editor, "_call", return_value=copy.deepcopy(model)) as call:
+            reviewed = editor._review(self.manifest, sentence, self.shot, self.root)
+        self.assertEqual(reviewed["selling_point_value"]["supported_ids"], ["p1"])
+        self.assertEqual(reviewed["selling_point_value"]["strength"], 2)
+        self.assertIn('"claim_text": "薄薄的一层"', call.call_args.args[0])
+
+        model['shot_value_observation']['claims'][0]['claim_text'] = '不存在的卖点'
+        model['selling_point_value'] = {'strength': 3, 'supported_ids': ['fake']}
+        with mock.patch.object(editor, "_review_media", return_value=media), \
+             mock.patch.object(editor, "_call", return_value=copy.deepcopy(model)):
+            changed = editor._review(self.manifest, sentence, self.shot, self.root)
+            paraphrased = editor._review(self.manifest, self.sentence, self.shot, self.root)
+        self.assertNotIn('selling_point_value', changed)
+        self.assertNotIn('selling_point_value', paraphrased)
+        self.assertEqual(changed['supported_point_ids'], ['p1'])
+
+        conflicting = copy.deepcopy(observation)
+        conflicting['claims'][0].update(claim_text='薄薄的一层', role='generic_motion', coverage='none',
+            adds_claim_information=False, specific_link=False)
+        model = {**self.review, 'scene_ids': [], 'shot_value_observation': conflicting}
+        with mock.patch.object(editor, '_review_media', return_value=media), \
+             mock.patch.object(editor, '_call', return_value=model):
+            result = editor._review(self.manifest, sentence, self.shot, self.root)
+        self.assertEqual(result['verdict'], 'uncertain')
+        self.assertEqual(result['shot_value_conflict'], ['p1'])
+        self.assertTrue(result['dense_required'])
+
+    def test_value_ranking_is_scoped_to_the_actual_candidate_window(self):
+        alternative = {**self.shot, 'shot_id': 'alternative'}
+        plan = self.plan()
+        value = {'strength': 2, 'supported_ids': ['p1'],
+                 'evidence_intervals_us': [{'start': 2_000_000, 'end': 3_000_000}]}
+        plan['reviews']['1'] = [self.review, {**self.review, 'shot_id': 'alternative', 'selling_point_value': value}]
+        analysis = {'shots': [self.shot, alternative]}
+        rows = editor._build_edit_inventory(self.manifest, analysis, plan, None)[0]['candidates']
+        self.assertEqual(rows[0]['shot_id'], 'alternative')
+        self.assertIn('selling_point_value', rows[0])
+        plan['reviews']['1'][1]['selling_point_value'] = {**value,
+            'evidence_intervals_us': [{'start': 5_500_000, 'end': 5_900_000}]}
+        rows = editor._build_edit_inventory(self.manifest, analysis, plan, None)[0]['candidates']
+        self.assertNotIn('selling_point_value', rows[1])
+
+    def test_display_readability_is_ranked_only_in_the_actual_selected_window(self):
+        media = {'start': 0, 'end': 6, 'before': contract.source_identity(self.video),
+                 'times': [0, 3, 5], 'sheet': self.root / 'sheet.jpg'}
+        sentence = {'index': 0, 'text': '同商品通用产品展示池', 'kind': 'product_intro', 'selling_points': []}
+        clarity = {'view_kind': 'stable_display', 'subject_visibility': 'clear',
+                   'demonstration_complete': False, 'information_point': '产品主体可见',
+                   'limitations': '均匀抽帧', 'clear_intervals_us': [
+                       {'start': 0, 'end': 6_000_000, 'observed': '主体无遮挡'}]}
+        model = {**self.review, 'scene_ids': [], 'basis': 'product_display',
+                 'supported_point_ids': [], 'shot_usability_observation': clarity}
+        with mock.patch.object(editor, '_review_media', return_value=media), \
+             mock.patch.object(editor, '_call', return_value=copy.deepcopy(model)):
+            reviewed = editor._review(self.manifest, sentence, self.shot, self.root)
+        self.assertIn('shot_usability_observation', reviewed)
+        plan = self.plan()
+        plan['sentences'][0].update(kind='product_intro', selling_points=[])
+        alternative = {**self.shot, 'shot_id': 'alternative'}
+        blocked = copy.deepcopy(reviewed)
+        blocked['shot_usability_observation']['subject_visibility'] = 'blocked'
+        plan['display_reviews'] = [{**blocked, 'shot_id': 'handfeel'},
+                                   {**reviewed, 'shot_id': 'alternative'}]
+        rows = editor._build_edit_inventory(self.manifest, {'shots': [self.shot, alternative]}, plan, None)[0]['candidates']
+        self.assertEqual([r['shot_id'] for r in rows], ['alternative', 'handfeel'])
+        self.assertEqual([r['usability']['status'] for r in rows], ['USABLE_FOR_COMPARISON', 'REJECTED'])
+        reviewed['shot_usability_observation']['clear_intervals_us'] = [
+            {'start': 5_500_000, 'end': 5_900_000, 'observed': '末尾短暂露出'}]
+        plan['display_reviews'][1] = {**reviewed, 'shot_id': 'alternative'}
+        rows = editor._build_edit_inventory(self.manifest, {'shots': [self.shot, alternative]}, plan, None)[0]['candidates']
+        self.assertTrue(all(r['usability']['status'] == 'REJECTED' for r in rows))
 
     def test_inventory_still_blocks_malformed_id_types(self):
         model = {"sentences": [{**self.sentence, "candidate_ids": [123]}],

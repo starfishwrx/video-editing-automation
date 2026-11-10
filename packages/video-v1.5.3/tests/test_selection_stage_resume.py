@@ -391,6 +391,144 @@ class WorkerSelectionRecoveryTests(unittest.TestCase):
         stage, _ = scheduled._plan(task, self.root.resolve(), {})
         self.assertEqual(stage, 'build')
 
+    def test_worker_note_binding_survives_first_run_and_retry(self):
+        task = {'record_id': 'record', 'title': 'draft', 'script': '第一句，继续。第二句',
+                'material_dir': str(self.root), 'delivery_mode': 'formal', '画面备注': '第2句：展示包装'}
+        source = self.root / 'source.mp4'
+        source.write_bytes(b'fixture')
+        (self.root / 'record' / 'eval').mkdir(parents=True)
+        seen = []
+        def save_task(directory, task_data, _frozen):
+            (directory / 'task.json').write_text(json.dumps(task_data, ensure_ascii=False), encoding='utf8')
+        def interrupted(manifest, report_dir, _name, **_kwargs):
+            seen.append(copy.deepcopy(manifest))
+            report_dir.mkdir(parents=True, exist_ok=True)
+            (report_dir / 'last_result.json').write_text(json.dumps({
+                'status': 'DRAFT_WRITE_TIMEOUT', 'retryable': True, 'resume_stage': 'draft_write',
+                'failure_class': 'draft', 'failure_code': 'DRAFT_WRITE_TIMEOUT'}))
+            return {'rc': 1, 'stdout': '', 'stderr': 'DRAFT_WRITE_TIMEOUT',
+                    'combined': 'DRAFT_WRITE_TIMEOUT', 'stage_retry_exhausted': True}
+        with patch.object(worker, 'WORK', self.root), patch.object(worker, 'DRAFTS', self.drafts), \
+             patch.object(worker, '_runtime_facts', return_value={}), patch.object(worker, 'video_files', return_value=[str(source)]), \
+             patch.object(worker, '_save_frozen_task', side_effect=save_task), \
+             patch.object(worker, 'restore_qc_rejections', return_value=({}, {})), \
+             patch.object(worker, 'build_progress_inputs', return_value={'fixture': True}), \
+             patch.object(worker, 'publish_failure_notification', return_value={}), \
+             patch.object(worker, 'progress'), patch.object(worker, 'log'), \
+             patch.object(worker.production_eval, 'runtime_identity', return_value={}), \
+             patch.object(worker.production_eval, 'freeze', return_value={'mode': 'enforce'}), \
+             patch.object(worker.production_eval, 'write_once'), patch.object(worker, 'run_build', side_effect=interrupted):
+            worker.process_task(task, admitted=True)
+            worker.process_task(task, admitted=True, retry_error=True)
+        self.assertGreaterEqual(len(seen), 2)
+        for manifest in seen:
+            self.assertEqual(manifest['shot_notes'], '第2句：展示包装')
+            self.assertEqual(manifest['shot_notes_index_basis'], 'original_sentence')
+            self.assertEqual(manifest['source_reuse_policy'], 'strict-v1')
+        binding = json.loads((self.root / 'record' / 'shot_notes_binding.json').read_text(encoding='utf8'))
+        self.assertEqual(binding['schema'], 'shot-notes-binding-v1')
+
+    def test_note_binding_preflight_retry_and_force_rebuild_have_distinct_generations(self):
+        directory = self.root / 'binding'
+        directory.mkdir()
+        task = {'record_id': 'binding', '画面备注': '第1句：展示包装'}
+        # A dispatcher-created task.json and a failed preflight are not proof
+        # that an older selection ever ran.
+        (directory / 'task.json').write_text('{}', encoding='utf8')
+        (directory / 'done.json').write_text('{"status":"ERROR","failures":[{"phase":"queue_preflight"}]}', encoding='utf8')
+        first = worker._frozen_shot_note_overrides(directory, task, '画面备注')
+        self.assertEqual(first['source_reuse_policy'], 'strict-v1')
+        self.assertEqual(first['shot_notes'], '第1句：展示包装')
+        self.assertEqual(worker._frozen_shot_note_overrides(directory, task, '画面备注'), first)
+        changed = {**task, '画面备注': '第1句：展示实验'}
+        with self.assertRaisesRegex(ValueError, 'SHOT_NOTES_INPUT_CHANGED'):
+            worker._frozen_shot_note_overrides(directory, changed, '画面备注')
+        rebuilt = worker._frozen_shot_note_overrides(directory, {**changed, 'force_rebuild': True}, '画面备注')
+        self.assertEqual(rebuilt['shot_notes'], '第1句：展示实验')
+        self.assertEqual(worker._frozen_shot_note_overrides(directory, changed, '画面备注'), rebuilt)
+        history = list((directory / 'selection_policy_history').glob('*.json'))
+        self.assertEqual(len(history), 1)
+        self.assertEqual(json.loads(history[0].read_text(encoding='utf8'))['overrides'], first)
+        third = worker._frozen_shot_note_overrides(directory,
+            {**task, '画面备注': '第1句：展示特写', 'force_rebuild': 1}, '画面备注')
+        self.assertEqual(third['shot_notes'], '第1句：展示特写')
+
+    def test_dispatcher_writes_task_before_worker_and_new_policy_still_reaches_build(self):
+        from tools import batch_dispatch
+        task = {'record_id': 'record', 'title': 'draft', 'script': '第一句。第二句',
+                'material_dir': str(self.root), 'delivery_mode': 'formal', '画面备注': '第2句：展示包装'}
+        source = self.root / 'source.mp4'
+        source.write_bytes(b'fixture')
+        (self.root / 'record' / 'eval').mkdir(parents=True)
+        captured = []
+        def save_task(directory, task_data, _frozen):
+            (directory / 'task.json').write_text(json.dumps(task_data, ensure_ascii=False), encoding='utf8')
+        def build(manifest, report_dir, _name, **_kwargs):
+            captured.append(copy.deepcopy(manifest))
+            report_dir.mkdir(parents=True, exist_ok=True)
+            (report_dir / 'last_result.json').write_text(json.dumps({
+                'status': 'DRAFT_WRITE_TIMEOUT', 'retryable': True, 'resume_stage': 'draft_write'}))
+            return {'rc': 1, 'stdout': '', 'stderr': 'DRAFT_WRITE_TIMEOUT',
+                    'combined': 'DRAFT_WRITE_TIMEOUT', 'stage_retry_exhausted': True}
+        def launch(command, **_kwargs):
+            path = Path(command[command.index('--task-file') + 1])
+            self.assertTrue(path.is_file())
+            worker.process_task(json.loads(path.read_text(encoding='utf8')), admitted=True)
+            return SimpleNamespace(returncode=1, stdout='', stderr='')
+        deadline = str(time.time() + 600)
+        with patch.dict(worker.os.environ, {'JY_TASK_DEADLINE_EPOCH': deadline, 'JY_TASK_DEADLINE_TS': deadline}), \
+             patch.object(worker, 'WORK', self.root), patch.object(worker, 'DRAFTS', self.drafts), \
+             patch.object(worker, '_runtime_facts', return_value={}), patch.object(worker, 'video_files', return_value=[str(source)]), \
+             patch.object(worker, '_save_frozen_task', side_effect=save_task), \
+             patch.object(worker, 'restore_qc_rejections', return_value=({}, {})), \
+             patch.object(worker, 'build_progress_inputs', return_value={'fixture': True}), \
+             patch.object(worker, 'publish_failure_notification', return_value={}), \
+             patch.object(worker, 'progress'), patch.object(worker, 'log'), \
+             patch.object(worker.production_eval, 'runtime_identity', return_value={}), \
+             patch.object(worker.production_eval, 'freeze', return_value={'mode': 'enforce'}), \
+             patch.object(worker.production_eval, 'write_once'), patch.object(worker, 'run_build', side_effect=build), \
+             patch.object(batch_dispatch.subprocess, 'run', side_effect=launch):
+            batch_dispatch.run_task(task, 'build', {'JY_TASK_DEADLINE_EPOCH': deadline}, self.root)
+        self.assertTrue(captured)
+        self.assertEqual(captured[0]['source_reuse_policy'], 'strict-v1')
+        self.assertEqual(captured[0]['shot_notes'], '第2句：展示包装')
+        self.assertEqual(captured[0]['shot_notes_index_basis'], 'original_sentence')
+
+    def test_old_generation_does_not_add_newly_forwarded_task_limits_on_retry(self):
+        task = {'record_id': 'record', 'title': 'draft', 'script': '一句',
+                'material_dir': str(self.root), 'delivery_mode': 'formal',
+                'max_source_reuse': 1, 'max_absorb_demo_speed': 1.5}
+        source = self.root / 'source.mp4'
+        source.write_bytes(b'fixture')
+        directory = self.root / 'record'
+        (directory / 'eval').mkdir(parents=True)
+        (directory / 'eval' / 'active_contract.json').write_text('{}', encoding='utf8')
+        (directory / 'task.json').write_text(json.dumps(task), encoding='utf8')
+        captured = []
+        def build(manifest, report_dir, _name, **_kwargs):
+            captured.append(copy.deepcopy(manifest))
+            report_dir.mkdir(parents=True, exist_ok=True)
+            (report_dir / 'last_result.json').write_text(json.dumps({
+                'status': 'DRAFT_WRITE_TIMEOUT', 'retryable': True, 'resume_stage': 'draft_write'}))
+            return {'rc': 1, 'stdout': '', 'stderr': 'DRAFT_WRITE_TIMEOUT',
+                    'combined': 'DRAFT_WRITE_TIMEOUT', 'stage_retry_exhausted': True}
+        with patch.object(worker, 'WORK', self.root), patch.object(worker, 'DRAFTS', self.drafts), \
+             patch.object(worker, '_runtime_facts', return_value={}), patch.object(worker, 'video_files', return_value=[str(source)]), \
+             patch.object(worker, '_save_frozen_task'), patch.object(worker, 'restore_qc_rejections', return_value=({}, {})), \
+             patch.object(worker, 'build_progress_inputs', return_value={'fixture': True}), \
+             patch.object(worker, 'publish_failure_notification', return_value={}), \
+             patch.object(worker, 'progress'), patch.object(worker, 'log'), \
+             patch.object(worker.production_eval, 'runtime_identity', return_value={}), \
+             patch.object(worker.production_eval, 'freeze', return_value={'mode': 'enforce'}), \
+             patch.object(worker.production_eval, 'write_once'), patch.object(worker, 'run_build', side_effect=build):
+            worker.process_task(task, admitted=True)
+            worker.process_task(task, admitted=True, retry_error=True)
+        self.assertGreaterEqual(len(captured), 2)
+        for manifest in captured:
+            self.assertEqual(manifest['max_source_reuse'], 2)
+            self.assertNotIn('max_absorb_demo_speed', manifest)
+            self.assertNotIn('source_reuse_policy', manifest)
+
     def test_qc_target_without_bound_feedback_never_starts_a_weak_refill(self):
         task = {'record_id': 'record', 'title': 'draft', 'script': '一句',
                 'material_dir': str(self.root), 'delivery_mode': 'formal', 'force_rebuild': True}
