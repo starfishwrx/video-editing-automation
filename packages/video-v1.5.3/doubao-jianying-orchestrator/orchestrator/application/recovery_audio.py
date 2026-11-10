@@ -61,3 +61,54 @@ def bind_and_record(manifest: dict, matched: dict, report_dir: Path) -> dict:
         (report_dir / "matched_manifest.json").write_text(
             json.dumps(bound, ensure_ascii=False, indent=2), encoding="utf-8")
     return bound
+
+
+def prepare_for_selection(manifest: dict, timing: dict, report_dir: Path, *, source_dir: Path | None = None) -> dict:
+    """Finalize cached paper TTS before rematching, never after selection."""
+    from .. import rulepack
+    from ..audio import narration_preparation
+    from ..audio.narration_probe import probe_audio
+    from ..platform_env import find_ffmpeg
+
+    policy = rulepack.for_manifest(manifest)
+    if policy.get("category") != "zhipin":
+        return timing
+    ffmpeg, ffprobe = find_ffmpeg()[:2]
+    result = copy.deepcopy(timing)
+    fixed = dict(manifest.get("_paper_fixed_narrations") or {})
+    sentences = timing_contract.split_sentences(manifest)
+    rows = result.get("rows", [])
+    if len(sentences) != len(rows):
+        raise ValueError("RECOVERY_SENTENCE_TIMING_CHANGED")
+    retained = {str(Path(p).resolve()) for p in manifest.get("retained_tts_audio", [])}
+    for sentence, row in zip(sentences, rows):
+        segment = sentence if isinstance(sentence, dict) else {}
+        source_path = Path(row["tts_path"] )
+        if not source_path.is_absolute() and source_dir is not None:
+            source_path = source_dir / source_path
+        source = str(source_path.resolve())
+        if (segment.get("audio") or segment.get("audio_mode", "tts") == "file") and source not in retained:
+            declared = Path(str(segment.get("audio") or source))
+            if not declared.is_absolute() and source_dir is not None:
+                declared = source_dir / declared
+            if declared.resolve() != Path(source):
+                raise ValueError("RECOVERY_SENTENCE_AUDIO_CHANGED")
+            facts = probe_audio(source, ffprobe=str(ffprobe))
+            row.update(tts_path=source, audio_duration_us=round(float(facts["duration"]) * 1_000_000),
+                       timing_certainty="audio", estimated=False, probe_error="")
+            continue
+        record = narration_preparation.frozen(source, loudness=manifest.get("narration_loudness"))
+        if record is None:
+            record = narration_preparation.prepare(source, report_dir / "recovery-narration",
+                loudness=manifest.get("narration_loudness"),
+                edge_trim=bool(manifest.get("voice_edge_trim", True)),
+                ffmpeg=str(ffmpeg), ffprobe=str(ffprobe))
+        fixed[source] = record
+        row.update(tts_path=record["path"], audio_duration_us=record["duration_us"],
+                   timing_certainty="audio", estimated=False, probe_error="")
+    narration_preparation.preflight(result, report_dir, fps=float(manifest.get("fps") or 30),
+        max_frames=int(policy["voice"]["acceptance_max_gap_frames"]), ffmpeg=str(ffmpeg))
+    target = report_dir / "recovery_narration_timing.json"
+    target.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    manifest.update(narration_timing_file=str(target.resolve()), _paper_fixed_narrations=fixed)
+    return result

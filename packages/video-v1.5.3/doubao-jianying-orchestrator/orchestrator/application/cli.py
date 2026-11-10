@@ -1452,8 +1452,13 @@ def cmd_recover(args) -> int:
                                "message": "恢复选镜前的建稿环境未就绪；未调用视觉服务。"})
             return _emit(_compact_control_result(result), 1)
         try:
+            if timing is not None:
+                from . import recovery_audio
+                timing = recovery_audio.prepare_for_selection(manifest, timing, report_dir, source_dir=input_path.parent)
             matched_manifest, blocker = _temporary_match(manifest, input_path, report_dir,
                                                          narration_timing=timing)
+        except NarrationError as exc:
+            return _emit(_compact_control_result(finalize(exc.result())), 1)
         except Exception as exc:  # noqa: BLE001
             result = finalize({"status": "ERROR", "error_type": type(exc).__name__, "error": str(exc)})
             return _emit(_compact_control_result(result), 1)

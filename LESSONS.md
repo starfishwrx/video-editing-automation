@@ -803,3 +803,5 @@
 - 现象: 全部句子已有 AI 像素复核凭据，但局部重选后被错误标成规则与 AI 混合，导致预质检门按错误合同阻断。
 - 以后怎么做: 根据最终每句实际类型保留对应的现有合同，逐句来源、证据和时序仍由消费端核验；真正混合结果不得跳过规则门。
 - 证据: `packages/video-v1.5.3/doubao-jianying-orchestrator/tests/test_ai_editor.py`。
+
+2026-11-10 旧纸品配音恢复修复。semantic_match 复用缓存音频并在重选前完成归一、边缘静音处理和五帧预检，发布独立句长文件。draft_write 继续保留已匹配句长，旧任务气口超限需恢复 semantic_match。
