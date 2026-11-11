@@ -288,7 +288,7 @@ def _inventory(manifest: dict, shots: list[dict], directory: Path) -> list[dict]
 纯招呼或承接语可额外给 hook_neighbor="next"（引出后句）或 "previous"（承上句）。有独立痛点、数字、功能动作、商品切换或画面备注时省略。
 每句恰好一行，不改变原文。selling_point列出本句全部具体卖点，其他kind的selling_points为空。
 结合前后句识别使用感受和功能结果。比如弹力腰围之后的“不勒”、护围之后的“翻身也安心”仍在讲具体卖点，优先召回对应结构、动作或结果。纯惊叹或招呼才用一般展示。
-展示池在同等相关时要覆盖不同可见动作，例如陈列、拆包、取出、展开、局部展示。换桌面或机位重新举包只算一种。
+展示池在同等相关时优先覆盖陈列、拆包、取出、展开、局部展示等不同信息。比较实际展示的特征和用途，换桌面或换机位本身不足以判断重复。
 纸品scene_ids必须给出本句语义适用的semantic_contracts场景id，不适用时为空；不能只因某候选有擦拭就把包装抽数句判为清洁。
 每句candidate_ids只返回最相关的前8个，display_pool_ids也只返回前8个，避免响应被整库ID挤满。
 程序会把未列出的镜头加入后续逐轮扩展。不能因描述不确定就宣布无素材，不用A/B强度或旧合同词表淘汰。
@@ -2772,6 +2772,8 @@ def _mix_repeated_displays(manifest, analysis, plan, timing, inventory):
     original = timing_contract.split_sentences(manifest)
     revised = list(plan["rows"])
     linked = {i for pair in _linked_hooks(plan) for i in pair}
+    linked.update(s["index"] for s in plan["sentences"]
+                  if s.get("experiment_role") in {"absorption", "rewet", "followup", "bridge"})
     changed = False
     for position, row in enumerate(plan["rows"]):
         index = row["index"]
@@ -2815,6 +2817,12 @@ def _vary_repeated_actions(manifest, analysis, plan, timing, inventory):
     segments = _assemble(manifest, analysis, plan, narration_timing=timing, verify_sources=True)["segments"]
     original = timing_contract.split_sentences(manifest)
     protected = {i for pair in _linked_hooks(plan) for i in pair}
+    # A physical gesture alone cannot decide whether two claims or two
+    # experiment stages convey the same information. Keep their planned cuts.
+    for sentence in plan["sentences"]:
+        if (sentence["kind"] == "selling_point" or sentence.get("selling_points") or sentence.get("scene_ids")
+                or sentence.get("experiment_role") in {"absorption", "rewet", "followup", "bridge"}):
+            protected.add(sentence["index"])
     counts = Counter()
     actions = {}
     occupied = set()
@@ -3035,8 +3043,8 @@ def _edit_plan(manifest: dict, analysis: dict, plan: dict, directory: Path,
 technical_option是按本句完整配音求出的实际可行窗口；分配多镜后程序会重新求解，不可用单镜无解淘汰组合。
 匹配质量相近时优先within_preferred_speed=true；普通完整放置短窗保留最高2倍许可，2到3倍仅限已复看的纯过程。实验分相的关键动作结果原速，无许可时原速。technical_option无解时必须换完整短窗口或如实报告冲突。
 同品其他任务使用过该文件和镜头的任务数分别为prior_source_tasks和prior_scene_tasks。实际卖点、可读性、时长相当时，亲肤柔软等卖点和全稿任何位置的空泛钩子优先选较少用的文件、镜头及动作。同等条件按editorial_order选择，以便同时启动的任务也能混选。唯一贴切证据保留。
-通读整条片子，对照每句的实际观察和window_action_hint；即使换了文件、背景或机位，重新举包或重新倒液仍是重复。
-有等效画面时优先换有新信息的动作；连续实验从倒液推进到下渗、压纸、揭纸和结果，不在另一布景重新开始。
+普通展示按本句传达的信息判断重复：多次举起同一包装、没有新增信息时，优先其他同样贴切的画面。同动作展示不同特征或用途可以保留。
+吸水实验必须在同一场景完成同一次演示，允许换机位或跨文件。依次展示倒液、下渗、压纸、揭纸和结果；布景或台面不一致不能拼，无法确认同场也不能用于这组。动作去重不能打散实验。
 同一镜内自然延续和首次明确展示结果要保留。避开调整机位、空等、拿错或撤手重拍的余量，结果展示所需停留照常保留。
 确实只有一个实际支持的候选、卖点不得不复用时，可在该row写scarce_reuse_reason解释；介绍/钩子和有替代候选时不允许此例外，相关实验仍须顺接而非相邻重播。
 """

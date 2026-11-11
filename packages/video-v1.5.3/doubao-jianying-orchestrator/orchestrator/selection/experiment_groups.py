@@ -246,7 +246,7 @@ def review_group(manifest, context, directory):
     path.parent.mkdir(parents=True, exist_ok=True); sheet.save(path, quality=95)
     prompt = identity.policy_prompt(manifest) + "\n联合复核同次实验在固定逐句切片中的实际画面。\n" + json.dumps(
         context, ensure_ascii=False) + """
-图片按sentence/part顺序排列，每个part使用该源片段的实际时间戳；可以跨文件但必须是同次实验。
+图片按sentence/part顺序排列，每个part使用该源片段的实际时间戳。倒液、吸收、按压和提纸必须来自同一场景的同次实验，跨文件或换机位仍要核对布景、台面和巾体状态连续。换布景或无法确认同场时不能通过。
 逐句检查实际承担的阶段和口播是否相符，不把总长度可行当成逐句对应。
 反渗句开始应已有纸巾实际接触，不能仍是倒液或无关准备。关键动作、提起和结果要完整；
 结果可在同主题后续句承接，但不能借透气/促销句，也不能把后句结果说成前句已经出现。

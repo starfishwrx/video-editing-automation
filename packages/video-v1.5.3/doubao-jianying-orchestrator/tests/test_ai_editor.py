@@ -88,6 +88,16 @@ class AIEditorTests(unittest.TestCase):
         self.assertEqual(plan["rows"][1]["parts"][0]["shot_id"], "second")
         other["supported_point_ids"] = ["p1"]
         editor._vary_repeated_actions(manifest, analysis, plan, None, menu)
+        self.assertEqual(plan["rows"][1]["parts"][0]["shot_id"], "second")
+        for sentence in plan["sentences"]:
+            sentence.update(kind="hook", selling_points=[], experiment_role="bridge")
+        plan["display_reviews"] = [{**r, "supported_point_ids": [], "basis": "product_display"} for r in reviews]
+        menu = editor._build_edit_inventory(manifest, analysis, plan, None)
+        editor._vary_repeated_actions(manifest, analysis, plan, None, menu)
+        self.assertEqual(plan["rows"][1]["parts"][0]["shot_id"], "second")
+        for sentence in plan["sentences"]:
+            sentence["experiment_role"] = "other"
+        editor._vary_repeated_actions(manifest, analysis, plan, None, menu)
         self.assertEqual(plan["rows"][1]["parts"][0]["shot_id"], "other")
 
     def test_action_hint_does_not_merge_distinct_phases(self):
