@@ -17,6 +17,7 @@ def phase(**changes):
     raw = dict(schema=presentation.SCHEMA, kind="dynamic", start_us=100_000,
                reveal_us=700_000, readable_end_us=1_100_000, end_us=2_200_000,
                action="商品从侧向转向镜头", result="正面包装到位并可辨认",
+               change=dict(kind='orientation', actor='product', before='商品侧面朝向镜头', after='商品正面朝向镜头', product_state_changed=True),
                start_censored=False, end_censored=False)
     raw.update(changes)
     return presentation.normalize(raw, {"start": 0, "end": 8_000_000},
@@ -85,6 +86,30 @@ class PresentationWindowTests(unittest.TestCase):
         observed = editor._observed_shot(self.shot, self.review)
         self.assertEqual(playback.speed_range(observation=observed.get("playback_observation")), (1, 1))
         self.assertEqual(observed["speed_range_override"], [1, 1])
+
+    def test_dynamic_requires_observed_product_state_change(self):
+        for change in (None, dict(kind='pointing', actor='hand_only', before='整箱已摆好', after='手指向整箱', product_state_changed=True),
+                       dict(kind='reveal', actor='occluder', before='整箱已摆好', after='整箱已摆好', product_state_changed=True),
+                       dict(kind='orientation', actor='product', before='侧面', after='正面', product_state_changed=False),
+                       dict(kind='enter', actor='camera', before='背景', after='商品', product_state_changed=True),
+                       dict(kind='enter', actor='hand_only', before='商品', after='手指向商品', product_state_changed=True)):
+            with self.subTest(change=change), self.assertRaisesRegex(ValueError,'PRODUCT_CHANGE_UNOBSERVED'):
+                phase(change=change)
+
+    def test_legacy_frozen_phase_stays_readable_but_cannot_be_new_observation(self):
+        old=phase()
+        old['schema']=presentation.LEGACY_SCHEMA
+        old.pop('change')
+        self.assertEqual(presentation.get(old)['schema'],presentation.LEGACY_SCHEMA)
+        with self.assertRaisesRegex(ValueError,'SCHEMA_INVALID'):
+            presentation.normalize(old,old['review_window_us'],old['frame_times_us'])
+        old_v2=phase()
+        old_v2['schema']='reviewed-presentation-phases-v2'
+        old_v2['change'].pop('actor')
+        self.assertEqual(presentation.get(old_v2)['schema'],old_v2['schema'])
+        self.assertEqual(presentation.get(old_v2)['change'],old_v2['change'])
+        with self.assertRaisesRegex(ValueError,'SCHEMA_INVALID'):
+            presentation.normalize(old_v2,old_v2['review_window_us'],old_v2['frame_times_us'])
 
     def test_span_and_single_use_identical_phase_bounds(self):
         observed = editor._observed_shot(self.shot, self.review)
@@ -336,6 +361,21 @@ class PresentationWindowTests(unittest.TestCase):
         self.assertEqual(review['presentation_observation']['readable_end_us'], 900_000)
         self.assertEqual(review['parent_presentation_observation'], phase())
         self.assertEqual(self.review['presentation_observation'], phase())
+        legacy_parent=copy.deepcopy(self.review)
+        legacy_parent['presentation_observation']['schema']='reviewed-presentation-phases-v2'
+        legacy_parent['presentation_observation']['change'].pop('actor')
+        with mock.patch.object(editor, '_review_media', return_value=media), \
+                mock.patch.object(editor, '_call', return_value=response):
+            upgraded=editor._review_placement_window(self.manifest,self.sentence,self.shot,
+                Path(self.tmp.name),parent=legacy_parent)
+        self.assertEqual(upgraded['parent_presentation_observation'],legacy_parent['presentation_observation'])
+        self.assertEqual(upgraded['presentation_observation']['change']['actor'],'product')
+        response['presentation_observation']['change']['kind']='enter'
+        with mock.patch.object(editor, '_review_media', return_value=media), \
+                mock.patch.object(editor, '_call', return_value=response):
+            with self.assertRaisesRegex(ValueError,'PRESENTATION_CROP_CHANGED_ACTION_KIND'):
+                editor._review_placement_window(self.manifest,self.sentence,self.shot,
+                    Path(self.tmp.name),parent=self.review)
 
     def test_phase_crop_cannot_pass_without_fresh_readability_observation(self):
         media = dict(start=.1, end=1., before=self.review['source_identity'],

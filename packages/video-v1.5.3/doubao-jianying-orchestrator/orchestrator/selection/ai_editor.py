@@ -1418,9 +1418,9 @@ suitable=裁切内是一段完整、未拦腰切断关键动作/结果的可用�
     if phase:
         prompt += ("\n父观察的有效变化入点和首次到位点必须保留。父readable_end_us来自宽采样，"
                    "本次必须用附图重新判断短窗内是否已有足够辨认时间，不能直接截短父事实。"
-                   "若suitable，必须另返回presentation_observation，schema为reviewed-presentation-phases-v1、kind为dynamic，"
+                   "若suitable，必须另返回presentation_observation，schema为reviewed-presentation-phases-v3、kind为dynamic，"
                    "start_us和reveal_us严格沿用下列父值；readable_end_us/end_us由这次短窗实际画面重新确认，"
-                   "同时给action/result/start_censored=false/end_censored=false。"
+                   "同时给action/result/change/start_censored=false/end_censored=false。change沿用父观察商品状态变化种类，重新核对实际前后状态。"
                    "若首次展示还没完成、无法辨认或边界不在图内，返回unsuitable或uncertain。\n"
                    + json.dumps({"parent_presentation": phase}, ensure_ascii=False))
     result = _call(prompt, directory / "reviews" / f"placement_{key}.json", sheet)
@@ -1443,6 +1443,9 @@ suitable=裁切内是一段完整、未拦腰切断关键动作/结果的可用�
                 {"start": round(start * 1e6), "end": round(end * 1e6)}, [round(t * 1e6) for t in times])
             if any(refined_phase[k] != phase[k] for k in ('start_us', 'reveal_us')):
                 raise ValueError('PRESENTATION_CROP_CHANGED_ONSET_OR_REVEAL')
+            if (phase.get('change') and any(refined_phase['change'].get(k) != phase['change'].get(k)
+                                           for k in ('kind', 'actor') if k in phase['change'])):
+                raise ValueError('PRESENTATION_CROP_CHANGED_ACTION_KIND')
             # A later readable landing is conservative when it remains inside
             # the parent's usable end. It does not authorize reset footage.
             if refined_phase['end_us'] > phase['end_us']:
@@ -1972,8 +1975,8 @@ def _presentation_review(shot, parent, directory):
               "开箱露出商品就完成该动作，不要等待随后再拿出单包；首次转正就完成转正，不等下一次翻面。"
               "readable_end是第一次已经能辨认的时刻，不是最后一张清晰图或整个稳定停留的末端。\n"
               + contract.presentation.PROMPT
-              + "\n只输出一个JSON对象。schema必须为reviewed-presentation-phases-v1，kind必填dynamic|static|uncertain|not_presentation。"
-                "dynamic必须带start_us/reveal_us/readable_end_us/end_us/action/result/start_censored/end_censored；"
+              + "\n只输出一个JSON对象。schema必须为reviewed-presentation-phases-v3，kind必填dynamic|static|uncertain|not_presentation。"
+                "dynamic必须带start_us/reveal_us/readable_end_us/end_us/action/result/change/start_censored/end_censored；"
                 "其他kind给reason，不填猜测时间。时间来自图中原素材时间戳。\n"
               + json.dumps({"scene_us": window}, ensure_ascii=False))
     raw = _call(prompt, directory / "presentation" / f"{key}.json", media["sheet"])
