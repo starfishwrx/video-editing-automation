@@ -9,6 +9,9 @@ import subprocess
 import time
 
 
+REPLAN_STATUSES = {"NARRATION_GAP_EXCEEDED", "AI_SELECTION_RULES_CHANGED"}
+
+
 def _read(path: Path) -> dict:
     value = json.loads(path.read_text(encoding="utf-8-sig"))
     if not isinstance(value, dict):
@@ -29,8 +32,14 @@ def pending(report_dir: Path) -> bool:
     try:
         result = _read(Path(report_dir) / "last_result.json")
     except (OSError, ValueError):
-        return False
-    return result.get("retryable") is True and result.get("resume_stage") == "semantic_match"
+        return (Path(report_dir) / "selection_resume.json").is_file()
+    if not result.get("status") and not result.get("resume_stage"):
+        return (Path(report_dir) / "selection_resume.json").is_file()
+    # An old matched TTS track can exceed the gap gate during draft recovery.
+    # Its receipt survives a crash before recover_draft starts the rematch.
+    needs_audio_replan = (result.get("recovery_stage") == "draft_write"
+                          and result.get("status") in REPLAN_STATUSES)
+    return result.get("resume_stage") == "semantic_match" and (result.get("retryable") is True or needs_audio_replan)
 
 
 def _logical(manifest: dict) -> dict:
@@ -52,6 +61,7 @@ def freeze_refill_input(manifest: dict, report_dir: Path) -> dict:
     if len(sentences) != len(rows) or len(files) != len(rows) or not rows:
         raise ValueError("REFILL_FROZEN_AUDIO_REQUIRED")
     segments = []
+    retained_tts = set(prepared.get("retained_tts_audio") or [])
     for index, (sentence, row, identity) in enumerate(zip(sentences, rows, files), 1):
         path = str(row.get("tts_path") or "")
         if (not path or row.get("timing_certainty") != "audio"
@@ -62,6 +72,8 @@ def freeze_refill_input(manifest: dict, report_dir: Path) -> dict:
                 or row.get("text") != timing_contract.sentence_text(sentence)):
             raise ValueError("REFILL_FROZEN_AUDIO_CHANGED")
         segment = dict(sentence) if isinstance(sentence, dict) else {"text": str(sentence)}
+        if not segment.get("audio") and segment.get("audio_mode", "tts") == "tts":
+            retained_tts.add(str(Path(path).resolve()))
         segment.update(audio=path, audio_duration_us=int(row["audio_duration_us"]), timing_certainty="audio")
         segments.append(segment)
     resumed = dict(prepared)
@@ -72,6 +84,8 @@ def freeze_refill_input(manifest: dict, report_dir: Path) -> dict:
         if key in manifest:
             resumed[key] = manifest[key]
     resumed["segments"] = segments
+    if retained_tts:
+        resumed["retained_tts_audio"] = sorted(retained_tts)
     return resumed
 
 
@@ -169,6 +183,8 @@ def recover_draft(manifest: dict, report_dir: Path, *, prefix: list[str], run, e
             if not original.get("ai_refill_indices"):
                 raise ValueError("DRAFT_RECOVERY_MATCH_INPUT_MISMATCH")
             derived = freeze_refill_input(manifest, report_dir)
+            if "retained_tts_audio" not in original:
+                derived.pop("retained_tts_audio", None)
             if _logical(original) != _logical(derived):
                 raise ValueError("DRAFT_RECOVERY_MATCH_INPUT_MISMATCH")
         input_path = report_dir / "draft_recovery_input.json"
@@ -180,6 +196,15 @@ def recover_draft(manifest: dict, report_dir: Path, *, prefix: list[str], run, e
                        "--draft-name", str(manifest.get("draft_name") or ""), "--stage", "draft_write"], cwd=cwd, env=env, capture_output=True,
                       text=True, encoding="utf-8", errors="replace", timeout=remaining + 30)
         if process.returncode:
+            try:
+                failure = json.loads(process.stdout or "{}")
+            except ValueError:
+                failure = {}
+            if (isinstance(failure, dict) and failure.get("status") in REPLAN_STATUSES
+                    and failure.get("resume_stage") == "semantic_match"
+                    and (report_dir / "selection_resume.json").is_file()):
+                return recover(manifest, report_dir, prefix=prefix, run=run, env=env, cwd=cwd,
+                               deadline=deadline, drafts_root=drafts_root)
             return {"rc": process.returncode, "stdout": process.stdout or "", "stderr": process.stderr or "",
                     "combined": (process.stdout or "") + "\n" + (process.stderr or ""),
                     "stage_retry_exhausted": True}
@@ -267,11 +292,16 @@ def recover(manifest: dict, report_dir: Path, *, prefix: list[str], run, env: di
         if not (report_dir / "shot_candidates.json").is_file():
             return result(1, "SELECTION_RECOVERY_ANALYSIS_REQUIRED")
         recovery_input = dict(frozen["manifest"])
+        if not frozen["input_manifest"].get("usage_ledger_path"):
+            recovery_input.pop("usage_ledger_path", None)
         recovery_input["parent_run_id"] = frozen["run_id"]
         recovery_input["draft_name"] = manifest["draft_name"]
         recovery_input["narration_timing_file"] = str(report_dir / "narration_timing.json")
         # The timing snapshot must still be the exact one used for selection.
-        if _read(report_dir / "narration_timing.json") != timing:
+        saved_timing = _read(report_dir / "narration_timing.json")
+        # A refill that reused the original audio updates only the synthesis counter.
+        if {k: v for k, v in saved_timing.items() if k != "tts_attempted"} != {
+                k: v for k, v in timing.items() if k != "tts_attempted"}:
             return result(1, "SELECTION_RECOVERY_TIMING_CHANGED")
         input_path = report_dir / "selection_recovery_input.json"
         input_path.write_text(json.dumps(recovery_input, ensure_ascii=False, indent=2), encoding="utf-8")

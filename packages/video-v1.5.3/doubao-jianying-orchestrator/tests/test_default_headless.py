@@ -345,6 +345,31 @@ class DefaultHeadlessTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'MIRROR_DRIFT'):
                     draft_documents.timeline(root)
 
+    def test_saved_narration_source_and_target_offsets_match_plan(self):
+        from orchestrator.quality import draft_safety
+        expected = {"video_segments": 0, "narration_segments": 1, "bgm_required": False,
+                    "narration_windows": [{"start_us": 800000, "duration_us": 600000,
+                                           "source_start_us": 200000, "source_duration_us": 600000}]}
+        segment = {"source_timerange": {"start": 200000, "duration": 600000},
+                   "target_timerange": {"start": 800000, "duration": 600000}}
+        draft = {"tracks": [{"type": "audio", "name": "Narration", "segments": [segment]}]}
+        self.assertEqual(draft_safety._expected_track_issues(draft, expected), [])
+        for kind in ("source", "target"):
+            segment[kind + "_timerange"]["start"] += 200000
+            self.assertTrue(any(kind in issue for issue in draft_safety._expected_track_issues(draft, expected)))
+            segment[kind + "_timerange"]["start"] -= 200000
+
+    def test_legacy_readback_rejects_equal_length_swapped_audio(self):
+        from orchestrator.quality import draft_safety
+        windows = [{"staged_source": f"{i}.wav", "start_us": i * 1000000, "duration_us": 1000000,
+                    "source_start_us": 0, "source_duration_us": 1000000} for i in range(2)]
+        segments = [{"material_id": str(1-i), "source_timerange": {"start": 0, "duration": 1000000},
+                     "target_timerange": {"start": i*1000000, "duration": 1000000}} for i in range(2)]
+        draft = {"materials": {"audios": [{"id": str(i), "path": f"{i}.wav"} for i in range(2)]},
+                 "tracks": [{"type": "audio", "name": "Narration", "segments": segments}]}
+        expected = {"narration_segments": 2, "narration_windows": windows}
+        self.assertEqual(len(draft_safety._expected_track_issues(draft, expected)), 2)
+
     def test_plan_preserves_native_audio_brightness_slice_and_bgm(self):
         with tempfile.TemporaryDirectory() as raw:
             root=Path(raw); font=root/'font.ttf'; shutil.copyfile(ImageFont.truetype(layout_subtitle('x',1080,1920,font_name='Arial')['font_path'],12).path,font)
