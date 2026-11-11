@@ -66,6 +66,23 @@ class PresentationWindowTests(unittest.TestCase):
         self.assertFalse(shot_analyzer.candidate_window(observed, audio_duration_us=3_000_000,
                                                       manifest=self.manifest).ok)
 
+    def test_dynamic_failure_reaches_repairs_before_a_feasible_static_substitute(self):
+        from orchestrator.selection.ai_editor_recovery import WindowFailure
+        analysis,plan=self.short_display_pair()
+        static_video=Path(self.tmp.name)/'static.mp4'
+        static_video.write_bytes(b'static product')
+        static_shot={**self.shot,'shot_id':'static','video':str(static_video)}
+        static={**plan['display_reviews'][0],'shot_id':'static',
+                'source_identity':contract.source_identity(static_video)}
+        static.pop('presentation_observation')
+        analysis['shots'].append(static_shot)
+        plan['display_reviews'].append(static)
+        self.assertTrue(list(editor._short_complete_rows(self.manifest,analysis,plan,1,None)))
+        before=copy.deepcopy(plan['rows'])
+        with self.assertRaises(WindowFailure):
+            editor._revalidate_rows(self.manifest,analysis,plan,narration_timing=None)
+        self.assertEqual(plan['rows'],before)
+
     def test_broad_evidence_failure_can_review_another_complete_action(self):
         from orchestrator.selection.ai_editor_recovery import WindowFailure
         plan = self.plan()

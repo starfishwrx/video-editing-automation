@@ -2348,6 +2348,22 @@ def _compose_reviewed_short_displays(manifest, analysis, plan, directory, index,
     return False
 
 
+def _row_has_presentation(plan, row):
+    index = row['index']
+    if row.get('continuity_key'):
+        group = plan.get('continuity_reviews', {}).get(row['continuity_key']) or {}
+        return bool((group.get('input') or {}).get('presentation_observations'))
+    sentence = next(s for s in plan['sentences'] if s['index'] == index)
+    reviews = (plan.get('reviews', {}).get(str(index), []) if sentence['kind'] == 'selling_point'
+               else plan.get('display_reviews', []))
+    for part in row.get('parts', []):
+        review = (plan.get('window_reviews', {}).get(part.get('window_review_key')) or
+                  next((r for r in reviews if r.get('shot_id') == part.get('shot_id')), {}))
+        if review.get('presentation_observation'):
+            return True
+    return False
+
+
 def _revalidate_rows(manifest, analysis, plan, *, narration_timing=None):
     """Re-solve cached rows; replace only failing sentences, without API calls."""
     attempted = set()
@@ -2365,6 +2381,10 @@ def _revalidate_rows(manifest, analysis, plan, *, narration_timing=None):
             attempted.add(key)
             replaced = False
             for candidate in _short_complete_rows(manifest, analysis, plan, failure.index, narration_timing):
+                # Let the outer bounded pixel/group repairs see this action's
+                # failure before a cheap static substitute erases that context.
+                if _row_has_presentation(plan, old) and not _row_has_presentation(plan, candidate):
+                    continue
                 if (failure.index, contract.digest(candidate["parts"])) in attempted:
                     continue
                 trial = {**plan, "rows": [candidate if row["index"] == failure.index else row

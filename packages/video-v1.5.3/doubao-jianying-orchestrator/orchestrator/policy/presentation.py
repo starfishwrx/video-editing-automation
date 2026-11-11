@@ -9,7 +9,7 @@ from __future__ import annotations
 SCHEMA = "reviewed-presentation-phases-v3"
 LEGACY_SCHEMA = "reviewed-presentation-phases-v1"
 LEGACY_SCHEMAS = {LEGACY_SCHEMA, "reviewed-presentation-phases-v2"}
-VERSION = "presentation-in-out-v5"
+VERSION = "presentation-in-out-v6"
 CHANGES = {'enter', 'orientation', 'reveal', 'arrange', 'extract'}
 FIELDS = ("start_us", "reveal_us", "readable_end_us", "end_us")
 PROMPT = """
