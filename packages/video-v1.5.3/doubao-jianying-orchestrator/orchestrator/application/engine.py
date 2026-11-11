@@ -1491,6 +1491,8 @@ class OrchestrationEngine:
             candidate = int(round(float(stable) * US))
             if source_in * US <= candidate <= source_out * US:
                 preferred_us = candidate
+        observation = getattr(clip, "playback_observation", None)
+        unbounded = isinstance(observation, dict) and observation.get("kind") == "experiment_unbounded"
         return timing_contract.WindowRequest(
             source_in_us=int(round(source_in * US)),
             source_out_us=int(round(source_out * US)),
@@ -1503,7 +1505,8 @@ class OrchestrationEngine:
             speed_min=speed_min, speed_max=speed_max,
             preferred_speed=clip.preferred_speed,
             preferred_start_us=preferred_us,
-            video_duration_us=int(round(float(clip.video_duration) * US)), fps=frm)
+            video_duration_us=int(round(float(clip.video_duration) * US)), fps=frm,
+            honor_requested_speed_max=unbounded)
 
     def _clip_role(self, clip: Clip) -> str:
         """段落声明的视觉角色（决定变速范围；定案第 6 条）。
@@ -1827,9 +1830,14 @@ class OrchestrationEngine:
                         # 吸附到 1 帧的整数微秒档位（让剪映的 round(素材/速度)
                         # 回程误差 ≤1µs），并夹紧在该画面角色的允许区间内 ——
                         # 否则栅格落点会差出 1e-5 量级，写入前的不变量校验会误报。
-                        c.video_speed = frame_speed(
-                            solution.speed, req.speed_min, req.speed_max,
-                            fps=req.fps)
+                        # A confirmed experiment cut keeps its exact ratio.
+                        # Snapping it moves the out point and fails continuity.
+                        if solution.detail.get("unbounded_exact_window"):
+                            c.video_speed = float(solution.speed)
+                        else:
+                            c.video_speed = frame_speed(
+                                solution.speed, req.speed_min, req.speed_max,
+                                fps=req.fps)
                         c.duration = solution.segment_us / US
                         c.start_us = cursor
                         cursor += int(solution.segment_us)
@@ -1951,6 +1959,8 @@ class OrchestrationEngine:
             speed_min, speed_max = timing_contract.playback.capped_range(
                 (speed_min, speed_max), self._task_speed_cap_for_clip(c))
             speed = float(c.video_speed or 1.0)
+            observation = getattr(c, "playback_observation", None)
+            unbounded = isinstance(observation, dict) and observation.get("kind") == "experiment_unbounded"
             # 源出点优先取**求解器给的那个数**（`solved_window`），拿不到才按
             # 「入点 + 输出时长 × 速度」回算。回算本身没错，但它是用吸附后的速度
             # 反推的，一旦吸附把速度挪出原解，回算值就会跟着偏 —— 校验不该建立在
@@ -1982,6 +1992,7 @@ class OrchestrationEngine:
                 "material_duration_us": to_us(c.video_duration),
                 "video_speed": speed,
                 "speed_range": [speed_min, speed_max],
+                "allow_unbounded_speed": unbounded,
                 "evidence_start_us": None if span is None else to_us(span[0]),
                 "evidence_end_us": None if span is None else to_us(span[1]),
                 "actual_video_us": (int(row["duration_us"]) if row.get("duration_us")
@@ -2481,8 +2492,14 @@ class OrchestrationEngine:
                                     "SOURCE_ROTATION_PIXEL_FORMAT_UNSUPPORTED",
                                     "SOURCE_ROTATION_FULL_RANGE_UNCERTAIN",
                                     "SOURCE_ROTATION_UNSUPPORTED")
+            # A crypto/subprocess timeout has no native draft to ship. Write the
+            # same clips through the legacy editor entry; non-native drafts then
+            # distribute via ship_distribute rather than staying blocked.
+            timed_out = "timed out after" in reason
             if (result.get("status") == "HEADLESS_BUILD_BLOCKED"
-                    and any(reason == code or reason.startswith(code + ":") for code in compatibility_errors)):
+                    and (timed_out or any(
+                        reason == code or reason.startswith(code + ":")
+                        for code in compatibility_errors))):
                 import uuid
                 original = self.m.get("draft_name")
                 self.m["draft_name"] = f"{original or '豆包剪映编排草稿'}-legacy-{uuid.uuid4().hex[:10]}"

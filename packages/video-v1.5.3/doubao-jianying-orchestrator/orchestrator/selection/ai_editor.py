@@ -2077,6 +2077,7 @@ def _retrieve_empty_selection(manifest, analysis, plan, failure, narration_timin
         required = {p["id"] for p in sentence["selling_points"]}
         duration, _ = timing_contract.duration_for(narration_timing, index,
             segment=timing_contract.split_sentences(manifest)[index - 1])
+        long_matches = []
         for review in plan["reviews"].get(str(index), []):
             shot = shots.get(review.get("shot_id"))
             if (not shot or review.get("verdict") != "matched" or review.get("same_product") is not True
@@ -2091,16 +2092,34 @@ def _retrieve_empty_selection(manifest, analysis, plan, failure, narration_timin
                     timing_contract.REASON_EVIDENCE_SPEED_CONFLICT,
                     timing_contract.REASON_EVIDENCE_OUT_OF_RANGE}:
                 continue
+            intervals = [ev for ev in review.get("evidence_intervals_us") or []
+                         if isinstance(ev, dict) and type(ev.get("start")) is int and type(ev.get("end")) is int
+                         and ev["end"] > ev["start"]]
+            span = (max(ev["end"] for ev in intervals) - min(ev["start"] for ev in intervals)) if intervals else 10**15
+            # A stretch that fits inside twice the spoken line can play at or under 2x.
+            # Longer stretches stay available, after those, for a short crop.
+            needs_crop = 0 if span <= int(round(duration * contract.playback.PROCESS_PREFERRED_MAX)) else 1
+            long_matches.append((needs_crop, span, review, shot, solution))
+        if long_matches:
+            needs_crop, _, review, shot, solution = min(long_matches, key=lambda item: (item[0], item[1]))
             part = {"shot_id": shot["shot_id"], "audio_duration_us": duration}
             # Evidence that starts inside the head/tail guard still needs a real
             # short-window re-review; seed an in-guard start so placement can run.
+            # A stretch longer than twice the line also needs that crop. A stretch
+            # that already fits at 2x stays unmarked so assembly can speed it
+            # without another vision call.
             if solution.reason == timing_contract.REASON_EVIDENCE_OUT_OF_RANGE:
                 head = timing_contract.us_of(manifest.get("head_trim_s"), 300_000)
                 scene_start = round(float(shot["source_start"]) * 1e6)
                 part["source_start_us"] = scene_start + head
+            elif needs_crop and solution.reason in {timing_contract.REASON_EVIDENCE_SPAN_TOO_LONG,
+                                                     timing_contract.REASON_EVIDENCE_SPEED_CONFLICT}:
+                intervals = [ev for ev in review.get("evidence_intervals_us") or []
+                             if isinstance(ev, dict) and type(ev.get("start")) is int]
+                if intervals:
+                    part["source_start_us"] = min(ev["start"] for ev in intervals)
             candidate = {"index": index, "parts": [part],
                          "reason": "reviewed evidence requires window or continuity repair"}
-            break
     if candidate is None:
         return False
     plan["rows"] = [candidate if r["index"] == index else r for r in plan["rows"]]
@@ -2455,6 +2474,44 @@ def _place_absorb_experiment(manifest, analysis, plan, directory, narration_timi
     return placed_any
 
 
+def _use_shorter_matched_evidence(manifest, plan, failure, narration_timing, used) -> bool:
+    """Move a too-long selling point onto another matched shot that fits at 2x."""
+    if failure.reason != timing_contract.REASON_EVIDENCE_SPAN_TOO_LONG:
+        return False
+    sentence = next((s for s in plan.get("sentences") or []
+                     if isinstance(s, dict) and s.get("index") == failure.index), None)
+    row = next((r for r in plan.get("rows") or []
+                if isinstance(r, dict) and r.get("index") == failure.index), None)
+    if (sentence is None or row is None or row.get("continuity_key")
+            or sentence.get("kind") != "selling_point"):
+        return False
+    audio = _line_audio_us(manifest, sentence, narration_timing)
+    if audio <= 0:
+        return False
+    budget = int(round(audio * contract.playback.PROCESS_PREFERRED_MAX))
+    options = []
+    for review in plan.get("reviews", {}).get(str(failure.index), []):
+        sid = review.get("shot_id")
+        if (not isinstance(review, dict) or review.get("verdict") != "matched"
+                or not sid or sid == failure.shot_id or sid in used):
+            continue
+        intervals = [ev for ev in review.get("evidence_intervals_us") or []
+                     if isinstance(ev, dict) and type(ev.get("start")) is int and type(ev.get("end")) is int
+                     and ev["end"] > ev["start"]]
+        if not intervals:
+            continue
+        span = max(ev["end"] for ev in intervals) - min(ev["start"] for ev in intervals)
+        if span <= budget:
+            options.append((span, sid))
+    if not options:
+        return False
+    _, sid = min(options)
+    used.add(sid)
+    row["parts"] = [{"shot_id": sid, "audio_duration_us": audio}]
+    row["reason"] = "matched evidence fits inside twice the spoken line"
+    return True
+
+
 def _speed_fit_reviewed_evidence(manifest, analysis, plan, directory, failure, narration_timing=None) -> bool:
     """Play matched evidence up to 2x when a shorter crop is not available.
 
@@ -2545,6 +2602,78 @@ def _speed_fit_reviewed_evidence(manifest, analysis, plan, directory, failure, n
     return True
 
 
+def _reviewed_span_us(shot, review, part):
+    intervals = review.get("evidence_intervals_us") if isinstance(review, dict) else None
+    if isinstance(intervals, list) and intervals:
+        starts = [item.get("start") for item in intervals if isinstance(item, dict)]
+        ends = [item.get("end") for item in intervals if isinstance(item, dict)]
+        if starts and ends and all(type(value) is int for value in starts + ends):
+            return min(starts), max(ends)
+    if type(part.get("source_start_us")) is int:
+        start = part["source_start_us"]
+        end = round(float(shot.get("source_end") or 0) * 1_000_000)
+        if end > start:
+            return start, end
+    return (round(float(shot.get("source_start") or 0) * 1_000_000),
+            round(float(shot.get("source_end") or 0) * 1_000_000))
+
+
+def _repair_shared_comfort_shot(manifest, analysis, plan, directory, checked=None) -> bool:
+    """A softness line uses another matched shot when a different task already used this segment."""
+    from . import usage_ledger
+    others = usage_ledger.other_task_windows(manifest)
+    if not others:
+        return False
+    done = checked if isinstance(checked, set) else set()
+    shots = {str(shot["shot_id"]): shot for shot in analysis.get("shots", []) if shot.get("shot_id")}
+    changed = False
+    for sentence in plan.get("sentences") or []:
+        if not isinstance(sentence, dict) or not _fabric_comfort_sentence(sentence):
+            continue
+        index = sentence.get("index")
+        if index in done:
+            continue
+        row = next((item for item in plan.get("rows") or []
+                    if isinstance(item, dict) and item.get("index") == index), None)
+        parts = (row or {}).get("parts") or []
+        if row is None or row.get("continuity_key") or len(parts) != 1 or not isinstance(parts[0], dict):
+            continue
+        part = parts[0]
+        current_id = str(part.get("shot_id") or "")
+        shot = shots.get(current_id)
+        reviews = [review for review in plan.get("reviews", {}).get(str(index), [])
+                   if isinstance(review, dict) and review.get("verdict") == "matched"
+                   and str(review.get("shot_id") or "") in shots]
+        current = next((review for review in reviews if str(review.get("shot_id") or "") == current_id), None)
+        if shot is None or current is None:
+            continue
+        span = _reviewed_span_us(shot, current, part)
+        if not usage_ledger.overlaps_recorded_window(shot.get("video"), span[0], span[1], others):
+            continue
+        replacement = None
+        for review in reviews:
+            review_id = str(review.get("shot_id") or "")
+            if review_id == current_id:
+                continue
+            candidate = shots[review_id]
+            candidate_span = _reviewed_span_us(candidate, review, {})
+            if usage_ledger.overlaps_recorded_window(candidate.get("video"), candidate_span[0], candidate_span[1], others):
+                continue
+            replacement = candidate
+            break
+        done.add(index)
+        if replacement is None:
+            continue
+        part["shot_id"] = replacement["shot_id"]
+        part.pop("source_start_us", None)
+        part.pop("window_review_key", None)
+        row["reason"] = "其他任务已用同一段面层画面，改用另一条已匹配镜头"
+        changed = True
+    if changed:
+        _save(directory / "plan.json", plan)
+    return changed
+
+
 def _repair_reviewed_rows(manifest, analysis, plan, directory, narration_timing, duplicate_expanded):
     """Drain useful local repairs without spending text-editor retry rounds.
 
@@ -2558,7 +2687,11 @@ def _repair_reviewed_rows(manifest, analysis, plan, directory, narration_timing,
     experiment_groups.repair(manifest, analysis, plan, directory, narration_timing)
     _place_empty_matched_evidence(manifest, analysis, plan, directory, narration_timing)
     seen = set()
+    shorter_evidence_used = set()
+    shared_comfort_checked = set()
     for _ in range(1 + 8 * len(plan.get("sentences", []))):
+        if _repair_shared_comfort_shot(manifest, analysis, plan, directory, shared_comfort_checked):
+            continue
         try:
             return _revalidate_rows(manifest, analysis, plan, narration_timing=narration_timing)
         except (ValueError, KeyError, TypeError, OSError) as exc:
@@ -2611,6 +2744,9 @@ def _repair_reviewed_rows(manifest, analysis, plan, directory, narration_timing,
                 continue
             if not short_without_point and _speed_fit_reviewed_evidence(
                     manifest, analysis, plan, directory, failure, narration_timing):
+                continue
+            if not short_without_point and _use_shorter_matched_evidence(
+                    manifest, plan, failure, narration_timing, shorter_evidence_used):
                 continue
             if not short_without_point and _extend_previous_action(
                     manifest, analysis, plan, directory, failure, narration_timing):
@@ -2824,12 +2960,11 @@ technical_option是按本句完整配音求出的实际可行窗口；分配多�
 
 
 def _edit_with_review_fallback(manifest, analysis, plan, directory, narration_timing):
-    """Place matched evidence first; only then exhaust for a shorter alternative.
+    """Place matched evidence first. A sentence that already has evidence stays there.
 
     Search already stopped once selling-point evidence was matched. Local short
-    crop, mild speed, and sentence groups run inside edit/repair. If those still
-    cannot fit the audio, exhaust only that sentence's remaining pool so a later
-    short complete match can replace the long one—never trim old evidence.
+    crop and a speed of at most 2x run inside edit/repair. Finding evidence and
+    then failing to place it does not open the rest of the candidate pool.
     """
     shots = {str(s['shot_id']): s for s in analysis['shots']}
     rejected = qc_rejected_shots(manifest)
@@ -2843,6 +2978,7 @@ def _edit_with_review_fallback(manifest, analysis, plan, directory, narration_ti
             coverage = plan.get('coverage', {}).get(str(index), {})
             sentence = next((s for s in plan['sentences'] if s.get('index') == index), None)
             if (not sentence or index in expanded_indices or coverage.get('exhausted')
+                    or coverage.get('evidence_found')
                     or coverage.get('reason') != 'KNOWN_WINDOWS_INFEASIBLE'):
                 raise
             expanded_indices.add(index)

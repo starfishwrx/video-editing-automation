@@ -415,15 +415,46 @@ class DefaultExperimentGroupTests(unittest.TestCase):
         for i in (4, 5):
             source = self.root / f"other-{i}.mp4"; source.write_bytes(f"other {i}".encode())
             self.shots.append({**self.shots[0], "shot_id": f"shot{i}", "video": str(source)})
-        self.plan["sentences"][0]["candidate_ids"] = ["shot1", "shot4", "shot5"]
-        self.plan["sentences"][1]["candidate_ids"] = ["shot2", "shot3"]
+        def matched(shot):
+            return {**copy.deepcopy(self.plan["reviews"]["1"][0]), "shot_id": shot["shot_id"],
+                    "source_identity": contract.source_identity(shot["video"])}
+        self.plan["reviews"]["1"] = [matched(shot) for shot in (self.shots[0], self.shots[3], self.shots[4])]
+        self.plan["reviews"]["2"] = [matched(self.shots[1]), matched(self.shots[2])]
         with patch.object(groups, "observe_pair", side_effect=ValueError("EXPERIMENT_PAIR_NOT_CONFIRMED")) as observe:
             with self.assertRaisesRegex(ValueError, "EXPERIMENT_GROUP_PENDING"):
                 groups.repair(self.manifest, self.analysis, self.plan, self.root, None)
-        # PAIR_LIMIT 3 -> 6 (fix_rerun_20261109): all 3x2 hypotheses fit the budget; the
-        # first three reviews still cover every distinct pour source.
-        self.assertEqual(observe.call_count, min(groups.PAIR_LIMIT, 6))
+        # An unconfirmed pair does not spend the fit budget, so every matched
+        # hypothesis is observed. The first three still cover every pour source.
+        self.assertEqual(observe.call_count, 6)
         self.assertEqual({call.args[2]["shot_id"] for call in observe.call_args_list[:3]}, {"shot1", "shot4", "shot5"})
+
+    def test_unconfirmed_matches_continue_past_the_fit_budget(self):
+        for i in range(4, 12):
+            source = self.root / f"pour-{i}.mp4"; source.write_bytes(f"pour {i}".encode())
+            self.shots.append({**self.shots[0], "shot_id": f"shot{i}", "video": str(source)})
+        review = self.plan["reviews"]["1"][0]
+        self.plan["reviews"]["1"] = []
+        for shot in self.shots:
+            if shot["shot_id"] == "shot2":
+                continue
+            self.plan["reviews"]["1"].append({**copy.deepcopy(review), "shot_id": shot["shot_id"],
+                "source_identity": contract.source_identity(shot["video"])})
+        with patch.object(groups, "observe_pair", side_effect=ValueError("EXPERIMENT_PAIR_NOT_CONFIRMED")) as observe:
+            with self.assertRaisesRegex(ValueError, "EXPERIMENT_GROUP_PENDING"):
+                groups.repair(self.manifest, self.analysis, self.plan, self.root, None)
+        self.assertGreater(observe.call_count, groups.PAIR_LIMIT)
+
+    def test_result_window_failures_still_stop_at_pair_limit(self):
+        for i in range(4, 12):
+            source = self.root / f"fit-{i}.mp4"; source.write_bytes(f"fit {i}".encode())
+            self.shots.append({**self.shots[0], "shot_id": f"shot{i}", "video": str(source)})
+        review = self.plan["reviews"]["1"][0]
+        self.plan["reviews"]["1"] = [{**copy.deepcopy(review), "shot_id": shot["shot_id"],
+            "source_identity": contract.source_identity(shot["video"])} for shot in self.shots if shot["shot_id"] != "shot2"]
+        with patch.object(groups, "observe_pair", side_effect=ValueError("EXPERIMENT_RESULT_WINDOW_TOO_SHORT")) as observe:
+            with self.assertRaisesRegex(ValueError, "EXPERIMENT_GROUP_PENDING"):
+                groups.repair(self.manifest, self.analysis, self.plan, self.root, None)
+        self.assertEqual(observe.call_count, groups.PAIR_LIMIT)
 
     def test_overlapping_observation_windows_are_refined_before_selected_source_check(self):
         from orchestrator.selection.experiment_contract import validate_pair_evidence

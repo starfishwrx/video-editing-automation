@@ -340,6 +340,9 @@ class WindowRequest:
     video_duration_us: Optional[int] = None
     fps: float = DEFAULT_FPS
     preferred_speed: float = 1.0
+    # Set only for a cut whose playback observation already authorized the
+    # solved speed. Ordinary requests stay inside the production cap.
+    honor_requested_speed_max: bool = False
 
     @property
     def timeline_us(self) -> int:
@@ -473,9 +476,15 @@ def solve_window(req: WindowRequest) -> WindowSolution:
         preferred_speed = float(req.preferred_speed)
     except (TypeError, ValueError):
         preferred_speed = math.nan
-    if not math.isfinite(preferred_speed) or not 0.05 <= preferred_speed <= 20.0:
+    preference_cap = 20.0
+    if req.honor_requested_speed_max:
+        try:
+            preference_cap = max(preference_cap, float(req.speed_max), preferred_speed)
+        except (TypeError, ValueError):
+            preference_cap = 20.0
+    if not math.isfinite(preferred_speed) or not 0.05 <= preferred_speed <= preference_cap:
         return _fail(REASON_SPEED_OUT_OF_RANGE, preferred_speed=req.preferred_speed,
-                     allowed_preference=[0.05, 20.0])
+                     allowed_preference=[0.05, preference_cap])
 
     timeline_us = req.timeline_us
     if timeline_us <= 0:
@@ -501,9 +510,24 @@ def solve_window(req: WindowRequest) -> WindowSolution:
     speed_max = float(req.speed_max)
     if speed_max < speed_min:
         speed_min, speed_max = speed_max, speed_min
-    speed_max = min(speed_max, playback.PROCESS_MAX)
+    if not req.honor_requested_speed_max:
+        speed_max = min(speed_max, playback.PROCESS_MAX)
     if not (math.isfinite(speed_min) and math.isfinite(speed_max) and 0 < speed_min <= speed_max):
         return _fail(REASON_SPEED_OUT_OF_RANGE, policy_version=playback.VERSION)
+
+    if req.honor_requested_speed_max and usable_us > 0:
+        # The confirmed cut already fills its reviewed window. Snapping that
+        # ratio onto the frame grid moves the out point, and the continuity
+        # check rejects the draft. Keep the reviewed in and out points.
+        exact = usable_us / timeline_us
+        covers = span is None or (lo_bound <= ev_start and hi_bound >= ev_end)
+        if covers and speed_min - 1e-9 <= exact <= speed_max + 1e-9:
+            return WindowSolution(
+                ok=True, speed=round(exact, 9), source_start_us=int(lo_bound),
+                source_end_us=int(hi_bound), segment_us=int(timeline_us),
+                material_us=int(usable_us), handle_room_us=0,
+                detail={"candidate_count": 1, "usable_us": int(usable_us),
+                        "timeline_us": int(timeline_us), "unbounded_exact_window": True})
 
     if usable_us < int(round(speed_min * timeline_us)):
         return _fail(REASON_SOURCE_TOO_SHORT, usable_us=usable_us,
@@ -544,9 +568,11 @@ def solve_window(req: WindowRequest) -> WindowSolution:
         place_lo = lo_bound
         place_hi = hi_bound - window_us
         if span is not None:
-            # 窗口罩住证据 ⇔ start ≤ ev_start 且 start + window ≥ ev_end
-            place_lo = max(place_lo, ev_end - window_us)
-            place_hi = min(place_hi, ev_start)
+            # 窗口罩住证据 ⇔ start ≤ ev_start 且 start + window ≥ ev_end。
+            # 已授权的精确倍速会再吸附到帧栅格，窗口可能比证据短不到一帧。
+            slack = frame_us(req.fps) if req.honor_requested_speed_max else 0
+            place_lo = max(place_lo, ev_end - window_us - slack)
+            place_hi = min(place_hi, ev_start + slack)
         if place_lo > place_hi:
             continue
         if req.preferred_start_us is not None:
@@ -1269,7 +1295,8 @@ def check_invariants(items: Iterable[dict], *, fps: float = DEFAULT_FPS,
         allowed = item.get("speed_range") or [0.05, playback.PROCESS_MAX]
         if allowed:
             lo, hi = float(allowed[0]), float(allowed[1])
-            hi = min(hi, playback.PROCESS_MAX)
+            if not item.get("allow_unbounded_speed"):
+                hi = min(hi, playback.PROCESS_MAX)
             # 变速吸附在 1µs 栅格上（frame_speed），区间收成一个点时吸附值最多偏半格。
             grid = 1.0 / frame_us(fps)
             if speed < lo - grid or speed > hi + grid:

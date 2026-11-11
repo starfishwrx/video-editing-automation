@@ -27,6 +27,28 @@ def _save(path: Path, row) -> None:
     path.write_text(json.dumps(row, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")
 
 
+def monotonic_pts(raw):
+    """Keep presentation order when rounding collapses neighboring frames.
+
+    A tie, or a reversal no larger than one 60fps frame, is moved one
+    microsecond after the previous frame. A larger reversal stays an error.
+    """
+    if len(raw) < 2:
+        raise ValueError("ACTION_SOURCE_PTS_NOT_STRICTLY_INCREASING")
+    frames = []
+    previous = None
+    for value in raw:
+        if type(value) is not int:
+            raise ValueError("ACTION_SOURCE_PTS_NOT_STRICTLY_INCREASING")
+        if previous is not None and value <= previous:
+            if previous - value > 16_667:
+                raise ValueError("ACTION_SOURCE_PTS_NOT_STRICTLY_INCREASING")
+            value = previous + 1
+        frames.append(value)
+        previous = value
+    return frames
+
+
 def probe(source: str | Path, directory: Path, *, ffprobe="ffprobe") -> dict:
     before = identity(source)
     path = Path(directory) / ("pts-" + _key(before) + ".json")
@@ -40,9 +62,7 @@ def probe(source: str | Path, directory: Path, *, ffprobe="ffprobe") -> dict:
     data = json.loads(proc.stdout)
     stream = data["streams"][0]
     unit = Fraction(stream["time_base"])
-    raw = [round(int(f["best_effort_timestamp"]) * unit * 1_000_000) for f in data["frames"]]
-    if len(raw) < 2 or any(a >= b for a, b in zip(raw, raw[1:])):
-        raise ValueError("ACTION_SOURCE_PTS_NOT_STRICTLY_INCREASING")
+    raw = monotonic_pts([round(int(f["best_effort_timestamp"]) * unit * 1_000_000) for f in data["frames"]])
     origin = raw[0]
     frames = [{"index": i, "pts_us": value - origin} for i, value in enumerate(raw)]
     if before != identity(source):

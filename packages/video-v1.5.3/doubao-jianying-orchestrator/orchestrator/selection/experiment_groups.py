@@ -14,11 +14,43 @@ from types import SimpleNamespace
 from .. import ai_editor_contract as identity
 from ..policy import continuity
 from . import experiment_contract, experiment_events, timing_contract as timing
+from .experiment_retiming import speed_unbounded
 
 ROLES = {"absorption", "rewet", "followup", "bridge", "breathability", "fluorescence",
          "sku_change", "promotion", "other", "uncertain"}
 PAIR_LIMIT = 6
 ADJACENT_EXTRA = 4
+# These rejections mean the pair was not the same experiment. They must not
+# fill the six-slot budget that is reserved for a confirmed pair that cannot
+# be fitted, or for an event chain that stays invalid after one re-ask.
+UNBUDGETED_REJECTIONS = (
+    "EXPERIMENT_PAIR_MATCH_WITHOUT_EVIDENCE",
+    "EXPERIMENT_PAIR_NOT_CONFIRMED",
+    "EXPERIMENT_PAIR_PHASE_ORDER_INVALID",
+    "EXPERIMENT_PAIR_PHASE_INVALID",
+)
+
+
+def counts_toward_pair_limit(row):
+    if not isinstance(row, dict) or row.get("status") != "rejected":
+        return False
+    reason = str(row.get("reason") or "")
+    return not any(code in reason for code in UNBUDGETED_REJECTIONS)
+
+
+def retries_without_speed_limit(row, manifest):
+    """A confirmed pair that only missed the speed cap can be fitted again."""
+    if not speed_unbounded(manifest) or not isinstance(row, dict):
+        return False
+    if row.get("status") != "rejected":
+        return False
+    reason = str(row.get("reason") or "")
+    return any(code in reason for code in (
+        "EXPERIMENT_DURATION_CONFLICT_WITH_3X_CAP",
+        "EXPERIMENT_DURATION_CONFLICT_WITH_TASK_CAP",
+        "EXPERIMENT_PHASE_DURATION_CONFLICT",
+        "CONTINUITY_ALLOCATION_CHANGED",
+    ))
 
 
 def groups(sentences, *, require_rewet=True):
@@ -177,7 +209,7 @@ def _context(manifest, analysis, members, narration_timing, pair, motion, shot_i
     max_speed = min(identity.playback.PROCESS_MAX, task_cap if task_cap is not None else identity.playback.PROCESS_MAX)
     planned = experiment_events.fit_phase_windows(pair["members"], observations,
         experiment_contract.contract_for(scoped)["minimum_result_frames"], total, boundary,
-        fps=fps, max_speed=max_speed)
+        fps=fps, max_speed=max_speed, unbounded=speed_unbounded(manifest))
     sources = {}
     for sid, member in zip(shot_ids, pair["members"]):
         shot = shots[sid]
@@ -218,6 +250,8 @@ def _context(manifest, analysis, members, narration_timing, pair, motion, shot_i
         "source_selection": [p.get("source_selection") for p in planned]}
     if task_cap is not None:
         context["task_absorb_speed_cap"] = task_cap
+    if speed_unbounded(manifest):
+        context["speed_unbounded"] = True
     return context
 
 
@@ -225,27 +259,13 @@ def review_group(manifest, context, directory):
     """Independent joint placement review of the exact proposed sentence cuts."""
     from PIL import Image, ImageDraw
     from . import ai_editor as editor
-    rows, tiles = [], []
-    for member in context["members"]:
-        for i, cut in enumerate(member["parts"]):
-            media = editor._review_media({"video": cut["source_identity"]["path"],
-                "source_start": cut["start_us"] / 1e6, "source_end": cut["end_us"] / 1e6},
-                directory, dense=False)
-            if media["before"] != cut["source_identity"]:
-                raise ValueError("EXPERIMENT_PAIR_SOURCE_CHANGED")
-            tiles.append(media["sheet"])
-            rows.append({"sentence_index": member["index"], "part_index": i + 1, "cut": cut})
-    images = [Image.open(p).convert("RGB") for p in tiles]
-    width = max(im.width for im in images)
-    sheet = Image.new("RGB", (width, sum(im.height + 30 for im in images)), "#222222")
-    draw = ImageDraw.Draw(sheet); y = 0
-    for row, image in zip(rows, images):
-        draw.text((8, y + 4), f"sentence {row['sentence_index']} part {row['part_index']}", fill="white")
-        sheet.paste(image, (0, y + 30)); y += image.height + 30
-    path = directory / ("group-" + identity.digest(context)[:24] + ".jpg")
-    path.parent.mkdir(parents=True, exist_ok=True); sheet.save(path, quality=95)
+    # The waiver is an admission flag, not part of the picture the reviewer sees.
+    # Leaving it out keeps an already matched review on the same cache key.
+    review_input = {key: value for key, value in context.items() if key != "speed_unbounded"}
+    path = directory / ("group-" + identity.digest(review_input)[:24] + ".jpg")
+    path.parent.mkdir(parents=True, exist_ok=True)
     prompt = identity.policy_prompt(manifest) + "\n联合复核同次实验在固定逐句切片中的实际画面。\n" + json.dumps(
-        context, ensure_ascii=False) + """
+        review_input, ensure_ascii=False) + """
 图片按sentence/part顺序排列，每个part使用该源片段的实际时间戳；可以跨文件但必须是同次实验。
 逐句检查实际承担的阶段和口播是否相符，不把总长度可行当成逐句对应。
 反渗句开始应已有纸巾实际接触，不能仍是倒液或无关准备。关键动作、提起和结果要完整；
@@ -263,6 +283,26 @@ def review_group(manifest, context, directory):
 members和parts必须与输入逐个同序；证据区间只填各part实际源窗内的可见阶段。
 不能确认同次实验或关键动作结果、阶段错位时拒绝，不因素材不足放行。
 """
+    cached = path.is_file() and path.with_suffix(".json").is_file() and path.with_suffix(".request.json").is_file()
+    if not cached:
+        rows, tiles = [], []
+        for member in context["members"]:
+            for i, cut in enumerate(member["parts"]):
+                media = editor._review_media({"video": cut["source_identity"]["path"],
+                    "source_start": cut["start_us"] / 1e6, "source_end": cut["end_us"] / 1e6},
+                    directory, dense=False)
+                if media["before"] != cut["source_identity"]:
+                    raise ValueError("EXPERIMENT_PAIR_SOURCE_CHANGED")
+                tiles.append(media["sheet"])
+                rows.append({"sentence_index": member["index"], "part_index": i + 1, "cut": cut})
+        images = [Image.open(p).convert("RGB") for p in tiles]
+        width = max(im.width for im in images)
+        sheet = Image.new("RGB", (width, sum(im.height + 30 for im in images)), "#222222")
+        draw = ImageDraw.Draw(sheet); y = 0
+        for row, image in zip(rows, images):
+            draw.text((8, y + 4), f"sentence {row['sentence_index']} part {row['part_index']}", fill="white")
+            sheet.paste(image, (0, y + 30)); y += image.height + 30
+        sheet.save(path, quality=95)
     return editor._call(prompt, path.with_suffix(".json"), path)
 
 
@@ -303,19 +343,32 @@ def assemble_member(manifest, plan, group, index, original):
     for cut, fact in zip(member["parts"], observed["parts"]):
         start, end, target = cut["start_us"], cut["end_us"], cut["target_us"]
         observation = {**observed, **fact, "confidence": group["review"]["confidence"]}
-        playback = ({"schema": identity.playback.OBSERVATION_SCHEMA, "kind": "process",
-            "observed": fact["observation"], "start_us": start, "end_us": end} if cut["process"] else None)
+        exact = (end - start) / target
+        if speed_unbounded(manifest):
+            step = 1.0 / timing.frame_us(float((group.get("input") or {}).get("fps") or manifest.get("fps") or 30))
+            band = [max(exact - 2 * step, 1e-6), exact + 2 * step]
+            playback = {"schema": identity.playback.OBSERVATION_SCHEMA, "kind": "experiment_unbounded",
+                "observed": fact.get("observation") or "实验组按口播时长放入",
+                "start_us": start, "end_us": end, "speed_range": band}
+            # The scene contract still prefers real time. The solved speed stays
+            # in the playback band above; writing it here fails the receipt check.
+            preferred = 1.0
+        else:
+            band = [exact, exact]
+            preferred = 1.0
+            playback = ({"schema": identity.playback.OBSERVATION_SCHEMA, "kind": "process",
+                "observed": fact["observation"], "start_us": start, "end_us": end} if cut["process"] else None)
         observation["playback_observation"] = playback
         item = {"ok": True, "video": cut["source_identity"]["path"], "shot_id": cut["shot_id"],
             "temporary_shot_id": cut["shot_id"], "text": member["text"],
             "source_start": start / 1e6, "source_end": end / 1e6, "duration": (end - start) / 1e6,
             "source_start_us": start, "source_end_us": end, "segment_us": target,
             "segment_s": target / 1e6, "material_s": (end - start) / 1e6,
-            "speed": (end - start) / target, "video_speed": (end - start) / target,
+            "speed": exact, "video_speed": exact,
             # The group has already solved the shared budget. A one-part
             # member must not be independently cropped/re-timed by the engine.
-            "speed_range_override": [(end - start) / target, (end - start) / target],
-            "preferred_speed": 1.0, "playback_observation": playback, "time_sensitive": observed["time_sensitive"],
+            "speed_range_override": band,
+            "preferred_speed": preferred, "playback_observation": playback, "time_sensitive": observed["time_sensitive"],
             "visual_role": "direct_evidence" if observed["time_sensitive"] else "product_display",
             "guard_override": [0, 0], "scene_source_start": start / 1e6, "scene_source_end": end / 1e6,
             "guard_source_start": start / 1e6, "guard_source_end": end / 1e6,
@@ -365,16 +418,19 @@ def repair(manifest, analysis, plan, directory, narration_timing):
             continue  # A directed single-row refill may not replace accepted neighbours.
         rejected = editor.qc_rejected_shots(manifest)
         def candidates(role):
-            result = []
+            """Matched shots for this role. The raw shortlist is only a fallback when nothing matched."""
+            matched, fallback = [], []
             for sentence in members:
                 if sentence["experiment_role"] != role:
                     continue
                 i = sentence["index"]
-                result += [p.get("shot_id") for p in rows[i].get("parts", [])]
-                result += [r["shot_id"] for r in plan.get("reviews", {}).get(str(i), []) if r.get("verdict") == "matched"]
-                result += sentence.get("candidate_ids", [])[:editor.ROUND_SIZE]
-            return [sid for sid in dict.fromkeys(result) if sid in shots
-                    and not any(sid in rejected.get(i, set()) for i in indices)][:editor.ROUND_SIZE]
+                matched += [p.get("shot_id") for p in rows[i].get("parts", []) if p.get("shot_id")]
+                matched += [r["shot_id"] for r in plan.get("reviews", {}).get(str(i), [])
+                            if isinstance(r, dict) and r.get("verdict") == "matched" and r.get("shot_id")]
+                fallback += sentence.get("candidate_ids", [])[:editor.ROUND_SIZE]
+            chosen = matched or fallback
+            return [sid for sid in dict.fromkeys(chosen) if sid in shots
+                    and not any(sid in rejected.get(i, set()) for i in indices)]
         first_ids, second_ids = candidates("absorption"), candidates("rewet")
         shared = set(first_ids).intersection(second_ids)
         if shared and not plan.get("_locked_members"):
@@ -422,9 +478,9 @@ def repair(manifest, analysis, plan, directory, narration_timing):
                 identity.source_identity(shots[second]["video"]),
                 [shots[s][k] for s in (first, second) for k in ("source_start", "source_end")]])[:24]
             previous = attempts.get(key)
-            if previous and previous.get("status") == "rejected":
+            if previous and previous.get("status") == "rejected" and not retries_without_speed_limit(previous, manifest):
                 continue
-            if not previous and len(attempts) >= PAIR_LIMIT:
+            if not previous and sum(counts_toward_pair_limit(row) for row in attempts.values()) >= PAIR_LIMIT:
                 break
             attempts[key] = {"status": "reviewing", "shot_ids": [first, second]}
             editor._save(directory / "plan.json", plan)

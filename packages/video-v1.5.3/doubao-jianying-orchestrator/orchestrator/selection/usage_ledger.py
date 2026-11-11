@@ -140,6 +140,69 @@ def other_task_usage(manifest: dict[str, Any]) -> tuple[dict[str, int], dict[str
             {key: len(tasks) for key, tasks in sources.items()})
 
 
+def segment_uses(segments: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One placed window per physical cut, so another task can avoid that segment."""
+    found: list[dict[str, Any]] = []
+    for seg in segments or []:
+        if not isinstance(seg, dict) or seg.get("visual_missing"):
+            continue
+        parts = seg.get("span_parts") if seg.get("multi_shot") else None
+        items = parts if isinstance(parts, list) and parts else [seg]
+        for part in items:
+            if not isinstance(part, dict):
+                continue
+            video = part.get("video") or seg.get("video")
+            if not video:
+                continue
+            start = part.get("scene_source_start", part.get("source_start"))
+            end = part.get("scene_source_end", part.get("source_end"))
+            try:
+                start_us = int(round(float(start) * 1_000_000))
+                end_us = int(round(float(end) * 1_000_000))
+            except (TypeError, ValueError):
+                continue
+            if end_us <= start_us:
+                continue
+            found.append({"key": shot_key(video, start), "video": str(video),
+                          "start_us": start_us, "end_us": end_us})
+    return found
+
+
+def other_task_windows(manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    """Windows already used by a different task. Legacy rows keep only their shot key."""
+    found: list[dict[str, Any]] = []
+    for key, use, same in _other_uses(manifest):
+        if same or not isinstance(use, dict):
+            continue
+        start, end = use.get("start_us"), use.get("end_us")
+        if isinstance(use.get("video"), str) and type(start) is int and type(end) is int and end > start:
+            found.append({"key": key, "video": use["video"], "start_us": start, "end_us": end})
+        else:
+            found.append({"key": key})
+    return found
+
+
+def overlaps_recorded_window(video: Any, start_us: int, end_us: int,
+                             others: Iterable[dict[str, Any]]) -> bool:
+    """True when this cut replays more than one frame of another task's segment."""
+    if type(start_us) is not int or type(end_us) is not int or end_us <= start_us:
+        return False
+    path = _norm_path(video)
+    own = shot_key(video, start_us / 1_000_000)
+    for other in others:
+        if not isinstance(other, dict):
+            continue
+        recorded_start, recorded_end = other.get("start_us"), other.get("end_us")
+        if isinstance(other.get("video"), str) and type(recorded_start) is int and type(recorded_end) is int:
+            if _norm_path(other["video"]) != path:
+                continue
+            if min(end_us, recorded_end) - max(start_us, recorded_start) > 40_000:
+                return True
+        elif other.get("key") and other["key"] == own:
+            return True
+    return False
+
+
 def segment_keys(segments: Iterable[dict[str, Any]]) -> list[str]:
     keys: list[str] = []
     for seg in segments or []:
@@ -221,16 +284,24 @@ def record(manifest: dict[str, Any], segments: Iterable[dict[str, Any]], *,
     if not raw or not draft:
         return {"recorded": 0, "path": raw}
     segments = list(segments or [])
-    keys = segment_keys(segments)
+    placed = segment_uses(segments)
+    by_key = {row["key"]: row for row in placed}
+    for key in segment_keys(segments):
+        by_key.setdefault(key, {"key": key})
+    entries = list(by_key.values())
+    keys = list(by_key)
     now = time.strftime("%Y-%m-%dT%H:%M:%S")
     use = {"task": task, "draft": draft, "at": now, **({"reserved": True} if reserved else {})}
 
     def mutate(data):
         data = _drop_draft(data, draft, reserved_only=reserved)
         shots = data.setdefault("shots", {})
-        for key in keys:
-            uses = shots.setdefault(key, [])
-            uses.append(dict(use))
+        for row in entries:
+            entry = dict(use)
+            if "video" in row:
+                entry.update(video=row["video"], start_us=row["start_us"], end_us=row["end_us"])
+            uses = shots.setdefault(row["key"], [])
+            uses.append(entry)
             del uses[:-MAX_USES_PER_SHOT]
         if not reserved:
             data.setdefault("drafts", {})[draft] = {"task": task, "at": now, "shots": keys}

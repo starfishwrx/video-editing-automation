@@ -101,14 +101,12 @@ class SelectionRecoveryTests(unittest.TestCase):
         before = copy.deepcopy(plan['reviews']['2'])
         with patch.object(editor, '_edit_plan', side_effect=[failure, None]) as edit, \
              patch.object(editor, '_review_pool', return_value=(copy.deepcopy(self.reviews['1']), full)) as review:
-            editor._edit_with_review_fallback(self.manifest, self.analysis, plan, self.root, None)
-        self.assertEqual(edit.call_count, 2)
-        self.assertEqual(review.call_count, 1)
-        self.assertTrue(review.call_args.kwargs['exhaustive'])
-        self.assertEqual(review.call_args.args[1]['index'], 1)
+            with self.assertRaises(editor.WindowFailure):
+                editor._edit_with_review_fallback(self.manifest, self.analysis, plan, self.root, None)
+        self.assertEqual(edit.call_count, 1)
+        self.assertEqual(review.call_count, 0)
         self.assertEqual(plan['reviews']['2'], before)
-        self.assertEqual(plan['review_expansions'][0]['index'], 1)
-        self.assertTrue(plan['_resume_rows'])
+        self.assertNotIn('review_expansions', plan)
 
     def test_mismatches_keep_searching_until_feasible_match(self):
         sentence = copy.deepcopy(self.sentences[0])
@@ -142,7 +140,7 @@ class SelectionRecoveryTests(unittest.TestCase):
              patch.object(editor, '_review_pool', return_value=(copy.deepcopy(self.reviews['1']), full)) as review:
             with self.assertRaises(editor.WindowFailure):
                 editor._edit_with_review_fallback(self.manifest, self.analysis, plan, self.root, None)
-        self.assertEqual(review.call_count, 1)
+        self.assertEqual(review.call_count, 0)
 
     def test_long_matched_evidence_seeds_placement_without_more_reviews(self):
         plan = self.plan()
@@ -152,7 +150,26 @@ class SelectionRecoveryTests(unittest.TestCase):
         self.assertTrue(editor._retrieve_empty_selection(
             self.manifest, self.analysis, plan, failure, None))
         self.assertEqual(plan['rows'][0]['parts'][0]['shot_id'], 'shot1')
+        self.assertEqual(plan['rows'][0]['parts'][0]['source_start_us'], 1_000_000)
         self.assertIn('window or continuity repair', plan['rows'][0]['reason'])
+
+    def test_long_evidence_prefers_a_match_that_fits_at_two_x(self):
+        plan = self.plan()
+        plan['rows'][0] = {'index': 1, 'parts': [], 'reason': 'no short window yet'}
+        long = copy.deepcopy(plan['reviews']['1'][0])
+        long['evidence_intervals_us'] = [{'start': 1_000_000, 'end': 8_000_000}]
+        video = self.root / 'source-short.mp4'
+        video.write_bytes(b'short stretch')
+        short = {**copy.deepcopy(long), 'shot_id': 'shot-short',
+                 'source_identity': contract.source_identity(video),
+                 'evidence_intervals_us': [{'start': 2_000_000, 'end': 3_500_000}]}
+        self.analysis['shots'].append({**self.analysis['shots'][0], 'shot_id': 'shot-short', 'video': str(video)})
+        plan['reviews']['1'] = [long, short]
+        self.assertTrue(editor._retrieve_empty_selection(
+            self.manifest, self.analysis, plan, ValueError('AI_EDITOR_NO_SELECTION:1'), None))
+        part = plan['rows'][0]['parts'][0]
+        self.assertEqual(part['shot_id'], 'shot-short')
+        self.assertNotIn('source_start_us', part)
 
     def test_out_of_range_matched_evidence_seeds_guarded_start_for_placement(self):
         plan = self.plan()

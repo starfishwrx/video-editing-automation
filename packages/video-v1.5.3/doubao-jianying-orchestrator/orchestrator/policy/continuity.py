@@ -229,9 +229,11 @@ def _validate_experiment(group):
             _require(source["identity"] == part["source_identity"] and source["identity"]["path"] in paired,
                      "SOURCE_CHANGED")
             speed = (end - start) / target
-            _require(1 - 2 / target <= speed <= 3 + 2 / target
-                     and (part["process"] is True or abs(end - start - target) <= 2)
-                     and (not row["time_sensitive"] or abs(end - start - target) <= 2), "ALLOCATION_CHANGED")
+            realtime = abs(end - start - target) <= 2
+            unbounded = context.get("speed_unbounded") is True
+            _require(1 - 2 / target <= speed and (unbounded or speed <= 3 + 2 / target)
+                     and (part["process"] is True or realtime)
+                     and (unbounded or not row["time_sensitive"] or realtime), "ALLOCATION_CHANGED")
             _require(isinstance(fact.get("observation"), str) and bool(fact["observation"].strip()),
                      "MEMBER_OBSERVATION_MISSING")
             _intervals(fact.get("evidence_intervals_us"), start, end)
