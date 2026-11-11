@@ -1,5 +1,7 @@
 # 子系统：视觉匹配
 
+普通展示可根据切窗内的动作减少相同信息的重播。吸水实验须保持同场景、同次演示，头尾废料按原片坐标参与放置。详见 [ADR 0002](../adr/0002-ai-selection.md)。
+
 实际选镜位于 `packages/video-v1.5.3/doubao-jianying-orchestrator/orchestrator/selection/`，观察在 `vision/`，独立 QC 在 `quality/`，公共合同保留原位置。默认为 `ai_editor`；`manifest.selection_mode` 优先于 `JY_SELECTION_MODE`，`rule_then_ai` 为规则初排/AI 复核，显式 `legacy` 保留旧算法。模型与调用配置见[模型说明](../model-and-vision.md)。
 
 规范性关键词见[要求用语与适用范围](../../packages/video-v1.5.3/doubao-jianying-orchestrator/references/requirement_levels.md)。本页不把新队列默认施加于旧冻结运行。
