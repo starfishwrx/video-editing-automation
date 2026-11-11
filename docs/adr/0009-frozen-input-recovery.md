@@ -22,3 +22,7 @@
 ## 证据
 
 [Windows 状态与恢复](../windows-pipeline.md#状态与恢复)、[运行时恢复合同](../subsystems/runtime-and-recovery.md)、[匹配报告绑定](../subsystems/orchestrator-cli.md#4-依赖与缓存)、[开发日志](../working.md)、[CLI 冻结输入](../../packages/video-v1.5.3/doubao-jianying-orchestrator/orchestrator/application/cli.py)、[阶段恢复实现](../../packages/video-v1.5.3/tools/workflow/selection_recovery.py)。
+
+## 2026-11-11 冻结任务重跑（已采纳）
+
+批处理先识别已有草稿和冻结恢复阶段，再决定是否准备商品。旧匹配的编辑规则过期，或原配音超过纸品五帧气口上限时，恢复器只消费一次冻结选镜机会。原句、音频身份、句长及素材观察须校验一致；补镜可改变的 TTS 调用计数不参与句长比较。明确由任务提供的外部录音保留其来源。调用方没有指定台账时，恢复后的匹配和成功建稿使用当前共享台账。覆盖见 test_selection_stage_resume.py 和 test_batch_dispatch.py。

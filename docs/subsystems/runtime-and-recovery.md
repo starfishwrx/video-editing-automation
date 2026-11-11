@@ -63,3 +63,7 @@
 ## 纸品配音失败恢复
 
 NARRATION_GAP_EXCEEDED 与 NARRATION_AUDIO_UNVERIFIED 属时序阻断，next_action=replan_narration；探测失败 NARRATION_GAP_UNVERIFIED、准备失败 NARRATION_PREPARATION_FAILED 属环境阻断，next_action=fix_environment。均不可整任务自动重试。新增配音在选镜前有一次有界边缘修复；已冻结的音频/句长不在draft_write阶段自动改变，输入变化须重新规划受影响窗口，不能沿用原匹配认证。见 [ADR 0010](../adr/0010-final-narration-gate.md)。
+
+### 冻结重跑与写后回读
+
+有界恢复处理旧选镜规则与纸品气口超限。多版本任务逐个检查已保留草稿或恢复标记。重试沿用已有配音和素材观察。成功结果记录实际写稿后端和回退原因。回读核对 Narration 的源窗与目标窗，兼容写稿还核对实际暂存音频路径。默认写入先检查全部源片的兼容性，并在源片身份未变时复用探测结果。

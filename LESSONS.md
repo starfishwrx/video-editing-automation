@@ -7,6 +7,14 @@
 
 ## 新增条目
 
+### L-20261111-shared-display 相同开场需要用实际轨道追溯
+
+- status: OPEN
+- hits: 1
+- 模块: selection / recovery / draft readback
+- 对照源片和实际裁窗确认跨稿复用，再核实初选、补镜范围与写稿后端。测配音间隔应读草稿实际引用的文件，并核对当时使用的帧数阈值。
+- 证据: ADR 0002、ADR 0009、test_ai_editor.py、test_default_headless.py。
+
 ### L-20261110-contract-scope 规范要求用语前先核对范围和维护源
 - status: OPEN
 - hits: 2
