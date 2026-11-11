@@ -362,6 +362,25 @@ class PresentationWindowTests(unittest.TestCase):
         self.assertEqual(plan['rows'],before)
         self.assertIn('too_short',plan['window_reviews'])
 
+    def test_matched_static_display_crop_gets_only_reviewed_placement_speed_and_sentence_fit(self):
+        manifest={**self.manifest,'segments':[dict(text=self.sentence['text'],audio_duration_us=600_000)]}
+        plan=self.plan()
+        plan['display_reviews'][0].pop('presentation_observation')
+        plan['display_reviews'][0]['review_window_us']={'start':0,'end':8_000_000}
+        media=dict(start=.3,end=1.5,before=self.review['source_identity'],times=[.3,.6,.9,1.2,1.46],sheet=Path('static.jpg'))
+        raw=dict(verdict='suitable',same_product=True,observation='同商品已稳定可辨认',reason='本句泛促销可用',
+            confidence=.9,evidence_intervals_us=[{'start':300_000,'end':1_500_000}],
+            sentence_fit=True,sentence_observation='原句没有规格性能，实窗展示同商品')
+        with mock.patch.object(editor,'_review_media',return_value=media),mock.patch.object(editor,'_call',return_value=raw), \
+                mock.patch.object(editor,'_review',side_effect=AssertionError('matched parent needs placement review')):
+            key=editor._review_proposed_window(manifest,plan,Path(self.tmp.name),self.sentence,self.shot,(300_000,1_500_000))
+        self.assertIsNotNone(key)
+        plan['rows'][0]['parts']=[dict(shot_id='display',audio_duration_us=600_000,source_start_us=300_000,window_review_key=key)]
+        actual=editor._assemble(manifest,{'shots':[self.shot]},plan,narration_timing=None)['segments'][0]
+        self.assertEqual(actual['video_speed'],2)
+        self.assertTrue(actual['ai_selection']['sentence_fit']['ok'])
+        self.assertEqual(actual['ai_selection']['supported_point_ids'],[])
+
     def test_half_second_cta_does_not_force_whole_library_review(self):
         shots = {f"s{i}": {**self.shot, "shot_id": f"s{i}"} for i in range(24)}
         sentence = {**self.sentence, "index": 0, "kind": "product_intro", "candidate_ids": list(shots)}

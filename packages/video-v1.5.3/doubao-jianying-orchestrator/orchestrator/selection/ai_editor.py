@@ -1147,7 +1147,7 @@ def _assemble(manifest: dict, analysis: dict, plan: dict, *, narration_timing: d
                 review = {**revised, "scarce_reuse_reason": reuse_reason}
                 shot = {**shot, "source_start": window["start"] / 1e6, "source_end": window["end"] / 1e6}
             review = {**review, "preferred_speed": _scene_preference(manifest, sentence, review)}
-            if part.get('sentence_fit_required') and not (
+            if (part.get('sentence_fit_required') or review.get('sentence_fit_claim') is not None) and not (
                     review.get('sentence_fit') is True and review.get('sentence_fit_claim') == sentence['text']
                     and isinstance(review.get('sentence_observation'),str) and review['sentence_observation'].strip()):
                 raise ValueError(f'AI_EDITOR_SENTENCE_FIT_UNOBSERVED:{index}')
@@ -1195,7 +1195,7 @@ def _assemble(manifest: dict, analysis: dict, plan: dict, *, narration_timing: d
                     "guard_source_start": original_shot["source_start"],
                     "guard_source_end": original_shot["source_end"],
                     "evidence_intervals": observed["evidence_intervals"], "text": sentence["text"]}
-            if part.get('sentence_fit_required'):
+            if part.get('sentence_fit_required') or review.get('sentence_fit_claim') is not None:
                 item['sentence_fit_required']=True
             if group:
                 item.update(continuity_group=group, guard_override=[0, 0],
@@ -1377,10 +1377,11 @@ def _matched_parent_review(plan: dict, sentence: dict, shot_id: str) -> dict | N
 
 def _review_placement_window(manifest: dict, sentence: dict, shot: dict, directory: Path,
                              *, parent: dict) -> dict:
-    """Judge only whether a crop is a complete, placeable clip.
+    """Review a crop's completeness, plus explicit sentence fit when requested.
 
     Selling-point support is already certified by ``parent``. This pass must not
     re-litigate instrument purpose, label claims, or other semantic gates.
+    A generic parent has no such sentence certificate and must earn a new one.
     """
     media = _review_media(shot, directory, dense=True)
     start, end, before, times, sheet = (media[k] for k in ("start", "end", "before", "times", "sheet"))
@@ -1540,10 +1541,16 @@ def _review_proposed_window(manifest, plan, directory, sentence, shot, window, *
         return None
     source = contract.source_identity(shot["video"])
     # Display and hook cuts still need a dense look at the new pixels. Placement
-    # review only inherits a selling point that was already matched.
+    # review only inherits a selling point that was already matched. Generic
+    # placement additionally needs a bounded parent and new sentence semantics.
     matched_parent = _matched_parent_review(plan, sentence, shot["shot_id"])
-    parent = None if sentence.get('action_continuation') else (matched_parent if sentence.get("kind") == "selling_point"
-              or (matched_parent or {}).get("presentation_observation") else None)
+    reviewed_bounds=(matched_parent or {}).get('review_window_us') or {}
+    generic_crop=(type(reviewed_bounds.get('start')) is int and type(reviewed_bounds.get('end')) is int
+                  and reviewed_bounds['start'] <= window[0] < window[1] <= reviewed_bounds['end'])
+    parent = None if sentence.get('action_continuation') else (matched_parent if sentence.get('kind') == 'selling_point'
+        or (matched_parent or {}).get('presentation_observation') or generic_crop else None)
+    if parent and sentence.get('kind') in {'hook','product_intro'} and not parent.get('presentation_observation'):
+        sentence={**sentence,'require_sentence_fit':True}
     identity = [
         "placement" if parent else "semantic", sentence, shot["shot_id"], source, window,
         (parent or {}).get("evidence_intervals_us")]
