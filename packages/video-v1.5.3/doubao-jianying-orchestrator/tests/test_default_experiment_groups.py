@@ -60,7 +60,7 @@ class DefaultExperimentGroupTests(unittest.TestCase):
         return {"verdict": "matched", "same_product": True, "same_demonstration": True,
             "same_selling_point": True, "semantic_continuity": True, "complete_action": True, "result_preserved": True,
             "shared_point": "absorption and verification", "product_observation": "same product visible",
-            "demonstration_observation": "setup and wet state correspond", "observation": "complete experiment",
+            "demonstration_observation": "同一样品倒液吸收后纸巾按压并提起，纸面干燥", "observation": "complete experiment",
             "reason": "fixed phases support each clause", "confidence": .9, "members": rows}
 
     def repair(self):
@@ -88,6 +88,25 @@ class DefaultExperimentGroupTests(unittest.TestCase):
         matched["segments"][0].pop("ai_selection")
         matched["segments"][0]["selection_mode"] = "rule"
         return matched
+
+    def test_experiment_group_requires_observed_tissue_contact_and_lift(self):
+        result = self.repair()
+        group = copy.deepcopy(result["segments"][0]["continuity_group"])
+        self.assertEqual(group["schema"], continuity.EXPERIMENT_SCHEMA)
+        self.assertEqual(group["input"]["category"], "weipin")
+        continuity.validate(group)
+        group["review"]["demonstration_observation"] = "未见纸巾，只有手掌按压后抬起"
+        group["review"]["observation"] = "仅手掌接触巾体"
+        group["review"]["reason"] = "纸巾按压后提起，纸面干燥"
+        for row in group["review"]["members"]:
+            row["observation"] = "仅手掌接触巾体"
+            row["reason"] = "纸巾按压后提起，纸面干燥"
+            for part in row["parts"]:
+                part["observation"] = "仅手掌接触巾体"
+        with self.assertRaisesRegex(ValueError, "CONTINUITY_TISSUE_PRESS_REQUIRED"):
+            continuity.validate(group)
+        group["review"]["demonstration_observation"] = "同一样品倒液后纸巾按压并提起，未见湿痕"
+        continuity.validate(group)
 
     def test_default_repair_pairs_files_and_keeps_voice_and_unrelated_row(self):
         original = copy.deepcopy(self.manifest)
@@ -353,6 +372,7 @@ class DefaultExperimentGroupTests(unittest.TestCase):
                 "same_selling_point": True, "semantic_continuity": True, "complete_action": True,
                 "result_preserved": True, "confidence": .9,
                 **{k: "actual source fact" for k in ("shared_point", "product_observation", "demonstration_observation", "observation", "reason")},
+                "demonstration_observation": "倒液吸收后纸巾按压巾体并提起，纸面干燥",
                 "complete_intervals_us": [context["window_us"]], "members": []}
             for member in context["members"]:
                 review["members"].append({"index": member["index"], "verdict": "matched", "same_product": True,

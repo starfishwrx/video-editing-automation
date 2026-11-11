@@ -6,10 +6,44 @@ cross-file pairing nor permission to compress a critical action or its result.
 from __future__ import annotations
 
 import math
+import re
 
 SCHEMA = "reviewed-sentence-continuity-v1"
 EXPERIMENT_SCHEMA = "reviewed-experiment-sentence-group-v1"
 MAX_MEMBERS = 3
+# 反渗、干爽、不黏的按压验证只认纸巾。手掌或手指接触不是验证。
+_REWET_CLAIM = re.compile(r"反渗|回流|不黏|不粘|干爽|黏腻|粘腻")
+
+
+# These are observed actions, not a mention of a prop or a proposed test.
+# Keep the affirmative sequence in one observation; never assemble it from reasons.
+_TISSUE_SEQUENCE = re.compile(
+    r"纸巾(?:由手拿着)?[^，,。！？;；手\n]{0,40}?(?:按压|压住|压在|接触)"
+    r"[^。！？;；手\n]{0,60}?(?:提起|举起|抬起|拿起|揭起|移开)")
+_TISSUE_UNCERTAIN = re.compile(
+    r"未|没|并非|不是|不可见|看不到|缺少|缺失|看不清|无法|不能确认|不确定|不清楚|疑似|似乎|可能|或许|"
+    r"如果|假如|若|假设|需要|应当|应该|建议|待验证|准备|计划|将要|"
+    r"(?:不|无)(?:见|含|存在|使用|用|接触|按压|提起|举起|抬起)|"
+    r"\b(?:no|not|never|without|uncertain|unclear|possibly|maybe|might|could|"
+    r"would|should|if|need|planned)\b", re.I)
+# Negative wetness findings are positive results, not missing action evidence.
+_DRY_RESULT = re.compile(r"未被染湿|没有变湿|(?:未见|没有|没见到|未发现)(?:明显(?:的)?)?(?:湿痕|水渍|湿印|蓝色液体|液体回渗|反渗)")
+_HAND_LIFT = re.compile(r"(?:提起|举起|抬起|拿起|移开)(?:了)?(?:手掌|手指|手)(?!中)"
+                        r"|(?:手掌|手指)(?:随后|然后|再)?(?:提起|举起|抬起|移开)")
+
+
+def tissue_press_missing(texts, observations) -> bool:
+    """Require affirmative observed tissue contact followed by lifting, fail closed.
+
+    Callers supply only visual observation fields. Explanations and claims cannot
+    substitute for observed evidence; result/completeness gates still apply.
+    """
+    if not any(_REWET_CLAIM.search(str(text or "")) for text in texts):
+        return False
+    return not any(isinstance(item, str) and _TISSUE_SEQUENCE.search(item)
+                   and not _TISSUE_UNCERTAIN.search(_DRY_RESULT.sub("干燥", item))
+                   and not _HAND_LIFT.search(item)
+                   for item in observations)
 
 
 def adjacent(indices):
@@ -97,6 +131,11 @@ def validate(group):
     _require(cursor == end, "GROUP_DURATION_CHANGED")
     _require(adjacent([m["index"] for m in members]), "NOT_ADJACENT")
     source_chain([(str(context["source_identity"]["path"]), m["start_us"], m["end_us"]) for m in members])
+    if context.get("category") == "weipin" and tissue_press_missing(
+            [member.get("text") for member in members],
+            [review.get(key) for key in ("demonstration_observation", "observation")]
+            + [row.get("observation") for row in observations]):
+        _require(False, "TISSUE_PRESS_REQUIRED")
     return group
 
 
@@ -198,6 +237,12 @@ def _validate_experiment(group):
             _intervals(fact.get("evidence_intervals_us"), start, end)
             chain.append((source["identity"]["path"], start, end))
     source_chain(chain, (paired,))
+    if context.get("category") == "weipin" and tissue_press_missing(
+            [member.get("text") for member in members],
+            [review.get(key) for key in ("demonstration_observation", "observation")]
+            + [row.get("observation") for row in observed]
+            + [part.get("observation") for row in observed for part in row["parts"]]):
+        _require(False, "TISSUE_PRESS_REQUIRED")
     return group
 
 

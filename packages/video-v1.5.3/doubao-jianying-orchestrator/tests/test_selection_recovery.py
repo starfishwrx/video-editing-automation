@@ -1103,7 +1103,7 @@ class SelectionRecoveryTests(unittest.TestCase):
             'verdict': 'matched', 'same_product': True, 'same_demonstration': True, 'same_selling_point': True,
             'semantic_continuity': True, 'complete_action': True, 'result_preserved': True,
             'shared_point': 'experiment', 'product_observation': 'same product',
-            'demonstration_observation': 'same sample and setup', 'observation': 'complete experiment',
+            'demonstration_observation': '同一样品倒液吸收后纸巾按压并提起，纸面干燥', 'observation': 'complete experiment',
             'reason': 'continuous phases', 'confidence': .9,
             'complete_intervals_us': [copy.deepcopy(context['window_us'])], 'members': observations}}
 

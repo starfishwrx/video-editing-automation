@@ -21,6 +21,77 @@ import test_production_playback as baseline
 process = baseline.process
 
 
+class TissuePressGateTests(unittest.TestCase):
+    def row(self, claim, observed, reason="手掌按压证明不黏"):
+        return {"claim": claim, "match_level": "DIRECT", "visual_ok": True,
+                "observed": observed, "reason": reason}
+
+    def test_palm_or_hand_leaving_cannot_pass_a_rewet_claim(self):
+        sticky = self.row("上班族和学生党久坐也不会觉得黏腻",
+                          "用手掌按压已经吸满蓝色液体的巾体，抬起手后手掌干净")
+        gated = ai_editor_qc.apply_tissue_press_gate(dict(sticky), category="weipin")
+        self.assertEqual(gated["match_level"], "INSUFFICIENT_EVIDENCE")
+        self.assertFalse(gated["visual_ok"])
+        self.assertTrue(gated["tissue_press_required"])
+        self.assertIn("纸巾", gated["reason"])
+        rewet = self.row("海量瞬吸也不反渗", "倒完，表面没有外溢和反渗", "表面没有外溢")
+        self.assertEqual(ai_editor_qc.apply_tissue_press_gate(rewet, category="weipin")["match_level"],
+                         "INSUFFICIENT_EVIDENCE")
+        kept = self.row("上班族和学生党久坐也不会觉得黏腻", "纸巾按压后举起，纸巾无明显湿痕", "纸巾验证不反渗")
+        self.assertEqual(ai_editor_qc.apply_tissue_press_gate(kept, category="weipin")["match_level"], "DIRECT")
+        self.assertEqual(ai_editor_qc.apply_tissue_press_gate(dict(sticky), category="zhipin")["match_level"], "DIRECT")
+        absorb = self.row("高分子吸水因子", "倒入蓝色液体并锁在中央", "液体锁在中央")
+        self.assertEqual(ai_editor_qc.apply_tissue_press_gate(absorb, category="weipin")["match_level"], "DIRECT")
+        soft = self.row("棉柔面层软乎乎", "手掌抚摸白色面层", "面层柔软")
+        self.assertEqual(ai_editor_qc.apply_tissue_press_gate(soft, category="weipin")["match_level"], "DIRECT")
+
+
+    def test_mentions_negation_and_hypothetical_tissue_do_not_pass(self):
+        rejected = (
+            "未见纸巾，只有手掌按压后抬起",
+            "纸巾放在旁边，手掌按压后抬起",
+            "纸巾按压巾体，未见提起",
+            "纸巾按压巾体，提起未见",
+            "未使用纸巾按压后提起",
+            "没有纸巾按压后举起的画面",
+            "纸巾可能按压后举起",
+            "如果纸巾按压后提起即可验证",
+            "纸巾按压后抬起手掌",
+            "纸巾按压后，手掌抬起",
+            "纸巾按压巾体后手掌抬起，纸巾仍留在巾体上",
+            "并非纸巾按压后提起，而是手掌按压后抬起",
+            "纸巾按压后提起的过程不可见",
+            "看不到纸巾按压后提起的画面",
+            "不是纸巾按压后提起，而是手掌接触后离开",
+            "纸巾按压后，手掌缓缓抬起，纸巾仍在原处",
+            "A tissue is beside the pad while a bare hand presses the pad and lifts away.",
+            "纸巾按压巾体",
+            "纸巾提起后展示",
+        )
+        for observed in rejected:
+            for level in ("DIRECT", "ACCEPTABLE_DEGRADED"):
+                with self.subTest(observed=observed, level=level):
+                    row = self.row("吸收后不反渗", observed,
+                                   "纸巾按压巾体后提起，纸巾无明显湿痕")
+                    row["match_level"] = level
+                    gated = ai_editor_qc.apply_tissue_press_gate(row, category="weipin")
+                    self.assertEqual(gated["match_level"], "INSUFFICIENT_EVIDENCE")
+                    self.assertFalse(gated["visual_ok"])
+                    self.assertEqual(row["match_level"], level)
+
+    def test_observed_tissue_contact_and_lift_pass_without_using_reason(self):
+        for observed in ("纸巾按压巾体并提起，纸巾无明显湿痕",
+                         "纸巾接触巾体后举起，展示干燥纸面",
+                         "纸巾按压后提起，未见湿痕",
+                         "纸巾按压后提起，没有蓝色液体",
+                         "纸巾按压后提起，纸巾未被染湿",
+                         "纸巾按压后提起，表面没有变湿",
+                         "纸巾由手拿着按压巾体后提起，纸面干燥"):
+            with self.subTest(observed=observed):
+                row = self.row("吸收后不反渗", observed, "需要纸巾验证")
+                self.assertIs(ai_editor_qc.apply_tissue_press_gate(row, category="weipin"), row)
+
+
 class SentenceContinuityTests(unittest.TestCase):
     def setUp(self):
         baseline.ProductionPlaybackTests.setUp(self)
@@ -532,6 +603,36 @@ class SentenceContinuityTests(unittest.TestCase):
         self.assertFalse(self.plan['ok'])
         self.assertEqual(edit.call_count, 3)
         self.assertEqual(repair.call_count, 3)
+
+    def test_weipin_rewet_group_requires_tissue_not_a_bare_hand(self):
+        group = self.group()
+        group['input']['category'] = 'weipin'
+        group['input']['members'][1]['text'] = '上班族和学生党久坐也不会觉得黏腻'
+        with self.assertRaisesRegex(ValueError, 'CONTINUITY_TISSUE_PRESS_REQUIRED'):
+            continuity.validate(group)
+        group['review']['demonstration_observation'] = '倒液后纸巾按压巾体并提起，纸巾无明显湿痕'
+        continuity.validate(group)
+        other = self.group()
+        other['input']['category'] = 'zhipin'
+        other['input']['members'][1]['text'] = '台面都清爽了'
+        continuity.validate(other)
+
+    def test_tissue_group_rejects_negation_and_reason_only_evidence(self):
+        for observed in ("未见纸巾按压后提起", "纸巾可能按压后提起",
+                         "如果纸巾按压后提起即可验证", "只有手掌按压后抬起",
+                         "纸巾按压巾体", "纸巾放在旁边"):
+            with self.subTest(observed=observed):
+                group = self.group()
+                group['input']['category'] = 'weipin'
+                group['input']['members'][1]['text'] = '吸收后不反渗'
+                group['review']['demonstration_observation'] = observed
+                group['review']['reason'] = '纸巾按压后提起，纸巾无明显湿痕'
+                for row in group['review']['members']:
+                    row['reason'] = '纸巾按压后提起，纸巾无明显湿痕'
+                with self.assertRaisesRegex(ValueError, 'CONTINUITY_TISSUE_PRESS_REQUIRED'):
+                    continuity.validate(group)
+                group['review']['demonstration_observation'] = '纸巾按压巾体后提起，纸面干燥'
+                continuity.validate(group)
 
     def test_joint_rejections_never_grant_shared_time(self):
         for key in ('same_product', 'same_demonstration', 'same_selling_point', 'semantic_continuity',

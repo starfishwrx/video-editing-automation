@@ -106,6 +106,7 @@ def review_group(manifest, context, shot, directory):
 检查组合窗口完整保留必要动作及可读结果，每句对应的源区间实际展示该句承担的阶段；
 禁止结果口播时还在无关准备，禁止把只能组末看到的结果宣称已在前句出现。跨句处必须画面连续。
 不能仅因总长度放得下就通过。看不清阶段、商品/实验对应或结果可读性时uncertain。
+反渗、回流、干爽、不黏或黏腻的按压验证只认纸巾接触巾体并提起。手掌、手指、手离开、手掌干净都不是按压验证。组内有这类句子却看不见纸巾时，complete_action 必须为 false，verdict 不得 matched。
 输出JSON：{"verdict":"matched|mismatch|uncertain","same_product":true,"same_demonstration":true,
 "same_selling_point":true,"semantic_continuity":true,"complete_action":true,"result_preserved":true,
 "shared_point":"具体共同卖点","product_observation":"同商品可见依据","demonstration_observation":"同次连续演示可见依据",
