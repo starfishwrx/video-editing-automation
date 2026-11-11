@@ -98,7 +98,31 @@ class AIEditorTests(unittest.TestCase):
         for sentence in plan["sentences"]:
             sentence["experiment_role"] = "other"
         editor._vary_repeated_actions(manifest, analysis, plan, None, menu)
+        self.assertEqual(plan['rows'][1]['parts'][0]['shot_id'],'second')
+        # The shared generic pool still does not prove this exact spoken fact.
+        with mock.patch.object(editor,'_review_proposed_window',return_value=None) as semantic:
+            editor._vary_repeated_actions(manifest,analysis,plan,None,menu,directory=self.root)
+        self.assertTrue(semantic.call_args.args[3]['require_sentence_fit'])
+        self.assertEqual(semantic.call_args.args[3]['text'],self.manifest['segments'][0]['text'])
+        self.assertEqual(plan['rows'][1]['parts'][0]['shot_id'],'second')
+        for error in (ValueError('AI_EDITOR_CALL_FAILED:REQUEST_TIMEOUT'),OSError('AI_EDITOR_CALL_FAILED:503')):
+            with mock.patch.object(editor,'_review_proposed_window',side_effect=error):
+                editor._vary_repeated_actions(manifest,analysis,plan,None,menu,directory=self.root)
+            self.assertEqual(plan['rows'][1]['parts'][0]['shot_id'],'second')
+        with mock.patch.object(editor,'_row_has_presentation',side_effect=lambda p,r:r['index']==2), \
+                mock.patch.object(editor,'_review_proposed_window',side_effect=AssertionError('keep complete phase')):
+            editor._vary_repeated_actions(manifest,analysis,plan,None,menu,directory=self.root)
+        self.assertEqual(plan['rows'][1]['parts'][0]['shot_id'],'second')
+        def fit(_manifest,plan,_directory,sentence,shot,window):
+            plan.setdefault('window_reviews',{})['fit']={**plan['display_reviews'][-1],
+                'sentence_index':sentence['index'],'review_window_us':dict(zip(('start','end'),window)),
+                'sentence_fit':True,'sentence_fit_claim':sentence['text'],'sentence_observation':'本句事实有画面支持'}
+            return 'fit'
+        with mock.patch.object(editor,'_review_proposed_window',side_effect=fit):
+            editor._vary_repeated_actions(manifest,analysis,plan,None,menu,directory=self.root)
         self.assertEqual(plan["rows"][1]["parts"][0]["shot_id"], "other")
+        result=editor._assemble(manifest,analysis,plan,narration_timing=None)
+        self.assertTrue(result['segments'][1]['ai_selection']['sentence_fit']['ok'])
 
     def test_action_hint_does_not_merge_distinct_phases(self):
         shot = {"action": "倾倒", "action_segments": [
@@ -1298,6 +1322,23 @@ class AIEditorTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "SLOT_TIMEOUT"):
                 editor._call("prompt", self.root / "response.json")
             provider.assert_called_once()
+
+    def test_text_json_mode_identity_does_not_reuse_old_unconstrained_response(self):
+        from orchestrator import vision_analyzer
+        output=self.root/'edit-json.json'
+        editor._save(output,{'old':True})
+        prompt='Output JSON'
+        editor._save(output.with_suffix('.request.json'),dict(prompt_sha256=contract.digest(prompt),
+            image_sha256=None,model='qwen-test',endpoint='https://example.invalid/v1',thinking='enable_thinking=false'))
+        env={'JY_VISION_TRANSPORT':'qwen','JY_QWEN_BASE_URL':'https://example.invalid/v1',
+             'JY_QWEN_API_KEY':'synthetic','JY_QWEN_MODEL':'qwen-test'}
+        with mock.patch.dict('os.environ',env), mock.patch.object(vision_analyzer,'_run_qwen_chat',
+                return_value=(True,'{"new":true}')) as provider:
+            self.assertEqual(editor._call(prompt,output),{'new':True})
+            self.assertEqual(editor._call(prompt,output),{'new':True})
+        provider.assert_called_once()
+        identity=json.loads(output.with_suffix('.request.json').read_text(encoding='utf8'))
+        self.assertEqual(identity['response_format'],{'type':'json_object'})
 
     def test_float_vision_timeout_env_string_is_parsed_safely(self):
         from orchestrator import vision_analyzer

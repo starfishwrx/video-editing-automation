@@ -1029,6 +1029,8 @@ def _run_compatible_chat(cfg: dict[str, str], sheet: Path | None, prompt: str, o
         "temperature": 0,
         "stream": False,
     }
+    if sheet is None and validator is not None and 'json' in prompt.casefold():
+        body['response_format'] = {'type': 'json_object'}
     result = vision_client.post_chat(
         cfg["base_url"] + "/chat/completions", cfg["api_key"], body, output,
         timeout=min(float(timeout), runtime_policy.load_policy().request_timeout),

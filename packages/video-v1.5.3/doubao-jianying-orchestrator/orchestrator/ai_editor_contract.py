@@ -6,6 +6,7 @@ It is an observation receipt, not an independent-QC or delivery permission.
 from __future__ import annotations
 
 import hashlib
+import copy
 import importlib.util
 import json
 import math
@@ -20,7 +21,7 @@ POINT_COVERAGE_POLICY = "at_least_one_specific_point"
 KINDS = {"selling_point", "product_intro", "hook"}
 BASES = {"editorial_fit", "visible_result", "readable_label", "product_display"}
 if __package__:
-    from .policy import playback, continuity
+    from .policy import playback, continuity, presentation
 else:
     _playback_spec = importlib.util.spec_from_file_location(
         "_chatcut_playback", Path(__file__).parent / "policy" / "playback.py")
@@ -30,6 +31,10 @@ else:
         "_chatcut_continuity", Path(__file__).parent / "policy" / "continuity.py")
     continuity = importlib.util.module_from_spec(_continuity_spec)
     _continuity_spec.loader.exec_module(continuity)
+    _presentation_spec = importlib.util.spec_from_file_location(
+        "_chatcut_presentation", Path(__file__).parent / "policy" / "presentation.py")
+    presentation = importlib.util.module_from_spec(_presentation_spec)
+    _presentation_spec.loader.exec_module(presentation)
 AI_SPEED_MAX = playback.PROCESS_MAX
 POLICY = """先通读整稿，先安排具体卖点，再安排产品介绍和无具体卖点的钩子/衔接。
 全稿每一句按实际内容分类。开头、中段或结尾纯招呼、设问、吊胃口且没有本品具体卖点，标为hook；问句含本品具体卖点仍是selling_point。一句多个卖点至少实际呈现一个具体点，未覆盖项如实记录，不能声称全部已证实。
@@ -42,7 +47,7 @@ POLICY = """先通读整稿，先安排具体卖点，再安排产品介绍和�
 具体卖点不能用普通包装展示替代。看不到、只有口播、对象错误和不确定不得假装支持。
 相关实验按前后语义连续播放，不反复从头播放；匹配先于去重与机位变化。
 画面贴切优先，完整保留必要动作和结果；变速必须遵守下述生产播放规则。
-优先原素材时间轴的中后段、尽量避开原素材前三秒；这是偏好，不是每个切分镜头再减三秒，短素材和开头唯一正确证据仍可用。
+已复核有效动作时，从有效变化开始保留到首次展示成立和足够辨认，避开准备、重复停留及复位；动作阶段先于原素材中后段偏好。没有阶段事实时保留原取段偏好，不猜动作起止。
 奶被纸、棉柔巾、厨房纸、湿厕纸按口播匹配卖点及同商品展示；根据实际可见动作、机位和源区间减少近重复，不按文件名判断。
 素材描述仅供召回，最终判断必须依据本次提供的真实画面。不得修改口播或虚构素材。"""
 
@@ -88,8 +93,11 @@ def rules_identity(manifest: dict | None = None) -> dict:
     return {key: context[key] for key in ("category", "versions")}
 
 
-def policy_prompt(manifest: dict) -> str:
+def policy_prompt(manifest: dict, *, include_presentation: bool = True) -> str:
     policy = POLICY + "\n" + playback.PROMPT
+    if include_presentation:
+        policy += "\n" + presentation.PROMPT
+        policy += "\n商品展示动作阶段策略：" + presentation.VERSION
     if editorial_context(manifest)["category"] == "weipin":
         policy += ("\n裤型卫生巾按可见部位和动作分别判断：腰腹包覆或高腰看展开的腰头高度、前腹覆盖或试穿位置；"
                    "腰围弹力看两侧撑开腰头产生形变，宣称回弹还需看见松手回缩。"
@@ -288,6 +296,7 @@ def make_receipt(segment: dict, *, index: int, sentence: dict, observation: dict
         "source_identity": source_identity, "window_us": _window(segment),
         "playback_policy_version": playback.VERSION,
         "playback_observation": observation.get("playback_observation"),
+        "presentation_observation": copy.deepcopy(segment.get("presentation_observation")),
         "continuity_group": segment.get("continuity_group"),
         "action_completeness_scope": segment.get("action_completeness_scope"),
         "video_speed": segment.get("video_speed"),
@@ -299,6 +308,9 @@ def make_receipt(segment: dict, *, index: int, sentence: dict, observation: dict
     }
     if task_speed_cap is not None:
         receipt["task_absorb_speed_cap"] = task_speed_cap
+    if segment.get('sentence_fit_required'):
+        receipt['sentence_fit']={'ok':observation.get('sentence_fit'),
+            'claim':observation.get('sentence_fit_claim'),'observation':observation.get('sentence_observation')}
     return receipt
 
 
@@ -311,6 +323,7 @@ def validate_segment_receipt(item: dict, *, text: str | None = None,
         return {"ok": False, "reasons": ["AI_SELECTION_RECEIPT_MISSING"]}
     try:
         reasons.extend(continuity.member_errors(item, index if index is not None else receipt.get("index")))
+        reasons.extend(presentation.group_errors(item.get("continuity_group")))
         if item.get("continuity_group") and manifest is not None:
             context = item["continuity_group"]["input"]
             if (context.get("product") != manifest.get("product") or context.get("category") != manifest.get("category")
@@ -324,6 +337,12 @@ def validate_segment_receipt(item: dict, *, text: str | None = None,
             reasons.append("AI_SELECTION_BASIS_INVALID")
         if receipt.get("text") != str(text if text is not None else item.get("text") or ""):
             reasons.append("AI_SELECTION_TEXT_CHANGED")
+        if item.get('sentence_fit_required') or 'sentence_fit' in receipt:
+            fit=receipt.get('sentence_fit')
+            if (item.get('sentence_fit_required') is not True or not isinstance(fit,dict)
+                    or fit.get('ok') is not True or fit.get('claim') != receipt.get('text')
+                    or not isinstance(fit.get('observation'),str) or not fit['observation'].strip()):
+                reasons.append('AI_SELECTION_SENTENCE_FIT_UNOBSERVED')
         if index is not None and receipt.get("index") != index:
             reasons.append("AI_SELECTION_INDEX_CHANGED")
         if receipt.get("video") != str(item.get("video") or "") or receipt.get("shot_id") != item.get("temporary_shot_id"):
@@ -359,6 +378,11 @@ def validate_segment_receipt(item: dict, *, text: str | None = None,
         reasons.extend(p["code"] for p in problems)
         if item.get("playback_observation") != receipt.get("playback_observation"):
             reasons.append("PLAYBACK_OBSERVATION_CHANGED")
+        if item.get("presentation_observation") != receipt.get("presentation_observation"):
+            reasons.append("PRESENTATION_OBSERVATION_CHANGED")
+        if not item.get("multi_shot"):
+            reasons.extend(presentation.cut_errors(receipt.get("presentation_observation"),
+                window["start"], window["end"]))
         if receipt.get("video_speed") != speed or receipt.get("speed_range_override") != bounds:
             reasons.append("AI_SELECTION_SPEED_CHANGED")
         preferred = item.get("preferred_speed", 1.0)

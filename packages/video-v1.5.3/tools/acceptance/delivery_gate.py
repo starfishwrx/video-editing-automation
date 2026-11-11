@@ -29,7 +29,10 @@ def local_preview(task: dict, qc_result: dict) -> bool:
     """Retain an explicitly uncertified preview; this never permits delivery."""
     return (requested_mode(task) == "preview" and qc_result.get("status") == "UNCERTIFIED"
             and isinstance(qc_result.get("report"), dict)
-            and qc_result["report"].get("delivery_mode") == "preview")
+            and qc_result["report"].get("delivery_mode") == "preview"
+            and not any(isinstance(row, dict) and (row.get("action_repair") in {"recut", "replace", "review"}
+                       or (row.get("terminal_check") or {}).get("view") == "unverified")
+                        for row in qc_result["report"].get("model_review") or []))
 
 
 def qc_statuses(task_dir: Path, done: dict, draft_root: Path) -> list[str]:

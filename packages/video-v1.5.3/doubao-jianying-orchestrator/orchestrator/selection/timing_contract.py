@@ -40,7 +40,7 @@ import re
 import subprocess
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Optional
-from ..policy import playback
+from ..policy import playback, presentation
 
 US = 1_000_000
 
@@ -340,6 +340,7 @@ class WindowRequest:
     video_duration_us: Optional[int] = None
     fps: float = DEFAULT_FPS
     preferred_speed: float = 1.0
+    exact_source_timing: bool = False
 
     @property
     def timeline_us(self) -> int:
@@ -391,7 +392,7 @@ class WindowSolution:
 
     def to_dict(self) -> dict:
         return {
-            "ok": self.ok, "speed": round(self.speed, 6),
+            "ok": self.ok, "speed": self.speed if self.detail.get('exact_source_timing') else round(self.speed, 6),
             "source_start": round(self.source_start_us / US, 6),
             "source_end": round(self.source_end_us / US, 6),
             "segment_s": round(self.segment_us / US, 6),
@@ -444,6 +445,8 @@ def _candidate_speeds(req: WindowRequest, usable_us: int, timeline_us: int,
     if timeline_us > 0:
         values.add(usable_us / timeline_us)                     # 恰好铺满可用素材
         if evidence_span_us:
+            if req.exact_source_timing:
+                values.add(evidence_span_us / timeline_us)
             # 恰好罩住证据跨度（两端各留一帧余量，避免四舍五入后卡边）
             values.add((evidence_span_us + 2 * frame) / timeline_us)
 
@@ -520,6 +523,8 @@ def solve_window(req: WindowRequest) -> WindowSolution:
         few microseconds and become illegal at write time.  Choose the nearest
         grid point that does not cross the already-proved material boundary.
         """
+        if req.exact_source_timing:
+            return speed if int(round(speed * timeline_us)) <= usable_us else None
         snapped = frame_speed(speed, speed_min, speed_max, fps=req.fps)
         if int(round(snapped * timeline_us)) <= usable_us:
             return snapped
@@ -583,7 +588,7 @@ def solve_window(req: WindowRequest) -> WindowSolution:
         source_end_us=int(start) + int(window_us), segment_us=int(timeline_us),
         material_us=int(window_us), handle_room_us=int(usable_us - window_us),
         detail={"candidate_count": len(feasible), "usable_us": int(usable_us),
-                "timeline_us": int(timeline_us)},
+                "timeline_us": int(timeline_us), **({'exact_source_timing': True} if req.exact_source_timing else {})},
     )
 
 
@@ -679,6 +684,7 @@ class SpanSegment:
     video: str = ""
     shot_id: str = ""
     preferred_speed: float = 1.0
+    exact_source_timing: bool = False
 
     @property
     def lo_bound_us(self) -> int:
@@ -712,7 +718,7 @@ class SpanSegment:
             transition_out_handle_us=int(self.transition_out_handle_us),
             evidence_start_us=self.evidence_start_us, evidence_end_us=self.evidence_end_us,
             speed_min=float(self.speed_min), speed_max=float(self.speed_max),
-            preferred_speed=self.preferred_speed, fps=fps)
+            preferred_speed=self.preferred_speed, fps=fps, exact_source_timing=self.exact_source_timing)
 
 
 @dataclass(frozen=True)

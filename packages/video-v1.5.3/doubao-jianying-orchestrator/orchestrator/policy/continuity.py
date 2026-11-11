@@ -7,6 +7,15 @@ from __future__ import annotations
 
 import math
 import re
+if __package__:
+    from . import presentation
+else:
+    import importlib.util
+    from pathlib import Path
+    _presentation_spec = importlib.util.spec_from_file_location(
+        '_chatcut_continuity_presentation', Path(__file__).with_name('presentation.py'))
+    presentation = importlib.util.module_from_spec(_presentation_spec)
+    _presentation_spec.loader.exec_module(presentation)
 
 SCHEMA = "reviewed-sentence-continuity-v1"
 EXPERIMENT_SCHEMA = "reviewed-experiment-sentence-group-v1"
@@ -94,12 +103,19 @@ def validate(group):
     context, review = group["input"], group["review"]
     _require(isinstance(context, dict) and isinstance(review, dict), "REVIEW_INVALID")
     members, observations = context["members"], review["members"]
+    presentation_group = context.get('purpose') == 'product_presentation'
+    _require(context.get('purpose') in (None, 'product_presentation'), 'PURPOSE_INVALID')
+    if presentation_group:
+        _require(bool(context.get('presentation_observations')) and not presentation.group_errors(group),
+                 'PRESENTATION_PHASE_REQUIRED')
     _require(isinstance(members, list) and isinstance(observations, list)
              and 2 <= len(members) <= MAX_MEMBERS and len(observations) == len(members)
              and all(isinstance(m, dict) for m in members + observations), "MEMBERS_INVALID")
     _require(review.get("verdict") == "matched" and all(review.get(k) is True for k in (
-        "same_product", "same_demonstration", "same_selling_point", "semantic_continuity",
+        "same_product", "same_demonstration", "semantic_continuity",
         "complete_action", "result_preserved")), "JOINT_REVIEW_UNCERTAIN")
+    _require(review.get('same_presentation' if presentation_group else 'same_selling_point') is True,
+             'JOINT_REVIEW_UNCERTAIN')
     for key in ("shared_point", "product_observation", "demonstration_observation", "observation", "reason"):
         _require(isinstance(review.get(key), str) and bool(review[key].strip()), "OBSERVATION_MISSING")
     confidence = review.get("confidence")
@@ -113,7 +129,9 @@ def validate(group):
     for member, observed in zip(members, observations):
         index = member["index"]
         _require(type(index) is int and index > 0 and (previous is None or index == previous + 1), "NOT_ADJACENT")
-        _require(member.get("kind") == "selling_point" and member.get("selling_points"), "NOT_SELLING_POINT")
+        selling = member.get('kind') == 'selling_point' and bool(member.get('selling_points'))
+        general = member.get('kind') in {'hook', 'product_intro'} and member.get('selling_points') == []
+        _require(selling or (presentation_group and general), 'NOT_SELLING_POINT')
         _require(type(member["audio_duration_us"]) is int and member["audio_duration_us"] > 0
                  and type(member["target_us"]) is int and member["target_us"] >= member["audio_duration_us"], "AUDIO_INVALID")
         _require(member["start_us"] == cursor and member["end_us"] == cursor + member["target_us"], "DISCONTINUOUS")
@@ -122,7 +140,11 @@ def validate(group):
                  "MEMBER_UNCERTAIN")
         required = {p["id"] for p in member["selling_points"]}
         supported = observed.get("supported_point_ids")
-        _require(isinstance(supported, list) and bool(supported) and set(supported) <= required, "POINT_UNSUPPORTED")
+        _require(isinstance(supported, list) and set(supported) <= required
+                 and (bool(supported) if selling else supported == []), "POINT_UNSUPPORTED")
+        if presentation_group:
+            _require(observed['time_sensitive'] is False and (not selling or set(supported) == required),
+                     'PRESENTATION_MEMBER_UNSUPPORTED')
         for key in ("observation", "reason", "phase"):
             _require(isinstance(observed.get(key), str) and bool(observed[key].strip()), "MEMBER_OBSERVATION_MISSING")
         _require(observed.get("basis") in {"editorial_fit", "visible_result", "readable_label", "product_display"}, "BASIS_INVALID")
