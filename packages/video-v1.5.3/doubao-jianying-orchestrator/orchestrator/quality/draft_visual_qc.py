@@ -26,7 +26,7 @@ try:
     from ..media.video_decode import run_ffmpeg_decode
     from ..runtime.file_safety import atomic_write_text
     from ..runtime.runtime_policy import load_policy, media_slot
-    from ..visual_qc_contract import MATCH_LEVELS, REPORT_VERSION, RESPONSE_VERSION, draft_metadata_fingerprint, normalize_match_level, response_errors, _source_identity
+    from ..visual_qc_contract import MATCH_LEVELS, REPORT_VERSION, RESPONSE_VERSION, draft_metadata_fingerprint, normalize_match_level, response_errors, _source_identity, presentation_selection_errors
 except ImportError:
     # 这个文件会被 python draft_visual_qc.py 直接启动，没有包上下文。
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
@@ -36,7 +36,7 @@ except ImportError:
     from orchestrator.runtime.runtime_policy import load_policy, media_slot
     from orchestrator.visual_qc_contract import (MATCH_LEVELS, REPORT_VERSION, RESPONSE_VERSION,
                                                 draft_metadata_fingerprint, normalize_match_level,
-                                                response_errors, _source_identity)
+                                                response_errors, _source_identity, presentation_selection_errors)
 
 
 def _claim_gate_summary(claim: dict[str, Any]) -> str:
@@ -519,6 +519,7 @@ def main() -> int:
             response_version = ai_editor_qc.RESPONSE_VERSION
             result["response_contract"]["version"] = response_version
             result["selection_sha256"] = ai_editor_contract.digest(match_data.get("segments", []))
+            result['selection_segments'] = match_data.get('segments',[])
             result["editorial_rules"] = ai_editor_contract.rules_identity(match_data.get("manifest"))
             result["policy_version"] = ai_editor_contract.POLICY_VERSION
             identity_path = draft / "ai_selection_identity.json"
@@ -688,9 +689,9 @@ def main() -> int:
                 request_errors = {}
                 def prepare_batch(job):
                     batch_no, claims = job
-                    items = [dict(item, label=(f"S{local:02d} {item['suffix']} @{item['timestamp']:.3f}s" if ai_mode else f"S{local:02d} {item['suffix']}"))
+                    items = [dict(item, label=(ai_editor_qc.blind_frame_label(local,frame_no,item) if ai_mode else f"S{local:02d} {item['suffix']}"))
                              for local, claim in enumerate(claims, 1)
-                             for item in claim_frames.get(claim["index"], [])]
+                             for frame_no,item in enumerate(claim_frames.get(claim["index"], []),1)]
                     chunk_sheet = report_dir / f"draft_visual_qc_contact_sheet_{batch_no:02d}.jpg"
                     # Each claim contributes two frames (mid/end), or one
                     # per action part plus the final end frame.
@@ -824,6 +825,7 @@ def main() -> int:
                             row["selection_mode"] = claim["selection_mode"]
                             row["degraded_expected"] = claim["degraded"]
                             row["match_level"] = _normalize_match_level(row)
+                            row = ai_editor_qc.apply_presentation_gate(row,claim)
                             row = ai_editor_qc.apply_tissue_press_gate(
                                 row, category=str(claim.get("category") or ""))
                             row["visual_ok"] = row["match_level"] in {"DIRECT", "ACCEPTABLE_DEGRADED"}
@@ -845,6 +847,14 @@ def main() -> int:
                         result["warnings"].append("POST_DRAFT_VISION_JSON_INVALID:" + str(exc))
                         result["uncertified"] = True
                 # Requests finish out of order; retain timeline order in the evidence report.
+                if ai_mode:
+                    action_errors=presentation_selection_errors(match_data.get('segments',[]),visual_rows)
+                    for row in visual_rows:
+                        if row['index'] in action_errors and row.get('match_level') in {'DIRECT','ACCEPTABLE_DEGRADED'}:
+                            row.update(match_level='INSUFFICIENT_EVIDENCE',visual_ok=False)
+                            row['reason']=str(row.get('reason') or '')+' 动作检查与绑定的选镜意图或同组检查不一致。'
+                            result['warnings'].append(f"POST_DRAFT_PRESENTATION_UNVERIFIED:S{row['index']:02d}")
+                            result['uncertified']=True
                 result["model_review"] = sorted(visual_rows, key=lambda row: row["index"])
                 result["batch_results"].sort(key=lambda row: row["batch_no"])
                 result["degraded_matches"].sort(key=lambda row: row["index"])

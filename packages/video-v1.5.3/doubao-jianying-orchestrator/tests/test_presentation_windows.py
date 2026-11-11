@@ -236,6 +236,10 @@ class PresentationWindowTests(unittest.TestCase):
         frames = ai_editor_qc.frame_plan({"ai_segment": cut}, [row])
         self.assertTrue(any(abs(fraction - (.7 - .1) / 1.3) < 1e-9 for _, _, fraction in frames))
         self.assertTrue(any(abs(fraction - (1.06 - .1) / 1.3) < 1e-9 for _, _, fraction in frames))
+        labels=[ai_editor_qc.blind_frame_label(1,i,{'suffix':label,'timestamp':fraction})
+                for i,(_,label,fraction) in enumerate(frames,1)]
+        self.assertTrue(any('_ev' in label or '_phase' in label for _,label,_ in frames))
+        self.assertTrue(all(__import__('re').fullmatch(r'S01 P\d+ F\d+ @[0-9.]+s',label) for label in labels))
 
     def test_group_protects_whole_presentation_instead_of_replaying_per_member(self):
         group = {"input": {"window_us": {"start": 100_000, "end": 2_000_000}, "presentation_observations": [phase()]}}
@@ -519,10 +523,13 @@ class PresentationWindowTests(unittest.TestCase):
                                                 'verdict': 'matched', 'observation': 'UNTRUSTED_PASS_TEXT'}}}
         prompt = ai_editor_qc.prompt([claim], 8)
         self.assertIn('商品从侧向转向镜头', prompt)
+        self.assertIn('商品自身被转动至展示正面', prompt)
         self.assertIn('不是已发生事实', prompt)
         self.assertIn('不能偷换成更弱的动作后通过', prompt)
         self.assertNotIn('UNTRUSTED_PASS_TEXT', prompt)
         self.assertNotIn('1700001', prompt)
+        self.assertNotIn(presentation.SCHEMA,prompt)
+        self.assertNotIn('另观察原素材',prompt)
 
     def test_action_qc_does_not_borrow_next_unrelated_shots_result(self):
         claims = [{'index': i, 'ai_segment': {}} for i in range(1, 5)]

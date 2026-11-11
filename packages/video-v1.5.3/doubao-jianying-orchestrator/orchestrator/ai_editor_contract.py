@@ -93,9 +93,11 @@ def rules_identity(manifest: dict | None = None) -> dict:
     return {key: context[key] for key in ("category", "versions")}
 
 
-def policy_prompt(manifest: dict) -> str:
-    policy = POLICY + "\n" + playback.PROMPT + "\n" + presentation.PROMPT
-    policy += "\n商品展示动作阶段策略：" + presentation.VERSION
+def policy_prompt(manifest: dict, *, include_presentation: bool = True) -> str:
+    policy = POLICY + "\n" + playback.PROMPT
+    if include_presentation:
+        policy += "\n" + presentation.PROMPT
+        policy += "\n商品展示动作阶段策略：" + presentation.VERSION
     if editorial_context(manifest)["category"] == "weipin":
         policy += ("\n裤型卫生巾按可见部位和动作分别判断：腰腹包覆或高腰看展开的腰头高度、前腹覆盖或试穿位置；"
                    "腰围弹力看两侧撑开腰头产生形变，宣称回弹还需看见松手回缩。"

@@ -12,8 +12,8 @@ from typing import Any
 
 REPORT_VERSION = "chatcut-visual-qc-v3"
 RESPONSE_VERSION = "chatcut-visual-qc-response-v3"
-AI_REPORT_VERSION = "chatcut-visual-qc-v5"
-AI_RESPONSE_VERSION = "chatcut-visual-qc-response-v5"
+AI_REPORT_VERSION = "chatcut-visual-qc-v6"
+AI_RESPONSE_VERSION = "chatcut-visual-qc-response-v6"
 MATCH_LEVELS = {"DIRECT", "ACCEPTABLE_DEGRADED", "MISMATCH", "INSUFFICIENT_EVIDENCE"}
 OVERALL_LEVELS = {"PASS", "PASS_WITH_DEGRADED", "PASS_WITH_GAPS", "FAIL", "UNCERTIFIED"}
 
@@ -26,13 +26,18 @@ def _draft_documents():
     return module
 
 
-def _current_editorial_rules(report: dict) -> bool:
+def _ai_contract():
     if __package__:
         from . import ai_editor_contract as contract
     else:
         spec = importlib.util.spec_from_file_location("_chatcut_ai_contract", Path(__file__).with_name("ai_editor_contract.py"))
         contract = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(contract)
+    return contract
+
+
+def _current_editorial_rules(report: dict) -> bool:
+    contract=_ai_contract()
     recorded = report.get("editorial_rules")
     return (isinstance(recorded, dict) and report.get("policy_version") == contract.POLICY_VERSION
         and {k: recorded.get(k) for k in ("category", "versions")} == contract.rules_identity({"category": recorded.get("category")}))
@@ -120,6 +125,74 @@ def normalize_match_level(row: dict[str, Any]) -> str:
     return level
 
 
+def presentation_check_errors(row: dict, required_actors=None) -> list[str]:
+    required = row.get('presentation_expected_actors',[]) if required_actors is None else required_actors
+    if (not isinstance(required,(list,tuple,set)) or any(not isinstance(a,str) or a not in {'product','occluder'} for a in required)):
+        return ['PRESENTATION_EXPECTATION_INVALID']
+    check=row.get('action_check')
+    if not isinstance(check,dict):
+        return ['PRESENTATION_ACTION_UNVERIFIED']
+    actors={'product':{'product'},'occluder':{'occluder'},'product_and_occluder':{'product','occluder'}}
+    actor=check.get('actor')
+    actual=actors.get(actor,set()) if isinstance(actor,str) else set()
+    if (not actual or not set(required) <= actual or check.get('change_visible') is not True
+            or check.get('result_visibility') != 'clear' or not isinstance(check.get('observation'),str)
+            or not check['observation'].strip()):
+        return ['PRESENTATION_ACTION_UNVERIFIED']
+    return []
+
+
+def bound_selection(report):
+    segments=report.get('selection_segments')
+    if not isinstance(segments,list) or not segments or any(not isinstance(s,dict) for s in segments):
+        raise ValueError('QC_SELECTION_BINDING_MISSING')
+    if _ai_contract().digest(segments) != report.get('selection_sha256'):
+        raise ValueError('QC_SELECTION_BINDING_CHANGED')
+    return segments
+
+
+def presentation_expected_actors(phases):
+    return sorted({p['change']['actor'] for p in phases
+                   if (p.get('change') or {}).get('actor') in {'product','occluder'}})
+
+
+def presentation_selection_errors(segments,rows):
+    """Derive required action checks from the bound selection, never row flags."""
+    contract=_ai_contract()
+    by_index={r.get('index'):r for r in rows if isinstance(r,dict)}
+    expected,groups={},{}
+    for index,item in enumerate(segments,1):
+        if item.get('selection_mode') != 'ai_editor':
+            continue
+        parts=item.get('span_parts') if item.get('multi_shot') else [item]
+        phases=[(p.get('ai_selection') or {}).get('presentation_observation') for p in parts or []]
+        group=item.get('continuity_group') or {}
+        group_phases=(group.get('input') or {}).get('presentation_observations',[])
+        phases=[contract.presentation.get(p) for p in phases+group_phases if p is not None]
+        if not phases:
+            continue
+        actors=presentation_expected_actors(phases)
+        expected[index]=actors
+        if group_phases:
+            groups.setdefault(contract.digest(group['input']),[]).append(index)
+    errors={}
+    for index,actors in expected.items():
+        row=by_index.get(index) or {}
+        if row.get('presentation_check_required') is not True or row.get('presentation_expected_actors') != actors:
+            errors.setdefault(index,[]).append('PRESENTATION_EXPECTATION_CHANGED')
+        errors.setdefault(index,[]).extend(presentation_check_errors(row,actors))
+    for indices in groups.values():
+        signatures=[]
+        for index in indices:
+            check=(by_index.get(index) or {}).get('action_check')
+            if isinstance(check,dict):
+                signatures.append(json.dumps([check.get(k) for k in ('actor','change_visible','result_visibility')],sort_keys=True))
+        if len(signatures)!=len(indices) or len(set(signatures))!=1:
+            for index in indices:
+                errors.setdefault(index,[]).append('PRESENTATION_GROUP_CHECK_INCONSISTENT')
+    return {i:sorted(set(codes)) for i,codes in errors.items() if codes}
+
+
 def row_errors(row: Any) -> list[str]:
     if not isinstance(row, dict):
         return ["SEGMENT_NOT_OBJECT"]
@@ -145,6 +218,10 @@ def row_errors(row: Any) -> list[str]:
         errors.append("CONFIDENCE_INVALID")
     elif confidence == 0 and isinstance(level, str) and level in {"DIRECT", "ACCEPTABLE_DEGRADED"}:
         errors.append("POSITIVE_VERDICT_ZERO_CONFIDENCE")
+    if 'presentation_check_required' in row and type(row['presentation_check_required']) is not bool:
+        errors.append('PRESENTATION_MARKER_INVALID')
+    if row.get('presentation_check_required') and isinstance(level,str) and level in {'DIRECT','ACCEPTABLE_DEGRADED'}:
+        errors.extend(presentation_check_errors(row))
     return errors
 
 
@@ -173,6 +250,11 @@ def response_errors(model: dict[str, Any], expected_count: int, *, expected_vers
 
 
 def report_status(report: Any) -> str:
+    """Check report consistency; consumers must also call report_matches_draft.
+
+    A self-contained report cannot authenticate its own selection digest. Only
+    the draft identity in report_matches_draft anchors that digest to the build.
+    """
     try:
         return _report_status(report)
     except (OSError, RuntimeError, KeyError, TypeError, ValueError, AttributeError, OverflowError):
@@ -197,6 +279,7 @@ def report_matches_draft(report: Any, draft: Path) -> bool:
                     or identity.get("selection_sha256") != report.get("selection_sha256")
                     or report.get("response_contract", {}).get("version") != AI_RESPONSE_VERSION):
                 return False
+            bound_selection(report)
             if (not _current_editorial_rules(report) or identity.get("editorial_rules") != report.get("editorial_rules")
                     or identity.get("policy_version") != report.get("policy_version")):
                 return False
@@ -247,6 +330,8 @@ def _report_status(report: Any) -> str:
                 or report.get("issues")
                 or any(row.get("confidence", 0) < .6 for row in rows)):
             return "UNCERTIFIED"
+        if presentation_selection_errors(bound_selection(report),rows):
+            return 'UNCERTIFIED'
     indices = [row["index"] for row in rows]
     mapping = report.get("segment_map") or []
     batches = report.get("batch_results") or []
