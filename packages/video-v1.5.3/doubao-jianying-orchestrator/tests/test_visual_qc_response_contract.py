@@ -30,7 +30,7 @@ def response(rows=None, **changes):
 class VisualQcResponseContractTests(unittest.TestCase):
     def run_main(self, responses, *, claims=1, batch_size=4, write_sheet=None, passes=1,
                  after_review=None, match_metadata=None, source_duration=4_000_000,
-                 target_duration=4_000_000, declared_speed=1):
+                 target_duration=4_000_000, declared_speed=1, claim="揉搓也不掉絮"):
         with tempfile.TemporaryDirectory(prefix="visual-qc-contract-") as raw:
             root = Path(raw)
             draft, report = root / "draft", root / "report"
@@ -48,7 +48,7 @@ class VisualQcResponseContractTests(unittest.TestCase):
                 "materials": {"videos": materials}, "tracks": [{"name": "video", "segments": segments}]}), encoding="utf-8")
             match_data = {"delivery_mode": "formal"} if match_metadata is None else dict(match_metadata)
             match_data["segments"] = [
-                {"text": "揉搓也不掉絮", "temporary_shot_id": str(index)} for index in range(claims)]
+                {"text": claim, "temporary_shot_id": str(index)} for index in range(claims)]
             (report / "shot_match_report.json").write_text(json.dumps(match_data), encoding="utf-8")
             def output_for_batch(vision, sheet, prompt, output, **kwargs):
                 if callable(responses):
@@ -86,6 +86,20 @@ class VisualQcResponseContractTests(unittest.TestCase):
         self.assertEqual(result["response_contract"]["status"], "VALIDATED")
         self.assertIn(contract.RESPONSE_VERSION, calls[0].args[2])
         self.assertIn("不得重复", calls[0].args[2])
+
+    def test_weipin_tissue_gate_is_applied_to_legacy_qc_responses(self):
+        for observed, expected in (("未见纸巾，手掌按压后抬起", "UNCERTIFIED"),
+                                   ("纸巾可能按压后提起", "UNCERTIFIED"),
+                                   ("纸巾按压后提起，纸面干燥", "PASS")):
+            with self.subTest(observed=observed):
+                body = response([judgment(observed=observed,
+                    reason="纸巾按压后提起即可证明不反渗")])
+                result, code, _, _ = self.run_main([body], claim="吸收后不反渗",
+                    match_metadata={"delivery_mode": "formal", "manifest": {"category": "weipin"}})
+                self.assertEqual(result["status"], expected, result)
+                self.assertEqual(code, 0 if expected == "PASS" else 2)
+                self.assertEqual(result["release_eligibility"],
+                                 "SHIP_ALLOWED" if expected == "PASS" else "BLOCKED")
 
     def test_high_average_speed_is_advisory_and_uses_actual_timeline_durations(self):
         result, code, _, _ = self.run_main([response()], source_duration=8_000_000,

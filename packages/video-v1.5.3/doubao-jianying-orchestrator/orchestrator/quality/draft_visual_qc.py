@@ -507,8 +507,8 @@ def main() -> int:
         result["delivery_mode"] = modes.pop() if len(modes) == 1 else "unknown"
         ai_mode = any(c.get("selection_mode") == "ai_editor" for c in claims)
         response_version = RESPONSE_VERSION
+        from orchestrator.quality import ai_editor_qc
         if ai_mode:
-            from orchestrator.quality import ai_editor_qc
             from orchestrator import ai_editor_contract
             match_data = json.loads((report_dir / "shot_match_report.json").read_text(encoding="utf-8-sig"))
             selection_mode = str(match_data.get("selection_mode") or "ai_editor")

@@ -7,6 +7,14 @@
 
 ## 新增条目
 
+### L-20261111-tissue-press 按压证据不能只匹配名词
+
+- status: OPEN
+- hits: 1
+- 模块: continuity / visual QC
+- 以后怎么做: 卫品反渗验证须观察到纸巾接触并提起，裸手、否定或假设描述不能因含“纸巾”而通过；解释理由不能替代观察。共享 QC 闸门同时覆盖 AI 与旧选镜模式，行为变化同步回归与维护日志。
+- 证据: PR #67、test_sentence_continuity.py、test_visual_qc_response_contract.py。
+
 ### L-20261111-shared-display 相同开场需要用实际轨道追溯
 
 - status: OPEN

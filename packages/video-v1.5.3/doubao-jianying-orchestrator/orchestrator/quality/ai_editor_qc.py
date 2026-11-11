@@ -79,10 +79,10 @@ DIRECT表示本句按其用途正常匹配：贴切的轻薄/柔软展示和普�
 
 
 def apply_tissue_press_gate(row: dict, *, category: str) -> dict:
-    """Downgrade a passing rewet judgment that never reports tissue."""
+    """Downgrade a rewet judgment without observed tissue contact and lifting."""
     if category != "weipin" or row.get("match_level") not in {"DIRECT", "ACCEPTABLE_DEGRADED"}:
         return row
-    if not tissue_press_missing([row.get("claim")], [row.get("observed"), row.get("reason")]):
+    if not tissue_press_missing([row.get("claim")], [row.get("observed")]):
         return row
     revised = dict(row)
     revised["match_level"] = "INSUFFICIENT_EVIDENCE"
