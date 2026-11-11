@@ -284,6 +284,7 @@ def _inventory(manifest: dict, shots: list[dict], directory: Path) -> list[dict]
 "selling_points":[{"id":"p1","text":"本句具体卖点"}],"candidate_ids":["最相关shot_id", "其余候选"],"scene_ids":[],
 "experiment_role":"absorption|rewet|followup|bridge|breathability|fluorescence|sku_change|promotion|other|uncertain"}],
 "display_pool_ids":["适合包装/拆包/产品展示的shot_id"]}。
+纯招呼或承接语可额外给 hook_neighbor="next"（引出后句）或 "previous"（承上句）。有独立痛点、数字、功能动作、商品切换或画面备注时省略。
 每句恰好一行，不改变原文。selling_point列出本句全部具体卖点，其他kind的selling_points为空。
 纸品scene_ids必须给出本句语义适用的semantic_contracts场景id，不适用时为空；不能只因某候选有擦拭就把包装抽数句判为清洁。
 每句candidate_ids只返回最相关的前8个，display_pool_ids也只返回前8个，避免响应被整库ID挤满。
@@ -352,6 +353,9 @@ start/end使用原素材秒数，选择与该素材action_segments重叠且最�
         role = row.get("experiment_role", "other")
         if role not in experiment_groups.ROLES:
             raise ValueError("AI_EDITOR_EXPERIMENT_ROLE_INVALID")
+        row.pop("hook_neighbor_context", None)
+        if row.get("hook_neighbor") not in ("next", "previous"):
+            row.pop("hook_neighbor", None)
         row["experiment_role"] = role
         known_scenes = {scene["id"] for scene in contract.editorial_context(manifest)["rules"].get("semantic_contracts", [])}
         scene_ids = row.get("scene_ids", [] if not known_scenes else None)
@@ -552,7 +556,7 @@ def _review(manifest: dict, sentence: dict, shot: dict, directory: Path, *, dens
 "evidence_intervals_us":[{"start":1000000,"end":2000000}], "time_sensitive":false, "scene_ids":[]}。
 scene_ids只列出本句语义适用且本镜实际支持的纸品semantic_contracts场景id；不支持或本句不涉及的场景不能列入，不适用时为空。
 共享展示池句子index=0时，独立记录可读的紧凑展示区间，由剪辑阶段对齐每句配音。判断是否为同商品包装/拆包/取出/手持或本体展示，不承担功能证明。
-sentence.action_continuation 为 true 时，这句没有卖点，只判断附图是不是上一镜动作还能再延续的一段。同商品且动作仍在继续就 matched，不要因为没有新卖点而拒绝。证据区间落在 scene_us 内，长度不要超过这句配音。
+sentence.action_continuation 为 true 且没有 hook_neighbor_context 时，这句没有卖点，判断附图是不是上一镜动作还能再延续的一段。同商品且动作仍在继续就 matched，不要因为没有新卖点而拒绝。证据区间落在 scene_us 内，长度不要超过这句配音。
 卖点可以只支持其中几项，必须如实返回支持的id，不能凭口播推断。区间必须在提供的scene_us内，
 包含支持判断必需的完整动作和结果；感受性展示按实际贴切区间。看不清返回uncertain，不能凭模型强度标签推断。
 具体香型、成分、数量和数值须有画面可读的对应标称或可确认的直接证据；香薰、花朵等氛围只能表达一般香味体验，不能证明某种具体香型。检测仪外观或数字本身也不能证明仪器用途与检测结论。
@@ -576,9 +580,17 @@ shot_value_request非空时，可额外返回shot_value_observation，逐项评�
 "clear_intervals_us":[{"start":1000000,"end":2000000,"observed":"这段为何看得清"}]}。
 区间只填实际看清主体的时间，只用附图和原素材时间；遮挡或不确定须如实说。主体清晰不意味着支持功能或本句卖点。
 """
+    if sentence.get("hook_neighbor_context"):
+        prompt += """
+本次拟把无独立画面诉求的招呼或衔接语与邻句连播。hook_neighbor_context 给出方向、相邻口播及已裁镜头的观察。
+根据原文、备注和本次窗口的实际图片，判断是否确为纯衔接语，以及该段能否自然引出下一镜或延续上一镜的同一动作／展示。
+有独立痛点、价格数量、功能、指向对象或指定画面时，不能仅凭同商品通过。准备空镜、遮挡、跳切或无关动作也不通过。
+返回 hook_link_supported 布尔值；仅两项判断均有依据时填 true 并说明所见。"""
     result = _call(prompt, directory / "reviews" / f"{key}.json", sheet)
     if result.get("verdict") not in {"matched", "mismatch", "uncertain"} or type(result.get("same_product")) is not bool:
         raise ValueError("AI_EDITOR_REVIEW_INVALID")
+    if sentence.get("hook_neighbor_context") and result.get("hook_link_supported") is not True:
+        result = {**result, "verdict": "uncertain"}
     confidence = result.get("confidence")
     if isinstance(confidence, bool) or not isinstance(confidence, (int, float)) or not math.isfinite(confidence) or not 0 <= confidence <= 1:
         raise ValueError("AI_EDITOR_REVIEW_CONFIDENCE_INVALID")
@@ -971,8 +983,8 @@ def _observed_shot(shot: dict, review: dict) -> dict:
             "action_complete": True, "head_waste": 0, "tail_waste": 0}
 
 
-def _assemble(manifest: dict, analysis: dict, plan: dict, *, narration_timing: dict | None,
-              verify_sources: bool = False, validate_sequence: bool = True) -> dict:
+def _assemble_segments(manifest, analysis, plan, narration_timing, verify_sources, *, only_index=None):
+    """Solve individual cuts with their evidence. Whole-script constraints follow in _assemble."""
     from . import shot_analyzer
     if {k: plan.get("identity", {}).get("editorial_rules", {}).get(k) for k in ("category", "versions")} != contract.rules_identity(manifest):
         raise ValueError("AI_EDITOR_RULES_CHANGED")
@@ -998,6 +1010,8 @@ def _assemble(manifest: dict, analysis: dict, plan: dict, *, narration_timing: d
     original = timing_contract.split_sentences(manifest)
     for sentence in sentences:
         index = sentence["index"]
+        if only_index is not None and index != only_index:
+            continue
         row = indexed[index]
         frozen = plan.get("_frozen_segments", {}).get(index)
         if frozen is not None:
@@ -1157,6 +1171,16 @@ def _assemble(manifest: dict, analysis: dict, plan: dict, *, narration_timing: d
                 raise WindowFailure(index, first["shot_id"], "PLAYBACK_SPEED_CONFLICT")
             raise ValueError(";".join(check["reasons"]))
         output.append(segment)
+    return output, unresolved
+
+
+def _assemble(manifest: dict, analysis: dict, plan: dict, *, narration_timing: dict | None,
+              verify_sources: bool = False, validate_sequence: bool = True) -> dict:
+    output, unresolved = _assemble_segments(manifest, analysis, plan, narration_timing, verify_sources)
+    sentences = plan["sentences"]
+    for index, neighbor in _linked_hooks(plan):
+        if not _touching(output, index, neighbor):
+            raise ValueError(f"AI_EDITOR_NO_SELECTION:{index}")
     out_manifest = {**manifest, "selection_mode": "ai_editor", "segments": output,
                     "temporary_material_analysis": True,
                     "temporary_shot_ids": [s.get("temporary_shot_id") or s.get("shot_id") for s in output]}
@@ -1266,7 +1290,8 @@ def _build_edit_inventory(manifest: dict, analysis: dict, plan: dict,
             candidate["editorial_order"] = rank
         inventory.append({"index": sentence["index"], "text": sentence["text"],
             "kind": sentence["kind"], "selling_points": sentence["selling_points"],
-            "audio_duration_us": duration, "candidates": candidates})
+            "audio_duration_us": duration, "candidates": candidates,
+            **({"hook_neighbor": sentence["hook_neighbor"]} if sentence.get("hook_neighbor") in ("next", "previous") else {})})
     return inventory
 
 
@@ -1454,6 +1479,7 @@ def _review_proposed_window(manifest, plan, directory, sentence, shot, window, *
                     and (playback is None or (process is not None and window[0] <= process[0] < process[1] <= window[1]))
                     and isinstance(supported, list) and all(isinstance(p, str) and p in allowed for p in supported)
                     and contract.points_supported(allowed, set(supported))
+                    and (not sentence.get("hook_neighbor_context") or saved.get("hook_link_supported") is True)
                     and parent_ok):
                 return key
             return None
@@ -1461,13 +1487,14 @@ def _review_proposed_window(manifest, plan, directory, sentence, shot, window, *
     prior = [v for v in attempts.values() if isinstance(v, dict) and v.get("index") == index]
     # Failed crops of this sentence's own shot do not spend the one look at the previous action.
     if continuation:
-        if sum(v.get("mode") == "continuation" for v in prior) >= 1:
+        mode = "hook_neighbor" if sentence.get("hook_neighbor_context") else "continuation"
+        if any(v.get("mode") == mode for v in prior):
             return None
     elif len(prior) >= 3:
         return None
     attempts[key] = {"index": index, "shot_id": shot["shot_id"],
                      "window_us": {"start": window[0], "end": window[1]}, "status": "reviewing",
-                     "mode": "continuation" if continuation else ("placement" if parent else "semantic")}
+                     "mode": mode if continuation else ("placement" if parent else "semantic")}
     if attempt_metadata:
         attempts[key].update(attempt_metadata)
     _save(directory / "plan.json", plan)
@@ -2559,6 +2586,7 @@ def _repair_reviewed_rows(manifest, analysis, plan, directory, narration_timing,
     _place_empty_matched_evidence(manifest, analysis, plan, directory, narration_timing)
     seen = set()
     for _ in range(1 + 8 * len(plan.get("sentences", []))):
+        _seed_unplaced_hooks(manifest, analysis, plan, directory, narration_timing)
         try:
             return _revalidate_rows(manifest, analysis, plan, narration_timing=narration_timing)
         except (ValueError, KeyError, TypeError, OSError) as exc:
@@ -2594,6 +2622,8 @@ def _repair_reviewed_rows(manifest, analysis, plan, directory, narration_timing,
                                            index, duplicate_expanded) for index in dict.fromkeys(repair_indices)):
                 continue
         if isinstance(failure, WindowFailure):
+            if _seed_unplaced_hooks(manifest, analysis, plan, directory, narration_timing, failed_index=failure.index):
+                continue
             # A recrop that still cannot hold the evidence used to count as
             # progress and skip the previous-shot tail. Look at that tail first.
             sentence = next((s for s in plan.get("sentences") or []
@@ -2679,6 +2709,19 @@ def _replace_focused_row(plan, index, revised):
         plan['rows'] = [revised if r.get('index') == index else r for r in plan['rows']]
 
 
+def _linked_hooks(plan):
+    """Yield the two sentence indices bound by each accepted hook review."""
+    for row in plan["rows"]:
+        for part in row.get("parts") or []:
+            review = plan.get("window_reviews", {}).get(part.get("window_review_key"), {})
+            side = review.get("hook_neighbor_side")
+            if side in ("previous", "next"):
+                if review.get("hook_link_supported") is not True:
+                    raise ValueError(f"AI_EDITOR_UNREVIEWED_SELECTION:{row['index']}")
+                index = row["index"]
+                yield index, index + (1 if side == "next" else -1)
+
+
 def _mix_repeated_displays(manifest, analysis, plan, timing, inventory):
     """Replace plain repeated displays only when the complete alternate edit validates."""
     from . import shot_notes
@@ -2691,12 +2734,13 @@ def _mix_repeated_displays(manifest, analysis, plan, timing, inventory):
         return
     original = timing_contract.split_sentences(manifest)
     revised = list(plan["rows"])
+    linked = {i for pair in _linked_hooks(plan) for i in pair}
     changed = False
     for position, row in enumerate(plan["rows"]):
         index = row["index"]
         menu = menus.get(index)
         parts = row.get("parts") or []
-        if (not menu or len(parts) != 1 or row.get("continuity_key") or parts[0].get("window_review_key")
+        if (not menu or index in linked or len(parts) != 1 or row.get("continuity_key") or parts[0].get("window_review_key")
                 or index in plan.get("_frozen_segments", {}) or original[index-1].get("visual_requirements")
                 or shot_notes.note_for(manifest, index, original[index-1])):
             continue
@@ -2722,6 +2766,138 @@ def _mix_repeated_displays(manifest, analysis, plan, timing, inventory):
         plan["rows"] = revised
 
 
+def _hook_requests(manifest, plan):
+    """Only neutral lines with no independent visual instruction may borrow a cut."""
+    from . import shot_notes
+    if manifest.get("shot_notes_general") or plan.get("_frozen_segments"):
+        return
+    original = timing_contract.split_sentences(manifest)
+    rows = {r.get("index"): r for r in plan.get("rows") or [] if isinstance(r, dict)}
+    for sentence in plan["sentences"]:
+        index = sentence["index"]
+        row = rows.get(index, {})
+        side = row.get("hook_neighbor", sentence.get("hook_neighbor"))
+        if (side not in ("next", "previous") or sentence["kind"] not in {"hook", "product_intro"}
+                or sentence.get("selling_points") or sentence.get("scene_ids") or sentence.get("qc_feedback")
+                or row.get("continuity_key") or original[index - 1].get("visual_requirements")
+                or shot_notes.note_for(manifest, index, original[index - 1])):
+            continue
+        neighbor = index + (1 if side == "next" else -1)
+        if neighbor in rows:
+            yield sentence, row, side, neighbor
+
+
+def _hook_cut(manifest, plan, directory, sentence, side, shot, edge, anchor_text, duration):
+    """Review the exact original-speed interval touching the neighbor's cut."""
+    from . import shot_analyzer
+    index = sentence["index"]
+    if shot["shot_id"] in qc_rejected_shots(manifest).get(index, set()):
+        return None
+    length = duration + timing_contract.us_of(manifest.get("tail_pad_s"), 0)
+    start = edge["window_us"]["start"] - length if side == "next" else edge["window_us"]["end"]
+    end = start + length
+    lo = round(float(shot["source_start"]) * 1e6) + timing_contract.us_of(
+        manifest.get("head_trim_s"), round(shot_analyzer.DEFAULT_HEAD_TRIM_S * 1e6))
+    hi = round(float(shot["source_end"]) * 1e6) - timing_contract.us_of(
+        manifest.get("tail_trim_s"), round(shot_analyzer.DEFAULT_TAIL_TRIM_S * 1e6))
+    if start < lo or end > hi:
+        return None
+    context = {"side": side, "text": anchor_text, "observation": edge["observation"], "window_us": edge["window_us"]}
+    key = _review_proposed_window(manifest, plan, directory,
+        {**sentence, "action_continuation": True, "hook_neighbor_context": context}, shot, (start, end))
+    if key is None:
+        return None
+    plan["window_reviews"][key].update(action_continuation=True, hook_neighbor_side=side)
+    return {"index": index, "parts": [{"shot_id": shot["shot_id"], "source_start_us": start,
+            "audio_duration_us": duration, "window_review_key": key}],
+            "reason": "无独立画面诉求，提前引入下一镜" if side == "next" else "无独立画面诉求，顺延上一镜"}
+
+
+def _anchor_receipt(anchor, side):
+    parts = anchor.get("span_parts") or [anchor]
+    return parts[0 if side == "next" else -1]["ai_selection"]
+
+
+def _touching(segments, index, neighbor):
+    if not 1 <= neighbor <= len(segments):
+        return False
+    hook = segments[index - 1]["ai_selection"]
+    anchor = segments[neighbor - 1]
+    forward = neighbor > index
+    edge = _anchor_receipt(anchor, "next" if forward else "previous")
+    return (hook["source_identity"] == edge["source_identity"]
+            and hook["window_us"]["end" if forward else "start"] == edge["window_us"]["start" if forward else "end"])
+
+
+def _seed_unplaced_hooks(manifest, analysis, plan, directory, timing, *, failed_index=None):
+    """Try an adjoining cut for an empty line or a standalone cut that failed to fit."""
+    rows = plan.get("rows")
+    if (not isinstance(rows, list) or any(not isinstance(r, dict) for r in rows)
+            or (failed_index is None and not any(r.get("parts") == [] for r in rows))):
+        return False
+    original = timing_contract.split_sentences(manifest)
+    shots = {shot["shot_id"]: shot for shot in analysis["shots"]}
+    changed = False
+    for sentence, row, side, neighbor in _hook_requests(manifest, plan):
+        if failed_index is not None and sentence["index"] != failed_index:
+            continue
+        if failed_index is None and row.get("parts") != []:
+            continue
+        index = sentence["index"]
+        duration, certainty = timing_contract.duration_for(timing, index, segment=original[index - 1])
+        if not duration or certainty == timing_contract.TIMING_CERTAINTY_ESTIMATED:
+            continue
+        try:
+            anchors, _ = _assemble_segments(manifest, analysis, plan, timing, True, only_index=neighbor)
+        except (ValueError, TypeError, KeyError, OSError):
+            continue  # The ordinary repair loop may still repair this anchor.
+        anchor = anchors[0]
+        edge = _anchor_receipt(anchor, side)
+        candidate = _hook_cut(manifest, plan, directory, sentence, side, shots[edge["shot_id"]],
+                              edge, anchor["text"], duration)
+        if candidate and candidate["parts"] != row.get("parts"):
+            row.update(candidate)  # Full assembly must still validate the seam and source use.
+            changed = True
+    return changed
+
+
+def _place_hook_neighbors(manifest, analysis, plan, directory, timing):
+    """Prefer a continuous cut over an already valid standalone display."""
+    requests = list(_hook_requests(manifest, plan))
+    if not requests:
+        return
+    shots = {shot["shot_id"]: shot for shot in analysis["shots"]}
+    baseline = _assemble(manifest, analysis, plan, narration_timing=timing, verify_sources=True)["segments"]
+    protected = {i for pair in _linked_hooks(plan) for i in pair}
+    for sentence, row, side, neighbor in requests:
+        index = sentence["index"]
+        segment, anchor = baseline[index - 1], baseline[neighbor - 1]
+        if (index in protected or len(row.get("parts", [])) != 1
+                or segment["timing_certainty"] == timing_contract.TIMING_CERTAINTY_ESTIMATED):
+            continue
+        if _touching(baseline, index, neighbor):
+            protected.update((index, neighbor))
+            continue
+        edge = _anchor_receipt(anchor, side)
+        try:
+            candidate = _hook_cut(manifest, plan, directory, sentence, side, shots[edge["shot_id"]],
+                                  edge, anchor["text"], segment["audio_duration_us"])
+        except ValueError as exc:
+            if failure_fields(str(exc)).get("failure_class") == "vision":
+                return  # Stop optional calls and retain the valid standalone edit.
+            raise
+        if candidate:
+            trial = [candidate if r["index"] == index else r for r in plan["rows"]]
+            try:
+                solved = _assemble(manifest, analysis, {**plan, "rows": trial},
+                                   narration_timing=timing, verify_sources=True)["segments"]
+            except (ValueError, KeyError, TypeError, OSError):
+                continue
+            if _touching(solved, index, neighbor):
+                plan["rows"], baseline = trial, solved
+                protected.update((index, neighbor))
+
+
 def _edit_plan(manifest: dict, analysis: dict, plan: dict, directory: Path,
                narration_timing: dict | None = None) -> None:
     """Compile current editing instructions from frozen, pixel-reviewed candidates."""
@@ -2732,6 +2908,9 @@ def _edit_plan(manifest: dict, analysis: dict, plan: dict, directory: Path,
 每句恰好一行，不能选择本句候选以外的镜头。parts的audio_duration_us为正整数且总和必须等于该句audio_duration_us。
 多卖点可组合多镜，至少覆盖本句一个经复看的具体卖点，未覆盖项如实记录，不声称全部已证实。
 单镜或多镜根据句意与实际配音节奏选择：当一段口播包含不同卖点或存在多个贴切画面，且每个镜头有足够时间清楚呈现时，优先考虑句内多镜，避免机械地每句一镜；不要为了镜头数量裁掉动作、重复播放或制造闪帧。
+根据全稿句意与配音节奏，纯招呼、吊胃口或承上启下的短句优先和相邻画面连播，同时为该句照常选好独立备用镜头。
+在该句 row 增加 hook_neighbor：开场“姐妹们”、指向下句的“那你看看”填 "next"；在描述上一动作之后自然接话填 "previous"。
+有具体痛点（如“干纸擦得屁股疼”）、价格数量、功能动作、指定画面或其他独立信息时省略。不要单凭秒数或标点判定。程序另行复核相邻源窗。
 同源连续实验顺接后续区间，不每句重播。source_start_us可省略，提供时不得裁掉必需证据。
 镜头变化和去重只是质量接近时的偏好，不得抢走唯一卖点候选。没有合格候选返回空parts，不编造支持。
 候选若带selling_point_value，它是本次画面中具体原文信息的辅助判断：同等匹配时优先能展示相关特征或直接演示的镜头；一般包装只适合无具体卖点的展示句。无此字段不代表不合格，不得把它当成独立质检或编造未展示的卖点。
@@ -2796,6 +2975,7 @@ technical_option是按本句完整配音求出的实际可行窗口；分配多�
         try:
             _repair_reviewed_rows(manifest, analysis, plan, directory, narration_timing, duplicate_expanded)
             _mix_repeated_displays(manifest, analysis, plan, narration_timing, current_inventory)
+            _place_hook_neighbors(manifest, analysis, plan, directory, narration_timing)
             plan["ok"] = True
             plan["phase"] = "selection_complete"
             return
@@ -3000,6 +3180,10 @@ def prepare(manifest: dict, analysis: dict, report_dir: Path, *, narration_timin
                 # Never trim the original evidence and relabel it as new.
                 if coverage.get("reason") == "KNOWN_WINDOWS_INFEASIBLE" and row["candidates"]:
                     continue
+                sentence = plan["sentences"][row["index"] - 1]
+                if (row["kind"] in {"hook", "product_intro"} and not row["selling_points"]
+                        and sentence.get("hook_neighbor") in ("next", "previous")):
+                    continue  # An empty row still needs a reviewed adjoining cut in the edit.
                 if any(row["index"] in {s["index"] for s in group}
                        for group in experiment_groups.groups(plan["sentences"])):
                     # Individual fragments may not certify the whole experiment.
