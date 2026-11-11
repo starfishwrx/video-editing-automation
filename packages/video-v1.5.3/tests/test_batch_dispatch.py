@@ -28,6 +28,35 @@ class BatchDispatchTests(unittest.TestCase):
         self.preflight.start()
         self.addCleanup(self.preflight.stop)
 
+    def test_frozen_single_task_recovery_does_not_schedule_product_preparation(self):
+        task = {"record_id": "r", "title": "old"}
+        rd = self.root / "r" / "report" / "old"
+        rd.mkdir(parents=True)
+        (rd / "last_result.json").write_text(json.dumps({"retryable": True, "resume_stage": "draft_write"}))
+        prepare = mock.Mock(return_value="analysis.json")
+        run = mock.Mock(return_value={"status": "OK"})
+        rows = dispatch.dispatch([task], work=self.root, policy=self.policy, preparer=prepare, runner=run)
+        self.assertEqual([r["stage"] for r in rows], ["build"])
+        prepare.assert_not_called()
+        run.assert_called_once()
+        self.assertFalse(dispatch._resumes_frozen_build({**task, "force_rebuild": True}, self.root))
+        self.assertFalse(dispatch._resumes_frozen_build({**task, "count": 2}, self.root))
+        rows = dispatch.dispatch([task], work=self.root, policy=self.policy, preparer=prepare,
+                                 runner=run, resume_stage="material")
+        prepare.assert_called_once()
+        self.assertTrue(all(r["stage"] == "material" for r in rows))
+        import batch_worker
+        (rd.parent / "report_2").mkdir()
+        (rd.parent / "report_2" / "last_result.json").write_text(
+            json.dumps({"retryable": True, "resume_stage": "draft_write"}))
+        (rd / "last_result.json").write_text("{}")
+        (self.root / "r" / "done.json").write_text(json.dumps({"drafts": ["accepted"]}))
+        (self.root / "accepted").mkdir()
+        with mock.patch.object(batch_worker, "DRAFTS", self.root), \
+                mock.patch.object(batch_worker, "prior_draft_requires_recheck", return_value=False):
+            self.assertTrue(dispatch._resumes_frozen_build({**task, "count": 2}, self.root))
+
+
     def test_task_speed_cap_is_forwarded_from_top_level_and_nested_manifest(self):
         from tools.queueing.contracts import task_runtime_overrides
         self.assertEqual(task_runtime_overrides({'max_absorb_demo_speed': 1.5,

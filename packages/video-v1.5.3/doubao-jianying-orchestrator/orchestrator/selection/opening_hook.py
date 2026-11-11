@@ -3,7 +3,7 @@ from copy import deepcopy
 import re
 
 PURPOSE = 'opening_hook_packaging'
-RULE = 'first_three_no_product_selling_point_packaging_v1'
+RULE = 'classified_no_product_selling_point_packaging_v2'
 
 
 def packaging_recall_priority(description):
@@ -31,7 +31,8 @@ def packaging_recall_priority(description):
 
 
 def eligible(request):
-    return (type(request.get('index')) is int and 1 <= request['index'] <= 3
+    return (type(request.get('index')) is int and request['index'] >= 1
+        and (request['index'] <= 3 or request.get('is_generic_hook') is True)
         and request.get('has_product_selling_point') is False
         and request.get('display_goal') == 'general_product'
         and request.get('require_action') is False and request.get('require_result') is False
@@ -49,7 +50,7 @@ def is_packaging_hook(request):
 def normalize(requests):
     result = deepcopy(requests)
     for row in result:
-        if type(row.get('index')) is int and 1<=row['index']<=3:
+        if (type(row.get('index')) is int and 1 <= row['index'] <= 3) or row.get('is_generic_hook') is True:
             if type(row.get('has_product_selling_point')) is not bool:
                 raise ValueError('OPENING_HOOK_CLASSIFICATION_REQUIRED')
             if row['has_product_selling_point'] is False and not eligible(row):
@@ -62,7 +63,7 @@ def normalize(requests):
             row['visual_purpose'] = PURPOSE
             row.setdefault('hook_original_checks', deepcopy(row['checks']))
             row['checks'] = [{'id': row['checks'][0]['id'], 'claim_text': row['text'], 'type': 'display',
-                'question': '开头无本品具体卖点的钩子，用本品包装承接；包装身份与外观可辨，不要求泛红、竞品或功效实验。'}]
+                'question': '无本品具体卖点的钩子，用本品包装承接；包装身份与外观可辨，不要求泛红、竞品或功效实验。'}]
     return result
 
 
@@ -70,7 +71,7 @@ def validate_completed(requests):
     for row in requests:
         if row.get('visual_purpose') == PURPOSE:
             is_packaging_hook(row)
-        if type(row.get('index')) is int and 1<=row['index']<=3:
+        if (type(row.get('index')) is int and 1 <= row['index'] <= 3) or row.get('is_generic_hook') is True:
             if type(row.get('has_product_selling_point')) is not bool:
                 raise ValueError('OPENING_HOOK_CLASSIFICATION_REQUIRED')
             if row['has_product_selling_point'] is False and not is_packaging_hook(row):

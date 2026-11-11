@@ -3,7 +3,7 @@
 规范性关键词见[要求用语与适用范围](../doubao-jianying-orchestrator/references/requirement_levels.md)。默认AI编辑、显式legacy和隔离预览分别适用。
 
 纸品专项规则和参数见[纸品生产规则](PAPER_PRODUCTION_RULES.md)。AI政策升级为
-`selling-points-first-reference-quality-v4`，计划、片段、草稿和独立QC记录生效规则版本；不要求规则内容哈希或收据自签。
+`selling-points-first-reference-quality-v5`，计划、片段、草稿和独立QC记录生效规则版本；不要求规则内容哈希或收据自签。
 
 正常 CLI 和任务模板默认使用 `ai_editor`。manifest 的 `selection_mode: legacy`
 可显式回滚，其优先级高于 `JY_SELECTION_MODE`。未标模式的历史内存 matcher 输入

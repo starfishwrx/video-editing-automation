@@ -20,7 +20,7 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 class WeipinVoiceGapTests(unittest.TestCase):
     def test_weipin_voice_has_no_tail_pad(self):
         rules = rulepack.load("weipin")
-        self.assertEqual(rules["versions"]["weipin"], "1.5.3-12")
+        self.assertEqual(rules["versions"]["weipin"], "1.5.3-13")
         self.assertEqual(rules["voice"]["tempo"], 1.2)
         self.assertEqual(rules["voice"]["max_gap_frames"], 1)
         self.assertEqual(rulepack.gap_tail_pad_s(1, fps=30), 0.0)
@@ -332,6 +332,12 @@ class ShotLabelRecognitionTests(unittest.TestCase):
         }
         self.assertEqual(rulepack.annotate_shot_labels(fake, self.RULES), [])
         self.assertNotIn("面层卖点", fake.get("evidence_tags") or [])
+
+    def test_static_waist_feature_does_not_imply_stretch_or_recoil(self):
+        shot = {"description": "手指指向展开裤体的腰头褶皱"}
+        added = rulepack.annotate_shot_labels(shot, self.RULES)
+        self.assertIn("腰腹卖点", added)
+        self.assertNotIn("弹力腰围", added)
 
     def test_surface_fluorescence_and_count_labels(self):
         surface = {

@@ -100,7 +100,7 @@ class AIEditorTests(unittest.TestCase):
         sentence = {**self.sentence, "candidate_ids": ["handfeel", "alt"], "audio_durations_us": [2_000_000]}
         alt = {**self.shot, "shot_id": "alt"}
         seen = []
-        def review(manifest, sentence, shot, directory, dense=False):
+        def review(manifest, sentence, shot, directory, dense=False, prepared_media=None):
             seen.append(shot["shot_id"])
             return {**self.review, "shot_id": shot["shot_id"]}
         with mock.patch.object(editor, "_review", side_effect=review):
@@ -158,6 +158,89 @@ class AIEditorTests(unittest.TestCase):
         self.assertEqual(rows[0]["candidate_ids"], ["handfeel"])
         self.assertEqual(rows[0]["inventory_ignored_candidate_ids"], ["invented"])
         self.assertEqual(rows[0]["inventory_ignored_display_ids"], ["invented-display"])
+
+    def test_cross_task_display_and_selling_point_prefer_an_unused_equal_match(self):
+        from orchestrator.selection import usage_ledger
+        other = self.root / "second.mp4"
+        other.write_bytes(b"second")
+        fresh = {**self.shot, "shot_id": "fresh", "video": str(other)}
+        self.manifest.update(record_id="current", draft_name="current-cut",
+                             usage_ledger_path=str(self.root / "usage.json"))
+        usage_ledger.record({**self.manifest, "record_id": "earlier", "draft_name": "earlier-cut"},
+                           [self.shot])
+        plan = self.plan()
+        for kind in ("hook", "selling_point"):
+            plan["sentences"][0]["kind"] = kind
+            reviews = [self.review, {**self.review, "shot_id": "fresh"}]
+            plan["reviews"]["1"] = plan["display_reviews"] = reviews
+            rows = editor._build_edit_inventory(self.manifest, {"shots": [self.shot, fresh]}, plan, None)
+            self.assertEqual([(c["shot_id"], c["prior_source_tasks"]) for c in rows[0]["candidates"]],
+                             [("fresh", 0), ("handfeel", 1)])
+            reviews.pop()
+            self.assertEqual(editor._build_edit_inventory(self.manifest, {"shots": [self.shot]}, plan, None)
+                             [0]["candidates"][0]["shot_id"], "handfeel")
+
+    def test_repeated_plain_display_changes_only_if_complete_edit_still_passes(self):
+        plan = self.plan()
+        chosen = plan["rows"][0]["parts"][0]["shot_id"]
+        base = {"basis": "product_display", "confidence": .9, "time_sensitive": False,
+                "technical_option": {"within_preferred_speed": True}}
+        menu = [{"index": 1, "kind": "hook", "candidates": [
+            {**base, "shot_id": "fresh", "prior_source_tasks": 0, "editorial_order": 1},
+            {**base, "shot_id": chosen, "prior_source_tasks": 1, "editorial_order": 2}]}]
+        analysis = {"shots": [self.shot, {**self.shot, "shot_id": "fresh", "video": "second.mp4"}]}
+        with mock.patch.object(editor, "_assemble", side_effect=ValueError("sequence invalid")):
+            editor._mix_repeated_displays(self.manifest, analysis, plan, None, menu)
+        self.assertEqual(plan["rows"][0]["parts"][0]["shot_id"], chosen)
+        with mock.patch.object(editor, "_assemble") as verify:
+            editor._mix_repeated_displays(self.manifest, analysis, plan, None, menu)
+        self.assertEqual(plan["rows"][0]["parts"][0]["shot_id"], "fresh")
+        self.assertTrue(verify.call_args.kwargs["verify_sources"])
+
+    def test_hook_first_review_round_can_reach_an_unlisted_unused_source(self):
+        shots = [{**self.shot, "shot_id": f"s{i}", "video": f"{i}.mp4"} for i in range(9)]
+        listed = [shots[0]["shot_id"]]
+        hints = {"sentences": [{**self.sentence, "kind": "hook", "selling_points": [], "candidate_ids": listed}],
+                 "display_pool_ids": list(listed)}
+        counts = {s["shot_id"]: (int(i < 8), 0) for i, s in enumerate(shots)}
+        with mock.patch.object(editor, "_call", return_value=hints), mock.patch.object(
+                editor, "_prior_use_by_shot", return_value=counts):
+            row = editor._inventory(self.manifest, shots, self.root)[0]
+        self.assertIn("s8", row["candidate_ids"][:8])
+        self.assertEqual(set(row["candidate_ids"]), set(counts))
+
+    def test_category_history_shares_observed_display_only_with_other_tasks_in_category(self):
+        from orchestrator.selection import usage_ledger
+        base = {**self.manifest, "category": "weipin", "draft_name": "a", "record_id": "task-a",
+                "usage_ledger_path": str(self.root / "pool-a.json")}
+        segment = {**self.shot, "ai_selection": {"judgment": "matched", "observation": "手掌抚摸面层",
+                   "sentence_kind": "selling_point", "supported_point_ids": ["p1"],
+                   "selling_points": [{"id": "p1", "text": "亲肤"}]}}
+        next_task = {**base, "record_id": "b", "usage_ledger_path": str(self.root / "pool-b.json")}
+        usage_ledger.record(base, [segment], reserved=True)
+        self.assertEqual(usage_ledger.recent_presentations(next_task), [])
+        for _ in range(2):
+            usage_ledger.record(base, [segment])
+        seen = usage_ledger.recent_presentations(next_task)
+        self.assertEqual([r["points"] for r in seen], [["亲肤"]])
+        self.assertEqual(usage_ledger.recent_presentations(base), [])
+        self.assertEqual(usage_ledger.recent_presentations({**next_task, "category": "zhipin"}), [])
+
+    def test_shared_display_call_reuses_pixels_across_scripts_but_keeps_sku_and_claims(self):
+        media = {"start": 0, "end": 6, "before": contract.source_identity(self.video),
+                 "times": [0, 3, 5], "sheet": self.root / "sheet.jpg"}
+        generic = {"index": 0, "kind": "product_intro", "text": "同商品通用产品展示池", "selling_points": []}
+        with mock.patch.object(editor, "_call", return_value={**self.review, "supported_point_ids": []}) as call:
+            def prompt(manifest, sentence):
+                editor._review(manifest, sentence, self.shot, self.root, prepared_media=media)
+                return call.call_args.args[0]
+            first = prompt(self.manifest, {**generic, "audio_durations_us": [900000]})
+            changed = {**self.manifest, "segments": [{"text": "另一稿"}]}
+            self.assertEqual(first, prompt(changed, {**generic, "audio_durations_us": [1700000],
+                                                       "experiment_role": "other"}))
+            self.assertNotEqual(first, prompt({**changed, "sku": "other"}, generic))
+            call.return_value = dict(self.review)
+            self.assertNotEqual(prompt(self.manifest, self.sentence), prompt(changed, self.sentence))
 
     def test_review_accepts_unambiguous_interval_pair(self):
         media = {"start": 0, "end": 6, "before": contract.source_identity(self.video),
@@ -851,7 +934,7 @@ class AIEditorTests(unittest.TestCase):
         ids = [f"candidate{i}" for i in range(9)]
         sentence = {**self.sentence, "candidate_ids": ids}
         shots = {sid: {**self.shot, "shot_id": sid} for sid in ids}
-        def review(_m, _s, shot, _d):
+        def review(_m, _s, shot, _d, prepared_media=None):
             return {**self.review, "shot_id": shot["shot_id"], "verdict": "matched" if shot["shot_id"] == ids[-1] else "mismatch"}
         with mock.patch.object(editor, "_review", side_effect=review):
             reviews, coverage = editor._review_pool(self.manifest, sentence, shots, self.root, {})
@@ -863,7 +946,7 @@ class AIEditorTests(unittest.TestCase):
         sentence = {**self.sentence, "audio_durations_us": [2_000_000]}
         previous = {**self.review, "scene_ids": [], "evidence_intervals_us": [{"start": 0, "end": 1_000_000}]}
         observed = []
-        def review(_m, _s, shot, _d, *, dense=False):
+        def review(_m, _s, shot, _d, *, dense=False, prepared_media=None):
             observed.append((shot["source_start"], dense))
             if dense:
                 return {**previous, "evidence_intervals_us": [{"start": 300_000, "end": 1_000_000}]}
@@ -873,7 +956,7 @@ class AIEditorTests(unittest.TestCase):
         self.assertIn((0.3, True), observed)
         self.assertEqual(rows[0]["guarded_review_status"], "confirmed")
         self.assertTrue(coverage["feasible"])
-        def uncertain(_m, _s, shot, _d, *, dense=False):
+        def uncertain(_m, _s, shot, _d, *, dense=False, prepared_media=None):
             return {"verdict": "uncertain"} if dense else previous
         with mock.patch.object(editor, "_review", side_effect=uncertain):
             rows, coverage = editor._review_pool(self.manifest, sentence, {"handfeel": self.shot}, self.root, {})
@@ -881,7 +964,7 @@ class AIEditorTests(unittest.TestCase):
         self.assertEqual(rows[0]["evidence_intervals_us"], previous["evidence_intervals_us"])
         self.assertFalse(coverage["feasible"])
         self.assertEqual(coverage["uncertain"], 1)
-        def lost_point(_m, _s, shot, _d, *, dense=False):
+        def lost_point(_m, _s, shot, _d, *, dense=False, prepared_media=None):
             return {**previous, "supported_point_ids": [], "evidence_intervals_us": [{"start": 300_000, "end": 1_000_000}]} if dense else previous
         with mock.patch.object(editor, "_review", side_effect=lost_point):
             rows, coverage = editor._review_pool(self.manifest, sentence, {"handfeel": self.shot}, self.root, {})
@@ -896,7 +979,7 @@ class AIEditorTests(unittest.TestCase):
         with mock.patch.object(editor, "_review_media", return_value=media), mock.patch.object(editor, "_call", return_value=broad):
             first = editor._review(self.manifest, sentence, self.shot, self.root)
         self.assertTrue(first["dense_required"])
-        def review(_m, _s, _shot, _directory, *, dense=False):
+        def review(_m, _s, _shot, _directory, *, dense=False, prepared_media=None):
             return {**first, "verdict": "uncertain"} if dense else first
         with mock.patch.object(editor, "_review", side_effect=review):
             rows, _ = editor._review_pool(self.manifest, sentence, {"handfeel": self.shot}, self.root, {})
@@ -904,7 +987,7 @@ class AIEditorTests(unittest.TestCase):
         self.assertEqual(rows[0]["evidence_intervals_us"], broad["evidence_intervals_us"])
         self.assertEqual(rows[0]["refinement_status"], "retained_original")
         refined = {**first, "dense_required": False, "evidence_intervals_us": [{"start": 2_000_000, "end": 3_000_000}]}
-        def review_confirmed(_m, _s, _shot, _directory, *, dense=False):
+        def review_confirmed(_m, _s, _shot, _directory, *, dense=False, prepared_media=None):
             return refined if dense else first
         with mock.patch.object(editor, "_review", side_effect=review_confirmed):
             rows, _ = editor._review_pool(self.manifest, sentence, {"handfeel": self.shot}, self.root, {})
@@ -915,7 +998,7 @@ class AIEditorTests(unittest.TestCase):
         ids = [f"candidate{i}" for i in range(24)]
         sentence = {**self.sentence, "candidate_ids": ids, "audio_durations_us": [2_000_000]}
         shots = {sid: {**self.shot, "shot_id": sid} for sid in ids}
-        def review(_m, _s, shot, _d):
+        def review(_m, _s, shot, _d, prepared_media=None):
             sid = shot["shot_id"]
             return {**self.review, "shot_id": sid,
                     "verdict": "matched" if sid in {ids[0], ids[8]} else "mismatch"}
@@ -944,7 +1027,7 @@ class AIEditorTests(unittest.TestCase):
         sentence = {**self.sentence, "candidate_ids": ids, "audio_durations_us": [800_000]}
         long_shot = {**self.shot, "source_end": 60, "material_duration_us": 60_000_000}
         shots = {sid: {**long_shot, "shot_id": sid} for sid in ids}
-        def review(_m, _s, shot, _d):
+        def review(_m, _s, shot, _d, prepared_media=None):
             sid = shot["shot_id"]
             if sid != ids[3]:
                 return {"shot_id": sid, "verdict": "mismatch", "reason": "wrong action"}
@@ -1011,7 +1094,7 @@ class AIEditorTests(unittest.TestCase):
             {"rows": [{"index": 1, "parts": [{"shot_id": "shot9", "audio_duration_us": 2_000_000}]}]},
         ]
 
-        def review(_manifest, _sentence, shot, _directory):
+        def review(_manifest, _sentence, shot, _directory, prepared_media=None):
             self.assertEqual(shot["shot_id"], "shot9")
             return {**self.review, "shot_id": "shot9"}
 
@@ -1041,7 +1124,7 @@ class AIEditorTests(unittest.TestCase):
 
     def test_failed_candidate_stays_unknown_without_erasing_valid_observations(self):
         ids = ["failure", "handfeel"]
-        def review(_m, _s, shot, _d):
+        def review(_m, _s, shot, _d, prepared_media=None):
             if shot["shot_id"] == "failure":
                 raise ValueError("transient failure")
             return self.review

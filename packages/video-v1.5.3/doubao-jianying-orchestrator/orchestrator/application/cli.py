@@ -105,6 +105,9 @@ def _compact_build_result(result: dict) -> dict:
     payload["运行信息"] = {key: runtime.get(key) for key in (
         "pipeline_version", "selection_mode", "selection_mode_source",
         "configuration_source", "delivery_mode", "configuration_warnings")}
+    for key in ("draft_backend", "fallback_reason"):
+        if result.get(key):
+            payload["运行信息"][key] = result[key]
     if result.get("delivery_mode") == "preview":
         payload["交付模式"] = "preview（预览稿，不得用于正式交付）"
     # 唯一允许进成功合约的例外：**这份草稿不是正式交付**（定案第 9 条）。
@@ -135,7 +138,7 @@ def _compact_control_result(result: dict) -> dict:
         "parent_run_id", "recovery", "recovery_stage", "message", "error", "missing",
         "analysis", "match_report", "matched_manifest", "matched_manifest_sha256",
         "draft_path", "task_log", "reason", "failed_stage", "resume_stage",
-        "previous_match_report",
+        "previous_match_report", "draft_backend", "fallback_reason",
     )
     return {key: result[key] for key in keys if key in result}
 
@@ -1431,6 +1434,9 @@ def cmd_recover(args) -> int:
             return _emit(_compact_control_result(finalize({"status": "SHOT_NOTES_BINDING_INVALID",
                 "failure_class": "semantic", "retryable": False, "reason": str(exc),
                 "message": "画面备注无法安全绑定到原文，未开始恢复选镜。"})), 1)
+        ledger = usage_ledger.ledger_path(manifest, report_dir)
+        if ledger:
+            manifest["usage_ledger_path"] = str(ledger)
         analysis = str(manifest.get("shot_analysis_file") or "").strip()
         analysis_path = Path(analysis).expanduser() if analysis else report_dir / "shot_candidates.json"
         if not analysis_path.is_absolute():
@@ -1534,6 +1540,25 @@ def cmd_recover(args) -> int:
                          ("draft_name", "force_overwrite", "recovery_stage", "parent_run_id", "delivery_mode")}
     manifest.update(cached)
     manifest.update(recovery_controls)
+    ledger = usage_ledger.ledger_path(recovery_input, report_dir)
+    if ledger:
+        manifest["usage_ledger_path"] = str(ledger)
+    from .. import ai_editor_contract
+    active_rules = ai_editor_contract.rules_identity(manifest)
+    for segment in manifest.get("segments") or []:
+        if not isinstance(segment, dict):
+            continue
+        for part in segment.get("span_parts") or [segment]:
+            if not isinstance(part, dict) or not isinstance(part.get("ai_selection"), dict):
+                continue
+            receipt = part["ai_selection"]
+            recorded_rules = (receipt.get("identity") or {}).get("editorial_rules") or {}
+            if receipt.get("schema") == ai_editor_contract.RECEIPT_SCHEMA and (
+                    receipt.get("policy_version") != ai_editor_contract.POLICY_VERSION
+                    or {key: recorded_rules.get(key) for key in active_rules} != active_rules):
+                return _emit(_compact_control_result(finalize({"status": "AI_SELECTION_RULES_CHANGED",
+                    "resume_stage": "semantic_match", "failure_class": "semantic",
+                    "message": "原选镜使用旧规则，需要用冻结配音和素材观察重新匹配。"})), 1)
     from . import recovery_audio
     try:
         manifest = recovery_audio.bind_and_record(manifest, cached_result, report_dir)
@@ -1554,6 +1579,20 @@ def cmd_recover(args) -> int:
         result = exc.result()
     except Exception as exc:  # noqa: BLE001
         result = {"status": "ERROR", "error": str(exc), "error_type": type(exc).__name__}
+    if (result.get("status") == "NARRATION_GAP_EXCEEDED" and manifest.get("retained_tts_audio")
+            and not manifest.get("_paper_fixed_narrations")):
+        result.update(resume_stage="semantic_match",
+                      message="旧配音超过句间气口上限。用已有素材观察和原配音恢复选镜，按处理后的句长重新排画面。")
+    ledger = usage_ledger.ledger_path(manifest, report_dir)
+    if ledger:
+        ledger_manifest = {**manifest, "usage_ledger_path": str(ledger)}
+        try:
+            if result.get("status") == "SUCCESS":
+                result["usage_ledger"] = usage_ledger.record(ledger_manifest, manifest.get("segments") or [])
+            if cached.get("draft_name") and cached["draft_name"] != manifest.get("draft_name"):
+                usage_ledger.release({**ledger_manifest, "draft_name": cached["draft_name"]})
+        except (OSError, TimeoutError, ValueError) as exc:
+            logger.event("usage_ledger_failed", error=str(exc))
     result["matched_manifest_sha256"] = matched_manifest_sha256
     result = finalize(result)
     return _emit(_compact_control_result(result), 0 if result.get("status") == "SUCCESS" else 1)

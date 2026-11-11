@@ -293,9 +293,25 @@ def _expected_track_issues(draft: dict, expected_tracks: dict) -> list[str]:
     require_count("视频", "Video_BRoll", "video",
                   int(expected_tracks.get("video_segments", 0)),
                   allow_type_fallback=True)
-    require_count("旁白", "Narration", "audio",
+    narration_track = require_count("旁白", "Narration", "audio",
                   int(expected_tracks.get("narration_segments", 0)),
                   required=int(expected_tracks.get("narration_segments", 0)) > 0)
+    if narration_track and "narration_windows" in expected_tracks:
+        audio_paths = {str(m.get("id")): m.get("path") for m in draft.get("materials", {}).get("audios", [])
+                       if isinstance(m, dict)}
+        tolerance = expected_tracks.get("narration_duration_tolerance_us", 0)
+        for index, (segment, planned) in enumerate(zip(narration_track["segments"],
+                                                      expected_tracks["narration_windows"]), 1):
+            if planned.get("staged_source"):
+                actual_path = audio_paths.get(str(segment.get("material_id")))
+                if not actual_path or Path(actual_path).resolve() != Path(planned["staged_source"]).resolve():
+                    issues.append(f"旁白第 {index} 段音频文件与计划不符")
+            for kind, start, duration in (("source", "source_start_us", "source_duration_us"),
+                                          ("target", "start_us", "duration_us")):
+                actual = segment.get(f"{kind}_timerange") or {}
+                if (actual.get("start") != planned[start] or type(actual.get("duration")) is not int
+                        or abs(actual["duration"] - planned[duration]) > tolerance):
+                    issues.append(f"旁白第 {index} 段 {kind} 时间窗偏离写稿计划")
     subtitle_track = require_count("字幕", "Subtitles", "text",
                                    int(expected_tracks.get("subtitle_segments", 0)),
                                    required=int(expected_tracks.get("subtitle_segments", 0)) > 0)

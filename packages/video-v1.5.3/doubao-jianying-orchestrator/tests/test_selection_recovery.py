@@ -631,7 +631,7 @@ class SelectionRecoveryTests(unittest.TestCase):
         old["shots"][0]["material_duration_us"] = 10_000_000
         plan = self.plan()
         plan["identity"].update(analysis_sha256=contract.digest(old), policy_version=contract.POLICY_VERSION)
-        plan["resume_identity"] = copy.deepcopy(plan["identity"])
+        plan["resume_identity"] = {**plan["identity"], "editorial_prompt_sha256": contract.digest(contract.policy_prompt(self.manifest))}
         folder = self.root / "ai_editor"
         folder.mkdir()
         editor._save(folder / "plan.json", plan)
@@ -672,7 +672,7 @@ class SelectionRecoveryTests(unittest.TestCase):
         old["shots"][0]["material_duration_us"] = 10_000_000
         plan = self.plan()
         plan["identity"].update(analysis_sha256=contract.digest(old), policy_version=contract.POLICY_VERSION)
-        plan["resume_identity"] = copy.deepcopy(plan["identity"])
+        plan["resume_identity"] = {**plan["identity"], "editorial_prompt_sha256": contract.digest(contract.policy_prompt(self.manifest))}
         folder = self.root / "ai_editor"
         folder.mkdir()
         editor._save(folder / "plan.json", plan)
@@ -691,7 +691,7 @@ class SelectionRecoveryTests(unittest.TestCase):
         old["shots"][0]["material_duration_us"] = 10_000_000
         plan = self.plan()
         plan["identity"].update(analysis_sha256=contract.digest(old), policy_version=contract.POLICY_VERSION)
-        plan["resume_identity"] = copy.deepcopy(plan["identity"])
+        plan["resume_identity"] = {**plan["identity"], "editorial_prompt_sha256": contract.digest(contract.policy_prompt(self.manifest))}
         folder = self.root / "ai_editor"
         folder.mkdir()
         editor._save(folder / "plan.json", plan)
@@ -723,7 +723,7 @@ class SelectionRecoveryTests(unittest.TestCase):
                 folder.mkdir(parents=True)
                 plan = self.plan()
                 plan["identity"].update(analysis_sha256=old_digest, policy_version=contract.POLICY_VERSION)
-                plan["resume_identity"] = copy.deepcopy(plan["identity"])
+                plan["resume_identity"] = {**plan["identity"], "editorial_prompt_sha256": contract.digest(contract.policy_prompt(self.manifest))}
                 editor._save(folder / "plan.json", plan)
                 editor.snapshot_previous_analysis(old, root)
                 identity = {**plan["resume_identity"], "analysis_sha256": editor._analysis_digest(new)}
