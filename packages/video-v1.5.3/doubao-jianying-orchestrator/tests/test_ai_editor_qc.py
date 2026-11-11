@@ -49,6 +49,12 @@ class AIEditorQCIntegrationTests(unittest.TestCase):
         row["member_stage"] = {"phase": "first_readable", "observation": "包装正面刚刚转到可读位置"}
         self.assertEqual(visual_qc_contract.presentation_selection_errors([item], [row]), {})
 
+    def test_missing_or_uncertain_member_stage_never_excludes_the_source(self):
+        for stage in ({}, {"phase": "uncertain", "observation": "看不清商品位置变化"}):
+            self.assertEqual(visual_qc_contract.member_repair({"member_stage": stage}), "review")
+        self.assertEqual(visual_qc_contract.member_repair({"member_stage": {
+            "phase": "camera", "observation": "相机平移，商品与彼此位置不变"}}), "replace")
+
     def test_member_stage_sends_only_its_ordered_frames_and_validates_response(self):
         frames = [{"draft_segment": 3, "timestamp": t, "path": str(self.root / f"{t}.jpg")}
                   for t in (2., 1.)]

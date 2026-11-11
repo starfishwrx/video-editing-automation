@@ -1385,6 +1385,9 @@ def qc_refill_feedback_from_report(rd: pathlib.Path, report: dict, targets, *, e
 
 def action_refill_controls(rd, report, *, expected_sources):
     """Route independently bound action failures; a late reveal retains its source."""
+    if any(isinstance(row, dict) and row.get("action_repair") == "review"
+           for row in report.get("model_review") or []):
+        return None
     feedback = qc_current_refill_feedback(rd, report, expected_sources=expected_sources)
     if feedback is None:
         return None

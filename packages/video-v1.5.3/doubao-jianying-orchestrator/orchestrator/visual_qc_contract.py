@@ -168,6 +168,12 @@ def member_stage_observed(row):
             and isinstance(stage.get("observation"), str) and bool(stage["observation"].strip()))
 
 
+def member_repair(row):
+    if member_stage_observed(row) and row["member_stage"]["phase"] in {"hold", "camera"}:
+        return "replace"
+    return "review"
+
+
 def carton_landing_required(item):
     """Identify a single carton reveal or generic parcel presentation by its selected purpose."""
     if item.get('selection_mode') != 'ai_editor' or item.get('multi_shot') or item.get('continuity_group'):

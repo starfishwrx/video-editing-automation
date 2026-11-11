@@ -26,7 +26,7 @@ try:
     from ..media.video_decode import run_ffmpeg_decode
     from ..runtime.file_safety import atomic_write_text
     from ..runtime.runtime_policy import load_policy, media_slot
-    from ..visual_qc_contract import MATCH_LEVELS, REPORT_VERSION, RESPONSE_VERSION, draft_metadata_fingerprint, normalize_match_level, response_errors, _source_identity, carton_landing_required, clear_carton_landing, member_stage_observed, presentation_selection_errors
+    from ..visual_qc_contract import MATCH_LEVELS, REPORT_VERSION, RESPONSE_VERSION, draft_metadata_fingerprint, normalize_match_level, response_errors, _source_identity, carton_landing_required, clear_carton_landing, member_stage_observed, member_repair, presentation_selection_errors
 except ImportError:
     # 这个文件会被 python draft_visual_qc.py 直接启动，没有包上下文。
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
@@ -36,7 +36,7 @@ except ImportError:
     from orchestrator.runtime.runtime_policy import load_policy, media_slot
     from orchestrator.visual_qc_contract import (MATCH_LEVELS, REPORT_VERSION, RESPONSE_VERSION,
                                                 draft_metadata_fingerprint, normalize_match_level,
-                                                response_errors, _source_identity, carton_landing_required, clear_carton_landing, member_stage_observed, presentation_selection_errors)
+                                                response_errors, _source_identity, carton_landing_required, clear_carton_landing, member_stage_observed, member_repair, presentation_selection_errors)
 
 
 def _claim_gate_summary(claim: dict[str, Any]) -> str:
@@ -932,7 +932,8 @@ def main() -> int:
                                     row['reason'] += ' 裁切结束时未确认商品完整露出。'
                             check = row.get('terminal_check') or {}
                             phases = ai_editor_qc._action_phases(claim)
-                            if check.get('view') == 'unverified':
+                            if check.get('view') in {'unverified', 'uncertain'} or check.get('flap_over_goods') == 'uncertain':
+                                row['action_repair'] = 'review'
                                 result['response_contract']['errors'].append(f"S{claim['index']:02d}:TERMINAL_FRAME_CALL_FAILED")
                             elif check and not clear_carton_landing(check):
                                 reveal = any((phase.get('change') or {}).get('kind') == 'reveal' for phase in phases)
@@ -968,7 +969,7 @@ def main() -> int:
                     action_errors=presentation_selection_errors(match_data.get('segments',[]),visual_rows)
                     for row in visual_rows:
                         if "PROMOTION_MEMBER_ACTION_MISSING" in action_errors.get(row["index"], []):
-                            row.update(match_level="INSUFFICIENT_EVIDENCE", visual_ok=False, action_repair="replace")
+                            row.update(match_level="INSUFFICIENT_EVIDENCE", visual_ok=False, action_repair=member_repair(row))
                             result["uncertified"] = True
                             result["warnings"].append(f"POST_DRAFT_MEMBER_STAGE_UNVERIFIED:S{row['index']:02d}")
                             if not member_stage_observed(row):

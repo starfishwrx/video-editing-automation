@@ -40,10 +40,16 @@ class AcceptanceDeliveryGateTests(unittest.TestCase):
 
     def test_actionable_preview_and_missing_endpoint_return_to_worker(self):
         task = {"delivery_mode": "preview"}
-        for row in ({"action_repair": "recut"}, {"action_repair": "replace"},
+        for row in ({"action_repair": "recut"}, {"action_repair": "replace"}, {"action_repair": "review"},
                     {"terminal_check": {"view": "unverified"}}, {}):
             result = {"status": "UNCERTIFIED", "report": {"delivery_mode": "preview", "model_review": [row]}}
             self.assertEqual(delivery_gate.local_preview(task, result), not bool(row))
+
+    def test_uncertain_observation_stops_before_source_rejection(self):
+        report = {"model_review": [{"index": 1, "action_repair": "review"}]}
+        with patch.object(worker, "qc_current_refill_feedback") as lookup:
+            self.assertIsNone(worker.action_refill_controls(Path("."), report, expected_sources=[]))
+            lookup.assert_not_called()
 
     def test_current_qc_cannot_reject_or_recut_a_changed_selection(self):
         with tempfile.TemporaryDirectory() as directory:
