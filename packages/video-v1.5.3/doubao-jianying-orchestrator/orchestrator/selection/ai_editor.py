@@ -19,6 +19,7 @@ from .. import ai_editor_contract as contract
 from . import timing_contract
 from . import sentence_continuity
 from . import experiment_groups
+from .editorial_actions import window_action
 from .ai_editor_recovery import WindowFailure, failed_index, failure_fields, proposed_window, repairable_index
 
 ROUND_SIZE = 8
@@ -286,6 +287,8 @@ def _inventory(manifest: dict, shots: list[dict], directory: Path) -> list[dict]
 "display_pool_ids":["适合包装/拆包/产品展示的shot_id"]}。
 纯招呼或承接语可额外给 hook_neighbor="next"（引出后句）或 "previous"（承上句）。有独立痛点、数字、功能动作、商品切换或画面备注时省略。
 每句恰好一行，不改变原文。selling_point列出本句全部具体卖点，其他kind的selling_points为空。
+结合前后句识别使用感受和功能结果。比如弹力腰围之后的“不勒”、护围之后的“翻身也安心”仍在讲具体卖点，优先召回对应结构、动作或结果。纯惊叹或招呼才用一般展示。
+展示池在同等相关时要覆盖不同可见动作，例如陈列、拆包、取出、展开、局部展示。换桌面或机位重新举包只算一种。
 纸品scene_ids必须给出本句语义适用的semantic_contracts场景id，不适用时为空；不能只因某候选有擦拭就把包装抽数句判为清洁。
 每句candidate_ids只返回最相关的前8个，display_pool_ids也只返回前8个，避免响应被整库ID挤满。
 程序会把未列出的镜头加入后续逐轮扩展。不能因描述不确定就宣布无素材，不用A/B强度或旧合同词表淘汰。
@@ -556,6 +559,7 @@ def _review(manifest: dict, sentence: dict, shot: dict, directory: Path, *, dens
 "reason":"为什么适合或不适合", "confidence":0.8, "supported_point_ids":["p1"],
 "evidence_intervals_us":[{"start":1000000,"end":2000000}], "time_sensitive":false, "scene_ids":[]}。
 scene_ids只列出本句语义适用且本镜实际支持的纸品semantic_contracts场景id；不支持或本句不涉及的场景不能列入，不适用时为空。
+避开空等、调整机位、拿错物品后重来、主体长期遮挡等废弃画面。若同一条有干净的有效动作，只给那一段的证据；必要的停留亮结果或连贯入画应保留。
 共享展示池句子index=0时，独立记录可读的紧凑展示区间，由剪辑阶段对齐每句配音。判断是否为同商品包装/拆包/取出/手持或本体展示，不承担功能证明。
 sentence.action_continuation 为 true 且没有 hook_neighbor_context 时，这句没有卖点，判断附图是不是上一镜动作还能再延续的一段。同商品且动作仍在继续就 matched，不要因为没有新卖点而拒绝。证据区间落在 scene_us 内，长度不要超过这句配音。
 卖点可以只支持其中几项，必须如实返回支持的id，不能凭口播推断。区间必须在提供的scene_us内，
@@ -720,8 +724,7 @@ def _cached_row_feasible(manifest, analysis, plan, sentence, narration_timing):
             window = revised["review_window_us"]
             if not round(shot["source_start"] * 1e6) <= window["start"] < window["end"] <= round(shot["source_end"] * 1e6):
                 return False
-            observed = _observed_shot({**shot, "source_start": window["start"] / 1e6,
-                                      "source_end": window["end"] / 1e6}, revised)
+            observed = _observed_shot(shot, revised)
             observed["source_start"] = max(observed["source_start"], part.get("source_start_us", window["start"]) / 1e6)
             cfg = {**manifest, "tail_pad_s": manifest.get("tail_pad_s", 0) if n == len(row["parts"]) - 1 else 0}
             if "source_start_us" in part:
@@ -796,6 +799,27 @@ def _review_pool(manifest: dict, sentence: dict, shots: dict, directory: Path, a
     from . import shot_analyzer
     def feasible(good: list[dict]) -> bool:
         return _cached_reviews_feasible(manifest, sentence, shots, good, audio)
+
+    def display_variety_ready(good):
+        # Neutral lines still need a varied fallback when they cannot join a
+        # neighbor. Their lengths do not become mandatory feasibility gates.
+        durations = sentence.get("audio_durations_us") or []
+        if (sentence["index"] != 0 or len(durations) < 2 or len(reviewed_by_id) >= ALTERNATIVE_REVIEW_LIMIT
+                or len(reviewed_by_id) == len(ids)):
+            return True
+        if not any(shots[sid].get("action") or shots[sid].get("action_segments") for sid in ids):
+            return True
+        actions = set()
+        for review in good:
+            shot = shots[review["shot_id"]]
+            for duration in set(durations):
+                cut = shot_analyzer.candidate_window(_observed_shot(shot, review), audio_duration_us=duration,
+                        manifest=manifest, time_sensitive=review["time_sensitive"])
+                if cut.ok:
+                    actions.add(window_action(shot, cut.source_start_us / 1e6, cut.source_end_us / 1e6))
+            if len(actions - {""}) >= 2:
+                return True
+        return False
     reviewed_by_id = {str(row.get("shot_id")): row for row in (existing_reviews or [])
                       if isinstance(row, dict) and row.get("shot_id") in shots
                       and row.get("shot_id") not in (excluded_ids or set())
@@ -809,7 +833,7 @@ def _review_pool(manifest: dict, sentence: dict, shots: dict, directory: Path, a
         enough = ((required and (len(existing_good) >= 2
                    or len(reviewed_by_id) >= min(ALTERNATIVE_REVIEW_LIMIT, len(ids))))
                   or (not required and len(existing_good) >= min(3, len(ids))))
-        if not exhaustive and enough and feasible(existing_good):
+        if not exhaustive and enough and feasible(existing_good) and display_variety_ready(existing_good):
             break
         # Matched selling-point evidence ends the search. Timing fit is a
         # separate placement path (short crop, mild speed, sentence group);
@@ -900,7 +924,7 @@ def _review_pool(manifest: dict, sentence: dict, shots: dict, directory: Path, a
                 break
         if not exhaustive and evidence_found and not feasible(good):
             break
-        if not exhaustive and not required and len(good) >= min(3, len(ids)) and feasible(good):
+        if not exhaustive and not required and len(good) >= min(3, len(ids)) and feasible(good) and display_variety_ready(good):
             break
     reviewed = [reviewed_by_id[sid] for sid in ids if sid in reviewed_by_id]
     good = [r for r in reviewed if r["verdict"] == "matched"]
@@ -955,6 +979,14 @@ def _placement_fit_observation(review: dict) -> dict | None:
 
 
 def _observed_shot(shot: dict, review: dict) -> dict:
+    # These estimates belong to the original scene, even after a requested
+    # in-point moves. A reviewed placement already certifies the exact crop.
+    clean_edges = None
+    exact_cut = review.get("placement_review") or review.get("continuity_key") or review.get("action_continuation")
+    if not exact_cut and (shot.get("head_waste") or shot.get("tail_waste")):
+        start, end = (round(float(shot[k]) * 1e6) for k in ("source_start", "source_end"))
+        head, tail = timing_contract.waste_guards_us(start, end, shot.get("head_waste"), shot.get("tail_waste"), 0, 0)
+        clean_edges = (start + head, end - tail)
     window = review.get("review_window_us")
     if window is not None:
         if (not isinstance(window, dict) or any(type(window.get(k)) is not int for k in ("start", "end"))
@@ -981,7 +1013,7 @@ def _observed_shot(shot: dict, review: dict) -> dict:
             "preferred_speed": review.get("preferred_speed", 1.0),
             "role": "direct_evidence" if review.get("time_sensitive") else "product_display",
             "visual_role": "direct_evidence" if review.get("time_sensitive") else "product_display",
-            "action_complete": True, "head_waste": 0, "tail_waste": 0}
+            "action_complete": True, "head_waste": 0, "tail_waste": 0, "preferred_clean_edges_us": clean_edges}
 
 
 def _assemble_segments(manifest, analysis, plan, narration_timing, verify_sources, *, only_index=None):
@@ -1087,7 +1119,7 @@ def _assemble_segments(manifest, analysis, plan, narration_timing, verify_source
                 review = {**review, "playback_observation": fit}
             if verify_sources and review["source_identity"] != contract.source_identity(shot["video"]):
                 raise ValueError("AI_EDITOR_SOURCE_CONTENT_CHANGED")
-            observed = _observed_shot(shot, review)
+            observed = _observed_shot(original_shot, review)
             observed["speed_range_override"] = list(shot_analyzer._fit_speed_range(
                 observed, manifest=manifest, time_sensitive=review["time_sensitive"]))
             # A continuation requests a later in-point; it must retain every
@@ -1233,6 +1265,10 @@ def _build_edit_inventory(manifest: dict, analysis: dict, plan: dict,
                 audio_duration_us=duration, manifest=manifest,
                 time_sensitive=review["time_sensitive"])
             candidate["source_identity"] = source_ids[shot["video"]]
+            if solution.ok:
+                action = window_action(shot, solution.source_start_us / 1e6, solution.source_end_us / 1e6)
+                if action:
+                    candidate["window_action_hint"] = action
             source_count, scene_count = history[candidate["shot_id"]]
             candidate.update(prior_source_tasks=source_count, prior_scene_tasks=scene_count)
             candidate["technical_option"] = {**solution.to_dict(),
@@ -1347,6 +1383,7 @@ def _review_placement_window(manifest: dict, sentence: dict, shot: dict, directo
 "confidence":0.9,"evidence_intervals_us":[{"start":1000000,"end":1800000}],
 "playback_observation":null}。
 suitable=裁切内是一段完整、未拦腰切断关键动作/结果的可用镜头；unsuitable=明显切在动作中途或关键结果被裁掉；
+裁切里的空等、机位调整、拿错重来或长时间遮挡挤掉了有效展示时也判unsuitable。稳定展示结果、必要的入画或揭起不属于废料。
 看不清完整性时uncertain。evidence_intervals_us必须落在scene_us内，选最短但完整的一段，优先能放进audio_durations_us。
 可选playback_observation仅当整段确认为纯过程窗口；否则省略。未标纯过程时，程序仍可在本裁切内用不超过2倍的速度罩住证据。
 """
@@ -1618,7 +1655,7 @@ def _single_part_end(manifest, analysis, plan, narration_timing, index):
         shot = {**shot, "source_start": window["start"] / 1e6, "source_end": window["end"] / 1e6}
     if review is None:
         return None
-    observed = _observed_shot(shot, review)
+    observed = _observed_shot(original_shot, review)
     if "source_start_us" in part:
         if type(part["source_start_us"]) is not int:
             return None
@@ -2028,7 +2065,6 @@ def _short_complete_rows(manifest, analysis, plan, index, narration_timing):
                                        - (window["start"] / 1e6 - shot["source_start"])),
                 "tail_trim_s": max(0, float(manifest.get("tail_trim_s", 0) or 0)
                                        - (shot["source_end"] - window["end"] / 1e6))}
-            shot = {**shot, "source_start": window["start"] / 1e6, "source_end": window["end"] / 1e6}
         solution = shot_analyzer.candidate_window(_observed_shot(shot, review),
             audio_duration_us=duration, manifest=cfg, time_sensitive=review["time_sensitive"])
         if solution.ok:
@@ -2767,6 +2803,78 @@ def _mix_repeated_displays(manifest, analysis, plan, timing, inventory):
         plan["rows"] = revised
 
 
+def _vary_repeated_actions(manifest, analysis, plan, timing, inventory):
+    """Prefer a new action over a restart, only among equivalent, reviewed cuts."""
+    from . import shot_notes, shot_value, shot_usability
+    if plan.get("_frozen_segments") or manifest.get("shot_notes_general") or not any(
+            len({c["window_action_hint"] for c in m["candidates"] if c.get("window_action_hint")}) > 1
+            for m in inventory):
+        return
+    shots = {s["shot_id"]: s for s in analysis["shots"]}
+    menus = {m["index"]: m["candidates"] for m in inventory}
+    segments = _assemble(manifest, analysis, plan, narration_timing=timing, verify_sources=True)["segments"]
+    original = timing_contract.split_sentences(manifest)
+    protected = {i for pair in _linked_hooks(plan) for i in pair}
+    counts = Counter()
+    actions = {}
+    occupied = set()
+    for index, segment in enumerate(segments, 1):
+        actions[index] = []
+        for part in segment.get("span_parts") or [segment]:
+            shot = shots[part["shot_id"]]
+            occupied.add(shot["video"])
+            action = window_action(shot, part["source_start"], part["source_end"])
+            counts[action] += 1
+            actions[index].append(action)
+        if index > 1 and _touching(segments, index, index - 1):
+            protected.update((index - 1, index))
+
+    seen = set()
+    for row in sorted(plan["rows"], key=lambda r: r["index"]):
+        index, parts = row["index"], row["parts"]
+        row_actions = actions[index]
+        if len(row_actions) != 1 or not row_actions[0] or row_actions[0] not in seen:
+            seen.update(row_actions)
+            continue
+        action = row_actions[0]
+        if (index in protected or len(parts) != 1 or row.get("continuity_key") or parts[0].get("window_review_key")
+                or original[index - 1].get("visual_requirements")
+                or shot_notes.note_for(manifest, index, original[index - 1])):
+            continue
+        menu = menus[index]
+        chosen = next((c for c in menu if c["shot_id"] == parts[0]["shot_id"]), None)
+        if not chosen or chosen.get("time_sensitive"):
+            continue
+        for candidate in menu:
+            other = candidate.get("window_action_hint")
+            if (not other or counts[other] or shots[candidate["shot_id"]]["video"] in occupied
+                    or candidate.get("time_sensitive") or candidate["basis"] != chosen["basis"]
+                    or candidate["confidence"] < chosen["confidence"]
+                    or not set(chosen["supported_point_ids"]) <= set(candidate["supported_point_ids"])
+                    or shot_value.rank({"plan": candidate}) > shot_value.rank({"plan": chosen})
+                    or shot_usability.rank(candidate)[1:] > shot_usability.rank(chosen)[1:]
+                    or (candidate.get("usability") or {}).get("status") == "REJECTED"
+                    or not candidate["technical_option"].get("within_preferred_speed")
+                    or candidate["technical_option"]["detail"].get("waste_trim", {}).get("status") == timing_contract.WASTE_TRIM_RELAXED):
+                continue
+            revised = {**row, "parts": [{"shot_id": candidate["shot_id"], "audio_duration_us": parts[0]["audio_duration_us"]}],
+                       "reason": f"同等卖点覆盖的已复核画面，以{other}替代本稿已出现的{action}。"}
+            trial = [revised if r["index"] == index else r for r in plan["rows"]]
+            try:
+                edit = _assemble(manifest, analysis, {**plan, "rows": trial}, narration_timing=timing, verify_sources=True)
+            except (ValueError, KeyError, TypeError, OSError):
+                continue
+            cut = edit["segments"][index - 1]
+            if window_action(shots[candidate["shot_id"]], cut["source_start"], cut["source_end"]) != other:
+                continue
+            plan["rows"] = trial
+            counts[action] -= 1
+            counts[other] += 1
+            occupied.add(shots[candidate["shot_id"]]["video"])
+            seen.add(other)
+            break
+
+
 def _hook_neighbor(manifest, original, sentence, row):
     """Resolve a neutral line's proposed neighbor under the actual script and notes."""
     from . import shot_notes
@@ -2927,7 +3035,9 @@ def _edit_plan(manifest: dict, analysis: dict, plan: dict, directory: Path,
 technical_option是按本句完整配音求出的实际可行窗口；分配多镜后程序会重新求解，不可用单镜无解淘汰组合。
 匹配质量相近时优先within_preferred_speed=true；普通完整放置短窗保留最高2倍许可，2到3倍仅限已复看的纯过程。实验分相的关键动作结果原速，无许可时原速。technical_option无解时必须换完整短窗口或如实报告冲突。
 同品其他任务使用过该文件和镜头的任务数分别为prior_source_tasks和prior_scene_tasks。实际卖点、可读性、时长相当时，亲肤柔软等卖点和全稿任何位置的空泛钩子优先选较少用的文件、镜头及动作。同等条件按editorial_order选择，以便同时启动的任务也能混选。唯一贴切证据保留。
-根据source_identity、源区间及可见动作描述减少近重复。优先中后段，但完整证据和唯一卖点先于取段偏好。
+通读整条片子，对照每句的实际观察和window_action_hint；即使换了文件、背景或机位，重新举包或重新倒液仍是重复。
+有等效画面时优先换有新信息的动作；连续实验从倒液推进到下渗、压纸、揭纸和结果，不在另一布景重新开始。
+同一镜内自然延续和首次明确展示结果要保留。避开调整机位、空等、拿错或撤手重拍的余量，结果展示所需停留照常保留。
 确实只有一个实际支持的候选、卖点不得不复用时，可在该row写scarce_reuse_reason解释；介绍/钩子和有替代候选时不允许此例外，相关实验仍须顺接而非相邻重播。
 """
     source_limit = contract.source_reuse_limit(manifest)
@@ -2985,6 +3095,7 @@ technical_option是按本句完整配音求出的实际可行窗口；分配多�
             _repair_reviewed_rows(manifest, analysis, plan, directory, narration_timing, duplicate_expanded)
             _mix_repeated_displays(manifest, analysis, plan, narration_timing, current_inventory)
             _place_hook_neighbors(manifest, analysis, plan, directory, narration_timing)
+            _vary_repeated_actions(manifest, analysis, plan, narration_timing, current_inventory)
             plan["ok"] = True
             plan["phase"] = "selection_complete"
             return

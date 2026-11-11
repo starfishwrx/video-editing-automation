@@ -69,6 +69,7 @@ DIRECT表示本句按其用途正常匹配：贴切的轻薄/柔软展示和普�
 防侧漏看见立体护边、侧翼或侧边结构就是直接匹配，不要求倒液防漏实验。只拉伸腰围、没有护边不算。
 干净卫生看见同商品外包装或未拆封包装就是直接匹配，标DIRECT，不得标ACCEPTABLE_DEGRADED，不要求撕开实验。
 画面反证或对象错误为MISMATCH；动作/结果未拍到、遮挡或无法确认则INSUFFICIENT_EVIDENCE。
+如实际切片主要是空等、调机位、拿错重拍或遮挡，说明在哪个物理片段影响了本句，按实际可见证据判定；稳定展示结果本身有信息。
 不要因凑满视频而放行，不得把结尾静态结果当作已看见完整过程。
 输出唯一JSON对象：{{"response_version":"{RESPONSE_VERSION}","segments":[{{"index":1,
 "match_level":"DIRECT|ACCEPTABLE_DEGRADED|MISMATCH|INSUFFICIENT_EVIDENCE","visual_ok":true,

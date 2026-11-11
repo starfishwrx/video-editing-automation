@@ -224,10 +224,17 @@ def candidate_window(shot: dict[str, Any], *, audio_duration_us: int,
     # The solver clamps this preference to the complete-evidence feasible range.
     preferred_start_us = (max(3_000_000, int(material_us) // 2)
                           if shot.get("selection_mode") == "ai_editor" else None)
+    source_in = _us(shot.get("source_start"))
+    source_out = min(_us(shot.get("source_end"), _number(shot.get("source_start"))), int(material_us))
+    head_waste, tail_waste = shot.get("head_waste"), shot.get("tail_waste")
+    edges = shot.get("preferred_clean_edges_us")
+    if edges and source_out > source_in:
+        span = source_out - source_in
+        head_waste = max(0, edges[0] - source_in) / span
+        tail_waste = max(0, source_out - edges[1]) / span
     return timing_contract.solve_window_waste_aware(timing_contract.WindowRequest(
-        source_in_us=_us(shot.get("source_start")),
-        source_out_us=min(_us(shot.get("source_end"), _number(shot.get("source_start"))),
-                          int(material_us)),
+        source_in_us=source_in,
+        source_out_us=source_out,
         audio_duration_us=int(audio_duration_us or 0),
         tail_pad_us=_us(source.get("tail_pad_s"), NARRATION_TAIL_PAD),
         head_guard_us=_us(source.get("head_trim_s"), DEFAULT_HEAD_TRIM_S),
@@ -238,7 +245,7 @@ def candidate_window(shot: dict[str, Any], *, audio_duration_us: int,
         preferred_speed=shot.get("preferred_speed", 1.0),
         video_duration_us=int(round(material_us)),
         fps=(frm or timing_contract.DEFAULT_FPS)),
-        shot.get("head_waste"), shot.get("tail_waste"))
+        head_waste, tail_waste)
 
 
 def span_segment_for(shot: dict[str, Any], *, manifest: dict[str, Any] | None = None,
