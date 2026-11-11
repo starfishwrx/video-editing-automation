@@ -59,6 +59,14 @@ class PresentationWindowTests(unittest.TestCase):
         self.assertEqual(solved.source_end_us, 1_400_000)
         self.assertEqual(presentation.cut_errors(phase(), solved.source_start_us, solved.source_end_us), [])
 
+    def test_observed_action_bounds_win_over_original_waste_estimates(self):
+        observed=editor._observed_shot({**self.shot,'head_waste':.8,'tail_waste':.1},self.review)
+        solved=shot_analyzer.candidate_window(observed,audio_duration_us=1_300_000,manifest=self.manifest)
+        self.assertTrue(solved.ok,solved)
+        self.assertEqual(solved.source_start_us,100_000)
+        self.assertGreaterEqual(solved.source_end_us,1_100_000)
+        self.assertLessEqual(solved.source_end_us,2_200_000)
+
     def test_no_static_fallback_when_action_does_not_fit(self):
         observed = editor._observed_shot(self.shot, self.review)
         self.assertFalse(shot_analyzer.candidate_window(observed, audio_duration_us=600_000,
@@ -149,6 +157,16 @@ class PresentationWindowTests(unittest.TestCase):
         observed = editor._observed_shot(self.shot, self.review)
         self.assertEqual(playback.speed_range(observation=observed.get("playback_observation")), (1, 1))
         self.assertEqual(observed["speed_range_override"], [1, 1])
+
+    def test_valid_hook_action_is_not_replaced_by_a_neighbor(self):
+        plan=self.plan()
+        row=plan['rows'][0]
+        before=copy.deepcopy(row)
+        with mock.patch.object(editor,'_hook_requests',return_value=[(self.sentence,row,'next',2)]), \
+                mock.patch.object(editor,'_assemble',return_value={'segments':[{'timing_certainty':'audio'},{}]}), \
+                mock.patch.object(editor,'_hook_cut',side_effect=AssertionError('keep useful action')):
+            editor._place_hook_neighbors(self.manifest,{'shots':[self.shot]},plan,Path(self.tmp.name),None)
+        self.assertEqual(row,before)
 
     def test_dynamic_requires_observed_product_state_change(self):
         for change in (None, dict(kind='pointing', actor='hand_only', before='整箱已摆好', after='手指向整箱', product_state_changed=True),

@@ -66,6 +66,103 @@ class AIEditorTests(unittest.TestCase):
         self.assertEqual([c["shot_id"] for c in inventory[0]["candidates"]], ["alt"])
         plan["rows"][0]["parts"][0]["shot_id"] = "alt"
         self.assertTrue(editor._assemble(self.manifest, analysis, plan, narration_timing=None)["ok"])
+
+    def test_repeated_action_in_different_files_uses_equivalent_new_action(self):
+        manifest = {**self.manifest, "segments": self.manifest["segments"] * 2}
+        shots, reviews = [], []
+        for sid, action in (("first", "举起"), ("second", "手持展示"), ("other", "展开")):
+            video = self.root / (sid + ".mp4")
+            video.write_bytes(sid.encode())
+            shots.append({**self.shot, "shot_id": sid, "video": str(video), "action": action})
+            reviews.append({**self.review, "shot_id": sid, "source_identity": contract.source_identity(video)})
+        analysis = {"shots": shots}
+        plan = self.plan()
+        plan["sentences"] = [{**self.sentence, "index": i} for i in (1, 2)]
+        plan["rows"] = [{"index": i, "parts": [{"shot_id": sid, "audio_duration_us": 2_000_000}]}
+                        for i, sid in enumerate(("first", "second"), 1)]
+        plan["reviews"] = {"1": reviews[:1], "2": reviews[1:]}
+        menu = editor._build_edit_inventory(manifest, analysis, plan, None)
+        other = next(c for c in menu[1]["candidates"] if c["shot_id"] == "other")
+        other["supported_point_ids"] = []
+        editor._vary_repeated_actions(manifest, analysis, plan, None, menu)
+        self.assertEqual(plan["rows"][1]["parts"][0]["shot_id"], "second")
+        other["supported_point_ids"] = ["p1"]
+        editor._vary_repeated_actions(manifest, analysis, plan, None, menu)
+        self.assertEqual(plan["rows"][1]["parts"][0]["shot_id"], "second")
+        for sentence in plan["sentences"]:
+            sentence.update(kind="hook", selling_points=[], experiment_role="bridge")
+        plan["display_reviews"] = [{**r, "supported_point_ids": [], "basis": "product_display"} for r in reviews]
+        menu = editor._build_edit_inventory(manifest, analysis, plan, None)
+        editor._vary_repeated_actions(manifest, analysis, plan, None, menu)
+        self.assertEqual(plan["rows"][1]["parts"][0]["shot_id"], "second")
+        for sentence in plan["sentences"]:
+            sentence["experiment_role"] = "other"
+        editor._vary_repeated_actions(manifest, analysis, plan, None, menu)
+        self.assertEqual(plan['rows'][1]['parts'][0]['shot_id'],'second')
+        # The shared generic pool still does not prove this exact spoken fact.
+        with mock.patch.object(editor,'_review_proposed_window',return_value=None) as semantic:
+            editor._vary_repeated_actions(manifest,analysis,plan,None,menu,directory=self.root)
+        self.assertTrue(semantic.call_args.args[3]['require_sentence_fit'])
+        self.assertEqual(semantic.call_args.args[3]['text'],self.manifest['segments'][0]['text'])
+        self.assertEqual(plan['rows'][1]['parts'][0]['shot_id'],'second')
+        for error in (ValueError('AI_EDITOR_CALL_FAILED:REQUEST_TIMEOUT'),OSError('AI_EDITOR_CALL_FAILED:503')):
+            with mock.patch.object(editor,'_review_proposed_window',side_effect=error):
+                editor._vary_repeated_actions(manifest,analysis,plan,None,menu,directory=self.root)
+            self.assertEqual(plan['rows'][1]['parts'][0]['shot_id'],'second')
+        with mock.patch.object(editor,'_row_has_presentation',side_effect=lambda p,r:r['index']==2), \
+                mock.patch.object(editor,'_review_proposed_window',side_effect=AssertionError('keep complete phase')):
+            editor._vary_repeated_actions(manifest,analysis,plan,None,menu,directory=self.root)
+        self.assertEqual(plan['rows'][1]['parts'][0]['shot_id'],'second')
+        def fit(_manifest,plan,_directory,sentence,shot,window):
+            plan.setdefault('window_reviews',{})['fit']={**plan['display_reviews'][-1],
+                'sentence_index':sentence['index'],'review_window_us':dict(zip(('start','end'),window)),
+                'sentence_fit':True,'sentence_fit_claim':sentence['text'],'sentence_observation':'本句事实有画面支持'}
+            return 'fit'
+        with mock.patch.object(editor,'_review_proposed_window',side_effect=fit):
+            editor._vary_repeated_actions(manifest,analysis,plan,None,menu,directory=self.root)
+        self.assertEqual(plan["rows"][1]["parts"][0]["shot_id"], "other")
+        result=editor._assemble(manifest,analysis,plan,narration_timing=None)
+        self.assertTrue(result['segments'][1]['ai_selection']['sentence_fit']['ok'])
+
+    def test_action_hint_does_not_merge_distinct_phases(self):
+        shot = {"action": "倾倒", "action_segments": [
+            {"start": 0, "end": 2, "action": "倒液"}, {"start": 2, "end": 4, "action": "揭纸"}]}
+        self.assertEqual(editor.window_action(shot, .5, 2), "倒液")
+        self.assertEqual(editor.window_action(shot, 2, 3), "揭纸")
+        self.assertFalse(editor.window_action(shot, 1, 3))
+        self.assertFalse(editor.window_action(shot, 3, 5))
+
+    def test_shared_pool_with_one_feasible_action_checks_one_more_round(self):
+        ids = [f"take_{n}" for n in range(24)]
+        shots = {sid: {**self.shot, "shot_id": sid, "action": "举起"} for sid in ids}
+        reviews = {sid: {**self.review, "shot_id": sid, "supported_point_ids": []} for sid in ids}
+        sentence = {**self.sentence, "index": 0, "kind": "product_intro", "selling_points": [],
+                    "candidate_ids": ids, "audio_durations_us": [1_000_000, 2_000_000],
+                    "standalone_durations_us": [2_000_000]}
+        def observe(chunk, *args, **kwargs):
+            return [(sid, reviews[sid]) for sid in chunk]
+        cached = [reviews[sid] for sid in ids[:8]]
+        with mock.patch.object(editor, "_iter_review_round", side_effect=observe):
+            _, coverage = editor._review_pool(self.manifest, sentence, shots, self.root, {}, existing_reviews=cached)
+            self.assertEqual(coverage["checked"], 16)
+            shots[ids[1]]["action"] = "展开"
+            _, coverage = editor._review_pool(self.manifest, sentence, shots, self.root, {}, existing_reviews=cached)
+            self.assertEqual(coverage["checked"], 8)
+
+    def test_scene_waste_applies_to_original_coordinates_and_yields_to_reviewed_crop(self):
+        shot = {**self.shot, "tail_waste": .5}
+        review = {**self.review, "evidence_intervals_us": [{"start": 2_000_000, "end": 2_100_000}]}
+        observed = editor._observed_shot(shot, review)
+        observed["source_start"] = 1
+        cut = shot_analyzer.candidate_window(observed, audio_duration_us=1_000_000, manifest=self.manifest)
+        self.assertTrue(cut.ok)
+        self.assertLessEqual(cut.source_end_us, 3_000_000)
+        review.update(placement_review=True, review_window_us={"start": 4_000_000, "end": 5_000_000},
+                      evidence_intervals_us=[{"start": 4_100_000, "end": 4_600_000}])
+        cut = shot_analyzer.candidate_window(editor._observed_shot(shot, review),
+                                             audio_duration_us=1_000_000, manifest=self.manifest)
+        self.assertTrue(cut.ok)
+        self.assertEqual(cut.source_start_us, 4_000_000)
         # The rejection is sentence-scoped and never applies to other sentences.
         self.assertEqual(editor.qc_rejected_shots({"qc_rejected_shots": {"1": ["handfeel"]}}), {1: {"handfeel"}})
 

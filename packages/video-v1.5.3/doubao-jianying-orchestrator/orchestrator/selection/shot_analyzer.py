@@ -232,6 +232,14 @@ def candidate_window(shot: dict[str, Any], *, audio_duration_us: int,
     source_out = min(_us(shot.get("source_end"), _number(shot.get("source_start"))), int(material_us))
     if phase:
         source_in, source_out = max(source_in, phase["start_us"]), min(source_out, phase["end_us"])
+    head_waste, tail_waste = shot.get("head_waste"), shot.get("tail_waste")
+    edges = shot.get("preferred_clean_edges_us")
+    if phase:
+        head_waste, tail_waste = 0, 0
+    elif edges and source_out > source_in:
+        span = source_out - source_in
+        head_waste = max(0, edges[0] - source_in) / span
+        tail_waste = max(0, source_out - edges[1]) / span
     return timing_contract.solve_window_waste_aware(timing_contract.WindowRequest(
         source_in_us=source_in, source_out_us=source_out,
         audio_duration_us=int(audio_duration_us or 0),
@@ -245,7 +253,7 @@ def candidate_window(shot: dict[str, Any], *, audio_duration_us: int,
         video_duration_us=int(round(material_us)),
         exact_source_timing=bool(phase),
         fps=(frm or timing_contract.DEFAULT_FPS)),
-        shot.get("head_waste"), shot.get("tail_waste"))
+        head_waste, tail_waste)
 
 
 def span_segment_for(shot: dict[str, Any], *, manifest: dict[str, Any] | None = None,
