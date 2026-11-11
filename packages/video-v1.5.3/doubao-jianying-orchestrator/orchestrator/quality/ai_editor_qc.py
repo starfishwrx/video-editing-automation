@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import math
 from .. import ai_editor_contract as contract
+from ..policy.continuity import tissue_press_missing
 from .. import visual_qc_contract
 
 RESPONSE_VERSION = visual_qc_contract.AI_RESPONSE_VERSION
@@ -61,6 +62,7 @@ def prompt(claims: list[dict], frame_count: int) -> str:
 reason明确列出实际支持的具体点及未确认的其他点；部分呈现不等于整句全部功效已证实。没有任何具体点成立不得通过。
 DIRECT表示本句按其用途正常匹配：贴切的轻薄/柔软展示和普通介绍/钩子的同商品展示均可正常通过，
 不要求它们成为物理实验。明确性能结果、数量和数值比较仍须对应画面。包装淋水不能证明巾体干爽。
+卫品口播里的反渗、回流、干爽、不黏或黏腻，按压验证只认纸巾：必须看见纸巾接触巾体并提起。手掌、手指、空手离开、按完后手掌干净都不是按压验证。没看见纸巾时这句标INSUFFICIENT_EVIDENCE，不得标DIRECT或ACCEPTABLE_DEGRADED。
 价格/优惠/划算等普通促销口播，可用同商品包装或陈列承接；明确价格数值或价格比较仍须对应可读证据。
 包装标称只支持包装上的说法，不证明实际性能；EDI纯水等原料标称不要求另拍制水过程。
 口播里的层数或结构名称如果说的是瞬吸、吸收、下渗，看得见倒液之后的吸收过程或结果就是这句证据，不要求切开看到内部层数。没有吸收过程的包装和静态陈列仍然不能证明。
@@ -74,6 +76,21 @@ DIRECT表示本句按其用途正常匹配：贴切的轻薄/柔软展示和普�
 每句恰好一条，index使用本批次从1开始编号。字段必填、描述非空、置信有限且0到1。
 正面判断置信至少0.6；DIRECT/ACCEPTABLE_DEGRADED的visual_ok为true，其余为false。
 """
+
+
+def apply_tissue_press_gate(row: dict, *, category: str) -> dict:
+    """Downgrade a passing rewet judgment that never reports tissue."""
+    if category != "weipin" or row.get("match_level") not in {"DIRECT", "ACCEPTABLE_DEGRADED"}:
+        return row
+    if not tissue_press_missing([row.get("claim")], [row.get("observed"), row.get("reason")]):
+        return row
+    revised = dict(row)
+    revised["match_level"] = "INSUFFICIENT_EVIDENCE"
+    revised["visual_ok"] = False
+    revised["tissue_press_required"] = True
+    note = "按压验证只认纸巾，手掌或手指接触不能代替。"
+    revised["reason"] = (str(revised.get("reason") or "").strip() + " " + note).strip()
+    return revised
 
 
 def claim_batches(claims, size):

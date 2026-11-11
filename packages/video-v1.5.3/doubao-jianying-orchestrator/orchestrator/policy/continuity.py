@@ -6,10 +6,20 @@ cross-file pairing nor permission to compress a critical action or its result.
 from __future__ import annotations
 
 import math
+import re
 
 SCHEMA = "reviewed-sentence-continuity-v1"
 EXPERIMENT_SCHEMA = "reviewed-experiment-sentence-group-v1"
 MAX_MEMBERS = 3
+# 反渗、干爽、不黏的按压验证只认纸巾。手掌或手指接触不是验证。
+_REWET_CLAIM = re.compile(r"反渗|回流|不黏|不粘|干爽|黏腻|粘腻")
+
+
+def tissue_press_missing(texts, observations) -> bool:
+    """A rewet claim still needs a tissue observation. A bare hand does not count."""
+    if not any(_REWET_CLAIM.search(str(text or "")) for text in texts):
+        return False
+    return not any("纸巾" in str(item or "") for item in observations)
 
 
 def adjacent(indices):
@@ -97,6 +107,12 @@ def validate(group):
     _require(cursor == end, "GROUP_DURATION_CHANGED")
     _require(adjacent([m["index"] for m in members]), "NOT_ADJACENT")
     source_chain([(str(context["source_identity"]["path"]), m["start_us"], m["end_us"]) for m in members])
+    if context.get("category") == "weipin" and tissue_press_missing(
+            [member.get("text") for member in members],
+            [review.get(key) for key in ("demonstration_observation", "observation", "reason")]
+            + [row.get("observation") for row in observations]
+            + [row.get("reason") for row in observations]):
+        _require(False, "TISSUE_PRESS_REQUIRED")
     return group
 
 

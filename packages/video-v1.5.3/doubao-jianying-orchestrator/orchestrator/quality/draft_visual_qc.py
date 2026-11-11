@@ -275,7 +275,7 @@ def _prompt(claims: list[dict[str, Any]], frame_count: int, *, force_ai: bool = 
 3. MISMATCH：画面与文案无关，或出现相反/冲突事实；
 4. INSUFFICIENT_EVIDENCE：画面可能相关，但遮挡、分辨率、时序或证据不足，无法可靠判断。
 
-卖点动作/结果优先直接匹配；只有泛包装、远景、静态陈列不能证明瞬吸、干爽、透气、反渗、柔软等效果。对已标记 degraded=true 的语义段，相关的产品/对应部位特写不因缺少直接动作被判为 MISMATCH。品牌、包装、联名、数量、赠品和 CTA 按对应画面相关性判断。黑帧、空帧、完全看不到产品、明显无关画面仍为 MISMATCH。不要因为上游 expected_shot 或 gate 状态自动通过。
+卖点动作/结果优先直接匹配；只有泛包装、远景、静态陈列不能证明瞬吸、干爽、透气、反渗、柔软等效果。卫品反渗、回流、干爽、不黏或黏腻的按压验证只认纸巾接触巾体并提起。手掌、手指、手离开、手掌干净都不是按压验证；没看见纸巾时标 INSUFFICIENT_EVIDENCE，不得标 DIRECT 或 ACCEPTABLE_DEGRADED。对已标记 degraded=true 的语义段，相关的产品/对应部位特写不因缺少直接动作被判为 MISMATCH。品牌、包装、联名、数量、赠品和 CTA 按对应画面相关性判断。黑帧、空帧、完全看不到产品、明显无关画面仍为 MISMATCH。不要因为上游 expected_shot 或 gate 状态自动通过。
 
 只输出一个 JSON 对象：{{"response_version":"{RESPONSE_VERSION}","segments":[{{"index":1,"match_level":"DIRECT|ACCEPTABLE_DEGRADED|MISMATCH|INSUFFICIENT_EVIDENCE","visual_ok":true,"observed":"看到的具体事实","reason":"这些事实为什么满足或不满足本句","confidence":0.8}}],"overall":"PASS|PASS_WITH_DEGRADED|FAIL|UNCERTIFIED"}}。每段必须且只能有一条，index 是从 1 开始且只对应本批次的整数，不得重复、漏段或输出其他批次编号。所有字段必填，observed/reason 不得为空。confidence 必须为有限数值且在 0 到 1 内；零置信度不得给 DIRECT/ACCEPTABLE_DEGRADED，无法判断时应给 INSUFFICIENT_EVIDENCE。ACCEPTABLE_DEGRADED 和 DIRECT 的 visual_ok 都填 true；MISMATCH 和 INSUFFICIENT_EVIDENCE 填 false。不得只给布尔值代替匹配等级。"""
 
@@ -824,6 +824,8 @@ def main() -> int:
                             row["selection_mode"] = claim["selection_mode"]
                             row["degraded_expected"] = claim["degraded"]
                             row["match_level"] = _normalize_match_level(row)
+                            row = ai_editor_qc.apply_tissue_press_gate(
+                                row, category=str(claim.get("category") or ""))
                             row["visual_ok"] = row["match_level"] in {"DIRECT", "ACCEPTABLE_DEGRADED"}
                             visual_rows.append(row)
                             if row["match_level"] == "ACCEPTABLE_DEGRADED":
