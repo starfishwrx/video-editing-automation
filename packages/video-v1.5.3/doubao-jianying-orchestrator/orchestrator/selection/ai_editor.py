@@ -208,6 +208,8 @@ def _call(prompt: str, path: Path, sheet: Path | None = None) -> dict:
                 "model": route_model, "endpoint": route_endpoint}
     if text_cfg:
         identity["thinking"] = "enable_thinking=false"
+        if sheet is None and 'json' in prompt.casefold():
+            identity['response_format'] = {'type': 'json_object'}
     request_path = path.with_suffix(".request.json")
     if path.is_file() and request_path.is_file():
         try:
@@ -1145,6 +1147,10 @@ def _assemble(manifest: dict, analysis: dict, plan: dict, *, narration_timing: d
                 review = {**revised, "scarce_reuse_reason": reuse_reason}
                 shot = {**shot, "source_start": window["start"] / 1e6, "source_end": window["end"] / 1e6}
             review = {**review, "preferred_speed": _scene_preference(manifest, sentence, review)}
+            if part.get('sentence_fit_required') and not (
+                    review.get('sentence_fit') is True and review.get('sentence_fit_claim') == sentence['text']
+                    and isinstance(review.get('sentence_observation'),str) and review['sentence_observation'].strip()):
+                raise ValueError(f'AI_EDITOR_SENTENCE_FIT_UNOBSERVED:{index}')
             fit = _placement_fit_observation(review)
             if fit:
                 review = {**review, "playback_observation": fit}
@@ -1189,6 +1195,8 @@ def _assemble(manifest: dict, analysis: dict, plan: dict, *, narration_timing: d
                     "guard_source_start": original_shot["source_start"],
                     "guard_source_end": original_shot["source_end"],
                     "evidence_intervals": observed["evidence_intervals"], "text": sentence["text"]}
+            if part.get('sentence_fit_required'):
+                item['sentence_fit_required']=True
             if group:
                 item.update(continuity_group=group, guard_override=[0, 0],
                             action_completeness_scope="continuous_sentence_group",
@@ -1383,11 +1391,15 @@ def _review_placement_window(manifest: dict, sentence: dict, shot: dict, directo
                 parent.get("evidence_intervals_us")]
     if phase:
         identity.append(phase)
+    if sentence.get('require_sentence_fit'):
+        identity.append(['sentence-fit-v1',sentence['text']])
     key = contract.digest(identity)[:24]
     durations = [v for v in (sentence.get("audio_durations_us") or []) if type(v) is int and v > 0]
     prompt = (
         contract.policy_prompt(manifest)
-        + "\n这是放置短窗复核，不是重新选镜。附图只对应拟定裁切窗口；卖点已被更长观察确认。\n"
+        + ("\n这是可选动态替换复核；共享展示池未确认当前原句，必须在本裁切独立核实。\n"
+           if sentence.get('require_sentence_fit') else
+           "\n这是放置短窗复核，不是重新选镜。附图只对应拟定裁切窗口；卖点已被更长观察确认。\n")
         + json.dumps({
             "product": manifest.get("product"),
             "category": manifest.get("category"),
@@ -1396,16 +1408,17 @@ def _review_placement_window(manifest: dict, sentence: dict, shot: dict, directo
             "shot_id": shot["shot_id"],
             "audio_durations_us": durations,
             "scene_us": {"start": round(start * 1e6), "end": round(end * 1e6)},
-            "certified_selling_point": {
+            ("generic_parent_observation" if sentence.get('require_sentence_fit') else "certified_selling_point"): {
                 "supported_point_ids": parent.get("supported_point_ids"),
                 "basis": parent.get("basis"),
                 "observation": parent.get("observation"),
                 "evidence_intervals_us": parent.get("evidence_intervals_us"),
             },
         }, ensure_ascii=False)
+        + ("\n独立检查本窗对整句实际事实的支持，以及动作和辨认完整性。\n" if sentence.get('require_sentence_fit') else
+           "\n只判断这个裁切窗口能不能作为一句完整可放入的镜头，不要重新判定卖点是否成立。\n"
+           "禁止以“仪器用途不确定”“标称是否证明卖点”“是否荧光检测”等理由否定；那些已由 certified_selling_point 确认。\n")
         + """
-只判断这个裁切窗口能不能作为一句完整可放入的镜头，不要重新判定卖点是否成立。
-禁止以“仪器用途不确定”“标称是否证明卖点”“是否荧光检测”等理由否定；那些已由 certified_selling_point 确认。
 输出JSON：{"verdict":"suitable|unsuitable|uncertain","same_product":true,
 "observation":"裁切内实际可见的完整片段事实","reason":"为什么这段裁切完整合适或不合适",
 "confidence":0.9,"evidence_intervals_us":[{"start":1000000,"end":1800000}],
@@ -1423,6 +1436,12 @@ suitable=裁切内是一段完整、未拦腰切断关键动作/结果的可用�
                    "同时给action/result/change/start_censored=false/end_censored=false。change沿用父观察商品状态变化种类，重新核对实际前后状态。"
                    "若首次展示还没完成、无法辨认或边界不在图内，返回unsuitable或uncertain。\n"
                    + json.dumps({"parent_presentation": phase}, ensure_ascii=False))
+    if sentence.get('require_sentence_fit'):
+        prompt += ('\n本次是可选动态替换，必须额外独立核对本句实际语义，不能继承通用展示池对本句的支持。'
+                   '忽略kind和空selling_points标签，直接读原句。只要原句含数量、规格、成分、检测或性能等具体事实，'
+                   '必须由这个实际裁切画面逐项支持；同商品、包装清楚或手在动不能作为具体事实证据。'
+                   '另返回sentence_fit=true|false和sentence_observation=本窗可见的逐句支持依据。'
+                   '不支持或无法确认时sentence_fit=false且不得suitable。原句：'+sentence['text'])
     result = _call(prompt, directory / "reviews" / f"placement_{key}.json", sheet)
     verdict = result.get("verdict")
     if verdict not in {"suitable", "unsuitable", "uncertain"} or type(result.get("same_product")) is not bool:
@@ -1435,6 +1454,9 @@ suitable=裁切内是一段完整、未拦腰切断关键动作/结果的可用�
         raise ValueError("AI_EDITOR_PLACEMENT_REVIEW_OBSERVATION_MISSING")
     if not result["same_product"] or confidence < .6:
         verdict = "uncertain" if result["same_product"] else "unsuitable"
+    if sentence.get('require_sentence_fit') and not (result.get('sentence_fit') is True
+            and isinstance(result.get('sentence_observation'),str) and result['sentence_observation'].strip()):
+        verdict = 'uncertain'
     intervals = _evidence_intervals(result.get("evidence_intervals_us"))
     result['evidence_intervals_us'] = intervals
     if verdict == "suitable":
@@ -1490,6 +1512,7 @@ suitable=裁切内是一段完整、未拦腰切断关键动作/结果的可用�
         "verdict": mapped,
         "placement_review": True,
         "placement_verdict": verdict,
+        **({'sentence_fit_claim':sentence['text']} if sentence.get('require_sentence_fit') else {}),
         "same_product": True if mapped == "matched" else result["same_product"],
         "basis": parent.get("basis"),
         "supported_point_ids": list(parent.get("supported_point_ids") or []),
@@ -1575,6 +1598,10 @@ def _review_proposed_window(manifest, plan, directory, sentence, shot, window, *
                     and isinstance(supported, list) and all(isinstance(p, str) and p in allowed for p in supported)
                     and contract.points_supported(allowed, set(supported))
                     and parent_ok):
+                if sentence.get('require_sentence_fit') and not (saved.get('sentence_fit') is True
+                        and saved.get('sentence_fit_claim') == sentence['text']
+                        and isinstance(saved.get('sentence_observation'),str) and saved['sentence_observation'].strip()):
+                    return None
                 return key
             return None
     continuation = sentence.get("action_continuation") is True
@@ -1606,6 +1633,9 @@ def _review_proposed_window(manifest, plan, directory, sentence, shot, window, *
             raise
         return None
     if (reviewed.get("verdict") != "matched" or reviewed.get("same_product") is not True
+            or (sentence.get('require_sentence_fit') and not (reviewed.get('sentence_fit') is True
+                and reviewed.get('sentence_fit_claim') == sentence['text']
+                and isinstance(reviewed.get('sentence_observation'),str) and reviewed['sentence_observation'].strip()))
             or reviewed.get("source_identity") != source
             or reviewed.get("review_window_us") != {"start": window[0], "end": window[1]}
             or not contract.points_supported({p["id"] for p in sentence["selling_points"]},
@@ -2267,9 +2297,11 @@ def _short_complete_rows(manifest, analysis, plan, index, narration_timing):
                "reason": "short complete reviewed window under " + contract.playback.VERSION}
 
 
-def _try_other_presentation_window(manifest, analysis, plan, directory, index, narration_timing):
+def _try_other_presentation_window(manifest, analysis, plan, directory, index, narration_timing, *, sentence_bound=False):
     """Spend the existing crop budget on another matched action, not a short repeat."""
     sentence=next(s for s in plan['sentences'] if s['index']==index)
+    if sentence_bound:
+        sentence={**sentence,'require_sentence_fit':True}
     if sentence['kind'] not in {'hook','product_intro'} or sentence.get('selling_points'):
         return False
     shots={s['shot_id']:s for s in analysis['shots']}
@@ -2301,6 +2333,8 @@ def _try_other_presentation_window(manifest, analysis, plan, directory, index, n
                 if row['parts'][0].get('window_review_key')==key),None)
             if candidate is None:
                 continue
+            if sentence_bound:
+                candidate['parts'][0]['sentence_fit_required']=True
             plan['rows']=[candidate if r['index']==index else r for r in plan['rows']]
             _save(directory/'plan.json',plan)
             return True
@@ -2402,6 +2436,44 @@ def _revalidate_rows(manifest, analysis, plan, *, narration_timing=None):
                 break
             if not replaced:
                 raise
+
+
+def _prefer_reviewed_actions(manifest, analysis, plan, directory, narration_timing):
+    """Try real, complete action windows before accepting a plain display row."""
+    from . import shot_notes
+    if manifest.get('shot_notes_general'):
+        return
+    shots={s['shot_id']:s for s in analysis['shots']}
+    originals=timing_contract.split_sentences(manifest)
+    for sentence in plan['sentences']:
+        index=sentence['index']
+        row=next((r for r in plan.get('rows',[]) if r['index']==index),{})
+        # This is only an optional generic-display preference. A misclassified
+        # quantity/spec sentence must keep its prior evidence, not borrow a
+        # generic product action as proof of the spoken number or specification.
+        factual = re.search(r'\d|[一二三四五六七八九十百千万两双单半俩全每]|正装|试用装|规格|尺寸|加厚|加大|大包|小包|大码|小码|送|赠',sentence['text'])
+        promotional = re.search(r'赶紧|赶快|快来|活动|直播间|大促|冲|抢|看看|看下',sentence['text'])
+        if (sentence['kind'] not in {'hook','product_intro'} or sentence.get('selling_points')
+                or factual or not promotional or shot_notes.note_for(manifest,index,originals[index-1])
+                or not row.get('parts') or row.get('continuity_key') or _row_has_presentation(plan,row)
+                or index in plan.get('_frozen_segments',{}) or originals[index-1].get('visual_requirements')):
+            continue
+        occupied={shots[p['shot_id']]['video'] for r in plan['rows'] if r['index']!=index
+                  for p in r.get('parts',[]) if p.get('shot_id') in shots}
+        replacement=next((r for r in _short_complete_rows(manifest,analysis,plan,index,narration_timing)
+            if _row_has_presentation(plan,r) and all(shots[p['shot_id']]['video'] not in occupied
+                and (plan.get('window_reviews',{}).get(p.get('window_review_key')) or {}).get('sentence_fit') is True
+                and (plan['window_reviews'][p['window_review_key']]).get('sentence_fit_claim') == sentence['text']
+                and isinstance(plan['window_reviews'][p['window_review_key']].get('sentence_observation'),str)
+                and plan['window_reviews'][p['window_review_key']]['sentence_observation'].strip()
+                for p in r['parts'])),None)
+        if replacement:
+            for part in replacement['parts']:
+                part['sentence_fit_required']=True
+            plan['rows']=[replacement if r['index']==index else r for r in plan['rows']]
+            _save(directory/'plan.json',plan)
+        else:
+            _try_other_presentation_window(manifest,analysis,plan,directory,index,narration_timing,sentence_bound=True)
 
 
 def _retrieve_empty_selection(manifest, analysis, plan, failure, narration_timing):
@@ -2911,6 +2983,7 @@ def _repair_reviewed_rows(manifest, analysis, plan, directory, narration_timing,
     _place_absorb_experiment(manifest, analysis, plan, directory, narration_timing)
     experiment_groups.repair(manifest, analysis, plan, directory, narration_timing)
     _place_empty_matched_evidence(manifest, analysis, plan, directory, narration_timing)
+    _prefer_reviewed_actions(manifest,analysis,plan,directory,narration_timing)
     seen = set()
     for _ in range(1 + 8 * len(plan.get("sentences", []))):
         try:

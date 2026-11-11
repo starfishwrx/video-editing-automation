@@ -90,6 +90,7 @@ class PresentationWindowTests(unittest.TestCase):
         with mock.patch.object(editor, '_place_absorb_experiment'), \
                 mock.patch.object(editor.experiment_groups, 'repair'), \
                 mock.patch.object(editor, '_place_empty_matched_evidence'), \
+                mock.patch.object(editor, '_prefer_reviewed_actions'), \
                 mock.patch.object(editor, '_revalidate_rows', side_effect=[failure, {'ok': True}]), \
                 mock.patch.object(editor, '_retrieve_empty_selection', return_value=False), \
                 mock.patch.object(editor, '_extend_previous_action', return_value=False), \
@@ -98,6 +99,51 @@ class PresentationWindowTests(unittest.TestCase):
             self.assertTrue(editor._repair_reviewed_rows(self.manifest, {'shots': [self.shot]},
                 plan, Path(self.tmp.name), None, set())['ok'])
         alternate.assert_called_once()
+
+    def test_plain_display_is_replaced_by_available_complete_action_without_new_calls(self):
+        plan=self.plan()
+        static_video=Path(self.tmp.name)/'static.mp4'
+        static_video.write_bytes(b'static product')
+        static_shot={**self.shot,'shot_id':'static','video':str(static_video)}
+        static={**self.review,'shot_id':'static','source_identity':contract.source_identity(static_video)}
+        static.pop('presentation_observation')
+        plan['display_reviews'].append(static)
+        plan['rows'][0]['parts'][0]['shot_id']='static'
+        plan['window_reviews']={'line_fit':{**self.review,'sentence_index':1,
+            'review_window_us':{'start':100_000,'end':1_400_000},
+            'presentation_observation':phase(end_us=1_400_000),
+            'sentence_fit':True,'sentence_fit_claim':self.sentence['text'],
+            'sentence_observation':'本句为泛促销，实际完整转正展示同商品'}}
+        analysis={'shots':[self.shot,static_shot]}
+        self.assertTrue(editor._assemble(self.manifest,analysis,plan,narration_timing=None)['ok'])
+        with mock.patch.object(editor,'_call',side_effect=AssertionError('existing complete pixels suffice')):
+            editor._prefer_reviewed_actions(self.manifest,analysis,plan,Path(self.tmp.name),None)
+        actual=editor._assemble(self.manifest,analysis,plan,narration_timing=None)
+        self.assertEqual(actual['segments'][0]['shot_id'],'display')
+        self.assertEqual(actual['segments'][0]['source_start'],.1)
+        self.assertTrue(actual['segments'][0]['ai_selection']['sentence_fit']['ok'])
+        plan['window_reviews']['line_fit']['sentence_fit']=False
+        with self.assertRaisesRegex(ValueError,'AI_EDITOR_SENTENCE_FIT_UNOBSERVED'):
+            editor._assemble(self.manifest,analysis,plan,narration_timing=None)
+        plan['window_reviews']['line_fit']['sentence_fit']=True
+        plan['rows'][0]['parts'][0]['shot_id']='static'
+        plan['_frozen_segments']={1:copy.deepcopy(actual['segments'][0])}
+        with mock.patch.object(editor,'_try_other_presentation_window',side_effect=AssertionError('frozen')):
+            editor._prefer_reviewed_actions(self.manifest,analysis,plan,Path(self.tmp.name),None)
+        self.assertEqual(plan['rows'][0]['parts'][0]['shot_id'],'static')
+        plan.pop('_frozen_segments')
+        for text in ('到手五包', '到手5包', '这次买正装送正装', '一整年的量',
+                     '看看双包', '看看三大包', '看看两盒', '看看半斤', '看看三种香型', '看看加大号', '荧光检测'):
+            plan['sentences'][0]['text']=text
+            with mock.patch.object(editor,'_try_other_presentation_window',side_effect=AssertionError('spoken fact')):
+                editor._prefer_reviewed_actions(self.manifest,analysis,plan,Path(self.tmp.name),None)
+            self.assertEqual(plan['rows'][0]['parts'][0]['shot_id'],'static')
+        plan['sentences'][0]['text']=self.sentence['text']='看看这个商品'
+        from orchestrator.selection import shot_notes
+        with mock.patch.object(shot_notes,'note_for',return_value={'requested':'keep'}), \
+                mock.patch.object(editor,'_try_other_presentation_window',side_effect=AssertionError('note')):
+            editor._prefer_reviewed_actions(self.manifest,analysis,plan,Path(self.tmp.name),None)
+        self.assertEqual(plan['rows'][0]['parts'][0]['shot_id'],'static')
 
     def test_phase_does_not_authorize_acceleration(self):
         observed = editor._observed_shot(self.shot, self.review)
@@ -404,6 +450,19 @@ class PresentationWindowTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'PRESENTATION_SCHEMA_INVALID'):
                 editor._review_placement_window(self.manifest, self.sentence, self.shot,
                     Path(self.tmp.name), parent=self.review)
+
+    def test_proactive_replacement_requires_fresh_sentence_semantics_not_generic_product_fit(self):
+        media=dict(start=.1,end=1.4,before=self.review['source_identity'],times=[.1,.5,.9,1.3],sheet=Path('pixels.jpg'))
+        sentence={**self.sentence,'text':'赶紧看看荧光检测','require_sentence_fit':True}
+        raw=dict(verdict='suitable',same_product=True,observation='包装转正，未见荧光检测',reason='同商品完整动作',
+            confidence=.9,evidence_intervals_us=[{'start':700_000,'end':1_100_000}],
+            presentation_observation=phase(end_us=1_400_000))
+        for fit in (None,False,True):
+            result={**raw,'sentence_fit':fit,'sentence_observation':'根据本窗实际可见事实核对原句'}
+            with mock.patch.object(editor,'_review_media',return_value=media),mock.patch.object(editor,'_call',return_value=result):
+                review=editor._review_placement_window(self.manifest,sentence,self.shot,Path(self.tmp.name),parent=self.review)
+            self.assertEqual(review['verdict'],'matched' if fit is True else 'uncertain')
+            self.assertEqual(review['sentence_fit_claim'],sentence['text'])
 
     def test_fresh_crop_cannot_expand_parent_into_reset(self):
         media = dict(start=.1, end=3., before=self.review['source_identity'],

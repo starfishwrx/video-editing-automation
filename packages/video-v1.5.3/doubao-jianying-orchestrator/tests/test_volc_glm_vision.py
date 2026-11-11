@@ -154,6 +154,18 @@ class VolcDirectTests(unittest.TestCase):
             self.assertEqual(error, "QWEN_CONFIG_MISSING")
             post.assert_not_called()
 
+    def test_validated_qwen_text_requests_use_json_mode_without_changing_images(self):
+        cfg={'model':'qwen-test','base_url':'https://example.invalid/v1','api_key':'synthetic'}
+        sheet=self.root/'pixels.jpg'
+        sheet.write_bytes(b'pixels')
+        with mock.patch.object(vision_client,'post_chat',return_value=vision_client.VisionCallResult(True,text='{}')) as post:
+            for media,prompt,validator,expected in ((None,'Output JSON',lambda x:True,True),
+                    (sheet,'Output JSON',lambda x:True,False),(None,'ordinary text',None,False)):
+                vision_analyzer._run_compatible_chat(cfg,media,prompt,self.root/'out.json',
+                    timeout=5,validator=validator)
+                body=post.call_args.args[2]
+                self.assertEqual(body.get('response_format'),{'type':'json_object'} if expected else None)
+
     def test_qwen_cache_identity_binds_model_and_endpoint(self):
         video = self.root / "video.mp4"
         video.write_bytes(b"test")

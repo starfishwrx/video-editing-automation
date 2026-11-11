@@ -1226,6 +1226,23 @@ class AIEditorTests(unittest.TestCase):
                 editor._call("prompt", self.root / "response.json")
             provider.assert_called_once()
 
+    def test_text_json_mode_identity_does_not_reuse_old_unconstrained_response(self):
+        from orchestrator import vision_analyzer
+        output=self.root/'edit-json.json'
+        editor._save(output,{'old':True})
+        prompt='Output JSON'
+        editor._save(output.with_suffix('.request.json'),dict(prompt_sha256=contract.digest(prompt),
+            image_sha256=None,model='qwen-test',endpoint='https://example.invalid/v1',thinking='enable_thinking=false'))
+        env={'JY_VISION_TRANSPORT':'qwen','JY_QWEN_BASE_URL':'https://example.invalid/v1',
+             'JY_QWEN_API_KEY':'synthetic','JY_QWEN_MODEL':'qwen-test'}
+        with mock.patch.dict('os.environ',env), mock.patch.object(vision_analyzer,'_run_qwen_chat',
+                return_value=(True,'{"new":true}')) as provider:
+            self.assertEqual(editor._call(prompt,output),{'new':True})
+            self.assertEqual(editor._call(prompt,output),{'new':True})
+        provider.assert_called_once()
+        identity=json.loads(output.with_suffix('.request.json').read_text(encoding='utf8'))
+        self.assertEqual(identity['response_format'],{'type':'json_object'})
+
     def test_float_vision_timeout_env_string_is_parsed_safely(self):
         from orchestrator import vision_analyzer
         output = self.root / "out.json"

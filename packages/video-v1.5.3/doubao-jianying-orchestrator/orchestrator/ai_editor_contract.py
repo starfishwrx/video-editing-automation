@@ -306,6 +306,9 @@ def make_receipt(segment: dict, *, index: int, sentence: dict, observation: dict
     }
     if task_speed_cap is not None:
         receipt["task_absorb_speed_cap"] = task_speed_cap
+    if segment.get('sentence_fit_required'):
+        receipt['sentence_fit']={'ok':observation.get('sentence_fit'),
+            'claim':observation.get('sentence_fit_claim'),'observation':observation.get('sentence_observation')}
     return receipt
 
 
@@ -332,6 +335,12 @@ def validate_segment_receipt(item: dict, *, text: str | None = None,
             reasons.append("AI_SELECTION_BASIS_INVALID")
         if receipt.get("text") != str(text if text is not None else item.get("text") or ""):
             reasons.append("AI_SELECTION_TEXT_CHANGED")
+        if item.get('sentence_fit_required') or 'sentence_fit' in receipt:
+            fit=receipt.get('sentence_fit')
+            if (item.get('sentence_fit_required') is not True or not isinstance(fit,dict)
+                    or fit.get('ok') is not True or fit.get('claim') != receipt.get('text')
+                    or not isinstance(fit.get('observation'),str) or not fit['observation'].strip()):
+                reasons.append('AI_SELECTION_SENTENCE_FIT_UNOBSERVED')
         if index is not None and receipt.get("index") != index:
             reasons.append("AI_SELECTION_INDEX_CHANGED")
         if receipt.get("video") != str(item.get("video") or "") or receipt.get("shot_id") != item.get("temporary_shot_id"):
