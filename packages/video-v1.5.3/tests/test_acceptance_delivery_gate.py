@@ -51,6 +51,13 @@ class AcceptanceDeliveryGateTests(unittest.TestCase):
             self.assertIsNone(worker.action_refill_controls(Path("."), report, expected_sources=[]))
             lookup.assert_not_called()
 
+    def test_missing_bound_observation_routes_monitor_to_qc(self):
+        from tools.queueing.contracts import batch_result_contract
+        failure = {"retryable": True, "failed_stage": "qc", "resume_stage": "qc",
+                   "failure_class": "vision", "failure_code": "QC_OBSERVATION_UNVERIFIED"}
+        result = batch_result_contract("ERROR", pipeline_version="test", run_id="run", failures=[failure])
+        self.assertEqual((result["retryable"], result["resume_stage"]), (True, "qc"))
+
     def test_current_qc_cannot_reject_or_recut_a_changed_selection(self):
         with tempfile.TemporaryDirectory() as directory:
             rd = Path(directory)

@@ -2043,7 +2043,8 @@ def process_task(task: dict, *, retry_partial: bool = False,
                                     qc_rejected.setdefault(index, set()).update(ids)
                             elif report.get("version") == production_eval.visual_qc_contract.AI_REPORT_VERSION:
                                 last_failure.update(phase="post_draft_qc", failed_stage="qc", resume_stage="qc",
-                                                    retryable=True, type="uncertified_qc", draft=a_name)
+                                                    retryable=True, type="uncertified_qc", failure_class="vision",
+                                                    failure_code="QC_OBSERVATION_UNVERIFIED", draft=a_name)
                                 break  # A failed/unbound endpoint call cannot authorize a new selection.
                             else:
                                 # Older reports can lack a complete per-sentence binding.
