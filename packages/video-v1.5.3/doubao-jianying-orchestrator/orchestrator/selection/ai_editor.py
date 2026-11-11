@@ -3079,6 +3079,18 @@ def _repair_reviewed_rows(manifest, analysis, plan, directory, narration_timing,
             continue
         if _retrieve_empty_selection(manifest, analysis, plan, failure, narration_timing):
             continue
+        # A hook with no row has no WindowFailure to drive compact-window repair.
+        # Try a sentence-bound pixel check before giving up its unused budget.
+        missing = re.fullmatch(r"AI_EDITOR_NO_SELECTION:(\d+)", str(failure))
+        if missing:
+            from . import shot_notes
+            index = int(missing[1])
+            original = timing_contract.split_sentences(manifest)[index - 1]
+            if (not plan.get('_frozen_segments', {}).get(index) and not original.get('visual_requirements')
+                    and not shot_notes.note_for(manifest,index,original)
+                    and _try_other_presentation_window(manifest,analysis,plan,directory,index,
+                                                       narration_timing,sentence_bound=True)):
+                continue
         repeated_index = _duplicate_repair_focus(plan, failure)
         if repeated_index is not None:
             repair_indices = [repeated_index]
@@ -4356,6 +4368,14 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
                 seed = contract.digest([task, index, shots[sid]["video"]]) if task else ""
                 return (0 if corrected else 1), rank, -float(review.get("confidence", 0)), usage[sid], seed
             ordered_good = sorted(good, key=candidate_order)
+            if explicit and contract.presentation.promotion_motion(sentence["text"]):
+                # Refills describe the line as a selling point. Keep the
+                # original promotional motion requirement on the new cut.
+                for review in ordered_good[:ROUND_SIZE]:
+                    if (not review.get("presentation_observation") and not review.get("time_sensitive")
+                            and review.get("frame_times_us") and review.get("sheet") and review.get("review_window_us")):
+                        review.update(_presentation_review(shots[review["shot_id"]], review, directory))
+                ordered_good.sort(key=lambda r: not bool(r.get("presentation_observation")))
             # Singles stay first; multi-shot combinations are considered only
             # when their real reviewed evidence covers the whole sentence.
             def candidate_groups():

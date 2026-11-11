@@ -1149,6 +1149,15 @@ def prior_draft_requires_recheck(task_dir: pathlib.Path, index: int,
             or not production_eval.visual_qc_contract.report_matches_draft(payload, DRAFTS / draft_name))
 
 
+def _qc_selection_matches(report, segments):
+    if not isinstance(report, dict):
+        return False
+    expected = report.get("selection_sha256")
+    if expected:
+        return expected == production_eval.ai_editor_contract.digest(segments)
+    return report.get("version") != production_eval.visual_qc_contract.AI_REPORT_VERSION
+
+
 def qc_rejected_shots_from_report(rd: pathlib.Path, report: dict | None = None, *,
                                   expected_sources: list[dict] | None = None,
                                   include_non_direct: bool = False) -> dict:
@@ -1159,6 +1168,8 @@ def qc_rejected_shots_from_report(rd: pathlib.Path, report: dict | None = None, 
     """
     report = report if report is not None else _read_json(rd / "draft_visual_qc.json")
     segments = _read_json(rd / "shot_match_report.json").get("segments") or []
+    if not _qc_selection_matches(report, segments):
+        return {}
     out = {}
     for row in (report or {}).get("model_review") or []:
         # Only an explicit semantic mismatch excludes the source. An
@@ -1263,6 +1274,8 @@ def same_shot_recut_windows(rd: pathlib.Path, report: dict | None, *, expected_s
     """Sentences whose same source continues past the cut that QC reviewed."""
     levels = {"INSUFFICIENT_EVIDENCE", "ACCEPTABLE_DEGRADED"}
     segments = _read_json(rd / "shot_match_report.json").get("segments") or []
+    if not _qc_selection_matches(report, segments):
+        return {}
     shots = {str(row.get("shot_id")): row
              for row in (_read_json(rd / "shot_candidates.json").get("shots") or [])
              if isinstance(row, dict) and row.get("shot_id")}
@@ -1319,6 +1332,8 @@ def qc_refill_feedback_from_report(rd: pathlib.Path, report: dict, targets, *, e
             or not production_eval.visual_qc_contract.report_matches_draft(report, draft)):
         return {}
     segments = _read_json(rd / "shot_match_report.json").get("segments") or []
+    if not _qc_selection_matches(report, segments):
+        return {}
     try:
         from orchestrator.quality import draft_visual_qc, ai_editor_qc
         from orchestrator.media.source_normalization import read_prepared_sources
@@ -1366,6 +1381,27 @@ def qc_refill_feedback_from_report(rd: pathlib.Path, report: dict, targets, *, e
                            "reason": row["reason"], "match_level": row["match_level"],
                            "prior_shot_ids": source_ids}
     return out
+
+
+def action_refill_controls(rd, report, *, expected_sources):
+    """Route independently bound action failures; a late reveal retains its source."""
+    feedback = qc_current_refill_feedback(rd, report, expected_sources=expected_sources)
+    if feedback is None:
+        return None
+    rejected = {}
+    recuts = same_shot_recut_windows(rd, report, expected_sources=expected_sources)
+    for row in report.get("model_review") or []:
+        index = row['index']
+        item = feedback.get(str(index))
+        if not item:
+            continue
+        method = row.get('action_repair')
+        if method == 'replace' or row.get('match_level') == 'MISMATCH':
+            rejected[index] = set(item['prior_shot_ids'])
+            recuts.pop(index, None)
+        elif index in recuts:
+            item['same_shot_recut'] = recuts[index]
+    return feedback, rejected, recuts
 
 
 def qc_current_refill_feedback(rd: pathlib.Path, report: dict, *, expected_sources) -> dict | None:
@@ -1469,6 +1505,7 @@ def restore_qc_rejections(rd: pathlib.Path, manifest: dict) -> tuple[dict, dict]
     except OSError:
         current = False
     if (current and input_matches
+            and report.get("version") != production_eval.visual_qc_contract.AI_REPORT_VERSION
             and report.get("status")
             and str(report["status"]) != "PASS"):
         repair_indices.update(qc_rejected_shots_from_report(
@@ -1476,12 +1513,16 @@ def restore_qc_rejections(rd: pathlib.Path, manifest: dict) -> tuple[dict, dict]
         for index, ids in qc_rejected_shots_from_report(
                 rd, report, expected_sources=identity["sources"]).items():
             rejected.setdefault(index, set()).update(ids)
-    current_feedback = (qc_current_refill_feedback(rd, report, expected_sources=identity["sources"])
-                        if current and input_matches else None)
-    if current_feedback is not None:
+    directed = (action_refill_controls(rd, report, expected_sources=identity["sources"])
+                if current and input_matches else None)
+    if directed is not None:
+        current_feedback, rejected_actions, _ = directed
         repair_indices = {int(key) for key in current_feedback}
         active_feedback.update(current_feedback)
-    elif input_matches and repair_indices:
+        for index, ids in rejected_actions.items():
+            rejected.setdefault(index, set()).update(ids)
+    elif (input_matches and repair_indices
+          and report.get("version") != production_eval.visual_qc_contract.AI_REPORT_VERSION):
         active_feedback.update(qc_refill_feedback_from_report(rd, report, repair_indices, expected_sources=identity["sources"]))
         active_feedback = {key: value for key, value in active_feedback.items()
                            if value.get("match_level") in {"MISMATCH", "INSUFFICIENT_EVIDENCE", "ACCEPTABLE_DEGRADED", "MATERIAL_GAP"}}
@@ -1989,28 +2030,30 @@ def process_task(task: dict, *, retry_partial: bool = False,
                                 rd, qc_result.get("report") or {},
                                 expected_sources=rejection_identity["sources"], include_non_direct=True)
                             repair_visual_missing_indices.update(targets)
-                            current_feedback = qc_current_refill_feedback(
-                                rd, qc_result.get("report") or {}, expected_sources=rejection_identity["sources"])
-                            if current_feedback is not None:
-                                repair_visual_missing_indices = {int(key) for key in current_feedback}
-                                repair_feedback = current_feedback
-                            for key, ids in qc_rejected_shots_from_report(
-                                    rd, qc_result.get("report") or {},
-                                    expected_sources=rejection_identity["sources"]).items():
-                                qc_rejected.setdefault(key, set()).update(ids)
-                            if current_feedback is None:
+                            report = qc_result.get("report") or {}
+                            sources = rejection_identity["sources"]
+                            directed = action_refill_controls(rd, report, expected_sources=sources)
+                            if directed is not None:
+                                repair_feedback, rejected_actions, recut_windows = directed
+                                repair_visual_missing_indices = {int(key) for key in repair_feedback}
+                                for index, ids in rejected_actions.items():
+                                    qc_rejected.setdefault(index, set()).update(ids)
+                            elif report.get("version") == production_eval.visual_qc_contract.AI_REPORT_VERSION:
+                                last_failure.update(phase="post_draft_qc", failed_stage="qc", resume_stage="qc",
+                                                    retryable=True, type="uncertified_qc", draft=a_name)
+                                break  # A failed/unbound endpoint call cannot authorize a new selection.
+                            else:
+                                # Older reports can lack a complete per-sentence binding.
+                                for key, ids in qc_rejected_shots_from_report(rd, report, expected_sources=sources).items():
+                                    qc_rejected.setdefault(key, set()).update(ids)
                                 repair_feedback.update(qc_refill_feedback_from_report(
-                                    rd, qc_result.get("report") or {}, repair_visual_missing_indices,
-                                    expected_sources=rejection_identity["sources"]))
+                                    rd, report, repair_visual_missing_indices, expected_sources=sources))
                                 repair_feedback = {key: value for key, value in repair_feedback.items()
-                                    if value.get("match_level") in {"MISMATCH", "INSUFFICIENT_EVIDENCE", "ACCEPTABLE_DEGRADED", "MATERIAL_GAP"}}
-                            recut_windows = same_shot_recut_windows(
-                                rd, qc_result.get("report") or {},
-                                expected_sources=rejection_identity["sources"])
-                            for index, window in recut_windows.items():
-                                row = repair_feedback.get(str(index))
-                                if isinstance(row, dict):
-                                    row["same_shot_recut"] = window
+                                    if value.get("match_level") in {"MISMATCH","INSUFFICIENT_EVIDENCE","ACCEPTABLE_DEGRADED","MATERIAL_GAP"}}
+                                recut_windows = same_shot_recut_windows(rd, report, expected_sources=sources)
+                                for index, window in recut_windows.items():
+                                    if str(index) in repair_feedback:
+                                        repair_feedback[str(index)]["same_shot_recut"] = window
                             save_qc_rejections(rd, rejection_identity, qc_rejected,
                                                repair_visual_missing_indices, repair_feedback)
                         log("DRAFT %d/%d attempt %d failed (%s): %s" % (

@@ -12,8 +12,8 @@ from typing import Any
 
 REPORT_VERSION = "chatcut-visual-qc-v3"
 RESPONSE_VERSION = "chatcut-visual-qc-response-v3"
-AI_REPORT_VERSION = "chatcut-visual-qc-v6"
-AI_RESPONSE_VERSION = "chatcut-visual-qc-response-v6"
+AI_REPORT_VERSION = "chatcut-visual-qc-v7"
+AI_RESPONSE_VERSION = "chatcut-visual-qc-response-v7"
 MATCH_LEVELS = {"DIRECT", "ACCEPTABLE_DEGRADED", "MISMATCH", "INSUFFICIENT_EVIDENCE"}
 OVERALL_LEVELS = {"PASS", "PASS_WITH_DEGRADED", "PASS_WITH_GAPS", "FAIL", "UNCERTIFIED"}
 
@@ -156,6 +156,37 @@ def presentation_expected_actors(phases):
                    if (p.get('change') or {}).get('actor') in {'product','occluder'}})
 
 
+def promotion_group_requires_stages(item):
+    members = ((item.get("continuity_group") or {}).get("input") or {}).get("members") or []
+    return (len(members) > 1 and _ai_contract().presentation.promotion_motion(item.get("text")))
+
+
+def member_stage_observed(row):
+    stage = row.get("member_stage")
+    return (isinstance(stage, dict)
+            and stage.get("phase") in ("change", "first_readable", "hold", "camera", "uncertain")
+            and isinstance(stage.get("observation"), str) and bool(stage["observation"].strip()))
+
+
+def carton_landing_required(item):
+    """Identify a single carton reveal or generic parcel presentation by its selected purpose."""
+    if item.get('selection_mode') != 'ai_editor' or item.get('multi_shot') or item.get('continuity_group'):
+        return False
+    receipt = item.get('ai_selection') or {}
+    phase = receipt.get('presentation_observation') or {}
+    action = ' '.join(str(value or '') for value in (
+        phase.get('action'), phase.get('result'), receipt.get('observation')))
+    carton = re.search(r'开箱|纸箱|箱盖|箱内|外箱|快递箱|包装箱|箱子', action)
+    return bool(carton and (_ai_contract().presentation.promotion_motion(item.get('text')) or receipt.get('sentence_kind') in {'hook', 'product_intro'}
+        or (phase.get('change') or {}).get('kind') == 'reveal'))
+
+
+def clear_carton_landing(check):
+    return (isinstance(check, dict) and check.get('view') in {'retail_product', 'contents_exposed'}
+        and check.get('flap_over_goods') == 'no'
+        and isinstance(check.get('observation'), str) and bool(check['observation'].strip()))
+
+
 def presentation_selection_errors(segments,rows):
     """Derive required action checks from the bound selection, never row flags."""
     contract=_ai_contract()
@@ -169,13 +200,20 @@ def presentation_selection_errors(segments,rows):
         group=item.get('continuity_group') or {}
         group_phases=(group.get('input') or {}).get('presentation_observations',[])
         phases=[contract.presentation.get(p) for p in phases+group_phases if p is not None]
-        if not phases:
+        if not phases and not contract.presentation.promotion_motion(item.get("text")):
             continue
         actors=presentation_expected_actors(phases)
         expected[index]=actors
         if group_phases:
             groups.setdefault(contract.digest(group['input']),[]).append(index)
     errors={}
+    for index,item in enumerate(segments,1):
+        if promotion_group_requires_stages(item):
+            stage = (by_index.get(index) or {}).get("member_stage") or {}
+            if not member_stage_observed(by_index.get(index) or {}) or stage["phase"] not in {"change", "first_readable"}:
+                errors.setdefault(index, []).append("PROMOTION_MEMBER_ACTION_MISSING")
+        if carton_landing_required(item) and not clear_carton_landing((by_index.get(index) or {}).get('terminal_check')):
+            errors.setdefault(index,[]).append('CARTON_LANDING_UNVERIFIED')
     for index,actors in expected.items():
         row=by_index.get(index) or {}
         if row.get('presentation_check_required') is not True or row.get('presentation_expected_actors') != actors:

@@ -27,6 +27,82 @@ class AIEditorQCIntegrationTests(unittest.TestCase):
         self.draft.mkdir()
         self.write_reports()
 
+    def test_promotion_refill_cannot_waive_motion_by_changing_sentence_kind(self):
+        item = {"text": "今天直播间大促", "selection_mode": "ai_editor",
+                "ai_selection": {"sentence_kind": "selling_point"}}
+        row = {"index": 1, "match_level": "DIRECT", "action_check": {"actor": "camera",
+               "change_visible": True, "result_visibility": "clear", "observation": "相机扫过固定陈列"}}
+        revised = ai_editor_qc.apply_presentation_gate(row, {"claim": item["text"], "ai_segment": item})
+        self.assertEqual(revised["match_level"], "INSUFFICIENT_EVIDENCE")
+        self.assertIn(1, visual_qc_contract.presentation_selection_errors([item], [row]))
+        self.assertFalse(contract.presentation.promotion_motion("这是完整的材质标签。"))
+
+    def test_promotion_group_cannot_borrow_change_from_another_member(self):
+        item = {"selection_mode": "ai_editor", "text": "今天直播间大促",
+                "continuity_group": {"input": {"members": [{"index": 1}, {"index": 2}]}}}
+        row = {"index": 1, "presentation_check_required": True, "presentation_expected_actors": [],
+               "action_check": {"actor": "product", "change_visible": True,
+                                "result_visibility": "clear", "observation": "组末商品落下"},
+               "member_stage": {"phase": "hold", "observation": "这句中包装始终不动"}}
+        self.assertIn("PROMOTION_MEMBER_ACTION_MISSING",
+                      visual_qc_contract.presentation_selection_errors([item], [row])[1])
+        row["member_stage"] = {"phase": "first_readable", "observation": "包装正面刚刚转到可读位置"}
+        self.assertEqual(visual_qc_contract.presentation_selection_errors([item], [row]), {})
+
+    def test_member_stage_sends_only_its_ordered_frames_and_validates_response(self):
+        frames = [{"draft_segment": 3, "timestamp": t, "path": str(self.root / f"{t}.jpg")}
+                  for t in (2., 1.)]
+        answer = {"phase": "hold", "observation": "首尾相同，只有手指在移动"}
+        def reply(sheet, prompt, output, *, validator, **kwargs):
+            validator(json.dumps(answer))
+            return True, json.dumps(answer)
+        vision = mock.Mock()
+        vision._write_sheet.return_value = True
+        vision._run_vision_with_retry.side_effect = reply
+        result = qc._inspect_member_stage(vision, frames, self.root, 3, "ffmpeg")
+        self.assertEqual(result, answer)
+        tiles = vision._write_sheet.call_args.args[0]
+        self.assertEqual([(t["timestamp"], t["label"]) for t in tiles], [(1., "F01"), (2., "F02")])
+
+    def test_legible_package_with_flap_still_over_goods_fails(self):
+        for view in ("retail_product", "contents_exposed"):
+            check = {"view": view, "flap_over_goods": "yes", "observation": "文字可读，前盖仍压在商品上"}
+            self.assertFalse(visual_qc_contract.clear_carton_landing(check))
+            self.assertTrue(visual_qc_contract.clear_carton_landing(dict(check, flap_over_goods="no")))
+
+    def test_last_tick_at_speed_uses_decoded_pts_and_pixels(self):
+        import shutil
+        import subprocess
+        from PIL import Image
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            self.skipTest("ffmpeg required for real source frames")
+        src = self.root / "source.mkv"
+        subprocess.run([ffmpeg, "-v", "error", "-f", "lavfi", "-i", "color=black:s=32x32:r=50:d=5",
+                        "-vf", "drawbox=color=white:t=fill:enable='gte(t,4.94)'",
+                        "-c:v", "ffv1", str(src)], check=True)
+        cut = {"source": str(src), "source_start": 2., "source_duration": 3.,
+               "target_start": 1., "target_duration": 2.}
+        frame = qc._terminal_frame(ffmpeg, cut, 25., self.root / "end.jpg")
+        self.assertIsNotNone(frame)
+        self.assertAlmostEqual(frame["timestamp"], 4.94)
+        self.assertAlmostEqual(frame["target_time"], 2.96)
+        with Image.open(frame["path"]) as decoded:
+            self.assertGreater(decoded.convert("L").getpixel((16, 16)), 220)
+        # Shift the file clock and omit alternate frames before the last tick.
+        shifted = self.root / "shifted.mkv"
+        subprocess.run([ffmpeg, "-v", "error", "-i", str(src), "-vf",
+                        "select='lt(t,4.8)+mod(n,2)',setpts=PTS+2/TB",
+                        "-fps_mode", "vfr", "-c:v", "ffv1", str(shifted)], check=True)
+        cut["source"] = str(shifted)
+        frame = qc._terminal_frame(ffmpeg, cut, 25., self.root / "vfr.jpg")
+        self.assertIsNotNone(frame)
+        self.assertAlmostEqual(frame["timestamp"], 4.94)
+        with Image.open(frame["path"]) as decoded:
+            self.assertGreater(decoded.convert("L").getpixel((16, 16)), 220)
+        cut["speed_materials"] = [{"curve_speed": {"points": [1, 2]}}]
+        self.assertIsNone(qc._terminal_frame(ffmpeg, cut, 25., self.root / "unknown.jpg"))
+
     def write_reports(self):
         (self.report / "shot_match_report.json").write_text(json.dumps(self.match), encoding="utf-8")
         (self.report / "shot_candidates.json").write_text(json.dumps({"shots": [self.fixture.shot]}), encoding="utf-8")

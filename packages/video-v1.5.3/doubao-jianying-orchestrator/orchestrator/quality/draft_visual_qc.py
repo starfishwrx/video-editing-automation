@@ -26,7 +26,7 @@ try:
     from ..media.video_decode import run_ffmpeg_decode
     from ..runtime.file_safety import atomic_write_text
     from ..runtime.runtime_policy import load_policy, media_slot
-    from ..visual_qc_contract import MATCH_LEVELS, REPORT_VERSION, RESPONSE_VERSION, draft_metadata_fingerprint, normalize_match_level, response_errors, _source_identity, presentation_selection_errors
+    from ..visual_qc_contract import MATCH_LEVELS, REPORT_VERSION, RESPONSE_VERSION, draft_metadata_fingerprint, normalize_match_level, response_errors, _source_identity, carton_landing_required, clear_carton_landing, member_stage_observed, presentation_selection_errors
 except ImportError:
     # 这个文件会被 python draft_visual_qc.py 直接启动，没有包上下文。
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
@@ -36,7 +36,7 @@ except ImportError:
     from orchestrator.runtime.runtime_policy import load_policy, media_slot
     from orchestrator.visual_qc_contract import (MATCH_LEVELS, REPORT_VERSION, RESPONSE_VERSION,
                                                 draft_metadata_fingerprint, normalize_match_level,
-                                                response_errors, _source_identity, presentation_selection_errors)
+                                                response_errors, _source_identity, carton_landing_required, clear_carton_landing, member_stage_observed, presentation_selection_errors)
 
 
 def _claim_gate_summary(claim: dict[str, Any]) -> str:
@@ -368,6 +368,95 @@ def _call_qc_model(vision_analyzer: Any, sheet: pathlib.Path, prompt: str,
         sheet, prompt, response,
         timeout=timeout, max_retries=2, validator=validate,
     )
+
+
+def _terminal_frame(ffmpeg, cut, fps, path):
+    """Sample the source at the last timeline frame within this physical cut."""
+    start, duration = cut["target_start"], cut["target_duration"]
+    if not math.isfinite(fps) or fps <= 0 or duration <= 0:
+        return None
+    if any(ref.get("curve_speed") for ref in cut.get("speed_materials") or []):
+        return None
+    last_tick = (math.ceil((start + duration) * fps - 1e-8) - 1) / fps
+    if last_tick < start - 1e-8:
+        return None
+    source_start = cut["source_start"]
+    instant = source_start + max(0., last_tick - start) * cut["source_duration"] / duration
+    # Keep input presentation timestamps relative to media start, including
+    # after seeking. showinfo reports the PTS of the exact JPEG we retain.
+    seek = max(0., source_start - 1.)
+    filters = (f"trim=end={instant + 1:.9f},"
+               f"select='between(t,{source_start - 1e-7:.9f},{instant + 1e-7:.9f})',showinfo")
+    command = [ffmpeg, "-y", "-hide_banner", "-loglevel", "info", "-copyts", "-start_at_zero",
+               "-ss", f"{seek:.9f}", "-i", cut["source"], "-map", "0:v:0", "-an", "-vf", filters,
+               "-fps_mode", "passthrough", "-q:v", "2", "-update", "1", str(path)]
+    path.unlink(missing_ok=True)
+    proc = run_ffmpeg_decode(command, capture_output=True, timeout=60)
+    if proc.returncode or not path.is_file() or not path.stat().st_size:
+        return None
+    # Integer PTS and time base avoid the rounded pts_time in ffmpeg's log.
+    log = proc.stderr.decode("utf-8", errors="replace")
+    time_base = re.search(r"config in time_base:\s*(\d+)/(\d+)", log)
+    timestamps = re.findall(r"\bn:\s*\d+\s+pts:\s*(-?\d+)", log)
+    if not time_base or not timestamps:
+        return None
+    pts = int(timestamps[-1]) * int(time_base[1]) / int(time_base[2])
+    if not source_start - 1e-7 <= pts <= instant + 1e-7:
+        return None
+    return {"path": str(path), "timestamp": pts, "mapped_source_time": instant,
+            "target_time": last_tick}
+
+
+def _inspect_carton_landing(vision, frame, output, timeout):
+    """Inspect only the last sampled in-cut image, without narration or selector verdict."""
+    prompt = ('只查看这一张真实静帧。先辨认纸箱四个翻盖/顶板与箱内物品的位置。'
+        '箱外印刷图案、白色箱盖、胶带和外箱文字不算里面的商品。若开口仍被盖住或只见窄缝、'
+        '局部一角，填 partially_covered。只见运输外箱搬运或箱子关闭填 outer_carton。'
+        '能直接辨认箱内独立零售包装且开口已经敞开才填 contents_exposed。独立零售商品已经在箱外'
+        '清楚展示填 retail_product。箱内商品即便文字清晰，只要任一硬纸板还横跨箱口、压在或遮住顶层商品，就仍未露全。逐片看前后左右四个箱盖：全部翻到外侧才是no；仍横搭在商品上为yes。无法辨别用uncertain。返回JSON：'
+        '{"view":"retail_product|contents_exposed|partially_covered|outer_carton|uncertain","flap_over_goods":"yes|no|uncertain","observation":"分别描述近侧和远侧盖板与顶层商品的实际位置"}')
+    def validate(data):
+        result = data if isinstance(data,dict) else next((v for v in iter_json_values(data) if isinstance(v,dict)), {})
+        if (result.get('view') not in {'retail_product','contents_exposed','partially_covered','outer_carton','uncertain'}
+                or result.get('flap_over_goods') not in {'yes','no','uncertain'}
+                or not isinstance(result.get('observation'),str) or not result['observation'].strip()):
+            raise ValueError('TERMINAL_FRAME_INVALID')
+        return result
+    if timeout <= 0:
+        return {'view':'unverified','observation':'末端实帧复核超时'}
+    ok, text = vision._run_vision_with_retry(pathlib.Path(frame['path']),prompt,output,
+        timeout=timeout,max_retries=2,validator=validate)
+    if not ok:
+        return {'view':'unverified','observation':'末端实帧复核失败'}
+    result = validate(text)
+    return {**result, "source_time": frame["timestamp"], "target_time": frame["target_time"],
+            "mapped_source_time": frame["mapped_source_time"]}
+
+
+def _inspect_member_stage(vision, frames, directory, index, ffmpeg):
+    """Use just this member's chronological frames, without adjacent action or narration."""
+    items = [dict(frame, label=f"F{i:02d}") for i, frame in enumerate(
+        sorted(frames, key=lambda f: (f["draft_segment"], f["timestamp"])), 1)]
+    sheet = directory / f"member_stage_{index:03d}.jpg"
+    if not items or not vision._write_sheet(items, sheet, columns=min(4, len(items)),
+                                             tile_width=420, tile_height=300, ffmpeg=ffmpeg):
+        return {}
+    prompt = ('仅比较这几张按时间排序的实帧。描述同一件商品相对桌面、背景的位置或朝向变化。'
+              '包装被举入、转正、抽出、放下、打开为change。此前遮挡或看不清，到本句才首次清楚可辨为first_readable。'
+              '包装从头到尾已清楚且姿态几乎不变，重复托举、手指指点包装或轻微抖动为hold。'
+              '仅机位移动填camera。不能确认填uncertain。返回一个JSON对象，例如'
+              '{"phase":"hold","observation":"各帧包装与桌边位置相同，只有手指在移动"}。按实际画面填写。')
+    def validate(data):
+        value = data if isinstance(data, dict) else next((v for v in iter_json_values(data) if isinstance(v, dict)), {})
+        if not member_stage_observed({"member_stage": value}):
+            raise ValueError("MEMBER_STAGE_INVALID")
+        return value
+    timeout = _remaining_request_timeout()
+    if timeout <= 0:
+        return {}
+    ok, raw = vision._run_vision_with_retry(sheet, prompt, directory / f"member_stage_{index:03d}.json",
+                                            timeout=timeout, max_retries=2, validator=validate)
+    return validate(raw) if ok else {}
 
 
 def _checkpoint_binding(draft_identity: str, prompt: str, claims: list,
@@ -826,6 +915,34 @@ def main() -> int:
                             row["degraded_expected"] = claim["degraded"]
                             row["match_level"] = _normalize_match_level(row)
                             row = ai_editor_qc.apply_presentation_gate(row,claim)
+                            if ai_mode and ai_editor_qc.visual_qc_contract.promotion_group_requires_stages(claim.get("ai_segment") or {}):
+                                row["member_stage"] = _inspect_member_stage(vision_analyzer, claim_frames[claim["index"]],
+                                                                            report_dir, claim["index"], ffmpeg)
+                            if ai_mode and carton_landing_required(claim.get('ai_segment') or {}):
+                                cut = next(rows[-1] for current,rows in claim_rows if current['index']==claim['index'])
+                                endpoint = _prepare_media(_terminal_frame,ffmpeg,cut,float(info.get('fps') or 30),
+                                    frame_dir / f"terminal_{claim['index']:03d}.jpg")
+                                check = _inspect_carton_landing(vision_analyzer, endpoint,
+                                    report_dir / f"terminal_view_{claim['index']:03d}.json",_remaining_request_timeout()) if endpoint else {
+                                        'view':'unverified','observation':'末端时间线帧未取得'}
+                                row['terminal_check'] = check
+                                if not clear_carton_landing(check) and row['match_level'] != 'MISMATCH':
+                                    row.update(match_level='INSUFFICIENT_EVIDENCE',visual_ok=False)
+                                    row['observed'] += ' 末端单帧：' + check['observation']
+                                    row['reason'] += ' 裁切结束时未确认商品完整露出。'
+                            check = row.get('terminal_check') or {}
+                            phases = ai_editor_qc._action_phases(claim)
+                            if check.get('view') == 'unverified':
+                                result['response_contract']['errors'].append(f"S{claim['index']:02d}:TERMINAL_FRAME_CALL_FAILED")
+                            elif check and not clear_carton_landing(check):
+                                reveal = any((phase.get('change') or {}).get('kind') == 'reveal' for phase in phases)
+                                row['action_repair'] = 'recut' if reveal else 'replace'
+                            elif (phases or ai_editor_qc.contract.presentation.promotion_motion(claim.get('claim'))) and row.get('match_level') in {'MISMATCH','INSUFFICIENT_EVIDENCE'}:
+                                action = row.get('action_check') or {}
+                                if action.get('actor') in {'camera','hand_only','none'} or action.get('change_visible') is not True:
+                                    row['action_repair'] = 'replace'
+                                else:
+                                    row['action_repair'] = 'recut'
                             row = ai_editor_qc.apply_tissue_press_gate(
                                 row, category=str(claim.get("category") or ""))
                             row["visual_ok"] = row["match_level"] in {"DIRECT", "ACCEPTABLE_DEGRADED"}
@@ -850,6 +967,13 @@ def main() -> int:
                 if ai_mode:
                     action_errors=presentation_selection_errors(match_data.get('segments',[]),visual_rows)
                     for row in visual_rows:
+                        if "PROMOTION_MEMBER_ACTION_MISSING" in action_errors.get(row["index"], []):
+                            row.update(match_level="INSUFFICIENT_EVIDENCE", visual_ok=False, action_repair="replace")
+                            result["uncertified"] = True
+                            result["warnings"].append(f"POST_DRAFT_MEMBER_STAGE_UNVERIFIED:S{row['index']:02d}")
+                            if not member_stage_observed(row):
+                                result["response_contract"]["errors"].append(f"S{row['index']:02d}:MEMBER_STAGE_INVALID")
+                            row["reason"] += " 本句没有独立的商品变化或首次可辨认落点。"
                         if row['index'] in action_errors and row.get('match_level') in {'DIRECT','ACCEPTABLE_DEGRADED'}:
                             row.update(match_level='INSUFFICIENT_EVIDENCE',visual_ok=False)
                             row['reason']=str(row.get('reason') or '')+' 动作检查与绑定的选镜意图或同组检查不一致。'

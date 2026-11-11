@@ -29,7 +29,8 @@ def _action_phases(claim):
 def apply_presentation_gate(row, claim):
     """A generic product match cannot waive an explicitly required action."""
     phases=_action_phases(claim)
-    if not phases or row.get('match_level') not in {'DIRECT','ACCEPTABLE_DEGRADED'}:
+    if ((not phases and not contract.presentation.promotion_motion(claim.get('claim')))
+            or row.get('match_level') not in {'DIRECT','ACCEPTABLE_DEGRADED'}):
         return row
     required=visual_qc_contract.presentation_expected_actors(phases)
     revised={**row,'presentation_check_required':True,'presentation_expected_actors':required}
@@ -75,6 +76,8 @@ def prompt(claims: list[dict], frame_count: int) -> str:
             'extract':'商品从原处被实际取出并展示'}
         goals = list(dict.fromkeys([intended[c['kind']] for p in phases if isinstance(p,dict)
             for c in [p.get('change') or {}] if c.get('kind') in intended] + goals))
+        if contract.presentation.promotion_motion(claim.get('claim')):
+            goals.append('促销或数量展示需有商品自身或遮挡物的实际变化，固定背景对照确认；单独扫过陈列不算。')
         if goals:
             mapping += f"\nS{i:02d} 待核验动作意图（不是已发生事实）=" + '；'.join(goals)
     contexts = {contract.digest(contract.rules_identity({"category": c.get("category"), "product": c.get("product")})):
@@ -158,7 +161,7 @@ def claim_batches(claims, size):
         parts = item.get('span_parts') if item.get('multi_shot') else [item]
         action_unit = (bool(((group or {}).get('input') or {}).get('presentation_observations'))
                        or any((p.get('ai_selection') or {}).get('presentation_observation') for p in parts or []))
-        if action_unit:
+        if action_unit or any(contract.presentation.promotion_motion(c.get("claim")) for c in unit):
             if batch:
                 batches.append(batch)
                 batch = []

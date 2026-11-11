@@ -6,6 +6,15 @@ observations without phases stay usable; they are never promoted to phases.
 """
 from __future__ import annotations
 
+import re
+
+
+def promotion_motion(text):
+    """Offer, bundle and stock-up narration uses a visible product change."""
+    return bool(re.search(r"大促|直播间活动|品牌活动|买.{0,6}送|囤.{0,8}(量|货)|到手.{0,5}的量|"
+                          r"(?:不是|不止)(?:一|两|三|[0-9]+)(?:包|箱|提|件|套)", str(text or "")))
+
+
 SCHEMA = "reviewed-presentation-phases-v3"
 LEGACY_SCHEMA = "reviewed-presentation-phases-v1"
 LEGACY_SCHEMAS = {LEGACY_SCHEMA, "reviewed-presentation-phases-v2"}
