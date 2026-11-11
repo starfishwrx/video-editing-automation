@@ -35,6 +35,14 @@ def prompt(claims: list[dict], frame_count: int) -> str:
     # Purpose is an instruction to inspect, never the selector's pass verdict.
     mapping = "\n".join(f"S{i:02d}: 商品={c.get('product', '')}；口播={c['claim']}；建议用途={c.get('sentence_kind', '')}；物理片段数={c.get('slots', 1)}"
                         for i, c in enumerate(claims, 1))
+    for i, claim in enumerate(claims, 1):
+        item = claim.get('ai_segment') or {}
+        parts = item.get('span_parts') if item.get('multi_shot') else [item]
+        phases = [p.get('ai_selection', {}).get('presentation_observation') for p in parts or []]
+        phases += ((item.get('continuity_group') or {}).get('input') or {}).get('presentation_observations', [])
+        goals = list(dict.fromkeys(p['action'] for p in phases if isinstance(p, dict) and p.get('action')))
+        if goals:
+            mapping += f"\nS{i:02d} 待核验动作意图（不是已发生事实）=" + '；'.join(goals)
     contexts = {contract.digest(contract.rules_identity({"category": c.get("category"), "product": c.get("product")})):
         {"category": c.get("category"), "product": c.get("product")} for c in claims}
     policy = "\n".join(contract.policy_prompt(manifest) for manifest in contexts.values())
@@ -50,7 +58,7 @@ def prompt(claims: list[dict], frame_count: int) -> str:
     if groups:
         mapping += "\n待独立检查的连续画面句组：" + str(sorted(groups))
         mapping += ("。这只是时间线分组，不是通过结论。联合查看本批所有实际切片，独立确认同商品、"
-                    "同次演示、同一具体卖点、动作和结果完整且可读；仍逐句检查其口播与画面阶段、节奏是否吻合。"
+                    "同次演示、同一展示目的或具体卖点、动作和结果完整且可读；仍逐句检查其口播与画面阶段、节奏是否吻合。"
                     "无需每句重播完整实验，但不能借无关句，也不能把后句结果说成前句已出现。"
                     "组内任一必要阶段缺失、不连贯或无法确认时，受影响各句标为INSUFFICIENT_EVIDENCE，不得整体放行。")
     return policy + f"""
@@ -68,6 +76,8 @@ DIRECT表示本句按其用途正常匹配：贴切的轻薄/柔软展示和普�
 干净卫生看见同商品外包装或未拆封包装就是直接匹配，标DIRECT，不得标ACCEPTABLE_DEGRADED，不要求撕开实验。
 画面反证或对象错误为MISMATCH；动作/结果未拍到、遮挡或无法确认则INSUFFICIENT_EVIDENCE。
 不要因凑满视频而放行，不得把结尾静态结果当作已看见完整过程。
+商品展示有动作时，独立看实际裁切是否保留有效变化、第一次展示到位和足够辨认；找东西、重复摆弄和复位不替代有效展示。静态展示可按实际用途判断，不凭选镜器的阶段标签认定看过动作。
+待核验动作意图仅说明这段剪辑要完成什么，不是观察证据；必须逐项在附图核实其变化和落点。若意图包含开盖露出内部商品，只有搬箱、闭箱正面或刚开始掀盖而商品仍被挡住，不得按普通包装展示放过，标INSUFFICIENT_EVIDENCE。其他动作同理，不能偷换成更弱的动作后通过。
 输出唯一JSON对象：{{"response_version":"{RESPONSE_VERSION}","segments":[{{"index":1,
 "match_level":"DIRECT|ACCEPTABLE_DEGRADED|MISMATCH|INSUFFICIENT_EVIDENCE","visual_ok":true,
 "observed":"可见事实","reason":"逐项支持或不支持原因","confidence":0.8}}],"overall":"PASS|PASS_WITH_DEGRADED|FAIL|UNCERTIFIED"}}。
@@ -86,6 +96,19 @@ def claim_batches(claims, size):
         if group and ([c["index"] for c in unit] != [m["index"] for m in group["input"]["members"]]
                       or any((c.get("ai_segment") or {}).get("continuity_group") != group for c in unit)):
             raise ValueError("CONTINUITY_QC_GROUP_INCOMPLETE")
+        # An unrelated next shot must not lend its revealed product/result to
+        # this action. A certified continuous group is still one visual unit.
+        item = claims[cursor].get('ai_segment') or {}
+        parts = item.get('span_parts') if item.get('multi_shot') else [item]
+        action_unit = (bool(((group or {}).get('input') or {}).get('presentation_observations'))
+                       or any((p.get('ai_selection') or {}).get('presentation_observation') for p in parts or []))
+        if action_unit:
+            if batch:
+                batches.append(batch)
+                batch = []
+            batches.append(unit)
+            cursor += count
+            continue
         if batch and len(batch) + count > size:
             batches.append(batch)
             batch = []
@@ -116,6 +139,7 @@ def validate_cut(claim: dict, rows: list[dict], prepared_sources=None) -> list[s
         start = round(actual["source_start"] * 1e6)
         end = round((actual["source_start"] + actual["source_duration"]) * 1e6)
         planned = receipt.get("window_us") or {}
+        issues.extend(contract.presentation.cut_errors(receipt.get("presentation_observation"), start, end))
         expected_target = (part.get("segment_us") if contract.continuity.is_experiment(item.get("continuity_group"))
                            else end - start)
         if item.get("continuity_group") and (start != planned.get("start") or end != planned.get("end")
@@ -184,6 +208,14 @@ def frame_plan(claim: dict, rows: list[dict]) -> list[tuple]:
                 fraction = (timestamp / 1e6 - row["source_start"]) / row["source_duration"]
                 if 0 <= fraction < 1:
                     plan.append((row, f"p{n}_ev{k}_{label}", fraction))
+        phase = contract.presentation.get((part.get("ai_selection") or {}).get("presentation_observation"))
+        phases = [phase] if phase else ((part.get("continuity_group") or {}).get("input") or {}).get("presentation_observations", [])
+        for k, phase in enumerate(phases):
+            for label, timestamp in (("onset", phase["start_us"]), ("reveal", phase["reveal_us"]),
+                                     ("readable", max(phase["reveal_us"], phase["readable_end_us"] - 40000))):
+                fraction = (timestamp / 1e6 - row["source_start"]) / row["source_duration"]
+                if 0 <= fraction < 1:
+                    plan.append((row, f"p{n}_phase{k}_{label}", fraction))
     positions = {id(row): index for index, row in enumerate(rows)}
     ordered, seen = [], set()
     for row, label, fraction in sorted(plan, key=lambda p: (positions[id(p[0])], p[2])):

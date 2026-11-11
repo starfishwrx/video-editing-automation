@@ -33,6 +33,8 @@
 
 ## 3. Formal vs Preview
 
+默认AI的展示动作窗口优先覆盖有效变化至首次到位和足够辨认；实际裁切、连续组与独立QC共用约束，速度许可不变。共享池采用各句优先候选及有界补看，恢复按阶段策略版本隔离。见[ADR0013](adr/0013-presentation-action-windows.md)。
+
 - **formal**：只接受完整证据与 `PASS`；动作放不下记 `unmet`，不得用 `settled` / `lead_in` / `pool_fill` 冒充正式完整动作。
 - **preview**：允许黑屏补位、证据收窄等到观察态，结果必须带未认证理由；禁止进入正式交付与表格「已完成」。
 

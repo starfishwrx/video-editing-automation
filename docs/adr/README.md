@@ -23,3 +23,4 @@
 - [0011 按范围验证、并行完整 CI](0011-layered-offline-validation.md)（已采纳；不改变生产质量门禁）
 
 - [0012 有界素材准备恢复与源帧边界对齐](0012-bounded-material-recovery.md)：非视频确证、有限重问与剔除、事件及放置一帧容差、配对召回预算。
+- [0013 商品展示动作阶段与入出点](0013-presentation-action-windows.md)：默认AI动作窗口、密集短窗复核、共享池预算和阶段恢复身份。

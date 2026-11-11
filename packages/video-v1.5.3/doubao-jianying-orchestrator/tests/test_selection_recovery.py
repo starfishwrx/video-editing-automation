@@ -352,12 +352,49 @@ class SelectionRecoveryTests(unittest.TestCase):
             self.assertEqual(shots["shot2"]["_review_focus_window"], [90, 91])
             self.assertLessEqual(shots["shot2"]["source_start"], 90)
             self.assertGreaterEqual(shots["shot2"]["source_end"], 91)
+            self.assertGreaterEqual(shots["shot2"]["source_end"], 91.5)
+            self.assertLessEqual(shots["shot2"]["source_end"], 100)
             raise ValueError("focused pixels still unconfirmed")
         with patch.object(editor, "_inventory", side_effect=AssertionError("unnecessary inventory call")), \
              patch.object(editor, "_review_pool", side_effect=review) as observed:
             result = editor.refill_indices(request, self.analysis, baseline, [2], self.root)
         self.assertEqual(observed.call_count, 1)
         self.assertFalse(result["ok"])
+
+    def test_confirmed_action_correction_is_placed_before_easier_alternative(self):
+        baseline = editor._assemble(self.manifest, self.analysis, self.plan(), narration_timing=None, verify_sources=True)
+        self.shots[1].update(source_end=100, action_segments=[{'start': 90, 'end': 91}])
+        path = self.root / 'easier.mp4'
+        path.write_bytes(b'different easier display')
+        alternative = {**self.shots[1], 'shot_id': 'easier', 'video': str(path)}
+        self.shots.append(alternative)
+        correction = {**self.reviews['2'][0], 'confidence': .8,
+            'evidence_intervals_us': [{'start': 90_200_000, 'end': 91_500_000}]}
+        easier = {**self.reviews['2'][0], 'shot_id': 'easier', 'confidence': 1.,
+            'source_identity': contract.source_identity(path),
+            'evidence_intervals_us': [{'start': 1_000_000, 'end': 1_500_000}]}
+        request = {**self.manifest, 'ai_refill_indices': [2], 'ai_refill_feedback': {'2': {
+            'claim': self.manifest['segments'][1]['text'], 'observed': 'result omitted', 'reason': 'incomplete',
+            'prior_shot_ids': ['shot2'], 'same_shot_recut': {'shot_id': 'shot2', 'start': 90, 'end': 91}}}}
+        def observe(_manifest, sentence, *args, **kwargs):
+            return ([correction], {'feasible': False, 'reason': 'KNOWN_WINDOWS_INFEASIBLE'}) if sentence['candidate_ids'] == ['shot2'] else (
+                [easier], {'feasible': True, 'reason': 'READY'})
+        def media(shot, *_args, **_kwargs):
+            a, b = shot['source_start'], shot['source_end']
+            return dict(start=a, end=b, before=contract.source_identity(path if shot['shot_id']=='easier' else self.shots[1]['video']),
+                        times=[a, (a+b)/2, b-.04], sheet=Path('synthetic-pixels.jpg'))
+        placed = dict(verdict='suitable', same_product=True, observation='合成完整动作及结果',
+                      reason='新像素校验的完整紧凑窗口', confidence=.9, evidence_intervals_us=correction['evidence_intervals_us'])
+        with patch.object(editor, '_review_pool', side_effect=observe), \
+                patch.object(editor, '_review_media', side_effect=media), \
+                patch.object(editor, '_call', return_value=placed):
+            result = editor.refill_indices(request, self.analysis, baseline, [2], self.root)
+        self.assertTrue(result['ok'], result)
+        self.assertEqual(result['segments'][1]['shot_id'], 'shot2')
+        self.assertGreater(result['segments'][1]['video_speed'], 1)
+        receipt = json.loads((self.root/'ai_editor_refill/refill_02.json').read_text(encoding='utf-8'))
+        self.assertEqual(receipt['shot_ids'], ['shot2'])
+        self.assertEqual(result['segments'][0], baseline['segments'][0])
 
     def test_refill_uses_qc_gap_tail_window_and_current_draft_through_writer(self):
         from orchestrator.application import engine, headless_production

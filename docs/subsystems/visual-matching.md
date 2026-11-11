@@ -15,6 +15,8 @@
 
 ## 2. 默认 AI 选镜与整稿编排
 
+展示阶段见[ADR0013](../adr/0013-presentation-action-windows.md)。默认从实际复核得到有效入点、首次到位与辨认出点，传入求解及最终收据；有阶段时不用稳定中后段替代动作。共享池轮流汇集各展示句候选，短CTA不触发全库扫描。专项阶段补看最多16个同源窗口，局部裁切重新确认可辨认结果，原观察和配音保持不变。
+
 调用链为 `cli._temporary_match → ai_editor.prepare → shot_analyzer.match_manifest`。
 
 - `ai_editor._inventory` 通读脚本，根据已有描述分类和宽召回；描述只作索引。

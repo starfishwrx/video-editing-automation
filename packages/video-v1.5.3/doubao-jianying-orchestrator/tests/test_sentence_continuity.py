@@ -270,6 +270,158 @@ class SentenceContinuityTests(unittest.TestCase):
         sharing.install(self.plan, contract.digest(group['input'])[:24], group)
         return editor._assemble(self.manifest, self.analysis, self.plan, narration_timing=None, verify_sources=True)
 
+    def test_presentation_landing_is_protected_across_sentence_boundary(self):
+        from test_presentation_windows import phase
+        observed = phase(start_us=0, reveal_us=1_000_000, readable_end_us=3_000_000, end_us=4_500_000)
+        self.plan['reviews']['1'][0]['presentation_observation'] = observed
+        group = self.group()
+        self.assertEqual(group['input']['presentation_observations'], [observed])
+        key = contract.digest(group['input'])[:24]
+        sharing.install(self.plan, key, group)
+        result = editor._assemble(self.manifest, self.analysis, self.plan, narration_timing=None)
+        self.assertTrue(result['ok'])
+        self.assertLess(result['segments'][0]['source_end'], observed['readable_end_us'] / 1e6)
+        for row in result['segments']:
+            self.assertTrue(contract.validate_segment_receipt(row, index=row['ai_selection']['index'], manifest=self.manifest)['ok'])
+
+    def presentation_bridge(self):
+        from test_presentation_windows import phase
+        observed = phase(start_us=0, reveal_us=1_000_000, readable_end_us=3_000_000, end_us=4_500_000)
+        self.plan['reviews']['1'][0]['presentation_observation'] = observed
+        self.plan['sentences'][1].update(kind='product_intro', selling_points=[])
+        self.plan['display_reviews'] = [copy.deepcopy(self.plan['reviews']['2'][0])]
+        self.plan['display_reviews'][0]['supported_point_ids'] = []
+        self.plan['reviews'].pop('2')
+        context = next(sharing.proposals(self.manifest, self.analysis, self.plan, 1, None))
+        group = self.group(context)
+        group['review']['same_presentation'] = True
+        group['review']['members'][1]['supported_point_ids'] = []
+        return group
+
+    def test_presentation_action_can_span_claim_and_general_bridge(self):
+        group = self.presentation_bridge()
+        self.assertEqual(group['input']['purpose'], 'product_presentation')
+        continuity.validate(group)
+        sharing.install(self.plan, contract.digest(group['input'])[:24], group)
+        result = editor._assemble(self.manifest, self.analysis, self.plan, narration_timing=None)
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['segments'][0]['source_end'], result['segments'][1]['source_start'])
+        self.assertTrue(all(p['video_speed'] == 1 for p in result['segments']))
+
+    def test_presentation_bridge_requires_phase_joint_pixels_and_every_claim(self):
+        group = self.presentation_bridge()
+        for change in ('phase', 'joint', 'sensitive', 'invented', 'missing_claim'):
+            with self.subTest(change=change):
+                invalid = copy.deepcopy(group)
+                if change == 'phase': invalid['input'].pop('presentation_observations')
+                if change == 'joint': invalid['review'].pop('same_presentation')
+                if change == 'sensitive': invalid['review']['members'][0]['time_sensitive'] = True
+                if change == 'invented': invalid['review']['members'][1]['supported_point_ids'] = ['p1']
+                if change == 'missing_claim': invalid['review']['members'][0]['supported_point_ids'] = []
+                with self.assertRaises(ValueError): continuity.validate(invalid)
+        self.plan['reviews']['1'][0].pop('presentation_observation')
+        self.assertEqual(list(sharing.proposals(self.manifest, self.analysis, self.plan, 1, None)), [])
+
+    def test_default_editor_tries_joint_action_before_static_replacement_once(self):
+        group = self.presentation_bridge()
+        with patch.object(sharing, 'review_group', return_value=group) as review:
+            editor._prefer_presentation_groups(self.manifest, self.analysis, self.plan, self.root, None)
+            editor._prefer_presentation_groups(self.manifest, self.analysis, self.plan, self.root, None)
+        self.assertEqual(review.call_count, 1)
+        self.assertTrue(all(row.get('continuity_key') for row in self.plan['rows']))
+
+    def test_presentation_joint_review_budget_survives_recovery(self):
+        self.presentation_bridge()
+        self.plan['continuity_attempts'] = {str(i): {'index': 99, 'presentation': True, 'status': 'rejected'}
+                                             for i in range(6)}
+        before = copy.deepcopy(self.plan['rows'])
+        with patch.object(sharing, 'review_group') as review:
+            self.assertFalse(sharing.repair(self.manifest, self.analysis, self.plan, self.root,
+                WindowFailure(1, 'long', 'EVIDENCE_SPAN_TOO_LONG'), None, presentation_only=True))
+        review.assert_not_called()
+        self.assertEqual(self.plan['rows'], before)
+
+    def test_default_groups_reserve_source_before_reviewing_later_sentences(self):
+        group = self.presentation_bridge()
+        key = contract.digest(group['input'])[:24]
+        sharing.install(self.plan, key, group)
+        for i in (3, 4):
+            self.manifest['segments'].append(copy.deepcopy(self.manifest['segments'][0]))
+            self.plan['sentences'].append({**copy.deepcopy(self.plan['sentences'][0]), 'index': i})
+            self.plan['rows'].append(dict(index=i, parts=[]))
+            self.plan['reviews'][str(i)] = [copy.deepcopy(self.plan['reviews']['1'][0])]
+        self.assertEqual(list(sharing.proposals(self.manifest, self.analysis, self.plan, 3, None)), [])
+        for row in self.plan['rows'][:2]: row.pop('continuity_key')
+        self.assertTrue(list(sharing.proposals(self.manifest, self.analysis, self.plan, 3, None)))
+
+    def test_recovery_reselects_later_overlapping_group_and_keeps_observations(self):
+        group = self.presentation_bridge()
+        key = contract.digest(group['input'])[:24]
+        sharing.install(self.plan, key, group)
+        later = copy.deepcopy(group)
+        for m in later['input']['members']: m['index'] += 2
+        self.plan['continuity_reviews']['later'] = later
+        self.plan['rows'] += [dict(index=i, continuity_key='later', parts=[{'shot_id': 'long'}]) for i in (3, 4)]
+        before = copy.deepcopy(self.plan['rows'][:2])
+        sharing.clear_conflicting_presentations(self.manifest, self.plan)
+        self.assertEqual(self.plan['rows'][:2], before)
+        self.assertTrue(all(r['parts'] == [] and 'continuity_key' not in r for r in self.plan['rows'][2:]))
+        self.assertEqual(self.plan['continuity_reviews']['later'], later)
+        self.assertEqual(self.plan['presentation_conflict_repairs'][0]['indices'], [3, 4])
+
+    def test_cached_group_cannot_erase_newly_observed_presentation(self):
+        from test_presentation_windows import phase
+        group = self.group()
+        key = contract.digest(group['input'])[:24]
+        sharing.install(self.plan, key, group)
+        self.plan['reviews']['1'][0]['presentation_observation'] = phase(
+            start_us=0, reveal_us=1_000_000, readable_end_us=3_000_000, end_us=4_500_000)
+        with self.assertRaisesRegex(ValueError, 'PRESENTATION_GROUP_CHANGED'):
+            sharing.validate_plan(self.manifest, self.analysis, self.plan, None)
+
+    def test_narrow_anchor_presentation_is_not_erased_by_group(self):
+        from test_presentation_windows import phase
+        observed = phase(start_us=0, reveal_us=1_000_000, readable_end_us=3_000_000, end_us=4_500_000)
+        self.plan['window_reviews'] = {'anchor': {**copy.deepcopy(self.original_review),
+            'sentence_index': 1, 'review_window_us': {'start': 0, 'end': 4_500_000},
+            'presentation_observation': observed}}
+        group = self.group()
+        self.assertEqual(group['input']['presentation_observations'], [observed])
+        key = contract.digest(group['input'])[:24]
+        sharing.install(self.plan, key, group)
+        self.assertTrue(sharing.validate_plan(self.manifest, self.analysis, self.plan, None))
+        del self.plan['continuity_reviews'][key]['input']['presentation_observations']
+        with self.assertRaisesRegex(ValueError, 'PRESENTATION_GROUP_CHANGED'):
+            sharing.validate_plan(self.manifest, self.analysis, self.plan, None)
+
+    def test_legacy_phase_freeze_survives_two_successive_recoveries(self):
+        self.install()
+        folder = self.root / 'ai_editor'
+        folder.mkdir(exist_ok=True)
+        (folder / 'plan.json').write_text(json.dumps(self.plan), encoding='utf-8')
+        with patch.object(editor, '_editor_model', return_value='fixture'), \
+                patch.object(editor, '_call', side_effect=AssertionError('API forbidden')):
+            for _ in range(2):
+                saved = editor.prepare(self.manifest, self.analysis, self.root)['ai_editor_plan']
+                self.assertTrue(saved['ok'], saved)
+                self.assertTrue(saved['_legacy_presentation_frozen'])
+                self.assertIsNone(saved['presentation_policy_version'])
+
+    def test_phase_policy_change_cannot_restore_prior_phase_reviews(self):
+        self.plan['presentation_policy_version'] = contract.presentation.VERSION
+        self.plan['identity']['presentation_policy_version'] = contract.presentation.VERSION
+        self.plan['resume_identity'] = copy.deepcopy(self.plan['identity'])
+        self.plan['presentation_reviews'] = {'old': {'presentation_status': 'static'}}
+        folder = self.root / 'ai_editor'
+        folder.mkdir(exist_ok=True)
+        (folder / 'plan.json').write_text(json.dumps(self.plan), encoding='utf-8')
+        with patch.object(editor, '_editor_model', return_value='fixture'), \
+                patch.object(contract.presentation, 'VERSION', 'next-phase-protocol'), \
+                patch.object(editor, '_inventory', side_effect=ValueError('fresh inventory required')) as inventory:
+            updated = editor.prepare(self.manifest, self.analysis, self.root)['ai_editor_plan']
+        inventory.assert_called_once()
+        self.assertNotIn('old', updated.get('presentation_reviews', {}))
+
     def test_verified_continuity_group_counts_as_one_source_use(self):
         self.manifest['max_source_reuse'] = 1
         result = self.install()

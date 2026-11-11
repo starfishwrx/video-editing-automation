@@ -1491,6 +1491,10 @@ class OrchestrationEngine:
             candidate = int(round(float(stable) * US))
             if source_in * US <= candidate <= source_out * US:
                 preferred_us = candidate
+        phase = timing_contract.presentation.get(raw.get('presentation_observation'))
+        if phase:
+            head_guard = tail_guard = 0
+            preferred_us = phase['start_us']
         return timing_contract.WindowRequest(
             source_in_us=int(round(source_in * US)),
             source_out_us=int(round(source_out * US)),
@@ -1503,7 +1507,8 @@ class OrchestrationEngine:
             speed_min=speed_min, speed_max=speed_max,
             preferred_speed=clip.preferred_speed,
             preferred_start_us=preferred_us,
-            video_duration_us=int(round(float(clip.video_duration) * US)), fps=frm)
+            video_duration_us=int(round(float(clip.video_duration) * US)), fps=frm,
+            exact_source_timing=bool(phase))
 
     def _clip_role(self, clip: Clip) -> str:
         """段落声明的视觉角色（决定变速范围；定案第 6 条）。
@@ -1827,7 +1832,7 @@ class OrchestrationEngine:
                         # 吸附到 1 帧的整数微秒档位（让剪映的 round(素材/速度)
                         # 回程误差 ≤1µs），并夹紧在该画面角色的允许区间内 ——
                         # 否则栅格落点会差出 1e-5 量级，写入前的不变量校验会误报。
-                        c.video_speed = frame_speed(
+                        c.video_speed = solution.speed if req.exact_source_timing else frame_speed(
                             solution.speed, req.speed_min, req.speed_max,
                             fps=req.fps)
                         c.duration = solution.segment_us / US

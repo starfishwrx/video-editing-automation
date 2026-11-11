@@ -7,6 +7,14 @@
 
 ## 新增条目
 
+### L-20261111-presentation-window 清晰稳定不能替代有效动作阶段
+- status: OPEN
+- hits: 1
+- 模块: selection / timing / independent QC
+- 现象: 中后段偏好丢掉商品举入和转正；宽采样可能把长停留当必需证据，极短CTA因而触发整库扫描。
+- 以后怎么做: 记录有效入点、首次到位与辨认出点，按真实配音求窗；紧凑裁切另看密集实帧，保留父事实。连续组和恢复不能擦除阶段，阶段不能授予变速，展示池召回须有界。
+- 证据: ADR0013、test_presentation_windows.py、test_sentence_continuity.py。
+
 ### L-20261110-contract-scope 规范要求用语前先核对范围和维护源
 - status: OPEN
 - hits: 2
