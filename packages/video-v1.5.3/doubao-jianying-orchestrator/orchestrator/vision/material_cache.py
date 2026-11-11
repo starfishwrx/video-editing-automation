@@ -104,6 +104,33 @@ def refresh_external_analysis(analysis: dict, base_dir: Path, *, ffprobe, ffmpeg
     return refreshed
 
 
+def _restore_product_observations(manifest, result, prior):
+    """Seed unchanged shot facts when a rerun has only its product report."""
+    from . import vision_analyzer as vision
+    if not isinstance(prior, dict):
+        return
+    previous = {row.get("shot_id"): row for row in prior.get("shots") or [] if isinstance(row, dict)}
+    exclusions = vision.logged_pool_exclusions(prior)
+    warnings = {w.get("shot_id"): w for w in prior.get("warnings") or []
+                if isinstance(w, dict) and w.get("type") == vision.UNAUDITABLE_WARNING}
+    for shot in result["shots"]:
+        sid = shot["shot_id"]
+        old = previous.get(sid)
+        if not old:
+            continue
+        key = vision._vision_cache_key(manifest, shot)
+        if not key:
+            continue
+        if sid in exclusions and old.get("exclusion_cache_key") == key:
+            for field in ("excluded_from_pool", "exclusion_cache_key", "exclusion_reason"):
+                shot[field] = old.get(field)
+            result["warnings"].append(warnings[sid])
+        elif old.get("analysis_cache_key") == key:
+            facts = vision._cache_projection(old)
+            if facts:
+                vision._apply_cached_visual(shot, facts, key)
+
+
 def analyze_product(manifest: dict, base_dir: Path, report_dir: Path, *, ffmpeg=None,
                     ffprobe=None, threshold=.30, min_shot_s=.45, vision=True) -> dict:
     """Serialize one product's cold dependency, while reusing each unchanged source.
@@ -177,6 +204,7 @@ def analyze_product(manifest: dict, base_dir: Path, report_dir: Path, *, ffmpeg=
                   "analysis_prompt": shot_analyzer.build_analysis_prompt(manifest, shots),
                   "ok": bool(shots) and not issues}
         if vision and shots:
+            _restore_product_observations(manifest, result, _read(report_dir / "shot_candidates.json"))
             result = vision_analyzer.enrich_with_vision(manifest, result, report_dir, ffmpeg=ffmpeg)
         excluded = vision_analyzer.logged_pool_exclusions(result)
         complete = (bool(shots) and not issues and len(excluded) < len(result["shots"])

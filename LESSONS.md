@@ -14,6 +14,21 @@
 - 现象: 中后段偏好丢掉商品举入和转正；宽采样可能把长停留当必需证据，极短CTA因而触发整库扫描。
 - 以后怎么做: 记录有效入点、首次到位与辨认出点，按真实配音求窗；紧凑裁切另看密集实帧，保留父事实。连续组和恢复不能擦除阶段，阶段不能授予变速，展示池召回须有界。
 - 证据: ADR0013、test_presentation_windows.py、test_sentence_continuity.py。
+### L-20261111-tissue-press 按压证据不能只匹配名词
+
+- status: OPEN
+- hits: 1
+- 模块: continuity / visual QC
+- 以后怎么做: 卫品反渗验证须观察到纸巾接触并提起，裸手、否定或假设描述不能因含“纸巾”而通过；解释理由不能替代观察。共享 QC 闸门同时覆盖 AI 与旧选镜模式，行为变化同步回归与维护日志。
+- 证据: PR #67、test_sentence_continuity.py、test_visual_qc_response_contract.py。
+
+### L-20261111-shared-display 相同开场需要用实际轨道追溯
+
+- status: OPEN
+- hits: 1
+- 模块: selection / recovery / draft readback
+- 对照源片和实际裁窗确认跨稿复用，再核实初选、补镜范围与写稿后端。测配音间隔应读草稿实际引用的文件，并核对当时使用的帧数阈值。
+- 证据: ADR 0002、ADR 0009、test_ai_editor.py、test_default_headless.py。
 
 ### L-20261110-contract-scope 规范要求用语前先核对范围和维护源
 - status: OPEN

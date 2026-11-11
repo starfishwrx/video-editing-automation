@@ -197,18 +197,21 @@ def write_draft(engine, clips, bgm_path):
             raise ValueError('HEADLESS_SUBTITLE_FONT_REQUIRED')
         cache = Path(os.environ['JY_WORK_ROOT']) / '.cache' if os.environ.get('JY_WORK_ROOT') else engine.report_dir
         with _draft_write_io_slot(engine, cache):
-            prepared, video_overrides = {}, {}
+            prepared, video_overrides, prechecked = {}, {}, {}
             # Check every source first so an incompatible later clip does not
             # cause partial transcoding before the legacy fallback.
             for path in {str(Path(clip.video).resolve()) for clip in clips}:
+                identity = source_normalization.identity(Path(path))
                 facts = source_normalization.probe_media(path, ffprobe=str(engine.ffprobe or 'ffprobe'))
                 source_normalization.check_compatibility(facts)
+                prechecked[path] = (identity, facts)
             for clip in clips:
                 path = str(Path(clip.video).resolve())
                 if path in prepared:
                     continue
                 record = source_normalization.normalize_video(path, cache / 'upright-sources',
-                    ffmpeg=str(engine.ffmpeg or 'ffmpeg'), ffprobe=str(engine.ffprobe or 'ffprobe'))
+                    ffmpeg=str(engine.ffmpeg or 'ffmpeg'), ffprobe=str(engine.ffprobe or 'ffprobe'),
+                    prechecked=prechecked[path])
                 prepared[path] = record
                 if record['changed']:
                     video_overrides[path] = record['prepared']['path']
@@ -243,6 +246,7 @@ def write_draft(engine, clips, bgm_path):
                     'subtitle_font_size': 8, 'subtitle_bold': True, 'subtitle_transform_x': position['x'],
                     'subtitle_transform_y': position['y'], 'subtitle_strip_punctuation': True,
                     'subtitle_layout': next((t['segments'] for t in plan['tracks'] if t['name'] == 'Subtitles'), []),
+                    'narration_windows': next((t['segments'] for t in plan['tracks'] if t['name'] == 'Narration'), []),
                     'native_subtitles_required': source == 'audio', 'subtitle_cues': cues if caption else None}
         issues = draft_safety.post_write_validate(draft_dir, expected_tracks=expected)
         if issues:

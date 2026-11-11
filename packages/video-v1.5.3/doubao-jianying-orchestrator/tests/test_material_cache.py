@@ -83,6 +83,9 @@ class MaterialCacheTests(unittest.TestCase):
                 mock.patch.object(vision, "_run_vision_with_retry", side_effect=response) as api:
             first = material_cache.analyze_product(self.manifest, self.root, self.root / "a")
             warm = material_cache.analyze_product(self.manifest, self.root, self.root / "b")
+            vision._vision_cache_path(self.root / "a").write_text("{}", encoding="utf8")
+            retained = material_cache.analyze_product(self.manifest, self.root, self.root / "a")
+            self.assertTrue(retained["material_cache"]["ready"])
         self.assertEqual(prepare.call_count, 1)
         self.assertEqual(frames.call_count, 1)
         self.assertEqual(api.call_count, 3)

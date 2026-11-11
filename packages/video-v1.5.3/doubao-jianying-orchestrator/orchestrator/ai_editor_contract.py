@@ -16,7 +16,7 @@ from typing import Any
 
 PLAN_SCHEMA = "chatcut-ai-selection-v1"
 RECEIPT_SCHEMA = "chatcut-ai-selection-evidence-v1"
-POLICY_VERSION = "selling-points-first-reference-quality-v4"
+POLICY_VERSION = "selling-points-first-reference-quality-v5"
 POINT_COVERAGE_POLICY = "at_least_one_specific_point"
 KINDS = {"selling_point", "product_intro", "hook"}
 BASES = {"editorial_fit", "visible_result", "readable_label", "product_display"}
@@ -37,7 +37,7 @@ else:
     _presentation_spec.loader.exec_module(presentation)
 AI_SPEED_MAX = playback.PROCESS_MAX
 POLICY = """先通读整稿，先安排具体卖点，再安排产品介绍和无具体卖点的钩子/衔接。
-句子按实际内容分类，开场包含具体卖点仍是selling_point。一句多个卖点至少实际呈现一个具体点，未覆盖项如实记录，不能声称全部已证实。
+全稿每一句按实际内容分类。开头、中段或结尾纯招呼、设问、吊胃口且没有本品具体卖点，标为hook；问句含本品具体卖点仍是selling_point。一句多个卖点至少实际呈现一个具体点，未覆盖项如实记录，不能声称全部已证实。
 轻薄、柔软、舒服允许能体现特点的真实展示，不强制实验或固定厚度对照。
 明确性能结果、数值或比较必须有对应可见画面，包装文字只支持该标称。
 口播里的层数或结构名称如果说的是瞬吸、吸收、下渗，看得见倒液之后的吸收过程或结果就是这句证据，不要求切开看到内部层数。没有吸收过程的包装和静态陈列仍然不能证明。
@@ -96,6 +96,10 @@ def rules_identity(manifest: dict | None = None) -> dict:
 def policy_prompt(manifest: dict) -> str:
     policy = POLICY + "\n" + playback.PROMPT + "\n" + presentation.PROMPT
     policy += "\n商品展示动作阶段策略：" + presentation.VERSION
+    if editorial_context(manifest)["category"] == "weipin":
+        policy += ("\n裤型卫生巾按可见部位和动作分别判断：腰腹包覆或高腰看展开的腰头高度、前腹覆盖或试穿位置；"
+                   "腰围弹力看两侧撑开腰头产生形变，宣称回弹还需看见松手回缩。"
+                   "仅托举、折叠裤体、拉裆部或扯外袋不能证明腰围弹力。亲肤柔软可用清楚的巾体面层抚触、轻捏或贴肤展示，揉包装不能代替。")
     if editorial_context(manifest)["category"] in {"zhipin", "weipin"}:
         policy += "\n本任务生效的品类制作与选镜合同（按口播含义适用，不能据此虚构画面）：\n" + json.dumps(
             editorial_context(manifest), ensure_ascii=False, sort_keys=True)

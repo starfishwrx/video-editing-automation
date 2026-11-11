@@ -38,6 +38,12 @@ class OpeningHookTests(unittest.TestCase):
         self.assertEqual(rows[0]['text'],request()['text'])
         self.assertEqual(rows[0]['checks'][0]['claim_text'],request()['text'])
 
+    def test_classified_mid_script_hook_uses_product_without_downgrading_claims(self):
+        rows = hook.normalize([request(8, is_generic_hook=True), request(9)])
+        self.assertTrue(hook.is_packaging_hook(rows[0]))
+        self.assertNotIn("visual_purpose", rows[1])
+        hook.validate_completed(rows)
+
     def test_explicit_points_in_opening_are_not_downgraded(self):
         for text,kind in [('200抽','label'),('不易掉絮','action_result'),('悬挂式设计','display')]:
             r=request(text=text,has_product_selling_point=True,display_goal='visible_feature',

@@ -2,7 +2,7 @@
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
 
-def iter_ready(jobs, prepare, consume, *, prep_workers, api_workers, on_error):
+def iter_ready(jobs, prepare, consume, *, prep_workers, api_workers, on_error, pass_prepared=False):
     """Yield completed (job, result) pairs without a whole-round barrier.
 
     At most prep_workers + api_workers jobs are admitted at once. Preparation
@@ -37,6 +37,7 @@ def iter_ready(jobs, prepare, consume, *, prep_workers, api_workers, on_error):
                     yield job, on_error(job, exc)
                     continue
                 if kind == "prep":
-                    active[api_pool.submit(consume, job)] = ("api", job)
+                    args = (job, value) if pass_prepared else (job,)
+                    active[api_pool.submit(consume, *args)] = ("api", job)
                 else:
                     yield job, value

@@ -98,10 +98,15 @@ def check_compatibility(facts) -> int:
     return angle
 
 
-def normalize_video(source, directory, *, ffmpeg="ffmpeg", ffprobe="ffprobe") -> dict:
+def normalize_video(source, directory, *, ffmpeg="ffmpeg", ffprobe="ffprobe", prechecked=None) -> dict:
     source = Path(source).resolve(strict=True)
     before = identity(source)
-    facts = probe_media(source, ffprobe=ffprobe)
+    if prechecked is None:
+        facts = probe_media(source, ffprobe=ffprobe)
+    else:
+        checked_identity, facts = prechecked
+        if checked_identity != before:
+            raise ValueError("NORMALIZED_SOURCE_INPUT_CHANGED")
     angle = check_compatibility(facts)
     if not angle:
         return {"changed": False, "source": before, "prepared": before}

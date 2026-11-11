@@ -668,7 +668,7 @@ class SelectionRecoveryTests(unittest.TestCase):
         old["shots"][0]["material_duration_us"] = 10_000_000
         plan = self.plan()
         plan["identity"].update(analysis_sha256=contract.digest(old), policy_version=contract.POLICY_VERSION)
-        plan["resume_identity"] = copy.deepcopy(plan["identity"])
+        plan["resume_identity"] = {**plan["identity"], "editorial_prompt_sha256": contract.digest(contract.policy_prompt(self.manifest))}
         folder = self.root / "ai_editor"
         folder.mkdir()
         editor._save(folder / "plan.json", plan)
@@ -709,7 +709,7 @@ class SelectionRecoveryTests(unittest.TestCase):
         old["shots"][0]["material_duration_us"] = 10_000_000
         plan = self.plan()
         plan["identity"].update(analysis_sha256=contract.digest(old), policy_version=contract.POLICY_VERSION)
-        plan["resume_identity"] = copy.deepcopy(plan["identity"])
+        plan["resume_identity"] = {**plan["identity"], "editorial_prompt_sha256": contract.digest(contract.policy_prompt(self.manifest))}
         folder = self.root / "ai_editor"
         folder.mkdir()
         editor._save(folder / "plan.json", plan)
@@ -728,7 +728,7 @@ class SelectionRecoveryTests(unittest.TestCase):
         old["shots"][0]["material_duration_us"] = 10_000_000
         plan = self.plan()
         plan["identity"].update(analysis_sha256=contract.digest(old), policy_version=contract.POLICY_VERSION)
-        plan["resume_identity"] = copy.deepcopy(plan["identity"])
+        plan["resume_identity"] = {**plan["identity"], "editorial_prompt_sha256": contract.digest(contract.policy_prompt(self.manifest))}
         folder = self.root / "ai_editor"
         folder.mkdir()
         editor._save(folder / "plan.json", plan)
@@ -760,7 +760,7 @@ class SelectionRecoveryTests(unittest.TestCase):
                 folder.mkdir(parents=True)
                 plan = self.plan()
                 plan["identity"].update(analysis_sha256=old_digest, policy_version=contract.POLICY_VERSION)
-                plan["resume_identity"] = copy.deepcopy(plan["identity"])
+                plan["resume_identity"] = {**plan["identity"], "editorial_prompt_sha256": contract.digest(contract.policy_prompt(self.manifest))}
                 editor._save(folder / "plan.json", plan)
                 editor.snapshot_previous_analysis(old, root)
                 identity = {**plan["resume_identity"], "analysis_sha256": editor._analysis_digest(new)}
@@ -1140,7 +1140,7 @@ class SelectionRecoveryTests(unittest.TestCase):
             'verdict': 'matched', 'same_product': True, 'same_demonstration': True, 'same_selling_point': True,
             'semantic_continuity': True, 'complete_action': True, 'result_preserved': True,
             'shared_point': 'experiment', 'product_observation': 'same product',
-            'demonstration_observation': 'same sample and setup', 'observation': 'complete experiment',
+            'demonstration_observation': '同一样品倒液吸收后纸巾按压并提起，纸面干燥', 'observation': 'complete experiment',
             'reason': 'continuous phases', 'confidence': .9,
             'complete_intervals_us': [copy.deepcopy(context['window_us'])], 'members': observations}}
 

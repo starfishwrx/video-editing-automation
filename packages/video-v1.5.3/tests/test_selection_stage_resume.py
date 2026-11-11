@@ -99,6 +99,7 @@ class WorkerSelectionRecoveryTests(unittest.TestCase):
         self.assertEqual(result['segments'][0]['audio'], str(self.audio))
         self.assertEqual(result['segments'][0]['audio_duration_us'], 1_000_000)
         self.assertEqual(result['ai_refill_indices'], [1])
+        self.assertEqual(result['retained_tts_audio'], [str(self.audio)])
         self.audio.write_bytes(b'changed audio')
         with self.assertRaisesRegex(ValueError, 'REFILL_FROZEN_AUDIO_CHANGED'):
             selection_recovery.freeze_refill_input(request, self.report)
@@ -839,6 +840,54 @@ class WorkerSelectionRecoveryTests(unittest.TestCase):
         self.assertEqual(json.loads(result["stdout"])["resume_stage"], "draft_write")
         self.assertTrue(json.loads(result["stdout"])["retryable"])
         self.assertTrue(json.loads((self.report / "shot_match_report.json").read_text(encoding="utf-8"))["ok"])
+
+    def test_interrupted_gap_recovery_never_starts_full_build_with_missing_freeze(self):
+        self.write("last_result.json", {"status": "NARRATION_GAP_EXCEEDED", "retryable": False,
+                   "recovery_stage": "draft_write", "resume_stage": "semantic_match"})
+        (self.report / "selection_resume.json").unlink()
+        with patch.object(worker, "log"), patch.object(worker.subprocess, "run") as child:
+            for _ in range(2):
+                result = worker.run_build(self.manifest, self.report, "original", timeout=30)
+                self.assertNotEqual(result["rc"], 0)
+                self.assertTrue(result["stage_retry_exhausted"])
+        child.assert_not_called()
+
+    def test_missing_last_result_resumes_only_with_verified_frozen_inputs(self):
+        self.write("last_result.json", {})
+        self.assertTrue(selection_recovery.pending(self.report))
+        (self.report / "last_result.json").unlink()
+        self.assertTrue(selection_recovery.pending(self.report))
+        self.audio.write_bytes(b"changed")
+        with patch.object(worker, "log"), patch.object(worker.subprocess, "run") as child:
+            self.assertNotEqual(worker.run_build(self.manifest, self.report, "original", timeout=30)["rc"], 0)
+            child.assert_not_called()
+
+    def test_policy_change_routes_once_through_frozen_recovery(self):
+        self._check_frozen_rematch("AI_SELECTION_RULES_CHANGED")
+
+    def test_legacy_narration_gap_routes_once_through_frozen_audio_recovery(self):
+        self._check_frozen_rematch("NARRATION_GAP_EXCEEDED")
+
+    def _check_frozen_rematch(self, reason):
+        self.write("shot_match_report.json", {"ok": True, "input_manifest": self.manifest})
+        updated_timing = {**self.timing, "tts_attempted": 0}
+        self.write("narration_timing.json", updated_timing)
+        self.snapshot["manifest"]["usage_ledger_path"] = "obsolete/task/.cache/usage.json"
+        self.write("selection_resume.json", self.snapshot)
+        stages = []
+        def run(command, **kwargs):
+            stages.append(command[-1])
+            if command[-1] == "semantic_match":
+                recovered = json.loads(Path(command[command.index("--input") + 1]).read_text(encoding="utf8"))
+                self.assertNotIn("usage_ledger_path", recovered)
+            if len(stages) == 1:
+                return SimpleNamespace(returncode=1, stderr="", stdout=json.dumps({
+                    "status": reason, "resume_stage": "semantic_match"}))
+            return self.successful_cli(command, **kwargs)
+        result = selection_recovery.recover_draft(self.manifest, self.report, prefix=["python"],
+            run=run, env={}, cwd=str(ROOT), deadline=time.time()+60, drafts_root=self.drafts)
+        self.assertEqual(result["rc"], 0, result)
+        self.assertEqual(stages, ["draft_write", "preflight", "semantic_match", "draft_write"])
 
     def test_draft_timeout_recovery_uses_only_matched_draft_write(self):
         self.write('last_result.json', {'retryable': True, 'resume_stage': 'draft_write'})

@@ -65,6 +65,22 @@ class PresentationWindowTests(unittest.TestCase):
         self.assertFalse(shot_analyzer.candidate_window(observed, audio_duration_us=3_000_000,
                                                       manifest=self.manifest).ok)
 
+    def test_broad_evidence_failure_can_review_another_complete_action(self):
+        from orchestrator.selection.ai_editor_recovery import WindowFailure
+        plan = self.plan()
+        failure = WindowFailure(1, 'display', timing.REASON_EVIDENCE_OUT_OF_RANGE)
+        with mock.patch.object(editor, '_place_absorb_experiment'), \
+                mock.patch.object(editor.experiment_groups, 'repair'), \
+                mock.patch.object(editor, '_place_empty_matched_evidence'), \
+                mock.patch.object(editor, '_revalidate_rows', side_effect=[failure, {'ok': True}]), \
+                mock.patch.object(editor, '_retrieve_empty_selection', return_value=False), \
+                mock.patch.object(editor, '_extend_previous_action', return_value=False), \
+                mock.patch.object(editor, '_compose_reviewed_short_displays', return_value=False), \
+                mock.patch.object(editor, '_try_other_presentation_window', return_value=True) as alternate:
+            self.assertTrue(editor._repair_reviewed_rows(self.manifest, {'shots': [self.shot]},
+                plan, Path(self.tmp.name), None, set())['ok'])
+        alternate.assert_called_once()
+
     def test_phase_does_not_authorize_acceleration(self):
         observed = editor._observed_shot(self.shot, self.review)
         self.assertEqual(playback.speed_range(observation=observed.get("playback_observation")), (1, 1))
@@ -165,13 +181,106 @@ class PresentationWindowTests(unittest.TestCase):
         rows = list(editor._short_complete_rows(self.manifest, analysis, plan, 1, None))
         self.assertEqual(rows[0]['parts'][0]['shot_id'], 'display')
 
+    def test_shared_history_does_not_replace_verified_action_with_unused_static(self):
+        video = Path(self.tmp.name)/'unused.mp4'
+        video.write_bytes(b'another source')
+        static_shot = {**self.shot, 'shot_id': 'static', 'video': str(video)}
+        static = {k:v for k,v in self.review.items() if k!='presentation_observation'}
+        static.update(shot_id='static', source_identity=contract.source_identity(video), confidence=1.)
+        plan=self.plan()
+        plan['display_reviews'].append(static)
+        analysis={'shots':[self.shot,static_shot]}
+        with mock.patch.object(editor, '_prior_use_by_shot', return_value={'display':(4,4),'static':(0,0)}):
+            menu=editor._build_edit_inventory(self.manifest, analysis, plan, None)
+        self.assertEqual(menu[0]['candidates'][0]['shot_id'], 'display')
+        with mock.patch.object(editor, '_assemble', side_effect=AssertionError('must keep the complete action')):
+            editor._mix_repeated_displays(self.manifest, analysis, plan, None, menu)
+        self.assertEqual(plan['rows'][0]['parts'][0]['shot_id'], 'display')
+
+    def test_all_used_line_priorities_keep_first_seven_and_one_fresh_review_slot(self):
+        shots=[{**self.shot,'shot_id':str(i)} for i in range(9)]
+        priorities=[s['shot_id'] for s in shots[:8]]
+        response={'sentences':[dict(index=1,kind='hook',selling_points=[],scene_ids=[],candidate_ids=priorities)],
+                  'display_pool_ids':priorities}
+        with mock.patch.object(editor, '_call', return_value=response), mock.patch.object(editor,
+                '_prior_use_by_shot',return_value={str(i):(int(i<8),0) for i in range(9)}):
+            row=editor._inventory(self.manifest,shots,Path(self.tmp.name))[0]
+        self.assertEqual(row['candidate_ids'][:7],priorities[:7])
+        self.assertEqual(row['candidate_ids'][7],'8')
+        self.assertIn('7',row['candidate_ids'][8:])
+
+    def short_display_pair(self):
+        video=Path(self.tmp.name)/'second.mp4'
+        video.write_bytes(b'second observed product action')
+        other={**self.shot,'shot_id':'second','video':str(video)}
+        action=phase(reveal_us=300_000,readable_end_us=500_000,end_us=900_000)
+        first={**self.review,'presentation_observation':action,
+               'evidence_intervals_us':[{'start':300_000,'end':500_000}]}
+        second={**first,'shot_id':'second','source_identity':contract.source_identity(video)}
+        plan=self.plan()
+        plan['display_reviews']=[first,second]
+        return {'shots':[self.shot,other]},plan
+
+    def test_two_complete_short_actions_fill_one_longer_line_without_paid_review(self):
+        analysis,plan=self.short_display_pair()
+        self.assertEqual(list(editor._short_complete_rows(self.manifest,analysis,plan,1,None)),[])
+        with mock.patch.object(editor,'_call',side_effect=AssertionError('no new review')):
+            self.assertTrue(editor._compose_reviewed_short_displays(self.manifest,analysis,plan,Path(self.tmp.name),1,None))
+        result=editor._assemble(self.manifest,analysis,plan,narration_timing=None,verify_sources=True)
+        parts=result['segments'][0]['span_parts']
+        self.assertEqual(len(parts),2)
+        self.assertEqual(sum(round(p['segment_s']*1e6) for p in parts),1_300_000)
+        self.assertTrue(all(p['video_speed']==1 for p in parts))
+        self.assertTrue(contract.validate_segment_receipt(result['segments'][0],index=1,manifest=self.manifest)['ok'])
+
+    def test_short_action_composition_cannot_borrow_occupied_or_unobserved_source(self):
+        analysis,plan=self.short_display_pair()
+        plan['rows'].append(dict(index=2,parts=[dict(shot_id='second')]))
+        before=copy.deepcopy(plan['rows'])
+        self.assertFalse(editor._compose_reviewed_short_displays(self.manifest,analysis,plan,Path(self.tmp.name),1,None))
+        self.assertEqual(plan['rows'],before)
+        plan['rows'].pop()
+        plan['display_reviews'][1].pop('presentation_observation')
+        self.assertFalse(editor._compose_reviewed_short_displays(self.manifest,analysis,plan,Path(self.tmp.name),1,None))
+
+    def test_short_source_uses_fresh_tight_review_of_another_matched_action(self):
+        analysis,plan=self.short_display_pair()
+        other=plan['display_reviews'][1]
+        other['presentation_observation']=phase(readable_end_us=1_200_000,end_us=2_400_000)
+        other['evidence_intervals_us']=[{'start':300_000,'end':7_000_000}]
+        media=dict(start=.1,end=1.48,before=other['source_identity'],times=[.1,.5,.9,1.3],sheet=Path('pixels.jpg'))
+        response=dict(verdict='suitable',same_product=True,observation='同商品转正并可辨认',reason='完整紧凑动作',
+                      confidence=.9,evidence_intervals_us=[{'start':300_000,'end':1_480_000}],
+                      presentation_observation=phase(readable_end_us=1_200_000,end_us=1_480_000))
+        with mock.patch.object(editor,'_review_media',return_value=media),mock.patch.object(editor,'_call',return_value=response):
+            self.assertTrue(editor._try_other_presentation_window(self.manifest,analysis,plan,Path(self.tmp.name),1,None))
+        actual=editor._assemble(self.manifest,analysis,plan,narration_timing=None,verify_sources=True)
+        self.assertEqual(actual['segments'][0]['shot_id'],'second')
+        self.assertEqual(actual['segments'][0]['source_start'],.1)
+        self.assertGreater(actual['segments'][0]['video_speed'],1)
+        self.assertLessEqual(actual['segments'][0]['video_speed'],2)
+        self.assertEqual(other['evidence_intervals_us'],[{'start':300_000,'end':7_000_000}])
+        self.assertEqual(len(plan['window_repair_attempts']),1)
+
+    def test_positive_crop_that_is_still_too_short_does_not_replace_row(self):
+        plan=self.plan()
+        plan['window_reviews']={'too_short':{**self.review,'sentence_index':1,
+            'review_window_us':{'start':100_000,'end':1_480_000},
+            'presentation_observation':phase(end_us=1_350_000)}}
+        before=copy.deepcopy(plan['rows'])
+        with mock.patch.object(editor,'_review_proposed_window',return_value='too_short'):
+            self.assertFalse(editor._try_other_presentation_window(self.manifest,
+                {'shots':[self.shot]},plan,Path(self.tmp.name),1,None))
+        self.assertEqual(plan['rows'],before)
+        self.assertIn('too_short',plan['window_reviews'])
+
     def test_half_second_cta_does_not_force_whole_library_review(self):
         shots = {f"s{i}": {**self.shot, "shot_id": f"s{i}"} for i in range(24)}
         sentence = {**self.sentence, "index": 0, "kind": "product_intro", "candidate_ids": list(shots)}
         def run(ids, shots, directory, review, **kwargs):
             return iter((sid, review(sid)) for sid in ids)
         with mock.patch.object(editor, "_iter_review_round", side_effect=run), \
-                mock.patch.object(editor, "_review", side_effect=lambda m, s, shot, d: {
+                mock.patch.object(editor, "_review", side_effect=lambda m, s, shot, d, **kwargs: {
                     **self.review, "shot_id": shot["shot_id"], "presentation_observation": None}), \
                 mock.patch.object(editor, "_cached_reviews_feasible", return_value=False):
             rows, coverage = editor._review_pool(self.manifest, sentence, shots, Path(self.tmp.name), {})

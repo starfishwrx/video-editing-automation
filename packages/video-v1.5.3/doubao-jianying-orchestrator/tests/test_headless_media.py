@@ -23,6 +23,17 @@ FFMPEG, FFPROBE = shutil.which("ffmpeg"), shutil.which("ffprobe")
 
 @unittest.skipUnless(FFMPEG and FFPROBE, "FFmpeg and FFprobe required")
 class HeadlessMediaTests(unittest.TestCase):
+    def test_prechecked_upright_source_reuses_probe_and_rejects_changed_file(self):
+        source = Path(self.root) / "upright.mp4"
+        source.write_bytes(b"initial")
+        checked = (normalization.identity(source), {"streams": [{"codec_type": "video"}]})
+        with patch.object(normalization, "probe_media") as probe, patch.object(normalization, "rotation", return_value=0):
+            self.assertFalse(normalization.normalize_video(source, self.root, prechecked=checked)["changed"])
+            source.write_bytes(b"changed source")
+            with self.assertRaisesRegex(ValueError, "INPUT_CHANGED"):
+                normalization.normalize_video(source, self.root, prechecked=checked)
+            probe.assert_not_called()
+
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)

@@ -110,6 +110,30 @@ def _qc_pending(task: dict, work: Path) -> bool:
                for path in (work / task["record_id"] / "report").glob("**/qc_stage.json"))
 
 
+def _resumes_frozen_build(task: dict, work: Path) -> bool:
+    """These workers consume their bound match/analysis, including on failure."""
+    from tools.workflow import selection_recovery
+    if task.get("force_rebuild"):
+        return False
+    rid = task["record_id"]
+    base = str(task.get("title") or rid).strip() or rid
+    report_root = work / rid / "report"
+    if Path(base).name != base or base in {".", ".."}:
+        return False
+    import batch_worker
+    count = max(1, int(task.get("count") or 1))
+    previous = _read(work / rid / "done.json")
+    kept = previous.get("drafts") or []
+    for index in range(1, count + 1):
+        if index <= len(kept) and (batch_worker.DRAFTS / kept[index - 1]).is_dir():
+            if not batch_worker.prior_draft_requires_recheck(work / rid, index, base, previous):
+                continue
+        report = report_root / (base if index == 1 else f"report_{index}")
+        if not (selection_recovery.draft_pending(report) or selection_recovery.pending(report)):
+            return False
+    return True
+
+
 def _child_env(policy_file: Path, policy: RuntimePolicy, task: dict | None = None) -> dict:
     env = dict(os.environ, PYTHONUTF8="1",
         JY_CONCURRENCY_POLICY_FILE=str(policy_file), JY_SLOT_DIR=policy.slot_dir,
@@ -355,6 +379,8 @@ def dispatch(tasks: list[dict], *, work: Path, policy: RuntimePolicy | None = No
         atomic_write_text(progress, "")
         results, ready, preparing, failed = [], {}, set(), {}
         preflight_results, preflight_environment = {}, {}
+        product_keys = {task["record_id"]: product_key(task) for task, _ in pending}
+        frozen_builds = set()
         material_ready_clock = {}
         submitted_files = set()
         spool_blocked = False
@@ -434,7 +460,7 @@ def dispatch(tasks: list[dict], *, work: Path, policy: RuntimePolicy | None = No
                         owner.close()
                     break
                 for task, stage in list(pending):
-                    key = product_key(task)
+                    key = product_keys[task["record_id"]]
                     task_work = Path(task.get("_dispatch_work_root") or work)
                     requested_stage = task.get("_dispatch_resume_stage") or resume_stage
                     if not requested_stage:
@@ -444,7 +470,7 @@ def dispatch(tasks: list[dict], *, work: Path, policy: RuntimePolicy | None = No
                             record({"record_id": task["record_id"], "status": "ALREADY_DELIVERED",
                                     "stage": "complete", "formal_deliveries": 0})
                             continue
-                    if stage not in {"qc", "delivery"}:
+                    if stage not in {"qc", "delivery"} and task["record_id"] not in preflight_results:
                         voice_error = _voice_error(task)
                         audio_error = voice_error or _bgm_error(task)
                         if audio_error:
@@ -464,6 +490,9 @@ def dispatch(tasks: list[dict], *, work: Path, policy: RuntimePolicy | None = No
                                 check_narration=stage not in {"qc", "delivery"})
                         except (OSError, ValueError, TypeError, RuntimeError, ImportError) as exc:
                             preflight_results[rid] = {"ready": False, "reason": str(exc)}
+                        if (stage == "build" and requested_stage != "material"
+                                and _resumes_frozen_build(task, task_work)):
+                            frozen_builds.add(rid)
                         for warning in (preflight_results[rid].get("runtime") or {}).get("configuration_warnings", []):
                             print("WARNING: " + warning, file=sys.stderr)
                     checked = preflight_results[rid]
@@ -473,7 +502,7 @@ def dispatch(tasks: list[dict], *, work: Path, policy: RuntimePolicy | None = No
                                 "error": "ENVIRONMENT_PRECHECK_FAILED: " + str(checked.get("reason") or "NOT_READY"),
                                 "retryable": True, "formal_deliveries": 0})
                         continue
-                    if stage in {"qc", "delivery"}:
+                    if stage in {"qc", "delivery"} or rid in frozen_builds:
                         if sum(kind == "task" for kind, *_ in futures.values()) >= policy.task_workers:
                             continue
                     elif key in failed:
@@ -498,7 +527,7 @@ def dispatch(tasks: list[dict], *, work: Path, policy: RuntimePolicy | None = No
                     elif sum(kind == "task" for kind, *_ in futures.values()) >= policy.task_workers:
                         continue
                     env = _child_env(policy_file, policy, task)
-                    if key in ready:
+                    if key in ready and rid not in frozen_builds:
                         env["JY_SHARED_ANALYSIS_FILE"] = ready[key]
                     # Persist admission only after preflight and a worker slot,
                     # immediately before dispatching this specific task.

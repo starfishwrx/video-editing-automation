@@ -2502,7 +2502,7 @@ class OrchestrationEngine:
                 return fallback
             return result
         if backend == "legacy":
-            return self._write_legacy_draft(clips, bgm_path)
+            return {**self._write_legacy_draft(clips, bgm_path), "draft_backend": "legacy"}
         return {"status": "DRAFT_BACKEND_INVALID", "formal_delivery_allowed": False}
 
     def _write_legacy_draft(self, clips: list[Clip], bgm_path: Optional[str]) -> dict:
@@ -2571,6 +2571,7 @@ class OrchestrationEngine:
 
         built = []
         prev_seg = None
+        narration_windows = []
         # 闸门未认证时整批打标注（定案第 10 条）。读出一次，循环内不再重算 ——
         # 认证状态是**整批**属性，逐段变化会让标注看起来像「某几段有问题」。
         # 预览稿里若有未解出的占位段，同样必须看得见：那种稿子打开就像成品，
@@ -2664,6 +2665,9 @@ class OrchestrationEngine:
                     track_name="Narration")
                 if a is None:
                     raise RuntimeError(f"旁白添加失败: {narration}")
+                narration_windows.append({"staged_source": staged[str(Path(narration))],
+                    "start_us": c.start_us, "duration_us": to_us(c.duration),
+                    "source_start_us": self._audio_slice_us(c), "source_duration_us": to_us(c.duration)})
             # Explicit legacy retains clip-timed text. Audio captions are written
             # once per narration sentence after the video loop, across shot cuts.
             if c.text and caption_source == "legacy":
@@ -2795,6 +2799,9 @@ class OrchestrationEngine:
         expected_tracks = {
             "video_segments": len(clips),
             "narration_segments": narration_expected,
+            "narration_windows": narration_windows,
+            # The legacy audio probe reports whole milliseconds.
+            "narration_duration_tolerance_us": 1000,
             "subtitle_segments": subtitle_expected,
             "bgm_required": bool(bgm_path),
             "bgm_segments": 1,

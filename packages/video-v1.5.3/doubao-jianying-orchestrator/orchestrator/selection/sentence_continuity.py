@@ -88,9 +88,11 @@ def _reserved_presentation(context, reserved, source_limit):
 
 
 def clear_conflicting_presentations(manifest, plan):
-    """Keep earlier selected groups and reselect later collisions after recovery."""
+    """Reserve claim evidence before filler, then prefer the earlier group."""
     reserved = []
-    for key, context in sorted(_selected_presentations(plan), key=lambda pair: pair[1]['members'][0]['index']):
+    for key, context in sorted(_selected_presentations(plan), key=lambda pair: (
+            not any(m.get('kind') == 'selling_point' for m in pair[1]['members']),
+            pair[1]['members'][0]['index'])):
         if _reserved_presentation(context, reserved, contract.source_reuse_limit(manifest)):
             members = {m['index'] for m in context['members']}
             plan['rows'] = [dict(index=r['index'], parts=[], reason='presentation group source window already reserved')
@@ -100,7 +102,7 @@ def clear_conflicting_presentations(manifest, plan):
             reserved.append(context)
 
 
-def proposals(manifest, analysis, plan, index, narration_timing):
+def proposals(manifest, analysis, plan, index, narration_timing, *, prefer_forward=False):
     """Shared candidate IDs retrieve possibilities; only joint pixels certify them."""
     from .ai_editor import qc_rejected_shots
     rejected = qc_rejected_shots(manifest)
@@ -109,8 +111,12 @@ def proposals(manifest, analysis, plan, index, narration_timing):
     originals = timing.split_sentences(manifest)
     pad = timing.us_of(manifest.get("tail_pad_s"), 0)
     for length in range(2, continuity.MAX_MEMBERS + 1):
-        for first in range(max(1, index - length + 1), min(index, len(sentences) - length + 1) + 1):
+        starts=list(range(max(1, index - length + 1), min(index, len(sentences) - length + 1) + 1))
+        if prefer_forward:starts.sort(key=lambda first:(first!=index,-first))
+        for first in starts:
             members = [sentences[i] for i in range(first, first + length)]
+            if any(m['index'] in plan.get('_frozen_segments', {}) for m in members):
+                continue
             presentation_group = any(s["kind"] != "selling_point" for s in members)
             if any(s["kind"] not in {'selling_point', 'product_intro', 'hook'} for s in members):
                 continue
@@ -153,8 +159,10 @@ def proposals(manifest, analysis, plan, index, narration_timing):
                        "window_us": {"start": solution.source_start_us, "end": solution.source_end_us}, "members": allocated,
                        **({'purpose': 'product_presentation'} if presentation_group else {}),
                        **({"presentation_observations": phases} if phases else {})}
-                if phases and _reserved_presentation(context,
-                        [c for _, c in _selected_presentations(plan)], contract.source_reuse_limit(manifest)):
+                claim_group = any(m.get('kind') == 'selling_point' for m in members)
+                reserved = [c for _, c in _selected_presentations(plan) if not claim_group or
+                            any(m.get('kind') == 'selling_point' for m in c['members'])]
+                if phases and _reserved_presentation(context, reserved, contract.source_reuse_limit(manifest)):
                     continue
                 yield context
 
@@ -172,6 +180,7 @@ def review_group(manifest, context, shot, directory):
 检查组合窗口完整保留必要动作及可读结果，每句对应的源区间实际展示该句承担的阶段；
 禁止结果口播时还在无关准备，禁止把只能组末看到的结果宣称已在前句出现。跨句处必须画面连续。
 不能仅因总长度放得下就通过。看不清阶段、商品/实验对应或结果可读性时uncertain。
+反渗、回流、干爽、不黏或黏腻的按压验证只认纸巾接触巾体并提起。手掌、手指、手离开、手掌干净都不是按压验证。组内有这类句子却看不见纸巾时，complete_action 必须为 false，verdict 不得 matched。
 输出JSON：{"verdict":"matched|mismatch|uncertain","same_product":true,"same_demonstration":true,
 "same_selling_point":true,"semantic_continuity":true,"complete_action":true,"result_preserved":true,
 "shared_point":"具体共同卖点","product_observation":"同商品可见依据","demonstration_observation":"同次连续演示可见依据",
@@ -182,6 +191,7 @@ def review_group(manifest, context, shot, directory):
 "supported_point_ids":["p1"],"time_sensitive":false,"scene_ids":[],
 "evidence_intervals_us":[{"start":0,"end":2000000}]}]}。
 members每句恰好一行并按原序，证据区间只填本句切片内实际观察到的阶段，不复制超出切片的旧证据。
+basis只允许editorial_fit、visible_result、readable_label、product_display；阶段承接描述写phase，不新增basis枚举。
 完整动作由整组连续窗口承载，不冒称每片都独立完整。结果必须完整原速保留；无需重做素材识别。
 """
     if context.get('purpose') == 'product_presentation':
@@ -276,7 +286,9 @@ def repair(manifest, analysis, plan, directory, failure, narration_timing, *, me
     from . import ai_editor as editor
     from .ai_editor_recovery import failure_fields, repairable_index
     attempts = plan.setdefault("continuity_attempts", {})
-    for context in proposals(manifest, analysis, plan, failure.index, narration_timing):
+    contexts=(proposals(manifest,analysis,plan,failure.index,narration_timing,prefer_forward=True)
+              if presentation_only else proposals(manifest,analysis,plan,failure.index,narration_timing))
+    for context in contexts:
         if presentation_only and not context.get('presentation_observations'):
             continue
         if member_indices is not None and {m["index"] for m in context["members"]} != set(member_indices):
@@ -305,6 +317,8 @@ def repair(manifest, analysis, plan, directory, failure, narration_timing, *, me
             attempts[key]["status"] = "reviewed"
         trial = copy.deepcopy(plan)
         install(trial, key, group)
+        if context.get('presentation_observations'):
+            clear_conflicting_presentations(manifest, trial)
         try:
             editor._assemble(manifest, analysis, trial, narration_timing=narration_timing, verify_sources=True)
         except (ValueError, KeyError, TypeError, OSError) as other:
