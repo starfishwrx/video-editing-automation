@@ -943,6 +943,42 @@ class SelectionRecoveryTests(unittest.TestCase):
                 self.assertEqual(after, before)
                 self.assertEqual(len(reviews), 0 if has_point else 1)
 
+    def test_failed_hook_link_resumes_standalone_search_for_that_sentence(self):
+        plan = self.plan()
+        plan["sentences"][0].update(kind="hook", selling_points=[], hook_neighbor="next")
+        self.manifest["segments"][0]["audio_duration_us"] = 587_000
+        plan["display_reviews"] = self.reviews["2"]
+        plan["coverage"]["display_pool"] = {"feasible": True, "exhausted": False}
+        with patch.object(editor, "_edit_plan", side_effect=[ValueError("AI_EDITOR_NO_SELECTION:1"), None]) as edit, \
+                patch.object(editor, "_review_pool", return_value=(self.reviews["1"], {"checked": 2, "feasible": True})) as pool:
+            editor._edit_with_review_fallback(self.manifest, self.analysis, plan, self.root, None)
+        self.assertEqual(edit.call_count, 2)
+        self.assertEqual(pool.call_args.args[1]["audio_durations_us"], [587_000])
+        self.assertEqual(pool.call_args.args[1]["index"], 0)
+        self.assertEqual({r["shot_id"] for r in plan["display_reviews"]}, {"shot1", "shot2"})
+
+    def test_display_search_can_stop_before_a_neutral_hook_has_a_standalone_cut(self):
+        self.manifest["segments"][0].update(text="姐妹们", audio_duration_us=300_000)
+        self.sentences[0].update(text="姐妹们", kind="hook", selling_points=[], hook_neighbor="next")
+        self.sentences[1].update(kind="product_intro", selling_points=[])
+        self.reviews["2"][0].update(basis="product_display", supported_point_ids=[],
+                                     evidence_intervals_us=[{"start": 2_000_000, "end": 3_000_000}])
+        for has_note in (False, True):
+            with self.subTest(has_note=has_note):
+                self.manifest["segments"][0]["visual_requirements"] = ["正面包装"] if has_note else []
+                def pool(manifest, shared, shots, directory, timing, **kwargs):
+                    self.assertEqual(shared["audio_durations_us"], [300_000, 1_000_000])
+                    expected = [300_000, 1_000_000] if has_note else [1_000_000]
+                    self.assertEqual(shared["standalone_durations_us"], expected)
+                    self.assertEqual(editor._cached_reviews_feasible(manifest, shared, shots, self.reviews["2"], timing),
+                                     not has_note)
+                    raise ValueError("STOP_AFTER_DISPLAY_SEARCH")
+                with patch.object(editor, "_editor_model", return_value="offline"), \
+                        patch.object(editor, "_inventory", return_value=self.sentences), \
+                        patch.object(editor, "_review_pool", side_effect=pool) as review:
+                    editor.prepare(self.manifest, self.analysis, self.root)
+                review.assert_called_once()
+
     def test_default_prepare_links_empty_greeting_without_generic_display(self):
         self._prepare_empty_greeting()
 

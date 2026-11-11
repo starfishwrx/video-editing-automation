@@ -353,6 +353,7 @@ start/end使用原素材秒数，选择与该素材action_segments重叠且最�
         role = row.get("experiment_role", "other")
         if role not in experiment_groups.ROLES:
             raise ValueError("AI_EDITOR_EXPERIMENT_ROLE_INVALID")
+        row.pop("standalone_durations_us", None)
         row.pop("hook_neighbor_context", None)
         if row.get("hook_neighbor") not in ("next", "previous"):
             row.pop("hook_neighbor", None)
@@ -746,8 +747,8 @@ def _cached_reviews_feasible(manifest, sentence, shots, reviews, audio):
     excluded = qc_rejected_shots(manifest).get(sentence["index"], set())
     good = [r for r in reviews if r.get("verdict") == "matched" and r.get("shot_id") in shots
             and r.get("shot_id") not in excluded]
-    durations = sentence.get("audio_durations_us") or [timing_contract.duration_for(
-        audio, sentence["index"], segment={"text": sentence["text"]})[0]]
+    durations = sentence.get("standalone_durations_us") or sentence.get("audio_durations_us") or [
+        timing_contract.duration_for(audio, sentence["index"], segment={"text": sentence["text"]})[0]]
     for duration in durations:
         available = False
         for size in range(1, min(len(good), int(manifest.get("span_max_parts", 3))) + 1):
@@ -2766,25 +2767,33 @@ def _mix_repeated_displays(manifest, analysis, plan, timing, inventory):
         plan["rows"] = revised
 
 
-def _hook_requests(manifest, plan):
-    """Only neutral lines with no independent visual instruction may borrow a cut."""
+def _hook_neighbor(manifest, original, sentence, row):
+    """Resolve a neutral line's proposed neighbor under the actual script and notes."""
     from . import shot_notes
-    if manifest.get("shot_notes_general") or plan.get("_frozen_segments"):
+    index = sentence["index"]
+    side = row.get("hook_neighbor", sentence.get("hook_neighbor"))
+    if (side not in ("next", "previous") or sentence["kind"] not in {"hook", "product_intro"}
+            or sentence.get("selling_points") or sentence.get("scene_ids") or sentence.get("qc_feedback")
+            or manifest.get("shot_notes_general") or row.get("continuity_key")
+            or original[index - 1].get("visual_requirements")
+            or shot_notes.note_for(manifest, index, original[index - 1])):
+        return None
+    neighbor = index + (1 if side == "next" else -1)
+    if 1 <= neighbor <= len(original):
+        return side, neighbor
+    return None
+
+
+def _hook_requests(manifest, plan):
+    if plan.get("_frozen_segments"):
         return
     original = timing_contract.split_sentences(manifest)
     rows = {r.get("index"): r for r in plan.get("rows") or [] if isinstance(r, dict)}
     for sentence in plan["sentences"]:
-        index = sentence["index"]
-        row = rows.get(index, {})
-        side = row.get("hook_neighbor", sentence.get("hook_neighbor"))
-        if (side not in ("next", "previous") or sentence["kind"] not in {"hook", "product_intro"}
-                or sentence.get("selling_points") or sentence.get("scene_ids") or sentence.get("qc_feedback")
-                or row.get("continuity_key") or original[index - 1].get("visual_requirements")
-                or shot_notes.note_for(manifest, index, original[index - 1])):
-            continue
-        neighbor = index + (1 if side == "next" else -1)
-        if neighbor in rows:
-            yield sentence, row, side, neighbor
+        row = rows.get(sentence["index"], {})
+        link = _hook_neighbor(manifest, original, sentence, row)
+        if link and link[1] in rows:
+            yield sentence, row, *link
 
 
 def _hook_cut(manifest, plan, directory, sentence, side, shot, edge, anchor_text, duration):
@@ -3022,14 +3031,33 @@ def _edit_with_review_fallback(manifest, analysis, plan, directory, narration_ti
             index = failed_index(exc)
             coverage = plan.get('coverage', {}).get(str(index), {})
             sentence = next((s for s in plan['sentences'] if s.get('index') == index), None)
-            if (not sentence or index in expanded_indices or coverage.get('exhausted')
-                    or coverage.get('reason') != 'KNOWN_WINDOWS_INFEASIBLE'):
+            if not sentence or index in expanded_indices:
                 raise
+            if sentence["kind"] != "selling_point":
+                original = timing_contract.split_sentences(manifest)
+                if (not _hook_neighbor(manifest, original, sentence, {})
+                        or plan.get("coverage", {}).get("display_pool", {}).get("exhausted")):
+                    raise
+                # The neighbor could not carry this line. Resume the ordinary display search
+                # with its own duration, keeping other sentences' reviews and QC exclusions.
+                duration, _ = timing_contract.duration_for(narration_timing, index, segment=original[index - 1])
+                shared = {**sentence, "index": 0, "kind": "product_intro", "text": "同商品通用产品展示池",
+                          "selling_points": [], "audio_durations_us": [duration]}
+                previous = {r["shot_id"]: r for r in plan["display_reviews"]}
+                reviews, coverage = _review_pool(manifest, shared, shots, directory, narration_timing or {},
+                    existing_reviews=list(previous.values()), excluded_ids=rejected.get(index, set()))
+                if not any(r["shot_id"] not in previous or r != previous[r["shot_id"]] for r in reviews):
+                    raise
+                previous.update((r["shot_id"], r) for r in reviews)
+                plan["display_reviews"] = list(previous.values())
+            else:
+                if coverage.get("exhausted") or coverage.get("reason") != "KNOWN_WINDOWS_INFEASIBLE":
+                    raise
+                reviews, coverage = _review_pool(manifest, sentence, shots, directory, narration_timing or {},
+                    exhaustive=True, existing_reviews=plan["reviews"].get(str(index), []),
+                    excluded_ids=rejected.get(index, set()))
+                plan["reviews"][str(index)] = reviews
             expanded_indices.add(index)
-            reviews, coverage = _review_pool(manifest, sentence, shots, directory, narration_timing or {},
-                exhaustive=True, existing_reviews=plan['reviews'].get(str(index), []),
-                excluded_ids=rejected.get(index, set()))
-            plan['reviews'][str(index)] = reviews
             plan['coverage'][str(index)] = coverage
             plan.setdefault('review_expansions', []).append({'index': index, 'reason': str(exc),
                                                             'checked': coverage['checked']})
@@ -3147,8 +3175,15 @@ def prepare(manifest: dict, analysis: dict, report_dir: Path, *, narration_timin
         displays = [s for s in plan["sentences"] if s["kind"] != "selling_point"]
         if displays:
             shared = {**displays[0], "index": 0, "text": "同商品通用产品展示池", "kind": "product_intro", "selling_points": []}
-            shared["audio_durations_us"] = [timing_contract.duration_for(narration_timing, s["index"],
-                segment=original[s["index"] - 1])[0] for s in displays]
+            timings = [timing_contract.duration_for(narration_timing, s["index"], segment=original[s["index"] - 1])
+                       for s in displays]
+            shared["audio_durations_us"] = [duration for duration, _ in timings]
+            # A neutral line can borrow its neighbor's edge. Do not exhaust the display pool
+            # looking for an independent cut of that exact length before the editor can try it.
+            standalone = [duration for sentence, (duration, certainty) in zip(displays, timings)
+                          if certainty == timing_contract.TIMING_CERTAINTY_ESTIMATED
+                          or not _hook_neighbor(manifest, original, sentence, {})]
+            shared["standalone_durations_us"] = standalone or [max(shared["audio_durations_us"])]
             plan["display_reviews"], plan["coverage"]["display_pool"] = _review_pool(manifest, shared, by_id, directory, narration_timing or {},
                                                                                        existing_reviews=plan["display_reviews"])
             for sentence in displays:
@@ -3182,7 +3217,7 @@ def prepare(manifest: dict, analysis: dict, report_dir: Path, *, narration_timin
                     continue
                 sentence = plan["sentences"][row["index"] - 1]
                 if (row["kind"] in {"hook", "product_intro"} and not row["selling_points"]
-                        and sentence.get("hook_neighbor") in ("next", "previous")):
+                        and _hook_neighbor(manifest, original, sentence, {})):
                     continue  # An empty row still needs a reviewed adjoining cut in the edit.
                 if any(row["index"] in {s["index"] for s in group}
                        for group in experiment_groups.groups(plan["sentences"])):
