@@ -70,6 +70,14 @@ class AIEditorQCIntegrationTests(unittest.TestCase):
         tiles = vision._write_sheet.call_args.args[0]
         self.assertEqual([(t["timestamp"], t["label"]) for t in tiles], [(1., "F01"), (2., "F02")])
 
+    def test_reclassified_unboxing_still_requires_its_terminal_frame(self):
+        item = {"selection_mode": "ai_editor", "text": "看看这一款",
+                "ai_selection": {"sentence_kind": "selling_point", "observation": "双手打开一个纸箱，箱盖向两侧翻开"}}
+        self.assertTrue(visual_qc_contract.carton_landing_required(item))
+        self.assertIn("CARTON_LANDING_UNVERIFIED", visual_qc_contract.presentation_selection_errors([item], [])[1])
+        item["ai_selection"]["observation"] = "外箱底部清楚印着规格标签"
+        self.assertFalse(visual_qc_contract.carton_landing_required(item))
+
     def test_legible_package_with_flap_still_over_goods_fails(self):
         for view in ("retail_product", "contents_exposed"):
             check = {"view": view, "flap_over_goods": "yes", "observation": "文字可读，前盖仍压在商品上"}

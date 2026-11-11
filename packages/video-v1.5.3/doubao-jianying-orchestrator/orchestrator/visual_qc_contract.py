@@ -183,7 +183,9 @@ def carton_landing_required(item):
     action = ' '.join(str(value or '') for value in (
         phase.get('action'), phase.get('result'), receipt.get('observation')))
     carton = re.search(r'开箱|纸箱|箱盖|箱内|外箱|快递箱|包装箱|箱子', action)
-    return bool(carton and (_ai_contract().presentation.promotion_motion(item.get('text')) or receipt.get('sentence_kind') in {'hook', 'product_intro'}
+    opening = re.search(r"(?:开箱|掀盖|开盖)|(?:打开|掀开|翻开|拉开|揭开|掀起).{0,50}(?:纸箱|箱盖|盖板|封盖|箱子)|"
+                        r"(?:箱盖|盖板|封盖).{0,18}(?:掀|翻开|打开|移开)", action)
+    return bool(carton and (opening or _ai_contract().presentation.promotion_motion(item.get('text')) or receipt.get('sentence_kind') in {'hook', 'product_intro'}
         or (phase.get('change') or {}).get('kind') == 'reveal'))
 
 
