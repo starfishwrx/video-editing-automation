@@ -887,6 +887,203 @@ class SelectionRecoveryTests(unittest.TestCase):
         self.assertTrue(editor._fabric_comfort_sentence(
             {"kind": "selling_point", "text": "面层也很柔软舒适", "selling_points": [{"text": "面层柔软"}]}))
 
+    def _initial_hook_edit(self, index, text, direction, *, visual_support=True, has_point=False):
+        self.manifest["segments"][index - 1]["text"] = text
+        plan = self.plan()
+        sentence = plan["sentences"][index - 1]
+        sentence["text"] = text
+        if not has_point:
+            sentence.update(kind="hook", selling_points=[])
+        display = {**self.reviews[str(index)][0], "basis": "product_display", "supported_point_ids": []}
+        plan["display_reviews"] = [display]
+        proposed = copy.deepcopy(plan["rows"])
+        proposed[index - 1]["hook_neighbor"] = direction
+        media_windows = []
+
+        def media(shot, *_args, **_kwargs):
+            start, end = shot["source_start"], shot["source_end"]
+            media_windows.append((start, end))
+            return {"start": start, "end": end, "before": contract.source_identity(shot["video"]),
+                    "times": [start, end], "sheet": self.root / "fixture.jpg"}
+
+        def respond(prompt, path, sheet=None):
+            if sheet is None:
+                return {"rows": proposed}
+            start, end = media_windows[-1]
+            return {**display, "hook_link_supported": visual_support,
+                    "evidence_intervals_us": [{"start": round(start * 1e6), "end": round(end * 1e6)}]}
+
+        original = editor._assemble(self.manifest, self.analysis, plan, narration_timing=None)["segments"]
+        with patch.object(editor, "_call", side_effect=respond), patch.object(editor, "_review_media", side_effect=media):
+            editor._edit_plan(self.manifest, self.analysis, plan, self.root)
+        final = editor._assemble(self.manifest, self.analysis, plan, narration_timing=None, verify_sources=True)["segments"]
+        return original, final, media_windows
+
+    def test_initial_edit_links_opening_greeting_to_next_cut(self):
+        original, final, reviews = self._initial_hook_edit(1, "姐妹们", "next")
+        self.assertEqual(reviews, [(1., 2.)])
+        self.assertEqual(final[1], original[1])
+        self.assertEqual(final[0]["video"], final[1]["video"])
+        self.assertEqual(final[0]["source_end"], final[1]["source_start"])
+        self.assertEqual(final[0]["text"], "姐妹们")
+        self.assertEqual(final[0]["audio_duration_us"], original[0]["audio_duration_us"])
+
+    def test_initial_edit_carries_previous_action_into_connector(self):
+        original, final, reviews = self._initial_hook_edit(2, "就是这样", "previous")
+        self.assertEqual(reviews, [(3., 4.)])
+        self.assertEqual(final[0], original[0])
+        self.assertEqual(final[0]["video"], final[1]["video"])
+        self.assertEqual(final[1]["source_start"], final[0]["source_end"])
+
+    def test_neighbor_cannot_replace_a_concrete_claim_or_unconfirmed_pain_hook(self):
+        for has_point in (True, False):
+            with self.subTest(has_point=has_point):
+                before, after, reviews = self._initial_hook_edit(1, "干纸擦得屁股疼", "next",
+                                                                 visual_support=False, has_point=has_point)
+                self.assertEqual(after, before)
+                self.assertEqual(len(reviews), 0 if has_point else 1)
+
+    def test_failed_hook_link_resumes_standalone_search_for_that_sentence(self):
+        plan = self.plan()
+        plan["sentences"][0].update(kind="hook", selling_points=[], hook_neighbor="next")
+        self.manifest["segments"][0]["audio_duration_us"] = 587_000
+        plan["display_reviews"] = self.reviews["2"]
+        plan["coverage"]["display_pool"] = {"feasible": True, "exhausted": False}
+        with patch.object(editor, "_edit_plan", side_effect=[ValueError("AI_EDITOR_NO_SELECTION:1"), None]) as edit, \
+                patch.object(editor, "_review_pool", return_value=(self.reviews["1"], {"checked": 2, "feasible": True})) as pool:
+            editor._edit_with_review_fallback(self.manifest, self.analysis, plan, self.root, None)
+        self.assertEqual(edit.call_count, 2)
+        self.assertEqual(pool.call_args.args[1]["audio_durations_us"], [587_000])
+        self.assertEqual(pool.call_args.args[1]["index"], 0)
+        self.assertEqual({r["shot_id"] for r in plan["display_reviews"]}, {"shot1", "shot2"})
+
+    def test_display_search_can_stop_before_a_neutral_hook_has_a_standalone_cut(self):
+        self.manifest["segments"][0].update(text="姐妹们", audio_duration_us=300_000)
+        self.sentences[0].update(text="姐妹们", kind="hook", selling_points=[], hook_neighbor="next")
+        self.sentences[1].update(kind="product_intro", selling_points=[])
+        self.reviews["2"][0].update(basis="product_display", supported_point_ids=[],
+                                     evidence_intervals_us=[{"start": 2_000_000, "end": 3_000_000}])
+        for has_note in (False, True):
+            with self.subTest(has_note=has_note):
+                self.manifest["segments"][0]["visual_requirements"] = ["正面包装"] if has_note else []
+                def pool(manifest, shared, shots, directory, timing, **kwargs):
+                    self.assertEqual(shared["audio_durations_us"], [300_000, 1_000_000])
+                    expected = [300_000, 1_000_000] if has_note else [1_000_000]
+                    self.assertEqual(shared["standalone_durations_us"], expected)
+                    self.assertEqual(editor._cached_reviews_feasible(manifest, shared, shots, self.reviews["2"], timing),
+                                     not has_note)
+                    raise ValueError("STOP_AFTER_DISPLAY_SEARCH")
+                with patch.object(editor, "_editor_model", return_value="offline"), \
+                        patch.object(editor, "_inventory", return_value=self.sentences), \
+                        patch.object(editor, "_review_pool", side_effect=pool) as review:
+                    editor.prepare(self.manifest, self.analysis, self.root)
+                review.assert_called_once()
+
+    def test_default_prepare_links_empty_greeting_without_generic_display(self):
+        self._prepare_empty_greeting()
+
+    def test_empty_greeting_uses_first_part_of_a_multi_shot_neighbor(self):
+        self._prepare_empty_greeting(multipart=True)
+
+    def test_greeting_can_link_when_its_standalone_window_cannot_fit(self):
+        self._prepare_empty_greeting(infeasible=True)
+
+    def _prepare_empty_greeting(self, *, multipart=False, infeasible=False):
+        self.manifest.pop("selection_mode")
+        self.manifest.pop("tail_pad_s")
+        self.manifest["segments"][0].update(text="姐妹们", audio_duration_us=590_000)
+        self.sentences[0].update(text="姐妹们", kind="hook", selling_points=[], hook_neighbor="next")
+        if infeasible:
+            self.rows[0]["parts"][0]["audio_duration_us"] = 590_000
+        else:
+            self.rows[0]["parts"] = []
+        if multipart:
+            self.rows[1]["parts"][0]["audio_duration_us"] = 500_000
+            self.rows[1]["parts"].append({"shot_id": "shot1", "source_start_us": 2_000_000,
+                                          "audio_duration_us": 500_000})
+            self.reviews["2"].extend(self.reviews["1"])
+        window = []
+
+        def respond(prompt, path, sheet=None):
+            if path.name == "inventory.json":
+                return {"sentences": self.sentences, "display_pool_ids": []}
+            if sheet is None:
+                return {"rows": self.rows}
+            self.assertIn("hook_neighbor_context", prompt)
+            return {**self.reviews["2"][0], "basis": "product_display", "supported_point_ids": [],
+                    "hook_link_supported": True, "evidence_intervals_us": [dict(zip(("start", "end"), window))]}
+
+        def media(shot, *_args, **_kwargs):
+            start, end = shot["source_start"], shot["source_end"]
+            window[:] = [round(start * 1e6), round(end * 1e6)]
+            return {"start": start, "end": end, "before": contract.source_identity(shot["video"]),
+                    "times": [start, end], "sheet": self.root / "fixture.jpg"}
+
+        def pool(manifest, sentence, *args, **kwargs):
+            display = sentence["index"] == 0
+            if display and infeasible:
+                review = {**self.reviews["1"][0], "basis": "product_display", "supported_point_ids": [],
+                          "evidence_intervals_us": [{"start": 2_000_000, "end": 8_000_000}]}
+                return [review], {"feasible": False, "exhausted": True, "reason": "KNOWN_WINDOWS_INFEASIBLE"}
+            return ([] if display else self.reviews["2"],
+                    {"feasible": not display, "exhausted": True, "checked": 2, "total": 2})
+
+        with patch.object(editor, "_editor_model", return_value="offline"), \
+                patch.object(editor, "_review_pool", side_effect=pool), \
+                patch.object(editor, "_call", side_effect=respond), patch.object(editor, "_review_media", side_effect=media):
+            analysis = editor.prepare(self.manifest, self.analysis, self.root)
+            result = editor.match_manifest(self.manifest, analysis)
+        self.assertTrue(result["ok"], result.get("pending_items"))
+        greeting, claim = result["segments"]
+        self.assertEqual(window, [1_410_000, 2_000_000])
+        self.assertEqual(greeting["video"], claim["video"])
+        self.assertEqual(greeting["source_end"], claim["source_start"])
+        self.assertEqual(greeting["audio_duration_us"], 590_000)
+        self.assertEqual(len(claim.get("span_parts") or [claim]), 2 if multipart else 1)
+        # A repaired anchor with different footage cannot retain the old link on readback.
+        plan = analysis["ai_editor_plan"]
+        plan["reviews"]["2"].extend(self.reviews["1"])
+        plan["rows"][1]["parts"] = [{"shot_id": "shot1", "audio_duration_us": 1_000_000}]
+        reread = editor.match_manifest(self.manifest, analysis)
+        self.assertFalse(reread["ok"])
+        self.assertIn("AI_EDITOR_NO_SELECTION:1", str(reread["pending_items"]))
+
+
+    def test_mid_script_pointer_starts_the_following_shot_early(self):
+        video = self.root / "third.mp4"
+        video.write_bytes(b"third scene")
+        self.shots.append({**self.shots[0], "shot_id": "shot3", "video": str(video)})
+        self.manifest["segments"].append({"text": "看这个表层", "audio_duration_us": 1_000_000})
+        self.sentences.append({**self.sentences[0], "index": 3, "text": "看这个表层", "candidate_ids": ["shot3"]})
+        self.reviews["3"] = [{**self.reviews["1"][0], "shot_id": "shot3",
+                              "source_identity": contract.source_identity(video)}]
+        self.rows.append({"index": 3, "parts": [{"shot_id": "shot3", "source_start_us": 2_000_000,
+                                                 "audio_duration_us": 1_000_000}]})
+        self.manifest["segments"][1]["audio_duration_us"] = 790_000
+        self.rows[1]["parts"][0]["audio_duration_us"] = 790_000
+        before, after, windows = self._initial_hook_edit(2, "那你看看", "next")
+        self.assertEqual((after[0], after[2]), (before[0], before[2]))
+        self.assertEqual(windows, [(1.21, 2.)])
+        self.assertEqual(after[1]["video"], after[2]["video"])
+        self.assertEqual(after[1]["source_end"], after[2]["source_start"])
+
+    def test_no_source_headroom_keeps_the_standalone_greeting(self):
+        self.shots[1]["source_start"] = 2
+        before, after, reviews = self._initial_hook_edit(1, "姐妹们", "next")
+        self.assertEqual(after, before)
+        self.assertFalse(reviews)
+
+    def test_neighbor_preserves_specific_visual_note(self):
+        self.manifest["segments"][0]["visual_requirements"] = ["包装大字"]
+        before, after, reviews = self._initial_hook_edit(1, "那你看看", "next")
+        self.assertEqual(after, before)
+        self.assertFalse(reviews)
+
+    def test_neighbor_respects_maximum_source_reuse(self):
+        self.manifest["max_source_reuse"] = 1
+        before, after, _ = self._initial_hook_edit(1, "那你看看", "next")
+        self.assertEqual(after, before)
+
     def test_short_line_without_a_selling_point_continues_the_previous_action(self):
         plan = self.plan()
         plan["sentences"][1] = {"index": 2, "text": "顺便说", "kind": "hook",
