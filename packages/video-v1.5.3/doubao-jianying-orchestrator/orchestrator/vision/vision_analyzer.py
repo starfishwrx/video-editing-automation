@@ -67,7 +67,7 @@ _VISION_CACHE_FIELDS = (
     "pointing_to_text", "explicit_pointing", "pointing_action", "gesture",
     "evidence_intervals", "action_segments", "action_complete_source", "text_pass",
     "text_agreed", "pointed_agreed", "rule_checks",
-    "visual_observation_complete", "text_reads",
+    "visual_observation_complete", "text_reads", "shot_label_sources",
 )
 # A long take often holds several demonstrations (hang it, then pull one
 # sheet); two frames per shot missed them, so frames follow the shot length.
@@ -549,10 +549,13 @@ def _rule_checks(manifest: dict[str, Any]) -> dict[str, list[str]]:
     try:
         from .. import rulepack
         pairs = rulepack.analysis_rechecks(manifest)
+        strict = {_rule["text"] for _rule in rulepack.for_manifest(manifest).get("analysis_prompt_rules") or []
+                  if isinstance(_rule, dict) and _rule.get("recheck_pixels") is True}
     except Exception:
-        pairs = []
+        pairs, strict = [], set()
     pairs.append((_SHEET_BOUNDARY_RULE, ["全黑", "黑画面"]))
-    return {hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]: words for text, words in pairs}
+    return {("pixels:" if text in strict else "") + hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]: words
+            for text, words in pairs}
 
 
 _RECHECK_FIELDS = ("description", "visual_description", "visual_tags", "evidence_tags",
@@ -604,7 +607,8 @@ def _resolve_recheck(row: dict[str, Any] | None, checks: dict[str, list[str]]
         return _stamp_rule_checks(row, checks), "stamp"
     ready = (row.get("status") == "ready_for_matching"
              and bool(str(row.get("description") or "").strip()))
-    if policy == "reuse" and ready:
+    pixel_checks = {key: words for key, words in checks.items() if key.startswith("pixels:")}
+    if policy == "reuse" and ready and not _needs_recheck(row, pixel_checks):
         return _stamp_rule_checks(row, checks), "stamp"
     return None, "redo"
 
@@ -1483,7 +1487,7 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
             continue
         # 本任务候选文件里做完的观察：只有产生它的输入签名（商品、素材、窗口、
         # 规则、分析版本）与当前一致才保留并回种全局缓存；对不上就整条重做。
-        local = (shot.get("status") == "ready_for_matching"
+        local = (_reusable_visual_observation(shot)
                  and bool(shot.get("description"))
                  and shot.get("frame_exists") is not False)
         _, local_recheck = _resolve_recheck(shot if local else None, checks)

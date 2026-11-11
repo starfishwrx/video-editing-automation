@@ -253,6 +253,16 @@ def _call(prompt: str, path: Path, sheet: Path | None = None) -> dict:
     return payload
 
 
+def _prior_use_by_shot(manifest, shots):
+    from . import usage_ledger
+    scenes, sources = usage_ledger.other_task_usage(manifest)
+    counts = {}
+    for shot in shots:
+        key = usage_ledger.shot_key(shot.get("video"), shot.get("source_start"))
+        counts[str(shot["shot_id"])] = (sources.get(key.rpartition("@")[0], 0), scenes.get(key, 0))
+    return counts
+
+
 def _inventory(manifest: dict, shots: list[dict], directory: Path) -> list[dict]:
     from . import shot_notes
     rows = timing_contract.split_sentences(manifest)
@@ -313,6 +323,7 @@ start/end使用原素材秒数，选择与该素材action_segments重叠且最�
     if not isinstance(found, list) or len(found) != len(rows):
         raise ValueError("AI_EDITOR_SENTENCE_COVERAGE")
     by_index = {}
+    history = _prior_use_by_shot(manifest, shots)
     known = {str(s["shot_id"]) for s in shots}
 
     def resolve_ids(ids: list[str]) -> tuple[list[str], list[str], dict[str, str]]:
@@ -354,18 +365,37 @@ start/end使用原素材秒数，选择与该素材action_segments重叠且最�
         if not isinstance(ids, list) or any(not isinstance(s, str) for s in ids):
             raise ValueError("AI_EDITOR_CANDIDATE_UNKNOWN")
         ids, row["inventory_ignored_candidate_ids"], row["inventory_resolved_candidate_ids"] = resolve_ids(ids)
+        ids.sort(key=history.__getitem__)
+        row["candidate_ids"] = ids
         by_index[index] = {**row, "text": timing_contract.sentence_text(rows[index - 1]),
                            "candidate_ids": list(dict.fromkeys(ids + [str(s["shot_id"]) for s in shots]))}
     display = data.get("display_pool_ids")
     if not isinstance(display, list) or any(not isinstance(s, str) for s in display):
         raise ValueError("AI_EDITOR_DISPLAY_POOL_INVALID")
     display, ignored_display, resolved_display = resolve_ids(display)
+    display.sort(key=history.__getitem__)
     result = [by_index[i] for i in range(1, len(rows) + 1)]
+    # Each hook/intro has its own retrieval hints. Combine those with the
+    # common product-display shortlist before falling back to the full pool.
+    line_hints = [display, *(row["candidate_ids"] for row in found if row["kind"] != "selling_point")]
+    display_hints = []
+    for rank in range(ROUND_SIZE):
+        display_hints.extend(line[rank] for line in line_hints if rank < len(line))
+    display = sorted(dict.fromkeys(display_hints), key=history.__getitem__)
+    # Keep the review budget fixed. When all first-round hints are repeats,
+    # give one previously unused file a chance to qualify on actual pixels.
+    display = list(dict.fromkeys([*display, *history]))
+    if len(display) >= ROUND_SIZE and all(history[sid][0] for sid in display[:ROUND_SIZE]):
+        fresh = next((sid for sid in history if history[sid][0] == 0), None)
+        if fresh is not None:
+            if fresh in display:
+                display.remove(fresh)
+            display.insert(ROUND_SIZE - 1, fresh)
     for row in result:
         row["inventory_ignored_display_ids"] = ignored_display
         row["inventory_resolved_display_ids"] = resolved_display
         if row["kind"] != "selling_point":
-            row["candidate_ids"] = list(dict.fromkeys(display + [str(s["shot_id"]) for s in shots]))
+            row["candidate_ids"] = list(display)
     return result
 
 
@@ -435,8 +465,7 @@ def _iter_review_round(ids, shots, directory, review, *, dense=False, on_error=N
     from ..runtime.ready_work import iter_ready
     policy = load_policy()
     def prepare(sid):
-        # _review revalidates the source and reads the same cached media. A slow
-        # peer's preparation must not delay this already prepared candidate.
+        # The API worker consumes exactly the sheet produced here.
         return _review_media(shots[sid], directory, dense=dense)
     def error(sid, exc):
         if not isinstance(exc, (ValueError, OSError, TypeError, KeyError, TimeoutError)):
@@ -445,7 +474,7 @@ def _iter_review_round(ids, shots, directory, review, *, dense=False, on_error=N
             return on_error(sid, exc)
         return {"shot_id": sid, "verdict": "uncertain", "error": str(exc)}
     return iter_ready(ids, prepare, review, prep_workers=policy.prep_workers,
-                      api_workers=min(policy.api_workers, len(ids)), on_error=error)
+                      api_workers=min(policy.api_workers, len(ids)), on_error=error, pass_prepared=True)
 
 
 def _shot_value_request(sentence: dict) -> dict | None:
@@ -487,8 +516,11 @@ def _feedback_for_shot(sentence: dict, shot_id) -> dict:
     return {**sentence, "qc_feedback": scoped}
 
 
-def _review(manifest: dict, sentence: dict, shot: dict, directory: Path, *, dense: bool = False) -> dict:
-    media = _review_media(shot, directory, dense=dense)
+def _review(manifest: dict, sentence: dict, shot: dict, directory: Path, *, dense: bool = False,
+            prepared_media=None) -> dict:
+    media = prepared_media if prepared_media is not None else _review_media(shot, directory, dense=dense)
+    if prepared_media is not None and media["before"] != contract.source_identity(shot["video"]):
+        raise ValueError("AI_EDITOR_SOURCE_CHANGED_DURING_REVIEW")
     start, end, before, times, sheet = (media[k] for k in ("start", "end", "before", "times", "sheet"))
     key = contract.digest([sentence["index"], shot["shot_id"], before, start, end, dense])[:24]
     sentence = _feedback_for_shot(sentence, shot["shot_id"])
@@ -496,18 +528,30 @@ def _review(manifest: dict, sentence: dict, shot: dict, directory: Path, *, dens
         "判断必须遵守生效业务规则；反馈与规则冲突时不得把反馈中的额外要求变成新规则。"
         "对实际适用的缺口复看当前像素，不得凭反馈或素材描述补造动作与结果。\n") if sentence.get("qc_feedback") else ""
     value_request = _shot_value_request(sentence)
+    shared_display = (sentence["index"] == 0 and sentence["kind"] == "product_intro"
+                      and not sentence.get("selling_points") and not sentence.get("qc_feedback")
+                      and not sentence.get("action_continuation"))
+    if shared_display:
+        # This observation answers a product/window question. Placement and
+        # dense refinement still use each task's actual narration below.
+        review_context = {"source_identity": contract.digest(before),
+                          "product_identity": {k: manifest.get(k) for k in ("product_id", "product_key", "brand", "sku")},
+                          "sentence": {"index": 0, "kind": "product_intro",
+                          "text": sentence["text"], "selling_points": []}}
+    else:
+        review_context = {"sentence": sentence, "shot_id": shot["shot_id"],
+                          "whole_script": [timing_contract.sentence_text(s)
+                                           for s in timing_contract.split_sentences(manifest)]}
     prompt = contract.policy_prompt(manifest) + feedback_instruction + "\n只根据附图判断，所有时间戳均为原素材秒数。\n" + json.dumps({
         "product": manifest.get("product"), "category": manifest.get("category"),
-        "sentence": sentence, "shot_id": shot["shot_id"],
-        "shot_value_request": value_request,
-        "whole_script": [timing_contract.sentence_text(s) for s in timing_contract.split_sentences(manifest)],
+        **review_context, "shot_value_request": value_request,
         "scene_us": {"start": round(start * 1e6), "end": round(end * 1e6)}}, ensure_ascii=False) + """
 输出JSON对象：{"verdict":"matched|mismatch|uncertain", "same_product":true,
 "basis":"editorial_fit|visible_result|readable_label|product_display", "observation":"实际可见事实",
 "reason":"为什么适合或不适合", "confidence":0.8, "supported_point_ids":["p1"],
 "evidence_intervals_us":[{"start":1000000,"end":2000000}], "time_sensitive":false, "scene_ids":[]}。
 scene_ids只列出本句语义适用且本镜实际支持的纸品semantic_contracts场景id；不支持或本句不涉及的场景不能列入，不适用时为空。
-共享展示池句子index=0时，判断是否为同商品包装/拆包/取出/手持或本体展示，不承担功能证明。
+共享展示池句子index=0时，独立记录可读的紧凑展示区间，由剪辑阶段对齐每句配音。判断是否为同商品包装/拆包/取出/手持或本体展示，不承担功能证明。
 sentence.action_continuation 为 true 时，这句没有卖点，只判断附图是不是上一镜动作还能再延续的一段。同商品且动作仍在继续就 matched，不要因为没有新卖点而拒绝。证据区间落在 scene_us 内，长度不要超过这句配音。
 卖点可以只支持其中几项，必须如实返回支持的id，不能凭口播推断。区间必须在提供的scene_us内，
 包含支持判断必需的完整动作和结果；感受性展示按实际贴切区间。看不清返回uncertain，不能凭模型强度标签推断。
@@ -762,9 +806,9 @@ def _review_pool(manifest: dict, sentence: dict, shots: dict, directory: Path, a
         chunk = [sid for sid in ids[offset:offset + ROUND_SIZE] if sid not in reviewed_by_id]
         if not chunk:
             continue
-        def review(sid: str) -> dict:
+        def review(sid: str, media=None) -> dict:
             try:
-                return _review(manifest, sentence, shots[sid], directory)
+                return _review(manifest, sentence, shots[sid], directory, prepared_media=media)
             except (ValueError, OSError, TypeError, KeyError) as exc:
                 return {"shot_id": sid, "verdict": "uncertain", "error": str(exc)}
         completed = {}
@@ -780,10 +824,10 @@ def _review_pool(manifest: dict, sentence: dict, shots: dict, directory: Path, a
         reviewed_by_id.update(completed)
         dense_ids = [sid for sid in chunk if reviewed_by_id[sid].get("dense_required")]
         if dense_ids:
-            def dense_review(sid):
+            def dense_review(sid, media=None):
                 previous = reviewed_by_id[sid]
                 try:
-                    refined = _review(manifest, sentence, shots[sid], directory, dense=True)
+                    refined = _review(manifest, sentence, shots[sid], directory, dense=True, prepared_media=media)
                 except (ValueError, OSError, TypeError, KeyError) as exc:
                     refined = {"shot_id": sid, "verdict": "uncertain", "error": str(exc)}
                 if previous["verdict"] != "matched":
@@ -817,10 +861,10 @@ def _review_pool(manifest: dict, sentence: dict, shots: dict, directory: Path, a
                    for ev in previous.get("evidence_intervals_us", [])):
                 guarded[sid] = {**shot, "source_start": lo, "source_end": hi}
         if guarded:
-            def guarded_review(sid):
+            def guarded_review(sid, media=None):
                 previous = reviewed_by_id[sid]
                 try:
-                    refined = _review(manifest, sentence, guarded[sid], directory, dense=True)
+                    refined = _review(manifest, sentence, guarded[sid], directory, dense=True, prepared_media=media)
                 except (ValueError, OSError, TypeError, KeyError) as exc:
                     refined = {"verdict": "uncertain", "error": str(exc)}
                 if (refined.get("verdict") == "matched"
@@ -1144,6 +1188,7 @@ def _build_edit_inventory(manifest: dict, analysis: dict, plan: dict,
     shots = {str(s["shot_id"]): s for s in analysis.get("shots", [])}
     rejected = qc_rejected_shots(manifest)
     inventory = []
+    history = _prior_use_by_shot(manifest, shots.values())
     source_ids = {path: f"source{i}" for i, path in enumerate(dict.fromkeys(
         shot["video"] for shot in shots.values()), 1)}
     for sentence in plan["sentences"]:
@@ -1163,6 +1208,8 @@ def _build_edit_inventory(manifest: dict, analysis: dict, plan: dict,
                 audio_duration_us=duration, manifest=manifest,
                 time_sensitive=review["time_sensitive"])
             candidate["source_identity"] = source_ids[shot["video"]]
+            source_count, scene_count = history[candidate["shot_id"]]
+            candidate.update(prior_source_tasks=source_count, prior_scene_tasks=scene_count)
             candidate["technical_option"] = {**solution.to_dict(),
                 "playback_policy_version": contract.playback.VERSION,
                 "within_preferred_speed": solution.ok and solution.speed <= contract.playback.PROCESS_PREFERRED_MAX,
@@ -1197,12 +1244,26 @@ def _build_edit_inventory(manifest: dict, analysis: dict, plan: dict,
                 except (ValueError, TypeError, KeyError, ZeroDivisionError):
                     pass
         from . import shot_value, shot_usability
+        from .opening_hook import packaging_recall_priority
         def quality_rank(candidate):
             quality = candidate.get("usability") or {}
             status = quality.get("status")
             clarity = 0 if status == "USABLE_FOR_COMPARISON" else 2 if status == "REJECTED" else 1
-            return shot_value.rank({"plan": candidate}), clarity, shot_usability.rank(candidate)[1:]
-        candidates.sort(key=quality_rank)
+            return (shot_value.rank({"plan": candidate}), clarity, shot_usability.rank(candidate)[1:],
+                    not candidate["technical_option"].get("ok"),
+                    packaging_recall_priority(candidate.get("observation") or "")
+                    if sentence["kind"] in {"hook", "product_intro"} else 0,
+                    candidate["prior_source_tasks"], candidate["prior_scene_tasks"])
+        # Concurrent tasks can see the same empty ledger. Break equal-quality
+        # ties reproducibly by task and sentence without changing the evidence.
+        task = manifest.get("record_id") or manifest.get("ledger_task") or manifest.get("task_id")
+        def editorial_rank(candidate):
+            seed = (contract.digest([task, sentence["index"], shots[candidate["shot_id"]]["video"]])
+                    if task else "")
+            return (quality_rank(candidate), seed)
+        candidates.sort(key=editorial_rank)
+        for rank, candidate in enumerate(candidates, 1):
+            candidate["editorial_order"] = rank
         inventory.append({"index": sentence["index"], "text": sentence["text"],
             "kind": sentence["kind"], "selling_points": sentence["selling_points"],
             "audio_duration_us": duration, "candidates": candidates})
@@ -2618,6 +2679,49 @@ def _replace_focused_row(plan, index, revised):
         plan['rows'] = [revised if r.get('index') == index else r for r in plan['rows']]
 
 
+def _mix_repeated_displays(manifest, analysis, plan, timing, inventory):
+    """Replace plain repeated displays only when the complete alternate edit validates."""
+    from . import shot_notes
+    if not inventory or manifest.get("shot_notes_general"):
+        return
+    menus = {m["index"]: m for m in inventory if m["kind"] in {"hook", "product_intro"}}
+    sources = {s["shot_id"]: s["video"] for s in analysis.get("shots", [])}
+    occupied = {sources.get(p.get("shot_id")) for row in plan["rows"] for p in row.get("parts", [])}
+    if not any(c["prior_source_tasks"] for menu in menus.values() for c in menu["candidates"]):
+        return
+    original = timing_contract.split_sentences(manifest)
+    revised = list(plan["rows"])
+    changed = False
+    for position, row in enumerate(plan["rows"]):
+        index = row["index"]
+        menu = menus.get(index)
+        parts = row.get("parts") or []
+        if (not menu or len(parts) != 1 or row.get("continuity_key") or parts[0].get("window_review_key")
+                or index in plan.get("_frozen_segments", {}) or original[index-1].get("visual_requirements")
+                or shot_notes.note_for(manifest, index, original[index-1])):
+            continue
+        chosen = next((c for c in menu["candidates"] if c["shot_id"] == parts[0]["shot_id"]), None)
+        if not chosen or not chosen["prior_source_tasks"]:
+            continue
+        alternative = next((c for c in menu["candidates"]
+            if c["editorial_order"] < chosen["editorial_order"] and c["prior_source_tasks"] < chosen["prior_source_tasks"]
+            and c.get("basis") == chosen.get("basis") and c.get("confidence", 0) >= chosen.get("confidence", 0)
+            and c["technical_option"].get("within_preferred_speed") and not c.get("time_sensitive")
+            and sources.get(c["shot_id"]) not in occupied), None)
+        if alternative:
+            occupied.add(sources[alternative["shot_id"]])
+            revised[position] = {**row, "parts": [{"shot_id": alternative["shot_id"],
+                "audio_duration_us": parts[0]["audio_duration_us"]}],
+                "reason": "同商品展示已有复核，换用其他任务较少使用的素材。"}
+            changed = True
+    if changed:
+        try:
+            _assemble(manifest, analysis, {**plan, "rows": revised}, narration_timing=timing, verify_sources=True)
+        except (KeyError, ValueError, TypeError, OSError):
+            return
+        plan["rows"] = revised
+
+
 def _edit_plan(manifest: dict, analysis: dict, plan: dict, directory: Path,
                narration_timing: dict | None = None) -> None:
     """Compile current editing instructions from frozen, pixel-reviewed candidates."""
@@ -2634,22 +2738,28 @@ def _edit_plan(manifest: dict, analysis: dict, plan: dict, directory: Path,
 候选若带usability，仅表示所选实际窗口内主体的可见性与清晰时长；质量接近时优先主体清楚、呈现充分者。主体清晰不等于证明卖点；未返回该字段表示未知。
 technical_option是按本句完整配音求出的实际可行窗口；分配多镜后程序会重新求解，不可用单镜无解淘汰组合。
 匹配质量相近时优先within_preferred_speed=true；普通完整放置短窗保留最高2倍许可，2到3倍仅限已复看的纯过程。实验分相的关键动作结果原速，无许可时原速。technical_option无解时必须换完整短窗口或如实报告冲突。
+同品其他任务使用过该文件和镜头的任务数分别为prior_source_tasks和prior_scene_tasks。实际卖点、可读性、时长相当时，亲肤柔软等卖点和全稿任何位置的空泛钩子优先选较少用的文件、镜头及动作。同等条件按editorial_order选择，以便同时启动的任务也能混选。唯一贴切证据保留。
 根据source_identity、源区间及可见动作描述减少近重复。优先中后段，但完整证据和唯一卖点先于取段偏好。
 确实只有一个实际支持的候选、卖点不得不复用时，可在该row写scarce_reuse_reason解释；介绍/钩子和有替代候选时不允许此例外，相关实验仍须顺接而非相邻重播。
 """
     source_limit = contract.source_reuse_limit(manifest)
     if source_limit is not None:
         instructions += f"\n本任务每个源素材最多使用{source_limit}次；经验证的连续实验组按一次计算，不得以稀缺复用理由突破此上限。"
-    def make_prompt() -> str:
-        current_inventory = _build_edit_inventory(manifest, analysis, plan, narration_timing)
+    from . import usage_ledger
+    history = usage_ledger.recent_presentations(manifest)
+    history_hint = ("\n同品类其他稿已经使用的实际展示如下。同一卖点或钩子有同等合格候选时，"
+                    "换动作或机位。这些描述只供避免重复，不能当作本稿证据。\n"
+                    + json.dumps(history, ensure_ascii=False)) if history else ""
+    def make_prompt(current_inventory) -> str:
         return (contract.policy_prompt(manifest) + "\n你是整稿剪辑师。以下候选均已经实际看图。先保留卖点稀缺候选，再给介绍和钩子分配展示池。\n"
-                + json.dumps(current_inventory, ensure_ascii=False) + instructions)
+                + json.dumps(current_inventory, ensure_ascii=False) + instructions + history_hint)
 
     focus = None
     duplicate_expanded: set[int] = set()
     repair_instruction = ""
     for attempt in range(3):
-        prompt = make_prompt() + repair_instruction
+        current_inventory = _build_edit_inventory(manifest, analysis, plan, narration_timing)
+        prompt = make_prompt(current_inventory) + repair_instruction
         if attempt == 0 and plan.pop("_resume_rows", False):
             response = {"rows": plan["rows"]}
         else:
@@ -2685,6 +2795,7 @@ technical_option是按本句完整配音求出的实际可行窗口；分配多�
                 continue  # second and final editor call sees the complete audited pool
         try:
             _repair_reviewed_rows(manifest, analysis, plan, directory, narration_timing, duplicate_expanded)
+            _mix_repeated_displays(manifest, analysis, plan, narration_timing, current_inventory)
             plan["ok"] = True
             plan["phase"] = "selection_complete"
             return
@@ -2773,7 +2884,8 @@ def prepare(manifest: dict, analysis: dict, report_dir: Path, *, narration_timin
         logical_input = {k: v for k, v in manifest.items() if k not in {
             "draft_name", "force_overwrite", "parent_run_id", "recovery_stage", "shot_analysis_file", "_selection_attempt",
             "qc_rejected_shots"}}
-        plan["resume_identity"] = {**plan["identity"], "manifest_sha256": contract.digest(logical_input)}
+        plan["resume_identity"] = {**plan["identity"], "manifest_sha256": contract.digest(logical_input),
+                                   "editorial_prompt_sha256": contract.digest(contract.policy_prompt(manifest))}
         try:
             previous = json.loads((directory / "plan.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -3103,6 +3215,8 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
     shots = {str(s["shot_id"]): s for s in analysis.get("shots", [])
              if isinstance(s, dict) and s.get("status") == "ready_for_matching"
              and s.get("shot_id") and s.get("text_pass") not in ("pending", "failed")}
+    usage = _prior_use_by_shot(manifest, shots.values())
+    task = manifest.get("record_id") or manifest.get("ledger_task") or manifest.get("task_id")
     # Repeated text can identify several distinct narration positions. Keep
     # every candidate position and validate any explicit index before reusing
     # an existing selection; do not silently overwrite an earlier sentence.
@@ -3301,7 +3415,9 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
                 solution = shot_analyzer.candidate_window(_observed_shot(shots[review["shot_id"]], review),
                     audio_duration_us=audio_us, manifest=manifest, time_sensitive=review["time_sensitive"])
                 rank = (0 if solution.speed <= contract.playback.PROCESS_PREFERRED_MAX else 1) if solution.ok else 2
-                return rank, -float(review.get("confidence", 0))
+                sid = review["shot_id"]
+                seed = contract.digest([task, index, shots[sid]["video"]]) if task else ""
+                return rank, -float(review.get("confidence", 0)), usage[sid], seed
             ordered_good = sorted(good, key=candidate_order)
             # Singles stay first; multi-shot combinations are considered only
             # when their real reviewed evidence covers the whole sentence.

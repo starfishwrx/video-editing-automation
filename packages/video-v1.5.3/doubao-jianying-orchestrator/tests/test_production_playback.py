@@ -48,7 +48,7 @@ class ProductionPlaybackTests(unittest.TestCase):
                     "timing_sha256": contract.digest(None), "analysis_sha256": contract.digest(self.analysis),
                     "policy_version": contract.POLICY_VERSION, "editorial_rules": contract.rules_identity(self.manifest)}
         self.plan = {"schema": contract.PLAN_SCHEMA, "ok": True, "policy_version": contract.POLICY_VERSION,
-                     "identity": identity, "resume_identity": identity, "display_reviews": [],
+                     "identity": identity, "resume_identity": {**identity, "editorial_prompt_sha256": contract.digest(contract.policy_prompt(self.manifest))}, "display_reviews": [],
                      "sentences": [{"index": i, "text": text, "kind": "selling_point",
                          "selling_points": [{"id": "p1", "text": text}],
                          "candidate_ids": ids} for i, text, ids in
@@ -129,7 +129,7 @@ class ProductionPlaybackTests(unittest.TestCase):
     def test_display_duplicate_uses_new_guarded_original_speed_pixels_and_preserves_old_facts(self):
         baseline, conflicts = self.display_duplicate_fixture()
         before = copy.deepcopy(self.plan['display_reviews'])
-        def observe(_manifest, sentence, shot, directory, *, dense=False):
+        def observe(_manifest, sentence, shot, directory, *, dense=False, prepared_media=None):
             self.assertTrue(dense)
             self.assertGreaterEqual(shot['source_start'], .3)
             self.assertLessEqual(shot['source_end'], 11.8)
@@ -245,7 +245,7 @@ class ProductionPlaybackTests(unittest.TestCase):
         baseline, conflicts = self.display_duplicate_fixture()
         self.manifest['qc_rejected_shots'] = {'2': ['long']}
         self.shots[2]['material_duration_us'] = 9_000_000
-        def observe(_manifest, _sentence, shot, _directory, *, dense=False):
+        def observe(_manifest, _sentence, shot, _directory, *, dense=False, prepared_media=None):
             self.assertTrue(dense)
             self.assertLessEqual(round(shot['source_end'] * 1e6), 8_800_000)
             return {'verdict': 'uncertain'}
@@ -275,7 +275,7 @@ class ProductionPlaybackTests(unittest.TestCase):
         self.plan['display_reviews'].insert(1, {**self.reviews[2], 'shot_id': 'short_alias',
             'basis': 'product_display', 'supported_point_ids': [],
             'evidence_intervals_us': [{'start': 0, 'end': 500_000}]})
-        def observe(_manifest, sentence, shot, directory, *, dense=False):
+        def observe(_manifest, sentence, shot, directory, *, dense=False, prepared_media=None):
             lo, hi = round(shot['source_start'] * 1e6), round(shot['source_end'] * 1e6)
             return {**self.reviews[2], 'supported_point_ids': [],
                 'review_window_us': {'start': lo, 'end': hi},

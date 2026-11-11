@@ -49,6 +49,8 @@ def ledger_path(manifest: dict[str, Any], report_dir: Optional[Path] = None) -> 
     base = os.environ.get(LEDGER_DIR_ENV, "").strip()
     if base:
         root = Path(base)
+    elif os.environ.get("JY_WORK_ROOT", "").strip():
+        root = Path(os.environ["JY_WORK_ROOT"]) / ".cache"
     elif report_dir is not None:
         # 固定落在 work/.cache：重试多套一层目录也是同一本账。
         resolved = Path(report_dir).resolve()
@@ -123,11 +125,19 @@ def load_usage(manifest: dict[str, Any]) -> dict[str, str]:
 
 def other_task_counts(manifest: dict[str, Any]) -> dict[str, int]:
     """``{shot_key: 用过它的其它任务数}``。"""
-    tasks: dict[str, set] = {}
+    return other_task_usage(manifest)[0]
+
+
+def other_task_usage(manifest: dict[str, Any]) -> tuple[dict[str, int], dict[str, int]]:
+    """Distinct other tasks that used each scene or physical source."""
+    scenes, sources = {}, {}
     for key, use, same in _other_uses(manifest):
         if not same:
-            tasks.setdefault(key, set()).add(str(use.get("task") or use.get("draft") or ""))
-    return {key: len(names) for key, names in tasks.items()}
+            task = str(use.get("task") or use.get("draft") or "")
+            scenes.setdefault(key, set()).add(task)
+            sources.setdefault(key.rpartition("@")[0], set()).add(task)
+    return ({key: len(tasks) for key, tasks in scenes.items()},
+            {key: len(tasks) for key, tasks in sources.items()})
 
 
 def segment_keys(segments: Iterable[dict[str, Any]]) -> list[str]:
@@ -147,6 +157,62 @@ def segment_keys(segments: Iterable[dict[str, Any]]) -> list[str]:
     return list(dict.fromkeys(keys))
 
 
+def _category_path(manifest):
+    from .. import rulepack
+    path = str(manifest.get("usage_ledger_path") or "").strip()
+    category = rulepack.detect_category(manifest)[0]
+    if path and category in {"zhipin", "weipin"}:
+        return Path(path).parent / f"recent_displays_{category}.json"
+    return None
+
+
+def recent_presentations(manifest):
+    """Recent observed presentations from other tasks, including other SKUs."""
+    path = _category_path(manifest)
+    task, _ = _identity(manifest)
+    if not path or not task:
+        return []
+    result = []
+    for item in reversed(list(_read(path).values())):
+        if isinstance(item, dict) and item.get("task") != task:
+            for observation in item.get("presentations", []):
+                if observation not in result:
+                    result.append(observation)
+                    if len(result) == 32:
+                        return result
+    return result
+
+
+def _record_presentations(manifest, segments, task, draft):
+    path = _category_path(manifest)
+    if not path or not task:
+        return
+    rows = []
+    for seg in segments:
+        if not isinstance(seg, dict) or seg.get("visual_missing"):
+            continue
+        for part in seg.get("span_parts") or [seg]:
+            if not isinstance(part, dict) or not isinstance(part.get("ai_selection"), dict):
+                continue
+            receipt = part["ai_selection"]
+            observed = receipt.get("observation")
+            if receipt.get("judgment") != "matched" or not isinstance(observed, str) or not observed.strip():
+                continue
+            supported = receipt.get("supported_point_ids") or []
+            points = [p["text"] for p in receipt.get("selling_points") or []
+                      if isinstance(p, dict) and p.get("id") in supported and isinstance(p.get("text"), str)]
+            item = {"kind": receipt.get("sentence_kind"), "points": points, "observed": observed[:200]}
+            if item not in rows:
+                rows.append(item)
+    def update(data):
+        data = dict(data or {})
+        data.pop(draft, None)
+        if rows:
+            data[draft] = {"task": task, "presentations": rows[:32]}
+        return dict(list(data.items())[-32:])
+    locked_json_update(path, update, default={})
+
+
 def record(manifest: dict[str, Any], segments: Iterable[dict[str, Any]], *,
            reserved: bool = False) -> dict[str, Any]:
     """落本草稿用到的镜头；``reserved`` 是选镜后、成稿前的占位。"""
@@ -154,6 +220,7 @@ def record(manifest: dict[str, Any], segments: Iterable[dict[str, Any]], *,
     task, draft = _identity(manifest)
     if not raw or not draft:
         return {"recorded": 0, "path": raw}
+    segments = list(segments or [])
     keys = segment_keys(segments)
     now = time.strftime("%Y-%m-%dT%H:%M:%S")
     use = {"task": task, "draft": draft, "at": now, **({"reserved": True} if reserved else {})}
@@ -174,6 +241,7 @@ def record(manifest: dict[str, Any], segments: Iterable[dict[str, Any]], *,
     out = {"recorded": len(keys), "path": raw}
     if not reserved:
         out["overlap"] = overlap_for(data, draft)
+        _record_presentations(manifest, segments, task, draft)
     return out
 
 

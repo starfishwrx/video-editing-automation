@@ -36,7 +36,7 @@ class SentenceContinuityTests(unittest.TestCase):
     def identity(self):
         self.plan['identity'].update(manifest_sha256=contract.digest(self.manifest),
                                      analysis_sha256=contract.digest(self.analysis))
-        self.plan['resume_identity'] = copy.deepcopy(self.plan['identity'])
+        self.plan['resume_identity'] = {**self.plan['identity'], 'editorial_prompt_sha256': contract.digest(contract.policy_prompt(self.manifest))}
 
     def test_qc_rejected_member_cannot_trigger_joint_review(self):
         self.assertTrue(list(sharing.proposals(self.manifest, self.analysis, self.plan, 1, None)))

@@ -275,6 +275,14 @@ class EnrichV3Test(unittest.TestCase):
         return (mock.patch.object(vision_analyzer, "_analysis_rules", return_value=[rule]),
                 mock.patch.object(vision_analyzer, "_rule_checks", return_value={"r1": words}))
 
+    def test_waist_recheck_requires_pixels_once_even_when_old_observation_says_folding(self):
+        checks = vision_analyzer._rule_checks({"category": "weipin", "product": "萌睡裤"})
+        row = {"description": "将平铺的裤体对折再翻面", "status": "ready_for_matching"}
+        with mock.patch.dict(os.environ, {"JY_VISION_RECHECK": "reuse"}):
+            self.assertEqual(vision_analyzer._resolve_recheck(row, checks)[1], "redo")
+            self.assertEqual(vision_analyzer._resolve_recheck({**row, "rule_checks": list(checks)}, checks)[1], "keep")
+            self.assertNotEqual(vision_analyzer._resolve_recheck({**row, "description": "包装正面"}, checks)[1], "redo")
+
     def test_recheck_rule_keeps_cache_for_unrelated_shots(self):
         self._run([(True, self._first_pass()), self._text(["EDI纯水"]), self._text(["EDI纯水"])])
         rules, checks = self._with_recheck(["对光"])

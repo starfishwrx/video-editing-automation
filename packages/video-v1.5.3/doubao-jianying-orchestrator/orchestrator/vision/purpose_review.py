@@ -73,14 +73,14 @@ def requirements(manifest, narration, directory):
 一整天效果不能由短实验外推。修辞衔接/囤货号召/普通促销只需display，不能标为unverifiable。
 不增加原文没有的物理证明要求，也不删除难以证明的内容。需要动作/结果时对应布尔值为true。
 展示句另带display_goal：普通介绍/促销为general_product，薄软/舒适等具体特点为visible_feature。
-每句另给has_product_selling_point布尔值：是否对本品提出具体特点/标称/性能。开头第1—3句无具体卖点时，
+每句另给has_product_selling_point布尔值：是否对本品提出具体特点/标称/性能。is_generic_hook 标明任意位置的空泛钩子。全稿中这类钩子或开头第1—3句无具体卖点时，
 作为钩子用本品包装承接，display_goal=general_product、require_action/result=false、checks只用display。
 “谁还在用擦脸泛红的杂牌”是痛点钩子，has_product_selling_point=false，不要求泛红或竞品实验。
 “本品擦脸不泛红/不掉絮”“200抽”“联名”“悬挂式设计”均有具体卖点，必须true，保留原有检查要求。
 允许展示不等于只要同商品就合格，检查项写清观众实际需看清的形态、结构或动作结果。
 每项另带claim_text，必须保留该卖点的原文片段。“不闷热、不粘腻”等不同卖点分项，
 不能把原句改写成“展示本体/薄软”后按新的容易条件宣布支持；薄软或结构只作为候选表达方式。
-只输出JSON {"sentences":[{"index":1,"text":"原文","has_product_selling_point":false,"require_action":false,"require_result":false,"display_goal":"general_product|visible_feature",
+只输出JSON {"sentences":[{"index":1,"text":"原文","has_product_selling_point":false,"is_generic_hook":true,"require_action":false,"require_result":false,"display_goal":"general_product|visible_feature",
 "checks":[{"id":"c1","claim_text":"对应卖点原文片段","question":"逐项检查什么","type":"display|label|action_result|unverifiable"}]}]}。
 """ + json.dumps({"product": manifest["product"], "sentences": [
         {"index": i, "text": r["text"]} for i, r in enumerate(rows, 1)]}, ensure_ascii=False),
