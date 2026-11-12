@@ -938,6 +938,9 @@ class WorkerSelectionRecoveryTests(unittest.TestCase):
         captured = []
         class FakeEngine:
             def __init__(inner, manifest, *args, **kwargs): captured.append(copy.deepcopy(manifest))
+            def placed_cuts(inner):
+                return [{"video": segments[1]["video"], "scene_source_start": 0,
+                         "source_start": 3.25, "source_end": 4.75}]
             def run(inner):
                 draft = self.drafts / captured[-1]['draft_name']
                 draft.mkdir()
@@ -949,7 +952,8 @@ class WorkerSelectionRecoveryTests(unittest.TestCase):
             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
                 code = cli.cmd_recover(args)
             return SimpleNamespace(returncode=code, stdout='', stderr='')
-        with patch.object(worker, 'DRAFTS', self.drafts), \
+        with patch.dict("os.environ", {"JY_USAGE_LEDGER_DIR": str(self.root / "ledger")}), \
+             patch.object(worker, 'DRAFTS', self.drafts), \
              patch.object(worker.subprocess, 'run', side_effect=run_cli) as child, \
              patch.object(cli, '_vision_configuration_gate', return_value=None), \
              patch.object(cli, 'OrchestrationEngine', FakeEngine), \
@@ -958,6 +962,10 @@ class WorkerSelectionRecoveryTests(unittest.TestCase):
             result = worker.run_build(self.manifest, self.report, 'new-a3', timeout=60)
         self.assertEqual(result['rc'], 0, result)
         child.assert_called_once(); selection.assert_not_called(); tts.assert_not_called()
+        ledger_file, = (self.root / "ledger").glob("shot_usage_*.json")
+        uses, = json.loads(ledger_file.read_text("utf-8"))["shots"].values()
+        self.assertEqual(uses[0]["windows"], [{"video": segments[1]["video"],
+                                              "start_us": 3_250_000, "end_us": 4_750_000}])
         writer = captured[0]
         self.assertTrue(writer['draft_name'].startswith('new-a3_recovery_'))
         self.assertFalse(writer['force_overwrite'])
