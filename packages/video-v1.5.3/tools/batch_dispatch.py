@@ -251,18 +251,12 @@ def prepare_product(task: dict, product_dir: Path, env: dict) -> str:
                     **task_product_fields(task))
     product_dir.mkdir(parents=True, exist_ok=True)
     path = product_dir / "manifest.json"
-    output = product_dir / "shot_candidates.json"
-    payload = _read(output)
-    # Historical product observations that already passed material_cache.ready
-    # are reused as-is. Only cold gaps re-enter analyze-shots / frame prepare.
-    if payload.get("material_cache", {}).get("ready") and payload.get("shots"):
-        atomic_write_text(path, json.dumps(manifest, ensure_ascii=False, indent=2))
-        return str(output)
     atomic_write_text(path, json.dumps(manifest, ensure_ascii=False, indent=2))
     proc = subprocess.run([sys.executable, "-m", "orchestrator.cli", "analyze-shots",
         "--input", str(path), "--report-dir", str(product_dir)], cwd=str(SKILL),
         env=env, capture_output=True, text=True, encoding="utf-8", errors="replace",
         timeout=max(1, float(env["JY_TASK_DEADLINE_EPOCH"]) - time.time()) + 30)
+    output = product_dir / "shot_candidates.json"
     payload = _read(output)
     if proc.returncode or not payload.get("material_cache", {}).get("ready"):
         from tools.queueing.contracts import is_reusable_analysis_row

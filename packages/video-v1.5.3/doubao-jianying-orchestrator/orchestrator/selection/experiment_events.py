@@ -80,7 +80,7 @@ def compile_events(row,member):
     return validate_motion(observation,member)
 
 
-def fit_phase_windows(members,observations,result_frames,target_us,phase_boundary_us,*,fps=30,max_speed=3.0,unbounded=False):
+def fit_phase_windows(members,observations,result_frames,target_us,phase_boundary_us,*,fps=30,max_speed=3.0):
     """Select a continuous absorption-focused tail, then solve each clause's budget.
 
     This never omits an internal interval or claims to show the full pour.
@@ -98,10 +98,6 @@ def fit_phase_windows(members,observations,result_frames,target_us,phase_boundar
         b_selection={'coverage':'complete_verification','omitted_preparation_frame_ids':[initial,start-1],
             'selected_window_frame_ids':b_row['effective_window_frame_ids'],'internal_omissions':False}
     clips=windows(members,observed,result_frames,fps=fps)
-    if unbounded:
-        plans=fit_group(clips,target_us,fps=fps,phase_boundary_us=phase_boundary_us,unbounded=True)
-        if b_selection:plans[1]['source_selection']=b_selection
-        return plans
     if phase_boundary_us is None or observations[0].get('coverage')!='absorption_focus':
         plans=fit_group(clips,target_us,fps=fps,phase_boundary_us=phase_boundary_us,max_speed=max_speed)
         if b_selection:plans[1]['source_selection']=b_selection

@@ -200,6 +200,9 @@ def batch_result_contract(status: str, *, pipeline_version: str, run_id: str, fa
         retryable = True
     if first.get("retryable") is True and first.get("resume_stage") in {"draft_write", "delivery"}:
         retryable = True
+    if (first.get("retryable") is True and first.get("resume_stage") == "qc"
+            and first.get("failure_code") == "QC_OBSERVATION_UNVERIFIED"):
+        retryable = True
     if any(row.get("stage_retry_exhausted") is True or row.get("retryable") is False for row in rows) or any(
             token in lower for token in ("unauthorized", "forbidden", "invalid api key", "insufficient balance", "http 401", "http 403")):
         retryable = False

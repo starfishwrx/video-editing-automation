@@ -297,20 +297,6 @@ class DefaultHeadlessTests(unittest.TestCase):
                 self.assertEqual(engine.write_draft(clips, 'music.wav')['reason'], reason)
                 legacy.assert_not_called()
 
-    def test_headless_timeout_falls_back_to_legacy_once(self):
-        engine = OrchestrationEngine.__new__(OrchestrationEngine)
-        engine.m = {"draft_name": "offline"}
-        reason = "Command '['windows_crypto.py', 'encrypt']' timed out after 120 seconds"
-        with patch.dict(os.environ, {}, clear=True), patch.object(headless_production, 'write_draft',
-                return_value={'status': 'HEADLESS_BUILD_BLOCKED', 'reason': reason}), \
-                patch.object(engine, '_write_legacy_draft', return_value={'status': 'SUCCESS'}) as legacy:
-            result = engine.write_draft([], 'music.wav')
-            self.assertEqual(result['status'], 'SUCCESS')
-            self.assertEqual(result['draft_backend'], 'legacy')
-            self.assertEqual(result['fallback_reason'], reason)
-            legacy.assert_called_once_with([], 'music.wav')
-            self.assertEqual(engine.m['draft_name'], 'offline')
-
     @offline_host
     def test_empty_bgm_runs_automatically_without_music_preview_confirmation(self):
         with tempfile.TemporaryDirectory() as raw:

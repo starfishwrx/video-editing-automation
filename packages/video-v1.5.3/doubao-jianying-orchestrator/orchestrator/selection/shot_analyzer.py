@@ -222,23 +222,38 @@ def candidate_window(shot: dict[str, Any], *, audio_duration_us: int,
         evidence_end_us = None
     # Original-source timestamps, never a new three-second trim per scene.
     # The solver clamps this preference to the complete-evidence feasible range.
-    preferred_start_us = (max(3_000_000, int(material_us) // 2)
+    phase = timing_contract.presentation.get(shot.get("presentation_observation")) if shot.get("selection_mode") == "ai_editor" else None
+    preferred_start_us = (phase["start_us"] if phase else max(3_000_000, int(material_us) // 2)
                           if shot.get("selection_mode") == "ai_editor" else None)
+    if phase:
+        evidence_start_us = min(evidence_start_us, phase["start_us"]) if evidence_start_us is not None else phase["start_us"]
+        evidence_end_us = max(evidence_end_us, phase["readable_end_us"]) if evidence_end_us is not None else phase["readable_end_us"]
+    source_in = _us(shot.get("source_start"))
+    source_out = min(_us(shot.get("source_end"), _number(shot.get("source_start"))), int(material_us))
+    if phase:
+        source_in, source_out = max(source_in, phase["start_us"]), min(source_out, phase["end_us"])
+    head_waste, tail_waste = shot.get("head_waste"), shot.get("tail_waste")
+    edges = shot.get("preferred_clean_edges_us")
+    if phase:
+        head_waste, tail_waste = 0, 0
+    elif edges and source_out > source_in:
+        span = source_out - source_in
+        head_waste = max(0, edges[0] - source_in) / span
+        tail_waste = max(0, source_out - edges[1]) / span
     return timing_contract.solve_window_waste_aware(timing_contract.WindowRequest(
-        source_in_us=_us(shot.get("source_start")),
-        source_out_us=min(_us(shot.get("source_end"), _number(shot.get("source_start"))),
-                          int(material_us)),
+        source_in_us=source_in, source_out_us=source_out,
         audio_duration_us=int(audio_duration_us or 0),
         tail_pad_us=_us(source.get("tail_pad_s"), NARRATION_TAIL_PAD),
-        head_guard_us=_us(source.get("head_trim_s"), DEFAULT_HEAD_TRIM_S),
-        tail_guard_us=_us(source.get("tail_trim_s"), DEFAULT_TAIL_TRIM_S),
+        head_guard_us=0 if phase else _us(source.get("head_trim_s"), DEFAULT_HEAD_TRIM_S),
+        tail_guard_us=0 if phase else _us(source.get("tail_trim_s"), DEFAULT_TAIL_TRIM_S),
         evidence_start_us=evidence_start_us, evidence_end_us=evidence_end_us,
         speed_min=speed_min, speed_max=speed_max,
         preferred_start_us=preferred_start_us,
         preferred_speed=shot.get("preferred_speed", 1.0),
         video_duration_us=int(round(material_us)),
+        exact_source_timing=bool(phase),
         fps=(frm or timing_contract.DEFAULT_FPS)),
-        shot.get("head_waste"), shot.get("tail_waste"))
+        head_waste, tail_waste)
 
 
 def span_segment_for(shot: dict[str, Any], *, manifest: dict[str, Any] | None = None,
@@ -250,6 +265,7 @@ def span_segment_for(shot: dict[str, Any], *, manifest: dict[str, Any] | None = 
     那等于绕开用户定案第 5/6 条。所以保护区、变速范围、证据区间全部走同样的取值。
     """
     source = manifest or {}
+    phase = timing_contract.presentation.get(shot.get("presentation_observation")) if shot.get("selection_mode") == "ai_editor" else None
     evidence_start, evidence_end, _frame = candidate_evidence_interval(shot)
     speed_min, speed_max = _fit_speed_range(
         shot, manifest=manifest, time_sensitive=time_sensitive)
@@ -258,15 +274,20 @@ def span_segment_for(shot: dict[str, Any], *, manifest: dict[str, Any] | None = 
     material_us = _number(shot.get("material_duration_us"))
     if material_us > 1000:
         source_out = min(source_out, int(material_us))
+    source_in = _us(shot.get("source_start"))
+    if phase:
+        source_in, source_out = max(source_in, phase["start_us"]), min(source_out, phase["end_us"])
+        evidence_start, evidence_end = min(evidence_start, phase["start_us"] / 1e6), max(evidence_end, phase["readable_end_us"] / 1e6)
     return timing_contract.SpanSegment(
-        source_in_us=_us(shot.get("source_start")),
+        source_in_us=source_in,
         source_out_us=source_out,
-        head_guard_us=_us(source.get("head_trim_s"), DEFAULT_HEAD_TRIM_S),
-        tail_guard_us=_us(source.get("tail_trim_s"), DEFAULT_TAIL_TRIM_S),
+        head_guard_us=0 if phase else _us(source.get("head_trim_s"), DEFAULT_HEAD_TRIM_S),
+        tail_guard_us=0 if phase else _us(source.get("tail_trim_s"), DEFAULT_TAIL_TRIM_S),
         transition_in_handle_us=int(handles[0]), transition_out_handle_us=int(handles[1]),
         evidence_start_us=_us(evidence_start), evidence_end_us=_us(evidence_end),
         speed_min=speed_min, speed_max=speed_max,
         preferred_speed=shot.get("preferred_speed", 1.0),
+        exact_source_timing=bool(phase),
         video=str(video), shot_id=str(shot_id))
 
 

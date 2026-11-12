@@ -89,6 +89,56 @@ class DefaultExperimentGroupTests(unittest.TestCase):
         matched["segments"][0]["selection_mode"] = "rule"
         return matched
 
+    def test_review_cache_depends_on_window_and_evidence_independently_of_cap(self):
+        from PIL import Image
+        source = contract.source_identity(self.shots[0]["video"])
+        cut = {"start_us": 0, "end_us": 100000, "target_us": 100000, "source_identity": source}
+        context = {"members": [{"index": 1, "parts": [cut]}], "evidence_digest": "original",
+                   "task_absorb_speed_cap": 2}
+        tile = self.root / "tile.jpg"
+        Image.new("RGB", (10, 10)).save(tile)
+        with patch.object(editor, "_review_media", return_value={"before": source, "sheet": tile}), \
+             patch.object(editor, "_call") as call:
+            def request():
+                groups.review_group(self.manifest, context, self.root)
+                return call.call_args.args[:2]
+            original = request()
+            context["task_absorb_speed_cap"] = 3
+            self.assertEqual(request(), original)
+            context["evidence_digest"] = "different observation"
+            self.assertNotEqual(request(), original)
+            context["evidence_digest"] = "original"
+            cut["end_us"] += 1
+            self.assertNotEqual(request(), original)
+
+    def test_exact_paired_cut_obeys_phase_and_task_speed_limits(self):
+        from orchestrator.selection import timing_contract as timing
+        engine = OrchestrationEngine.__new__(OrchestrationEngine)
+        engine.m = {**self.manifest, "max_absorb_demo_speed": 2}
+        start, end, target = 123457, 1987654, 1000000
+        clip = Clip(video="source", text="吸收", source_start=start / 1e6,
+            source_end=end / 1e6, video_duration=10, duration=1, guard_override=[0, 0],
+            continuity_group={"schema": continuity.EXPERIMENT_SCHEMA}, stable_start=0.8,
+            playback_observation={"schema": contract.playback.OBSERVATION_SCHEMA, "kind": "process",
+                "observed": "continuous absorption", "start_us": start, "end_us": end})
+        def solve():
+            return timing.solve_window(engine._timing_request(clip, target))
+        fitted = solve()
+        self.assertTrue(fitted.ok, fitted.to_dict())
+        self.assertEqual((fitted.source_start_us, fitted.source_end_us), (start, end))
+        self.assertEqual(round(fitted.speed * target), end - start)
+        engine.m["max_absorb_demo_speed"] = 1.5
+        self.assertFalse(solve().ok)
+        engine.m["max_absorb_demo_speed"] = 10
+        clip.time_sensitive = True
+        self.assertFalse(solve().ok)
+        clip.time_sensitive = False
+        clip.playback_observation["kind"] = "experiment_unbounded"
+        self.assertFalse(solve().ok)
+        clip.playback_observation["kind"] = "process"
+        target = 500000
+        self.assertFalse(solve().ok)
+
     def test_experiment_group_requires_observed_tissue_contact_and_lift(self):
         result = self.repair()
         group = copy.deepcopy(result["segments"][0]["continuity_group"])
@@ -415,46 +465,15 @@ class DefaultExperimentGroupTests(unittest.TestCase):
         for i in (4, 5):
             source = self.root / f"other-{i}.mp4"; source.write_bytes(f"other {i}".encode())
             self.shots.append({**self.shots[0], "shot_id": f"shot{i}", "video": str(source)})
-        def matched(shot):
-            return {**copy.deepcopy(self.plan["reviews"]["1"][0]), "shot_id": shot["shot_id"],
-                    "source_identity": contract.source_identity(shot["video"])}
-        self.plan["reviews"]["1"] = [matched(shot) for shot in (self.shots[0], self.shots[3], self.shots[4])]
-        self.plan["reviews"]["2"] = [matched(self.shots[1]), matched(self.shots[2])]
+        self.plan["sentences"][0]["candidate_ids"] = ["shot1", "shot4", "shot5"]
+        self.plan["sentences"][1]["candidate_ids"] = ["shot2", "shot3"]
         with patch.object(groups, "observe_pair", side_effect=ValueError("EXPERIMENT_PAIR_NOT_CONFIRMED")) as observe:
             with self.assertRaisesRegex(ValueError, "EXPERIMENT_GROUP_PENDING"):
                 groups.repair(self.manifest, self.analysis, self.plan, self.root, None)
-        # An unconfirmed pair does not spend the fit budget, so every matched
-        # hypothesis is observed. The first three still cover every pour source.
-        self.assertEqual(observe.call_count, 6)
+        # PAIR_LIMIT 3 -> 6 (fix_rerun_20261109): all 3x2 hypotheses fit the budget; the
+        # first three reviews still cover every distinct pour source.
+        self.assertEqual(observe.call_count, min(groups.PAIR_LIMIT, 6))
         self.assertEqual({call.args[2]["shot_id"] for call in observe.call_args_list[:3]}, {"shot1", "shot4", "shot5"})
-
-    def test_unconfirmed_matches_continue_past_the_fit_budget(self):
-        for i in range(4, 12):
-            source = self.root / f"pour-{i}.mp4"; source.write_bytes(f"pour {i}".encode())
-            self.shots.append({**self.shots[0], "shot_id": f"shot{i}", "video": str(source)})
-        review = self.plan["reviews"]["1"][0]
-        self.plan["reviews"]["1"] = []
-        for shot in self.shots:
-            if shot["shot_id"] == "shot2":
-                continue
-            self.plan["reviews"]["1"].append({**copy.deepcopy(review), "shot_id": shot["shot_id"],
-                "source_identity": contract.source_identity(shot["video"])})
-        with patch.object(groups, "observe_pair", side_effect=ValueError("EXPERIMENT_PAIR_NOT_CONFIRMED")) as observe:
-            with self.assertRaisesRegex(ValueError, "EXPERIMENT_GROUP_PENDING"):
-                groups.repair(self.manifest, self.analysis, self.plan, self.root, None)
-        self.assertGreater(observe.call_count, groups.PAIR_LIMIT)
-
-    def test_result_window_failures_still_stop_at_pair_limit(self):
-        for i in range(4, 12):
-            source = self.root / f"fit-{i}.mp4"; source.write_bytes(f"fit {i}".encode())
-            self.shots.append({**self.shots[0], "shot_id": f"shot{i}", "video": str(source)})
-        review = self.plan["reviews"]["1"][0]
-        self.plan["reviews"]["1"] = [{**copy.deepcopy(review), "shot_id": shot["shot_id"],
-            "source_identity": contract.source_identity(shot["video"])} for shot in self.shots if shot["shot_id"] != "shot2"]
-        with patch.object(groups, "observe_pair", side_effect=ValueError("EXPERIMENT_RESULT_WINDOW_TOO_SHORT")) as observe:
-            with self.assertRaisesRegex(ValueError, "EXPERIMENT_GROUP_PENDING"):
-                groups.repair(self.manifest, self.analysis, self.plan, self.root, None)
-        self.assertEqual(observe.call_count, groups.PAIR_LIMIT)
 
     def test_overlapping_observation_windows_are_refined_before_selected_source_check(self):
         from orchestrator.selection.experiment_contract import validate_pair_evidence

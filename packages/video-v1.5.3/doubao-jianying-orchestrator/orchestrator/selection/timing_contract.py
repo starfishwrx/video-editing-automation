@@ -40,7 +40,7 @@ import re
 import subprocess
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Optional
-from ..policy import playback
+from ..policy import playback, presentation
 
 US = 1_000_000
 
@@ -340,9 +340,7 @@ class WindowRequest:
     video_duration_us: Optional[int] = None
     fps: float = DEFAULT_FPS
     preferred_speed: float = 1.0
-    # Set only for a cut whose playback observation already authorized the
-    # solved speed. Ordinary requests stay inside the production cap.
-    honor_requested_speed_max: bool = False
+    exact_source_timing: bool = False
 
     @property
     def timeline_us(self) -> int:
@@ -394,7 +392,7 @@ class WindowSolution:
 
     def to_dict(self) -> dict:
         return {
-            "ok": self.ok, "speed": round(self.speed, 6),
+            "ok": self.ok, "speed": self.speed if self.detail.get('exact_source_timing') else round(self.speed, 6),
             "source_start": round(self.source_start_us / US, 6),
             "source_end": round(self.source_end_us / US, 6),
             "segment_s": round(self.segment_us / US, 6),
@@ -447,6 +445,8 @@ def _candidate_speeds(req: WindowRequest, usable_us: int, timeline_us: int,
     if timeline_us > 0:
         values.add(usable_us / timeline_us)                     # 恰好铺满可用素材
         if evidence_span_us:
+            if req.exact_source_timing:
+                values.add(evidence_span_us / timeline_us)
             # 恰好罩住证据跨度（两端各留一帧余量，避免四舍五入后卡边）
             values.add((evidence_span_us + 2 * frame) / timeline_us)
 
@@ -476,15 +476,9 @@ def solve_window(req: WindowRequest) -> WindowSolution:
         preferred_speed = float(req.preferred_speed)
     except (TypeError, ValueError):
         preferred_speed = math.nan
-    preference_cap = 20.0
-    if req.honor_requested_speed_max:
-        try:
-            preference_cap = max(preference_cap, float(req.speed_max), preferred_speed)
-        except (TypeError, ValueError):
-            preference_cap = 20.0
-    if not math.isfinite(preferred_speed) or not 0.05 <= preferred_speed <= preference_cap:
+    if not math.isfinite(preferred_speed) or not 0.05 <= preferred_speed <= 20.0:
         return _fail(REASON_SPEED_OUT_OF_RANGE, preferred_speed=req.preferred_speed,
-                     allowed_preference=[0.05, preference_cap])
+                     allowed_preference=[0.05, 20.0])
 
     timeline_us = req.timeline_us
     if timeline_us <= 0:
@@ -510,24 +504,9 @@ def solve_window(req: WindowRequest) -> WindowSolution:
     speed_max = float(req.speed_max)
     if speed_max < speed_min:
         speed_min, speed_max = speed_max, speed_min
-    if not req.honor_requested_speed_max:
-        speed_max = min(speed_max, playback.PROCESS_MAX)
+    speed_max = min(speed_max, playback.PROCESS_MAX)
     if not (math.isfinite(speed_min) and math.isfinite(speed_max) and 0 < speed_min <= speed_max):
         return _fail(REASON_SPEED_OUT_OF_RANGE, policy_version=playback.VERSION)
-
-    if req.honor_requested_speed_max and usable_us > 0:
-        # The confirmed cut already fills its reviewed window. Snapping that
-        # ratio onto the frame grid moves the out point, and the continuity
-        # check rejects the draft. Keep the reviewed in and out points.
-        exact = usable_us / timeline_us
-        covers = span is None or (lo_bound <= ev_start and hi_bound >= ev_end)
-        if covers and speed_min - 1e-9 <= exact <= speed_max + 1e-9:
-            return WindowSolution(
-                ok=True, speed=round(exact, 9), source_start_us=int(lo_bound),
-                source_end_us=int(hi_bound), segment_us=int(timeline_us),
-                material_us=int(usable_us), handle_room_us=0,
-                detail={"candidate_count": 1, "usable_us": int(usable_us),
-                        "timeline_us": int(timeline_us), "unbounded_exact_window": True})
 
     if usable_us < int(round(speed_min * timeline_us)):
         return _fail(REASON_SOURCE_TOO_SHORT, usable_us=usable_us,
@@ -544,6 +523,8 @@ def solve_window(req: WindowRequest) -> WindowSolution:
         few microseconds and become illegal at write time.  Choose the nearest
         grid point that does not cross the already-proved material boundary.
         """
+        if req.exact_source_timing:
+            return speed if int(round(speed * timeline_us)) <= usable_us else None
         snapped = frame_speed(speed, speed_min, speed_max, fps=req.fps)
         if int(round(snapped * timeline_us)) <= usable_us:
             return snapped
@@ -568,11 +549,9 @@ def solve_window(req: WindowRequest) -> WindowSolution:
         place_lo = lo_bound
         place_hi = hi_bound - window_us
         if span is not None:
-            # 窗口罩住证据 ⇔ start ≤ ev_start 且 start + window ≥ ev_end。
-            # 已授权的精确倍速会再吸附到帧栅格，窗口可能比证据短不到一帧。
-            slack = frame_us(req.fps) if req.honor_requested_speed_max else 0
-            place_lo = max(place_lo, ev_end - window_us - slack)
-            place_hi = min(place_hi, ev_start + slack)
+            # 窗口罩住证据 ⇔ start ≤ ev_start 且 start + window ≥ ev_end
+            place_lo = max(place_lo, ev_end - window_us)
+            place_hi = min(place_hi, ev_start)
         if place_lo > place_hi:
             continue
         if req.preferred_start_us is not None:
@@ -609,7 +588,7 @@ def solve_window(req: WindowRequest) -> WindowSolution:
         source_end_us=int(start) + int(window_us), segment_us=int(timeline_us),
         material_us=int(window_us), handle_room_us=int(usable_us - window_us),
         detail={"candidate_count": len(feasible), "usable_us": int(usable_us),
-                "timeline_us": int(timeline_us)},
+                "timeline_us": int(timeline_us), **({'exact_source_timing': True} if req.exact_source_timing else {})},
     )
 
 
@@ -705,6 +684,7 @@ class SpanSegment:
     video: str = ""
     shot_id: str = ""
     preferred_speed: float = 1.0
+    exact_source_timing: bool = False
 
     @property
     def lo_bound_us(self) -> int:
@@ -738,7 +718,7 @@ class SpanSegment:
             transition_out_handle_us=int(self.transition_out_handle_us),
             evidence_start_us=self.evidence_start_us, evidence_end_us=self.evidence_end_us,
             speed_min=float(self.speed_min), speed_max=float(self.speed_max),
-            preferred_speed=self.preferred_speed, fps=fps)
+            preferred_speed=self.preferred_speed, fps=fps, exact_source_timing=self.exact_source_timing)
 
 
 @dataclass(frozen=True)
@@ -1295,8 +1275,7 @@ def check_invariants(items: Iterable[dict], *, fps: float = DEFAULT_FPS,
         allowed = item.get("speed_range") or [0.05, playback.PROCESS_MAX]
         if allowed:
             lo, hi = float(allowed[0]), float(allowed[1])
-            if not item.get("allow_unbounded_speed"):
-                hi = min(hi, playback.PROCESS_MAX)
+            hi = min(hi, playback.PROCESS_MAX)
             # 变速吸附在 1µs 栅格上（frame_speed），区间收成一个点时吸附值最多偏半格。
             grid = 1.0 / frame_us(fps)
             if speed < lo - grid or speed > hi + grid:

@@ -69,27 +69,8 @@ def placement_fit_window(value) -> tuple[int, int] | None:
     return a, b
 
 
-def _finite_speed_range(value) -> tuple[float, float] | None:
-    if isinstance(value, (list, tuple)) and len(value) == 2:
-        try:
-            low, high = float(value[0]), float(value[1])
-        except (TypeError, ValueError):
-            return None
-        if math.isfinite(low) and math.isfinite(high) and 0 < low <= high:
-            return low, high
-    return None
-
-
 def speed_range(*, time_sensitive=False, observation=None, override=None) -> tuple[float, float]:
-    """Overrides may narrow reviewed permissions; never grant new permissions.
-
-    An experiment group explicitly marked unbounded keeps the speed already
-    solved for that cut. The allowed band is stored on that observation so
-    later checks see it without a separate override. Ordinary observations
-    cannot opt into that kind.
-    """
-    if isinstance(observation, dict) and observation.get("kind") == "experiment_unbounded":
-        return _finite_speed_range(observation.get("speed_range")) or _finite_speed_range(override) or (1.0, 1.0)
+    """Overrides may narrow reviewed permissions; never grant new permissions."""
     if time_sensitive:
         return 1.0, 1.0
     if placement_fit_window(observation):

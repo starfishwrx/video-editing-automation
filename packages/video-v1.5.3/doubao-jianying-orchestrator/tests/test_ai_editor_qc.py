@@ -27,6 +27,96 @@ class AIEditorQCIntegrationTests(unittest.TestCase):
         self.draft.mkdir()
         self.write_reports()
 
+    def test_promotion_refill_cannot_waive_motion_by_changing_sentence_kind(self):
+        item = {"text": "今天直播间大促", "selection_mode": "ai_editor",
+                "ai_selection": {"sentence_kind": "selling_point"}}
+        row = {"index": 1, "match_level": "DIRECT", "action_check": {"actor": "camera",
+               "change_visible": True, "result_visibility": "clear", "observation": "相机扫过固定陈列"}}
+        revised = ai_editor_qc.apply_presentation_gate(row, {"claim": item["text"], "ai_segment": item})
+        self.assertEqual(revised["match_level"], "INSUFFICIENT_EVIDENCE")
+        self.assertIn(1, visual_qc_contract.presentation_selection_errors([item], [row]))
+        self.assertFalse(contract.presentation.promotion_motion("这是完整的材质标签。"))
+
+    def test_promotion_group_cannot_borrow_change_from_another_member(self):
+        item = {"selection_mode": "ai_editor", "text": "今天直播间大促",
+                "continuity_group": {"input": {"members": [{"index": 1}, {"index": 2}]}}}
+        row = {"index": 1, "presentation_check_required": True, "presentation_expected_actors": [],
+               "action_check": {"actor": "product", "change_visible": True,
+                                "result_visibility": "clear", "observation": "组末商品落下"},
+               "member_stage": {"phase": "hold", "observation": "这句中包装始终不动"}}
+        self.assertIn("PROMOTION_MEMBER_ACTION_MISSING",
+                      visual_qc_contract.presentation_selection_errors([item], [row])[1])
+        row["member_stage"] = {"phase": "first_readable", "observation": "包装正面刚刚转到可读位置"}
+        self.assertEqual(visual_qc_contract.presentation_selection_errors([item], [row]), {})
+
+    def test_missing_or_uncertain_member_stage_never_excludes_the_source(self):
+        for stage in ({}, {"phase": "uncertain", "observation": "看不清商品位置变化"}):
+            self.assertEqual(visual_qc_contract.member_repair({"member_stage": stage}), "review")
+        self.assertEqual(visual_qc_contract.member_repair({"member_stage": {
+            "phase": "camera", "observation": "相机平移，商品与彼此位置不变"}}), "replace")
+
+    def test_member_stage_sends_only_its_ordered_frames_and_validates_response(self):
+        frames = [{"draft_segment": 3, "timestamp": t, "path": str(self.root / f"{t}.jpg")}
+                  for t in (2., 1.)]
+        answer = {"phase": "hold", "observation": "首尾相同，只有手指在移动"}
+        def reply(sheet, prompt, output, *, validator, **kwargs):
+            validator(json.dumps(answer))
+            return True, json.dumps(answer)
+        vision = mock.Mock()
+        vision._write_sheet.return_value = True
+        vision._run_vision_with_retry.side_effect = reply
+        result = qc._inspect_member_stage(vision, frames, self.root, 3, "ffmpeg")
+        self.assertEqual(result, answer)
+        tiles = vision._write_sheet.call_args.args[0]
+        self.assertEqual([(t["timestamp"], t["label"]) for t in tiles], [(1., "F01"), (2., "F02")])
+
+    def test_reclassified_unboxing_still_requires_its_terminal_frame(self):
+        item = {"selection_mode": "ai_editor", "text": "看看这一款",
+                "ai_selection": {"sentence_kind": "selling_point", "observation": "双手打开一个纸箱，箱盖向两侧翻开"}}
+        self.assertTrue(visual_qc_contract.carton_landing_required(item))
+        self.assertIn("CARTON_LANDING_UNVERIFIED", visual_qc_contract.presentation_selection_errors([item], [])[1])
+        item["ai_selection"]["observation"] = "外箱底部清楚印着规格标签"
+        self.assertFalse(visual_qc_contract.carton_landing_required(item))
+
+    def test_legible_package_with_flap_still_over_goods_fails(self):
+        for view in ("retail_product", "contents_exposed"):
+            check = {"view": view, "flap_over_goods": "yes", "observation": "文字可读，前盖仍压在商品上"}
+            self.assertFalse(visual_qc_contract.clear_carton_landing(check))
+            self.assertTrue(visual_qc_contract.clear_carton_landing(dict(check, flap_over_goods="no")))
+
+    def test_last_tick_at_speed_uses_decoded_pts_and_pixels(self):
+        import shutil
+        import subprocess
+        from PIL import Image
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            self.skipTest("ffmpeg required for real source frames")
+        src = self.root / "source.mkv"
+        subprocess.run([ffmpeg, "-v", "error", "-f", "lavfi", "-i", "color=black:s=32x32:r=50:d=5",
+                        "-vf", "drawbox=color=white:t=fill:enable='gte(t,4.94)'",
+                        "-c:v", "ffv1", str(src)], check=True)
+        cut = {"source": str(src), "source_start": 2., "source_duration": 3.,
+               "target_start": 1., "target_duration": 2.}
+        frame = qc._terminal_frame(ffmpeg, cut, 25., self.root / "end.jpg")
+        self.assertIsNotNone(frame)
+        self.assertAlmostEqual(frame["timestamp"], 4.94)
+        self.assertAlmostEqual(frame["target_time"], 2.96)
+        with Image.open(frame["path"]) as decoded:
+            self.assertGreater(decoded.convert("L").getpixel((16, 16)), 220)
+        # Shift the file clock and omit alternate frames before the last tick.
+        shifted = self.root / "shifted.mkv"
+        subprocess.run([ffmpeg, "-v", "error", "-i", str(src), "-vf",
+                        "select='lt(t,4.8)+mod(n,2)',setpts=PTS+2/TB",
+                        "-fps_mode", "vfr", "-c:v", "ffv1", str(shifted)], check=True)
+        cut["source"] = str(shifted)
+        frame = qc._terminal_frame(ffmpeg, cut, 25., self.root / "vfr.jpg")
+        self.assertIsNotNone(frame)
+        self.assertAlmostEqual(frame["timestamp"], 4.94)
+        with Image.open(frame["path"]) as decoded:
+            self.assertGreater(decoded.convert("L").getpixel((16, 16)), 220)
+        cut["speed_materials"] = [{"curve_speed": {"points": [1, 2]}}]
+        self.assertIsNone(qc._terminal_frame(ffmpeg, cut, 25., self.root / "unknown.jpg"))
+
     def write_reports(self):
         (self.report / "shot_match_report.json").write_text(json.dumps(self.match), encoding="utf-8")
         (self.report / "shot_candidates.json").write_text(json.dumps({"shots": [self.fixture.shot]}), encoding="utf-8")
@@ -197,6 +287,108 @@ class AIEditorQCIntegrationTests(unittest.TestCase):
         row = {"source_start": self.segment["source_start"], "source_duration": self.segment["duration"]}
         frames = ai_editor_qc.frame_plan(claim, [row])
         self.assertEqual([r[2] for r in frames], sorted(r[2] for r in frames))
+
+    def test_blind_labels_do_not_turn_key_frames_into_fallback_samples(self):
+        from orchestrator.quality import draft_visual_qc as final_qc
+        from unittest import mock
+        for suffix in ('p1_phase0_reveal','p1_phase0_readable','p1_ev0_result'):
+            item={'suffix':suffix,'timestamp':1.5}
+            self.assertEqual(ai_editor_qc.blind_frame_label(1,2,item),'S01 P1 F02 @1.500s')
+            with mock.patch.object(final_qc,'_resume_frame',return_value=(False,'missing')) as extract:
+                ok,_error,timestamp=final_qc._resume_sample_frame('ffmpeg',Path('source.mp4'),1.5,
+                    Path('frame.jpg'),source_start=1.,suffix=suffix)
+            self.assertFalse(ok)
+            self.assertEqual(timestamp,1.5)
+            extract.assert_called_once()
+        with mock.patch.object(final_qc,'_resume_frame',side_effect=[(False,'missing'),(True,'')]) as extract:
+            ok,_error,timestamp=final_qc._resume_sample_frame('ffmpeg',Path('source.mp4'),1.5,
+                Path('frame.jpg'),source_start=1.,suffix='p1_t3')
+        self.assertTrue(ok)
+        self.assertEqual(timestamp,1.46)
+        self.assertEqual(extract.call_count,2)
+
+    def test_key_frame_wins_a_coincident_ordinary_sample_and_cannot_fall_back(self):
+        from orchestrator.quality import draft_visual_qc as final_qc
+        from unittest import mock
+        row={'source_start':0.,'source_duration':1.}
+        claim={'ai_segment':{'ai_selection':{'evidence_intervals_us':[{'start':140_000,'end':500_000}]}}}
+        frames=ai_editor_qc.frame_plan(claim,[row])
+        matching=[(suffix,fraction) for _,suffix,fraction in frames if abs(fraction-.14)<1e-9]
+        self.assertEqual(len(matching),1)
+        suffix,fraction=matching[0]
+        with mock.patch.object(final_qc,'_resume_frame',return_value=(False,'missing')) as extract:
+            ok,_error,timestamp=final_qc._resume_sample_frame('ffmpeg',Path('source.mp4'),fraction,
+                Path('frame.jpg'),source_start=0.,suffix=suffix)
+        self.assertFalse(ok)
+        self.assertEqual(timestamp,.14)
+        extract.assert_called_once()
+
+    def test_static_match_cannot_waive_a_required_presentation_action(self):
+        from test_presentation_windows import phase
+        claim={'ai_segment':{'ai_selection':{'presentation_observation':phase()}}}
+        row={'index':1,'match_level':'DIRECT','visual_ok':True,'reason':'普通促销陈列足够','observed':'实际商品画面','confidence':.9}
+        good={'actor':'product','change_visible':True,'result_visibility':'clear','observation':'实际看见商品转正及正面到位'}
+        for check in (None,{**good,'actor':'camera'},{**good,'actor':'hand_only'},
+                      {**good,'change_visible':False},{**good,'result_visibility':'partial'},
+                      {**good,'actor':'occluder'},{**good,'observation':''}):
+            gated=ai_editor_qc.apply_presentation_gate({**row,'action_check':check},claim)
+            self.assertEqual(gated['match_level'],'INSUFFICIENT_EVIDENCE')
+            self.assertFalse(gated['visual_ok'])
+        self.assertEqual(ai_editor_qc.apply_presentation_gate({**row,'action_check':good},claim)['match_level'],'DIRECT')
+        self.assertEqual(ai_editor_qc.apply_presentation_gate(row,{'ai_segment':{}}),row)
+        accepted=ai_editor_qc.apply_presentation_gate({**row,'action_check':good},claim)
+        self.assertEqual(visual_qc_contract.row_errors(accepted),[])
+        accepted.pop('action_check')
+        self.assertIn('PRESENTATION_ACTION_UNVERIFIED',visual_qc_contract.row_errors(accepted))
+
+    def test_persisted_action_gate_uses_bound_selection_not_deletable_markers(self):
+        import copy
+        from test_presentation_windows import phase
+        _, result = self.run_qc()
+        result['selection_segments'][0]['ai_selection']['presentation_observation'] = phase()
+        result['selection_sha256'] = contract.digest(result['selection_segments'])
+        row=result['model_review'][0]
+        row.update(presentation_check_required=True,presentation_expected_actors=['product'],
+            action_check=dict(actor='product',change_visible=True,result_visibility='clear',observation='商品转正到位'))
+        self.assertEqual(visual_qc_contract.report_status(result),'PASS')
+        # Self-consistency cannot authenticate a changed selection to the build.
+        self.assertFalse(visual_qc_contract.report_matches_draft(result,self.draft))
+        for key,value in [('presentation_check_required',None),('presentation_check_required',False),
+                          ('presentation_expected_actors',[]),('action_check',None)]:
+            edited=copy.deepcopy(result)
+            if value is None:
+                edited['model_review'][0].pop(key)
+            else:
+                edited['model_review'][0][key]=value
+            self.assertEqual(visual_qc_contract.report_status(edited),'UNCERTIFIED')
+        edited=copy.deepcopy(result)
+        edited['selection_segments'][0]['ai_selection'].pop('presentation_observation')
+        self.assertEqual(visual_qc_contract.report_status(edited),'UNCERTIFIED')
+        edited=copy.deepcopy(result)
+        edited.pop('selection_segments')
+        self.assertFalse(visual_qc_contract.report_matches_draft(edited,self.draft))
+
+    def test_continuous_group_cannot_disagree_about_shared_action(self):
+        from test_presentation_windows import phase
+        group={'input':{'presentation_observations':[phase()]}}
+        segments=[dict(selection_mode='ai_editor',continuity_group=group) for _ in range(2)]
+        rows=[dict(index=i,presentation_check_required=True,presentation_expected_actors=['product'],
+            action_check=dict(actor=actor,change_visible=True,result_visibility='clear',observation='商品展示'))
+            for i,actor in [(1,'product'),(2,'product_and_occluder')]]
+        errors=visual_qc_contract.presentation_selection_errors(segments,rows)
+        self.assertEqual(set(errors),{1,2})
+        self.assertTrue(all('PRESENTATION_GROUP_CHECK_INCONSISTENT' in codes for codes in errors.values()))
+
+    def test_reveal_requires_the_observed_subject_not_a_kind_based_assumption(self):
+        from test_presentation_windows import phase
+        for actor in ('product','occluder'):
+            observation=phase(change=dict(kind='reveal',actor=actor,before='商品被遮住',after='商品完整露出',product_state_changed=True))
+            claim={'ai_segment':{'ai_selection':{'presentation_observation':observation}}}
+            row=dict(index=1,match_level='DIRECT',visual_ok=True,reason='露出到位',
+                action_check=dict(actor=actor,change_visible=True,result_visibility='clear',observation='相对位置变化，商品完整露出'))
+            checked=ai_editor_qc.apply_presentation_gate(row,claim)
+            self.assertEqual(checked['match_level'],'DIRECT')
+            self.assertEqual(checked['presentation_expected_actors'],[actor])
 
     def test_staged_media_is_accepted_only_when_bytes_and_original_identity_match(self):
         staged = self.root / "staged.mp4"

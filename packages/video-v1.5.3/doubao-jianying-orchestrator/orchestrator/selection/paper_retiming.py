@@ -84,7 +84,7 @@ def _allocate(lengths: list[int], output_us: int, cap: Fraction) -> list[int] | 
 def plan_retiming(source_start_us: int, source_end_us: int,
                   protected_intervals: list, target_duration_us: int,
                   fps: float = 30, preferred_cap: float = 2.0,
-                  hard_cap: float = 3.0, unbounded: bool = False) -> dict:
+                  hard_cap: float = 3.0) -> dict:
     """Return a continuous fixed-duration fit, or a structured failure.
 
     Protected intervals use absolute source microseconds as ``{start, end}``
@@ -100,23 +100,6 @@ def plan_retiming(source_start_us: int, source_end_us: int,
         return _failure("INVALID_TARGET_DURATION")
     if not _finite(fps) or fps <= 0 or not math.isfinite(1_000_000 / fps):
         return _failure("INVALID_FPS")
-    if unbounded:
-        source_us = source_end_us - source_start_us
-        if target_duration_us > source_us:
-            return _failure("SOURCE_TOO_SHORT", source_us=source_us,
-                            target_duration_us=target_duration_us)
-        speed = source_us / target_duration_us
-        parts = [{"source_start_us": source_start_us, "source_end_us": source_end_us,
-                  "target_start_us": 0, "segment_us": target_duration_us,
-                  "speed": speed, "locked": False, "phase": "compressible"}]
-        return {"ok": True, "reason": "", "tier": "UNBOUNDED", "parts": parts,
-                "source_start_us": source_start_us, "source_end_us": source_end_us,
-                "source_us": source_us, "target_duration_us": target_duration_us,
-                "timeline_us": target_duration_us, "protected_us": 0,
-                "protected_intervals": [], "required_speed": speed,
-                "preferred_cap": speed, "hard_cap": speed,
-                "fps": float(fps), "frame_us": max(1, frame_us(fps)),
-                "maximum_speed": speed, "exception_reason": ""}
     if not (_finite(preferred_cap) and _finite(hard_cap)
             and 1 <= preferred_cap <= 2 and preferred_cap <= hard_cap <= 3):
         return _failure("INVALID_SPEED_LIMIT")

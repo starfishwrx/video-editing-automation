@@ -449,6 +449,19 @@ class BatchDispatchTests(unittest.TestCase):
         with patch.dict(dispatch.os.environ, {"JY_OPERATOR_VOICE": "憨熊1.2"}):
             self.assertIsNone(dispatch._voice_error({"voice": ""}))
 
+    def test_ready_product_revalidates_current_inventory(self):
+        import batch_worker
+        directory = self.root / "product"
+        directory.mkdir()
+        output = directory / "shot_candidates.json"
+        output.write_text(json.dumps({"shots": [{"video": "first.MOV"}], "material_cache": {"ready": True}}))
+        with patch.object(batch_worker, "task_video_files", return_value=["first.MOV", "new.MOV"]), \
+             patch.object(dispatch.subprocess, "run", return_value=SimpleNamespace(returncode=0)) as analyze:
+            dispatch.prepare_product({"record_id": "r", "script": "test"}, directory,
+                                     {"JY_TASK_DEADLINE_EPOCH": str(time.time() + 60)})
+        self.assertIn("analyze-shots", analyze.call_args.args[0])
+        self.assertIn("new.MOV", (directory / "manifest.json").read_text("utf-8"))
+
     def test_material_failure_reports_bad_rows_instead_of_inventory_tail(self):
         directory = self.root / "product"
         directory.mkdir()

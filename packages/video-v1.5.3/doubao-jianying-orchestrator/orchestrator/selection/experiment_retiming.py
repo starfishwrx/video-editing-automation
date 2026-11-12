@@ -1,7 +1,6 @@
 """Fit verified experiment phases, keeping contact, completion and results real-time."""
 from fractions import Fraction
 import math
-import os
 
 from .paper_retiming import _allocate, _protected, plan_retiming
 
@@ -76,48 +75,8 @@ def windows(members,observations,result_frames,*,fps=30):
     return result
 
 
-def speed_unbounded(manifest) -> bool:
-    """Temporary per-task waiver. Empty env keeps the production speed cap."""
-    raw = os.environ.get("JY_EXPERIMENT_UNCAPPED_SPEED_TASKS", "")
-    allowed = {part.strip().casefold() for part in raw.split(",") if part.strip()}
-    if not allowed or not isinstance(manifest, dict):
-        return False
-    return any(str(manifest.get(key) or "").strip().casefold() in allowed
-               for key in ("task_id", "record_id", "ledger_task"))
-
-
-def _fit_unbounded(clips, target_us, *, fps, phase_boundary_us):
-    """Compress a confirmed group to the spoken budget, including protected phases."""
-    if phase_boundary_us is not None:
-        if len(clips) != 2 or not 0 < phase_boundary_us < target_us:
-            raise ValueError('EXPERIMENT_PHASE_BOUNDARY_INVALID')
-        result = []
-        for index, (clip, budget) in enumerate(zip(clips, (phase_boundary_us, target_us - phase_boundary_us))):
-            try:
-                result.extend(_fit_unbounded([clip], budget, fps=fps, phase_boundary_us=None))
-            except ValueError as error:
-                raise ValueError(f'EXPERIMENT_PHASE_DURATION_CONFLICT:part={index};budget_us={budget};{error}') from error
-        return result
-    lengths = [clip['source_end_us'] - clip['source_start_us'] for clip in clips]
-    if any(length <= 0 for length in lengths) or target_us > sum(lengths):
-        raise ValueError('EXPERIMENT_DURATION_CONFLICT_NO_COMPRESSIBLE_PROCESS')
-    allocated = _allocate(lengths, target_us, Fraction(1_000_000))
-    if allocated is None:
-        raise ValueError('EXPERIMENT_DURATION_CONFLICT_WITH_TASK_CAP')
-    fitted = []
-    for clip, budget in zip(clips, allocated):
-        plan = plan_retiming(clip['source_start_us'], clip['source_end_us'], [], budget,
-                             fps=fps, unbounded=True)
-        if not plan['ok']:
-            raise ValueError('EXPERIMENT_' + plan['reason'])
-        fitted.append({**clip, 'protected_intervals': [], 'target_duration_us': budget, 'retiming': plan})
-    return fitted
-
-
-def fit_group(clips,target_us,*,fps=30,phase_boundary_us=None,max_speed=3.0,unbounded=False):
+def fit_group(clips,target_us,*,fps=30,phase_boundary_us=None,max_speed=3.0):
     """Fit without cutting footage, respecting the task and production speed caps."""
-    if unbounded:
-        return _fit_unbounded(clips, target_us, fps=fps, phase_boundary_us=phase_boundary_us)
     if type(max_speed) not in (int, float) or not math.isfinite(max_speed) or not 1 <= max_speed <= 3:
         raise ValueError('EXPERIMENT_SPEED_LIMIT_INVALID')
     if phase_boundary_us is not None:

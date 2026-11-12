@@ -1,4 +1,8 @@
+import sys
 import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from orchestrator.media.action_frames import monotonic_pts
 from orchestrator.vision.experiment_event_review import chain_format_error

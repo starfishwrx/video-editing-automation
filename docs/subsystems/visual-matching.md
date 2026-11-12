@@ -1,5 +1,7 @@
 # 子系统：视觉匹配
 
+普通展示可根据切窗内的动作减少相同信息的重播。吸水实验须保持同场景、同次演示，头尾废料按原片坐标参与放置。详见 [ADR 0002](../adr/0002-ai-selection.md)。
+
 实际选镜位于 `packages/video-v1.5.3/doubao-jianying-orchestrator/orchestrator/selection/`，观察在 `vision/`，独立 QC 在 `quality/`，公共合同保留原位置。默认为 `ai_editor`；`manifest.selection_mode` 优先于 `JY_SELECTION_MODE`，`rule_then_ai` 为规则初排/AI 复核，显式 `legacy` 保留旧算法。模型与调用配置见[模型说明](../model-and-vision.md)。
 
 规范性关键词见[要求用语与适用范围](../../packages/video-v1.5.3/doubao-jianying-orchestrator/references/requirement_levels.md)。本页不把新队列默认施加于旧冻结运行。
@@ -15,7 +17,11 @@
 
 ## 2. 默认 AI 选镜与整稿编排
 
+展示阶段见[ADR0013](../adr/0013-presentation-action-windows.md)。默认从实际复核得到有效入点、首次到位与辨认出点，传入求解及最终收据；有阶段时不用稳定中后段替代动作。共享池轮流汇集各展示句候选，短CTA不触发全库扫描。专项阶段补看最多16个同源窗口，局部裁切重新确认可辨认结果，原观察和配音保持不变。
+
 调用链为 `cli._temporary_match → ai_editor.prepare → shot_analyzer.match_manifest`。
+
+纯招呼或衔接短句可在初排时借用邻句的画面。例如“姐妹们”可提前进入下一镜，“就是这样”可继续播放上一镜。程序按本句配音时长复核紧贴邻句切点的实际画面。只有同源、首尾接壤并通过整稿检查才采用。有明确相邻方向且配音时长已知的短句，可先进入整稿编排，展示池无需先找到刚好容纳该句的独立镜头。卖点、具体痛点和指定画面按本句画面要求独立选取，配音与字幕始终逐句对齐。
 
 - `ai_editor._inventory` 通读脚本，根据已有描述分类和宽召回；描述只作索引。
 - 卖点候选每轮 8 个，逐个重新抽带时间戳的 8 帧供模型观察，不明确时加密到 16 帧。未审完或存在未知项时，不宣布全库缺素材。

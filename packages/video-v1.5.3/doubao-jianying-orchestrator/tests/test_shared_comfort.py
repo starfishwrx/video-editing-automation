@@ -1,81 +1,86 @@
-import tempfile
+"""Exercise actual solved cuts, colocated candidates and protected selections."""
+import sys
 import unittest
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from orchestrator.selection import ai_editor, usage_ledger
-
-
-def _plan(video_a, video_b, text):
-    return (
-        {"shots": [
-            {"shot_id": "a", "video": video_a, "source_start": 0.0, "source_end": 4.0},
-            {"shot_id": "b", "video": video_b, "source_start": 0.0, "source_end": 4.0},
-        ]},
-        {"sentences": [{"index": 3, "kind": "selling_point", "text": text,
-                        "selling_points": [{"text": text}]}],
-         "rows": [{"index": 3, "parts": [{"shot_id": "a", "audio_duration_us": 1_500_000,
-                                          "source_start_us": 1_000_000}]}],
-         "reviews": {"3": [
-             {"shot_id": "a", "verdict": "matched",
-              "evidence_intervals_us": [{"start": 1_000_000, "end": 2_500_000}]},
-             {"shot_id": "b", "verdict": "matched",
-              "evidence_intervals_us": [{"start": 500_000, "end": 1_500_000}]},
-         ]}},
-    )
+import test_selection_recovery as fixtures
 
 
 class SharedComfortTests(unittest.TestCase):
-    def test_overlapping_surface_shot_switches_to_another_matched_shot(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = str(Path(tmp) / "ledger.json")
-            video_a, video_b = r"D:\pool\soft\a.mp4", r"D:\pool\soft\b.mp4"
-            usage_ledger.record(
-                {"usage_ledger_path": path, "record_id": "other", "draft_name": "别的任务"},
-                [{"video": video_a, "source_start": 1.0, "source_end": 3.0}])
-            analysis, plan = _plan(video_a, video_b, "面层柔软又舒适")
-            manifest = {"usage_ledger_path": path, "record_id": "task-b",
-                        "draft_name": "本任务", "ledger_task": "task-b"}
-            self.assertTrue(ai_editor._repair_shared_comfort_shot(
-                manifest, analysis, plan, Path(tmp)))
-            part = plan["rows"][0]["parts"][0]
-            self.assertEqual(part["shot_id"], "b")
-            self.assertNotIn("source_start_us", part)
-            self.assertEqual(part["audio_duration_us"], 1_500_000)
+    def setUp(self):
+        fixture = fixtures.SelectionRecoveryTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        self.manifest = {**fixture.manifest, "usage_ledger_path": str(fixture.root / "ledger.json"),
+                         "record_id": "current", "draft_name": "current"}
+        self.plan = fixture.plan()
+        self.analysis = fixture.analysis
+        self.video = fixture.shots[0]["video"]
+        # Same physical file, another observed scene at a disjoint time.
+        fixture.shots.append({**fixture.shots[0], "shot_id": "alternative", "source_start": 5})
+        self.plan["sentences"][0]["candidate_ids"].append("alternative")
+        self.plan["reviews"]["1"].append({**fixture.reviews["1"][0], "shot_id": "alternative",
+            "evidence_intervals_us": [{"start": 7_000_000, "end": 7_500_000}]})
 
-    def test_only_matched_shot_stays(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = str(Path(tmp) / "ledger.json")
-            video_a, video_b = r"D:\pool\soft\a.mp4", r"D:\pool\soft\b.mp4"
-            usage_ledger.record(
-                {"usage_ledger_path": path, "record_id": "other", "draft_name": "别的任务"},
-                [{"video": video_a, "source_start": 1.0, "source_end": 3.0}])
-            analysis, plan = _plan(video_a, video_b, "柔软舒适")
-            plan["reviews"]["3"] = plan["reviews"]["3"][:1]
-            manifest = {"usage_ledger_path": path, "record_id": "this", "draft_name": "本任务"}
-            self.assertFalse(ai_editor._repair_shared_comfort_shot(
-                manifest, analysis, plan, Path(tmp)))
-            self.assertEqual(plan["rows"][0]["parts"][0]["shot_id"], "a")
+    def record(self, intervals, task="other"):
+        cuts = [{"video": self.video, "scene_source_start": 0, "scene_source_end": 10,
+                 "source_start": a, "source_end": b} for a, b in intervals]
+        usage_ledger.record({**self.manifest, "record_id": task, "draft_name": "earlier"},
+                            [], placed_cuts=cuts)
 
-    def test_same_task_and_absorption_lines_stay(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = str(Path(tmp) / "ledger.json")
-            video_a, video_b = r"D:\pool\soft\a.mp4", r"D:\pool\soft\b.mp4"
-            usage_ledger.record(
-                {"usage_ledger_path": path, "record_id": "same", "draft_name": "同任务另一版"},
-                [{"video": video_a, "source_start": 1.0, "source_end": 3.0}])
-            analysis, plan = _plan(video_a, video_b, "面层柔软")
-            manifest = {"usage_ledger_path": path, "record_id": "same", "draft_name": "本任务"}
-            self.assertFalse(ai_editor._repair_shared_comfort_shot(
-                manifest, analysis, plan, Path(tmp)))
-            absorption = _plan(video_a, video_b, "吸收效果杠杠好")[1]
-            usage_ledger.record(
-                {"usage_ledger_path": path, "record_id": "other", "draft_name": "别的任务"},
-                [{"video": video_a, "source_start": 1.0, "source_end": 3.0}])
-            other = {"usage_ledger_path": path, "record_id": "rec-b", "draft_name": "另一条"}
-            self.assertFalse(ai_editor._repair_shared_comfort_shot(
-                other, analysis, absorption, Path(tmp)))
-            self.assertEqual(absorption["rows"][0]["parts"][0]["shot_id"], "a")
+    def vary(self):
+        menu = ai_editor._build_edit_inventory(self.manifest, self.analysis, self.plan, None)
+        ai_editor._vary_shared_comfort(self.manifest, self.analysis, self.plan, None, menu)
+        return self.plan["rows"][0]["parts"][0]["shot_id"]
 
+    def test_separate_actual_cuts_in_one_scene_are_retained(self):
+        self.record([(2, 3), (8, 9)])
+        used = usage_ledger.other_task_windows(self.manifest)
+        self.assertEqual([(r["start_us"], r["end_us"]) for r in used],
+                         [(2_000_000, 3_000_000), (8_000_000, 9_000_000)])
+        self.assertEqual(self.vary(), "alternative")
 
-if __name__ == "__main__":
-    unittest.main()
+    def test_unplaced_scene_remainder_and_same_task_do_not_trigger_repair(self):
+        self.record([(4, 5)])
+        self.assertEqual(self.vary(), "shot1")
+        self.record([(2, 3)], task="current")
+        self.assertEqual(self.vary(), "shot1")
+
+    def test_timing_evidence_or_insufficient_alternative_preserves_selection(self):
+        self.record([(2, 3)])
+        self.plan["reviews"]["1"][0]["time_sensitive"] = True
+        self.assertEqual(self.vary(), "shot1")
+        self.plan["reviews"]["1"][0]["time_sensitive"] = False
+        self.plan["reviews"]["1"][1]["confidence"] = .5
+        self.assertEqual(self.vary(), "shot1")
+
+    def test_verified_action_stays_when_same_source_window_was_used(self):
+        from test_presentation_windows import phase
+        self.record([(0, 2)])
+        self.plan["rows"][0]["parts"][0].pop("source_start_us")
+        review = self.plan["reviews"]["1"][0]
+        review.update(presentation_observation=phase(),
+                      evidence_intervals_us=[{"start": 700_000, "end": 1_100_000}])
+        self.assertEqual(self.vary(), "shot1")
+
+    def test_writer_cuts_keep_each_physical_window_and_original_scene(self):
+        from orchestrator.application.engine import OrchestrationEngine
+        from orchestrator.domain.clips import Clip
+        engine = OrchestrationEngine.__new__(OrchestrationEngine)
+        engine._raw_segments = [{"span_parts": [{"video": self.video, "scene_source_start": 0},
+                                                {"video": self.video, "scene_source_start": 0}]}]
+        engine._clips = [Clip(video=self.video, text="", raw_index=0, multi_shot=True, span_index=i,
+                              source_start=start, duration=0.5, video_speed=1.5)
+                         for i, start in enumerate([2, 8])]
+        usage_ledger.record({**self.manifest, "draft_name": "earlier", "record_id": "other"},
+                            [], placed_cuts=engine.placed_cuts())
+        used = usage_ledger.other_task_windows(self.manifest)
+        self.assertEqual([(r["start_us"], r["end_us"]) for r in used],
+                         [(2_000_000, 2_750_000), (8_000_000, 8_750_000)])
+
+    def test_failed_alternate_is_discarded(self):
+        self.record([(2, 3)])
+        self.plan["reviews"]["1"][1]["source_identity"] = {"path": "stale"}
+        self.assertEqual(self.vary(), "shot1")

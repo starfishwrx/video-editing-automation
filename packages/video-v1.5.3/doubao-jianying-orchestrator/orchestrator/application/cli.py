@@ -1159,7 +1159,8 @@ def cmd_build(args) -> int:
     if manifest.get("usage_ledger_path"):
         try:
             if result.get("status") == "SUCCESS":
-                result["usage_ledger"] = usage_ledger.record(manifest, manifest.get("segments") or [])
+                result["usage_ledger"] = usage_ledger.record(manifest, manifest.get("segments") or [],
+                    placed_cuts=eng.placed_cuts())
             else:
                 usage_ledger.release(manifest)
         except (OSError, TimeoutError, ValueError) as exc:
@@ -1588,7 +1589,8 @@ def cmd_recover(args) -> int:
         ledger_manifest = {**manifest, "usage_ledger_path": str(ledger)}
         try:
             if result.get("status") == "SUCCESS":
-                result["usage_ledger"] = usage_ledger.record(ledger_manifest, manifest.get("segments") or [])
+                result["usage_ledger"] = usage_ledger.record(ledger_manifest, manifest.get("segments") or [],
+                    placed_cuts=eng.placed_cuts())
             if cached.get("draft_name") and cached["draft_name"] != manifest.get("draft_name"):
                 usage_ledger.release({**ledger_manifest, "draft_name": cached["draft_name"]})
         except (OSError, TimeoutError, ValueError) as exc:
