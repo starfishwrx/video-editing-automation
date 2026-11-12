@@ -7,6 +7,14 @@
 
 ## 新增条目
 
+### L-20261112-change-scope 历史目录禁令要检查实际变更路径
+- status: OPEN
+- hits: 1
+- 模块: 开发检查 / CI
+- 以后怎么做: 路径检查必须覆盖删除与重命名两端，使用明确提交与 NUL 分隔；比较失败不能变成空路径 PASS。PR 文本或标签不是自授权例外，既有实验与历史包分开处理。检查自身仍须代码审阅。
+- 证据: ADR 0011、tools/check_repository_scope.py、tests/test_repository_scope.py；Windows 聚合同时要求范围检查成功。
+
+
 ### L-20261112-media-duration-concurrency 并行切镜须核对两种写入器的时长
 
 - status: OPEN
