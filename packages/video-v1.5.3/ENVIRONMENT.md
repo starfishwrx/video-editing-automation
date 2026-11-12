@@ -109,7 +109,8 @@ See [model and image-call details](https://github.com/starfishwrx/video-editing-
 | `JY_VISION_SLOTS` | `20` by default | Cross-process vision slots; AI editor also shares these slots |
 | `JY_VISION_TEXT_WORKERS` | Same as batch workers; capped by batch workers | Concurrent text-review requests; both independent reads remain required |
 | `JY_VISION_PREP_WORKERS` | `2` | Per-process media preparation workers; independent of API workers |
-| `JY_VISION_PREP_SLOTS` | `2` | Shared cross-process media preparation slots, released before API calls |
+| `JY_VISION_PREP_SLOTS` | `2` | Shared cross-process slots for visual frame preparation, sheets and QC media work |
+| `JY_SOURCE_PREP_SLOTS` | `8` | Host-wide concurrent source probes, cuts and representative frames. An explicitly set `prep_slots` also caps cold sources when `source_prep_slots` is omitted. To raise the cold limit above the default, set `source_prep_slots` in the concurrency policy JSON. |
 | `JY_VISION_PREP_TIMEOUT` | `600` seconds | Media slot wait; timeout fails without starting an unbounded preparation |
 | `JY_VISION_TIMEOUT` | `360` seconds maximum under default policy | Cancellable total HTTP deadline, bounded by remaining stage/task time |
 | `JY_AI_EDITOR_TIMEOUT_S` | `JY_VISION_TIMEOUT`, otherwise `360` | Can tighten the policy's request deadline |

@@ -188,6 +188,8 @@ class BatchDispatchTests(unittest.TestCase):
         released = threading.Event()
         prepared, ran = [], []
         def prepare(task, directory, env):
+            policy = json.loads(Path(env["JY_CONCURRENCY_POLICY_FILE"]).read_text(encoding="utf-8"))
+            self.assertEqual((policy["source_prep_slots"], policy["prep_slots"]), (4, 2))
             prepared.append(task["material_dir"])
             if task["material_dir"] == "cold":
                 self.assertTrue(released.wait(5), "ready task was blocked behind cold material waiters")
@@ -201,7 +203,7 @@ class BatchDispatchTests(unittest.TestCase):
             return {"record_id": task["record_id"], "formal_deliveries": 0}
         tasks = [{"record_id": f"cold-{i}", "material_dir": "cold"} for i in range(4)]
         tasks += [{"record_id": "ready", "material_dir": "hot"}]
-        result = dispatch.dispatch(tasks, work=self.root, policy=self.policy, preparer=prepare, runner=run)
+        result = dispatch.dispatch(tasks, work=self.root, policy=replace(self.policy, source_prep_slots=4), preparer=prepare, runner=run)
         self.assertEqual(ran[0], "ready")
         self.assertEqual(sorted(prepared), ["cold", "hot"])
         self.assertEqual(len([row for row in result if row.get("stage") != "material"]), 5)

@@ -5,9 +5,12 @@ are accelerators, not quality certificates; visual and text gates still run.
 """
 from __future__ import annotations
 
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import copy
 import json
 import os
+from functools import partial
+from itertools import islice
 from pathlib import Path
 from typing import Callable
 
@@ -131,6 +134,68 @@ def _restore_product_observations(manifest, result, prior):
                 vision._apply_cached_visual(shot, facts, key)
 
 
+def _prepare_source(source: Path, *, manifest: dict, base_dir: Path, root: Path,
+                    ffmpeg, ffprobe, threshold: float, min_shot_s: float):
+    from ..selection import shot_analyzer
+    from ..runtime.runtime_policy import media_slot
+
+    try:
+        signature = contract.source_identity(source)
+    except OSError:
+        return None, {"issues": [{"type": "source_missing", "video": str(source)}]}, False
+    identity = {"source": signature, "threshold": threshold, "min_shot_s": min_shot_s,
+                "protocol": "scene-representatives-us-v1"}
+    key = contract.digest(identity)
+    source_dir = root / "sources" / key
+    path = source_dir / "prepared.json"
+    with file_lock(path, timeout=7200):
+        prepared = _read(path)
+        reusable = (isinstance(prepared, dict) and prepared.get("identity") == identity
+                    and prepared.get("analysis", {}).get("ok")
+                    and _present(p for row in prepared["analysis"].get("shots", [])
+                                 for p in row.get("frame_paths", [])))
+        if reusable and (not ffprobe or prepared.get("duration_contract") == DURATION_CONTRACT):
+            return signature, prepared["analysis"], True
+        with media_slot(timeout=600, cold_source=True) as handle:
+            if not handle.acquired:
+                raise TimeoutError("MEDIA_PREPARE_SLOT_TIMEOUT")
+            if reusable:
+                refreshed = _refresh_duration(prepared, source, signature, ffprobe=ffprobe, ffmpeg=ffmpeg)
+                if refreshed is not None:
+                    _save(path, refreshed)
+                    return signature, refreshed["analysis"], True
+            result = shot_analyzer.analyze_manifest(
+                {**manifest, "material_sources": [str(source)], "shot_analysis": None},
+                base_dir, source_dir, ffmpeg=ffmpeg, ffprobe=ffprobe,
+                threshold=threshold, min_shot_s=min_shot_s)
+        if signature != contract.source_identity(source):
+            raise ValueError("MATERIAL_SOURCE_CHANGED_DURING_PREPARATION")
+        if ffprobe and any(row.get("material_duration_confidence") != "HIGH"
+                           for row in result.get("shots", [])):
+            raise ValueError("MATERIAL_DURATION_BOUND_UNCONFIRMED")
+        if result.get("ok"):
+            _save(path, {"identity": identity, "analysis": result,
+                         **({"duration_contract": DURATION_CONTRACT} if ffprobe else {})})
+    return signature, result, False
+
+
+def _prepare_sources(sources, prepare, workers):
+    """Observe failures as jobs finish, but return rows in manifest order."""
+    if workers <= 1:
+        return [prepare(source) for source in sources]
+    jobs = iter(enumerate(sources))
+    results = [None] * len(sources)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        pending = {pool.submit(prepare, source): i for i, source in islice(jobs, workers)}
+        while pending:
+            done, _ = wait(pending, return_when=FIRST_COMPLETED)
+            for future in done:
+                results[pending.pop(future)] = future.result()
+            for i, source in islice(jobs, len(done)):
+                pending[pool.submit(prepare, source)] = i
+    return results
+
+
 def analyze_product(manifest: dict, base_dir: Path, report_dir: Path, *, ffmpeg=None,
                     ffprobe=None, threshold=.30, min_shot_s=.45, vision=True) -> dict:
     """Serialize one product's cold dependency, while reusing each unchanged source.
@@ -140,7 +205,7 @@ def analyze_product(manifest: dict, base_dir: Path, report_dir: Path, *, ffmpeg=
     """
     from ..selection import shot_analyzer
     from . import vision_analyzer
-    from ..runtime.runtime_policy import media_slot
+    from ..runtime.runtime_policy import load_policy
     sources = shot_analyzer.manifest_sources(manifest, base_dir)
     root = cache_root(report_dir)
     product = product_key(manifest, sources)
@@ -148,56 +213,19 @@ def analyze_product(manifest: dict, base_dir: Path, report_dir: Path, *, ffmpeg=
     with file_lock(root / "products" / product, timeout=float(os.environ.get("JY_VISION_CACHE_WAIT_TIMEOUT", "7200"))):
         shots, issues, inventory, warnings = [], [], [], []
         hits = 0
-        for index, source in enumerate(sources, 1):
-            try:
-                signature = contract.source_identity(source)
-            except OSError:
-                issues.append({"type": "source_missing", "video": str(source)})
-                continue
-            identity = {"source": signature, "threshold": threshold, "min_shot_s": min_shot_s,
-                        "protocol": "scene-representatives-us-v1"}
-            key = contract.digest(identity)
-            source_dir = root / "sources" / key
-            path = source_dir / "prepared.json"
-            with file_lock(path, timeout=7200):
-                prepared = _read(path)
-                reusable = (isinstance(prepared, dict) and prepared.get("identity") == identity
-                            and prepared.get("analysis", {}).get("ok")
-                            and _present(p for row in prepared["analysis"].get("shots", [])
-                                         for p in row.get("frame_paths", [])))
-                if reusable and ffprobe:
-                    refreshed = _refresh_duration(prepared, source, signature, ffprobe=ffprobe, ffmpeg=ffmpeg)
-                    if refreshed is None:
-                        reusable = False
-                    elif refreshed is not prepared:
-                        prepared = refreshed
-                        _save(path, prepared)
-                if reusable:
-                    result = prepared["analysis"]
-                    hits += 1
-                else:
-                    with media_slot(timeout=600) as handle:
-                        if not handle.acquired:
-                            raise TimeoutError("MEDIA_PREPARE_SLOT_TIMEOUT")
-                        result = shot_analyzer.analyze_manifest(
-                            {**manifest, "material_sources": [str(source)], "shot_analysis": None},
-                            base_dir, source_dir, ffmpeg=ffmpeg, ffprobe=ffprobe,
-                            threshold=threshold, min_shot_s=min_shot_s)
-                    if signature != contract.source_identity(source):
-                        raise ValueError("MATERIAL_SOURCE_CHANGED_DURING_PREPARATION")
-                    if ffprobe and any(row.get("material_duration_confidence") != "HIGH"
-                                       for row in result.get("shots", [])):
-                        raise ValueError("MATERIAL_DURATION_BOUND_UNCONFIRMED")
-                    if result.get("ok"):
-                        _save(path, {"identity": identity, "analysis": result,
-                                     **({"duration_contract": DURATION_CONTRACT} if ffprobe else {})})
-                for number, original in enumerate(result.get("shots", []), 1):
-                    row = copy.deepcopy(original)
-                    row["shot_id"] = f"source_{index:03d}_shot_{number:03d}"
-                    shots.append(row)
-                issues.extend(result.get("issues", []))
-                warnings.extend(result.get("warnings", []))
-            inventory.append(signature)
+        workers = max(1, min(len(sources), load_policy().source_prep_slots))
+        prepare = partial(_prepare_source, manifest=manifest, base_dir=base_dir, root=root,
+                          ffmpeg=ffmpeg, ffprobe=ffprobe, threshold=threshold, min_shot_s=min_shot_s)
+        for index, (signature, result, reused) in enumerate(_prepare_sources(sources, prepare, workers), 1):
+            if signature is not None:
+                inventory.append(signature)
+            hits += int(reused)
+            for number, original in enumerate(result.get("shots", []), 1):
+                row = copy.deepcopy(original)
+                row["shot_id"] = f"source_{index:03d}_shot_{number:03d}"
+                shots.append(row)
+            issues.extend(result.get("issues", []))
+            warnings.extend(result.get("warnings", []))
         result = {"version": shot_analyzer._skill_version(), "scope": "shared_product",
                   "sources": [str(p) for p in sources], "shots": shots, "issues": issues,
                   "pending_items": list(issues), "warnings": list(warnings), "library_write": [],
