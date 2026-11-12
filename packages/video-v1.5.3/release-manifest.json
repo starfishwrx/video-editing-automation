@@ -6,7 +6,7 @@
     "machine-specific paths",
     "knowledge-base bodies"
   ],
-  "file_count": 463,
+  "file_count": 471,
   "files": [
     {
       "path": ".gitignore"
@@ -318,6 +318,9 @@
       "path": "doubao-jianying-orchestrator/orchestrator/policy/playback.py"
     },
     {
+      "path": "doubao-jianying-orchestrator/orchestrator/policy/presentation.py"
+    },
+    {
       "path": "doubao-jianying-orchestrator/orchestrator/policy/production_parameters.py"
     },
     {
@@ -442,6 +445,9 @@
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/selection/ai_editor_recovery.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/selection/editorial_actions.py"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/selection/experiment_contract.py"
@@ -633,6 +639,9 @@
       "path": "doubao-jianying-orchestrator/references/production_quality_and_lessons.md"
     },
     {
+      "path": "doubao-jianying-orchestrator/references/requirement_levels.md"
+    },
+    {
       "path": "doubao-jianying-orchestrator/references/runtime_contract.md"
     },
     {
@@ -771,6 +780,9 @@
       "path": "doubao-jianying-orchestrator/tests/test_preferred_speed.py"
     },
     {
+      "path": "doubao-jianying-orchestrator/tests/test_presentation_windows.py"
+    },
+    {
       "path": "doubao-jianying-orchestrator/tests/test_production_playback.py"
     },
     {
@@ -784,6 +796,9 @@
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_ready_work.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/tests/test_recovery_audio_preparation.py"
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_reference_sentence_planning.py"
@@ -1185,6 +1200,9 @@
       "path": "tests/test_draft_delivery.py"
     },
     {
+      "path": "tests/test_dynamic_loading.py"
+    },
+    {
       "path": "tests/test_eval_bootstrap.py"
     },
     {
@@ -1293,6 +1311,9 @@
       "path": "tools/check_architecture.py"
     },
     {
+      "path": "tools/check_dynamic_loading.py"
+    },
+    {
       "path": "tools/classify_feedback.py"
     },
     {
@@ -1309,6 +1330,9 @@
     },
     {
       "path": "tools/draft_delivery.py"
+    },
+    {
+      "path": "tools/dynamic_loading_adapters.json"
     },
     {
       "path": "tools/eval_bootstrap.py"

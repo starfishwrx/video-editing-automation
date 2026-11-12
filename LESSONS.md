@@ -7,6 +7,15 @@
 
 ## 新增条目
 
+### L-20261112-dynamic-adapter-inventory 动态加载需显式盘点，低引用不等于废弃
+
+- status: OPEN
+- hits: 1
+- 模块: tools.check_dynamic_loading / 文档入口
+- 下次避免: 静态 import 检查不能证明动态依赖边界；记录合法适配位置、用途和验证，再检查新增位置/API计数漂移。相同计数目标变化仍须行为测试和审查。旧日期规则、薄适配器与低引用诊断工具先查运行合同，不能按名字删。
+- 强制检查: `tests/test_dynamic_loading.py` 覆盖新业务加载器、别名、追加调用、删除清单项和兼容exec；`test_modular_architecture.py` 继续验证同包资源与共享状态。
+- 未覆盖: 运行时目标证明、反射/赋值别名、外部宿主任务使用情况；见 `docs/repository-cleanup-inventory.md` 和 ADR 0003。
+
 ### L-20261112-media-duration-concurrency 并行切镜须核对两种写入器的时长
 
 - status: OPEN

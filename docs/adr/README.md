@@ -8,7 +8,7 @@
 
 - [0001 运行时身份与固定活代码目录](0001-runtime-identity.md)
 - [0002 AI 选镜与直连视觉](0002-ai-selection.md)（含纸品包装指向、数量展示、短句连播与整稿动作重复）
-- [0003 Windows 统一入口和功能包](0003-windows-modules.md)
+- [0003 Windows 统一入口和功能包](0003-windows-modules.md)（含动态加载适配清单与有限漂移检查）
 - [0004 逐句 TTS 字幕与必要校验](0004-subtitles-and-hashes.md)
 - [0005 原生写稿、兼容回退与独立 QC](0005-writing-qc.md)
 - [0006 短窗证据继承与放置](0006-short-window.md)

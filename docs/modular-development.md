@@ -44,7 +44,7 @@
 
 在活包根运行 `uv run --frozen python -X utf8 -m tools.check_architecture`。Windows CI 和默认包级测试都会执行相关边界检查：旧入口不得承载业务实现；实现模块不得反向引用旧导入路径；下层不得依赖 application；runtime/media 不得依赖选镜、视觉、音频、规则、质检或分发；domain 不得依赖其他功能包。函数内部的延迟 import 也会检查。新增功能模块可以直接放进功能包，无需增加旧入口；只有为既有调用路径迁移时才维护 module_map。
 
-根级公共合同也检查导入，不能反向加载application或worker/交付工具；原位分发适配器保留其tools依赖。`tools/queueing` 不加载worker、其他tools层或编排业务；`tools/acceptance` 不反向依赖worker、workflow或dispatcher；tools三层都拒绝应用层及旧兼容导入。规则覆盖静态Python导入语句（含函数内部）；按文件动态加载继续由独立合同测试验证。
+根级公共合同也检查导入，不能反向加载application或worker/交付工具；原位分发适配器保留其tools依赖。`tools/queueing` 不加载worker、其他tools层或编排业务；`tools/acceptance` 不反向依赖worker、workflow或dispatcher；tools三层都拒绝应用层及旧兼容导入。规则覆盖静态Python导入语句（含函数内部）；动态加载的适配文件/API数量盘点也接入此检查，详见[清理盘点](repository-cleanup-inventory.md)。实际加载目标和包外行为继续由独立合同测试及代码审查验证。
 
 本轮保留了原来选镜、场景规则与视觉观测之间的延迟双向调用，以及 runtime/media 的环境适配关联。引擎和 CLI 仍有较大的应用编排函数；本轮没有把这些共享状态隐蔽地拆成 mixin，也不声称已经得到完全无环依赖图。后续可用显式的分析结果/任务上下文进一步分离准备、规划和写稿服务，逐条增加依赖约束。
 
@@ -65,3 +65,11 @@
 整个项目的运行入口为 `scripts/run_pipeline.ps1`，内部调用 `tools/workflow/scheduled.py` 和 dispatcher；Windows 计划任务只负责周期触发这一完整入口。验收计算集中在 `tools/acceptance`，worker 负责调度适配与阶段调用。交付上下文显式传参，不修改 worker 全局路径或调用方环境。
 
 Mac 交接及人工准备／收集已删除，正式交付只依据四项当前证据。历史导入仅保留仍有效的 `production_eval` 兼容层，不为退役交接保留可执行实现。详细运行方式见 [Windows 脚本流水线](windows-pipeline.md)。本次真实删除旧路径，因此同步路径型库存清单；不新增文件哈希门槛，不升级 VERSION。
+
+## 动态加载适配器盘点（2026-11-12）
+
+`tools/dynamic_loading_adapters.json` 列出当前活包的动态加载适配文件、API 调用计数、用途和验证入口。`tools.check_dynamic_loading` 不导入运行时代码；`tools.check_architecture` 在实际包检查时调用它，现有 Package CI 和测试收录。它扫描活包 Python（排除 tests、vendor、虚拟环境/缓存），覆盖 importlib/runpy、直接 `__import__`、loader 执行及 exec/eval，包括普通 import 别名和函数内调用。
+
+这是**新增位置/API数量的漂移检查**，不是完整动态依赖证明或安全沙箱。相同文件/计数下的目标表达式替换、函数间移动、赋值/反射别名不能保证发现；相同名字跨作用域时保守合并可能误报。不要通过改名绕过检查，改成静态导入或经审查更新适配清单。目标身份、同包资源、模块状态及独立加载仍须现有行为回归；新增清单项必须解释用途及验证位置。清单不授予业务模块跨层依赖权限。
+
+本轮保留既有加载实现，不把这些合法适配器搬成通用插件加载器，也不修改生产选镜、QC 或部署。检查限于当前包，历史/实验/vendor 有独立维护边界；清理路径检查见独立 PR #74，两者不互相替代。
