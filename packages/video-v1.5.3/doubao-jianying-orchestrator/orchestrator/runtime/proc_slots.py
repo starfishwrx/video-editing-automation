@@ -86,7 +86,8 @@ class SlotHandle:
 
 @contextmanager
 def slot(name: str, capacity: int, *, timeout: float = 120.0,
-         poll: float = 0.2, slot_dir: Optional[Path] = None) -> Iterator[SlotHandle]:
+         poll: float = 0.2, slot_dir: Optional[Path] = None,
+         prefer_high: bool = False, first_index: int = 0) -> Iterator[SlotHandle]:
     """占用 ``name`` 资源的一个槽位。``capacity<=0`` 表示不限流，直接放行。"""
     if capacity <= 0:
         yield SlotHandle(name, -1, 0.0)
@@ -97,8 +98,11 @@ def slot(name: str, capacity: int, *, timeout: float = 120.0,
     deadline = start + max(0.0, timeout)
     fd: Optional[int] = None
     index: Optional[int] = None
+    indices = range(first_index, first_index + capacity)
+    if prefer_high:
+        indices = indices[::-1]
     while True:
-        for i in range(capacity):
+        for i in indices:
             path = root / f"{name}.{i}.lock"
             try:
                 candidate = os.open(str(path), os.O_RDWR | os.O_CREAT, 0o666)

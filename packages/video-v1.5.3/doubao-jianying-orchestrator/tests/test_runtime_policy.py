@@ -1,3 +1,4 @@
+from contextlib import ExitStack
 import json
 import os
 from pathlib import Path
@@ -31,6 +32,26 @@ class RuntimePolicyTests(unittest.TestCase):
                 path.write_text('{"vision_slots": 0}')
                 with self.assertRaises(ValueError):
                     rp.load_policy()
+
+    def test_source_slots_share_host_capacity_and_preserve_old_explicit_limits(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "policy.json"
+            with patch.dict(os.environ, {"JY_CONCURRENCY_POLICY_FILE": str(path)}, clear=True):
+                config = {"slot_dir": directory, "prep_slots": 2}
+                path.write_text(json.dumps(config))
+                self.assertEqual(rp.load_policy().source_prep_slots, 2)
+                config["source_prep_slots"] = 4
+                path.write_text(json.dumps(config))
+                with ExitStack() as stack:
+                    def acquire(cold):
+                        return stack.enter_context(rp.media_slot(timeout=0, cold_source=cold)).acquired
+
+                    for _ in range(4):
+                        self.assertTrue(acquire(True))
+                    self.assertFalse(acquire(True))
+                    self.assertTrue(acquire(False))
+                    self.assertFalse(acquire(True))
+                    self.assertFalse(acquire(False))
 
     def test_failed_slot_is_never_unlimited(self):
         with tempfile.TemporaryDirectory() as directory:

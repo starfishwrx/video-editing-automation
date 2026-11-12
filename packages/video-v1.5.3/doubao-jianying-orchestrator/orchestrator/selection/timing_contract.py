@@ -38,6 +38,7 @@ import json
 import math
 import re
 import subprocess
+import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Optional
 from ..policy import playback, presentation
@@ -97,6 +98,11 @@ PROBE_CONFIDENCE_HIGH = "HIGH"
 PROBE_CONFIDENCE_LOW = "LOW"
 
 
+# libmediainfo resets process-wide options after each parse. Concurrent opens
+# can return invalid XML and silently lose the legacy writer's tighter bound.
+_MEDIAINFO_LOCK = threading.Lock()
+
+
 def probe_material_duration_us(path: Any, *, ffprobe: str | None = None,
                                ffmpeg: str | None = None) -> dict:
     """素材**总时长**的唯一探测口：返回 ``{"duration_us", "source",
@@ -146,8 +152,9 @@ def probe_material_duration_us(path: Any, *, ffprobe: str | None = None,
     mediainfo_us = 0
     try:
         import pymediainfo
-        info = pymediainfo.MediaInfo.parse(
-            target, mediainfo_options={"File_TestContinuousFileNames": "0"})
+        with _MEDIAINFO_LOCK:
+            info = pymediainfo.MediaInfo.parse(
+                target, mediainfo_options={"File_TestContinuousFileNames": "0"})
         if info and info.video_tracks:
             ms = info.video_tracks[0].duration
             if ms and isinstance(ms, (int, float)) and math.isfinite(float(ms)) and float(ms) > 0:
