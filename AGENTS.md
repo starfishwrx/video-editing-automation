@@ -4,8 +4,8 @@
 
 ## 0. 开始前先读
 
-1. **版本身份**：可改的候选包目录是 `packages/video-v1.5.3/`（目录名是历史代号，不随小版本改名）。真实版本只读该目录下的 `VERSION`（当前候选 **1.6.0**）。生产以部署机器的 `ACTIVE_VIDEO_RUNTIME.json` 与实际安装文件为准。开发使用从 `main` 创建的干净功能分支/工作树。1.5.4/1.5.5 为隔离索引实验，不作默认入口。
-2. **文档入口**：先读 [`docs/README.md`](docs/README.md)。子系统文档与代码路径一律指向 `packages/video-v1.5.3/`。`packages/video-v1.5.2/` 及更早是历史归档，禁止修改。
+1. **版本身份**：可改的候选包目录是 `packages/video-v1.5.3/`（目录名是历史代号，不随小版本改名）。真实版本只读该目录下的 `VERSION`。生产以部署机器的 `ACTIVE_VIDEO_RUNTIME.json` 与实际安装文件为准。开发使用从 `main` 创建的干净功能分支/工作树。1.5.4/1.5.5 为隔离索引实验，不作默认入口。
+2. **文档入口**：先读 [`docs/README.md`](docs/README.md) 与[仓库范围导航](docs/repository-navigation.md)，再按任务进入当前实现；不要把历史检索结果当成现行范例。子系统文档与代码路径一律指向 `packages/video-v1.5.3/`。`packages/video-v1.5.2/` 及更早是历史归档，禁止修改。
 3. **凭据**：只能来自环境变量 `JY_SKILL_ROOT` `JY_DRAFT_ROOT` `JY_INSTALL_ROOT` `JY_NAS_SHARE` `JY_NAS_USER` `NAS_PASSWORD` `LARK_BASE_TOKEN` 等（完整列表见包内 `ENVIRONMENT.md`）。不得写进代码、测试、日志或提交。
 4. **闸门**：`RULES.md` 的成片证据要求继续生效；formal 模式只认 `PASS`。素材缺失、窗口越界、字幕内容不符或独立 QC 失败必须拦住。哈希、签名或逐文件发布清单不是成片质量证据，禁止为普通修改新增这类门槛。
 5. **架构决策同步（必做）**：新增、调整或废弃架构决策时，必须在同一次变更、同一 PR 中新增或更新 [ADR](docs/adr/README.md)，记录日期、状态、背景、选择、原因、代价和证据；同步 ADR 索引、受影响的 RFC／子系统文档，并在 `docs/working.md` 留痕。不能只记在对话、计划或开发日志里。替代旧决策时保留原记录，更新其状态并双向关联。未改变架构决策的普通修复无需新增 ADR。
