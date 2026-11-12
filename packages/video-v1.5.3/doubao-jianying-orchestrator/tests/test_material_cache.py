@@ -23,7 +23,7 @@ class MaterialCacheTests(unittest.TestCase):
     def setUp(self):
         self.stack = contextlib.ExitStack()
         self.addCleanup(self.stack.close)
-        self.root = Path(self.stack.enter_context(tempfile.TemporaryDirectory()))
+        self.root = Path(self.stack.enter_context(tempfile.TemporaryDirectory())).resolve()
         env = {k: v for k, v in os.environ.items() if not k.startswith("JY_")}
         env.update(JY_VISION_CACHE_DIR=str(self.root / "cache"), JY_SLOT_DIR=str(self.root / "slots"),
                    JY_VISION_TEXT_PASS="1", JY_VISION_TEXT_MIN_SHOTS="1")
@@ -43,19 +43,74 @@ class MaterialCacheTests(unittest.TestCase):
             "frame_path": str(frame), "frame_paths": [str(frame)], "status": "pending_analysis"}], "issues": []}
 
     def test_concurrent_cold_media_is_prepared_once_before_observation(self):
-        barrier = threading.Barrier(2)
-        calls = []
+        other = self.root / "other.mp4"
+        other.write_bytes(b"second source")
+        sources = [str(self.video), str(other)]
+        manifest = {**self.manifest, "material_sources": sources}
+        tasks_ready = threading.Barrier(2)
+        second_finished = threading.Event()
+
         def run(index):
-            barrier.wait(5)
-            return material_cache.analyze_product(self.manifest, self.root, self.root / f"task{index}", vision=False)
-        def prepare(*args, **kwargs):
-            calls.append("prepare")
-            return self.raw(*args, **kwargs)
-        with mock.patch.object(shot_analyzer, "analyze_manifest", side_effect=prepare), ThreadPoolExecutor(2) as pool:
+            tasks_ready.wait(5)
+            return material_cache.analyze_product(manifest, self.root, self.root / f"task{index}", vision=False)
+
+        def prepare(manifest, *args, **kwargs):
+            if manifest["material_sources"] == [sources[0]]:
+                self.assertTrue(second_finished.wait(5), "second source never ran in parallel")
+            result = self.raw(manifest, *args, **kwargs)
+            if manifest["material_sources"] == [sources[1]]:
+                second_finished.set()
+            return result
+
+        with mock.patch.dict(os.environ, {"JY_VISION_PREP_SLOTS": "2"}), \
+                mock.patch.object(shot_analyzer, "analyze_manifest", side_effect=prepare) as cut, \
+                ThreadPoolExecutor(2) as pool:
             results = list(pool.map(run, (1, 2)))
-        self.assertEqual(calls, ["prepare"])
-        self.assertEqual(sum(r["material_cache"]["sources_hit"] for r in results), 1)
-        self.assertTrue(all(r["material_cache"]["ready"] for r in results))
+        self.assertCountEqual([c.args[0]["material_sources"][0] for c in cut.call_args_list], sources)
+        self.assertEqual(sorted(r["material_cache"]["sources_hit"] for r in results), [0, 2])
+        for result in results:
+            self.assertTrue(result["material_cache"]["ready"])
+            self.assertEqual([row["video"] for row in result["shots"]], sources)
+            self.assertEqual([row["shot_id"] for row in result["shots"]],
+                             ["source_001_shot_001", "source_002_shot_001"])
+
+    def test_failed_parallel_source_can_resume_from_completed_peer(self):
+        other = self.root / "other.mp4"
+        other.write_bytes(b"second source")
+        queued = self.root / "last.mp4"
+        queued.write_bytes(b"queued source")
+        sources = [str(self.video), str(other), str(queued)]
+        manifest = {**self.manifest, "material_sources": sources}
+        report = self.root / "product"
+        draining = threading.Event()
+
+        class ObservedPool(ThreadPoolExecutor):
+            def shutdown(self, *args, **kwargs):
+                draining.set()
+                return super().shutdown(*args, **kwargs)
+
+        def fail_one(manifest, *args, **kwargs):
+            source = manifest["material_sources"][0]
+            if source == str(other):
+                raise TimeoutError("source failed")
+            self.assertEqual(source, str(self.video), "queued source started after failure")
+            self.assertTrue(draining.wait(5), "failure hidden behind slower first source")
+            return self.raw(manifest, *args, **kwargs)
+
+        with mock.patch.dict(os.environ, {"JY_VISION_PREP_SLOTS": "2"}), \
+                mock.patch.object(material_cache, "ThreadPoolExecutor", ObservedPool), \
+                mock.patch.object(shot_analyzer, "analyze_manifest", side_effect=fail_one) as cut, \
+                mock.patch.object(vision, "enrich_with_vision") as enrich:
+            with self.assertRaisesRegex(TimeoutError, "source failed"):
+                material_cache.analyze_product(manifest, self.root, report)
+            self.assertCountEqual([c.args[0]["material_sources"][0] for c in cut.call_args_list], sources[:2])
+            enrich.assert_not_called()
+        self.assertFalse((report / "shot_candidates.json").exists())
+        with mock.patch.object(shot_analyzer, "analyze_manifest", side_effect=self.raw) as retry:
+            recovered = material_cache.analyze_product(manifest, self.root, report, vision=False)
+        self.assertTrue(recovered["ok"])
+        self.assertEqual(recovered["material_cache"]["sources_hit"], 1)
+        self.assertCountEqual([c.args[0]["material_sources"][0] for c in retry.call_args_list], sources[1:])
 
     def test_source_change_only_prepares_changed_source(self):
         other = self.root / "other.mp4"
