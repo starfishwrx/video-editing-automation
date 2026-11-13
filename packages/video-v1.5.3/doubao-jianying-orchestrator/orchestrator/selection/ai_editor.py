@@ -3310,6 +3310,61 @@ def _mix_repeated_displays(manifest, analysis, plan, timing, inventory):
         plan["rows"] = revised
 
 
+def _vary_shared_comfort(manifest, analysis, plan, timing, inventory):
+    """Change an ordinary fabric cut only if an equivalent solved cut avoids reuse."""
+    from . import shot_notes, shot_value, shot_usability, usage_ledger
+    eligible = {s["index"]: s for s in plan["sentences"] if _fabric_comfort_sentence(s)
+                and not s.get("scene_ids") and not s.get("qc_feedback")
+                and s.get("experiment_role") in (None, "other")}
+    if not eligible or plan.get("_frozen_segments") or manifest.get("shot_notes_general"):
+        return
+    others = usage_ledger.other_task_windows(manifest)
+    if not others:
+        return
+    frame = timing_contract.frame_us(float(manifest.get("fps") or 30))
+    def reused(cut):
+        return usage_ledger.overlaps_recorded_window(cut["video"], round(cut["source_start"] * 1e6),
+            round(cut["source_end"] * 1e6), others, frame_us=frame)
+
+    linked = {i for pair in _linked_hooks(plan) for i in pair}
+    originals = timing_contract.split_sentences(manifest)
+    menus = {m["index"]: m["candidates"] for m in inventory}
+    cuts = _assemble(manifest, analysis, plan, narration_timing=timing, verify_sources=True)["segments"]
+    for row in plan["rows"]:
+        index, parts = row["index"], row["parts"]
+        if (index not in eligible or index in linked or len(parts) != 1 or row.get("continuity_key")
+                or parts[0].get("window_review_key") or _row_has_presentation(plan, row)
+                or originals[index - 1].get("visual_requirements") or shot_notes.note_for(manifest, index, originals[index - 1])
+                or _touching(cuts, index, index - 1) or _touching(cuts, index, index + 1)
+                or not reused(cuts[index - 1])):
+            continue
+        menu = menus.get(index, [])
+        chosen = next((c for c in menu if c["shot_id"] == parts[0]["shot_id"]), None)
+        if not chosen or chosen.get("time_sensitive"):
+            continue
+        for alt in menu:
+            if (alt["shot_id"] == chosen["shot_id"] or alt.get("time_sensitive")
+                    or alt["basis"] != chosen["basis"] or alt["confidence"] < chosen["confidence"]
+                    or not set(chosen["supported_point_ids"]) <= set(alt["supported_point_ids"])
+                    or shot_value.rank({"plan": alt}) > shot_value.rank({"plan": chosen})
+                    or shot_usability.rank(alt)[1:] > shot_usability.rank(chosen)[1:]
+                    or (alt.get("usability") or {}).get("status") == "REJECTED"
+                    or not alt["technical_option"]["within_preferred_speed"]):
+                continue
+            revised = {**row, "parts": [{"shot_id": alt["shot_id"], "audio_duration_us": parts[0]["audio_duration_us"]}],
+                       "reason": "同等卖点覆盖，换用其他任务未使用的面层片段。"}
+            trial = [revised if r["index"] == index else r for r in plan["rows"]]
+            try:
+                proposed = _assemble(manifest, analysis, {**plan, "rows": trial},
+                                     narration_timing=timing, verify_sources=True)["segments"]
+            except (ValueError, KeyError, TypeError, OSError):
+                continue
+            if not reused(proposed[index - 1]):
+                plan["rows"] = trial
+                cuts = proposed
+                break
+
+
 def _vary_repeated_actions(manifest, analysis, plan, timing, inventory, *, directory=None):
     """Prefer a new action over a restart, only among equivalent, reviewed cuts."""
     from . import shot_notes, shot_value, shot_usability
@@ -3634,6 +3689,7 @@ technical_option是按本句完整配音求出的实际可行窗口；分配多�
             _mix_repeated_displays(manifest, analysis, plan, narration_timing, current_inventory)
             _place_hook_neighbors(manifest, analysis, plan, directory, narration_timing)
             _vary_repeated_actions(manifest, analysis, plan, narration_timing, current_inventory,directory=directory)
+            _vary_shared_comfort(manifest, analysis, plan, narration_timing, current_inventory)
             from . import camera_variety
             camera_variety.refine(manifest, analysis, plan, narration_timing, current_inventory, directory)
             plan["ok"] = True

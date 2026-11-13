@@ -214,7 +214,7 @@ def _context(manifest, analysis, members, narration_timing, pair, motion, shot_i
                              for m in allocated for p in m["parts"]], (paired_paths,))
     context = {"product": manifest.get("product"), "category": manifest.get("category"),
         "rules": identity.rules_identity(manifest), "pair_shot_ids": list(shot_ids), "sources": sources,
-        "members": allocated, "fps": fps,
+        "members": allocated, "fps": fps, "evidence_digest": identity.digest([pair, motion]),
         "source_selection": [p.get("source_selection") for p in planned]}
     if task_cap is not None:
         context["task_absorb_speed_cap"] = task_cap
@@ -225,6 +225,9 @@ def review_group(manifest, context, directory):
     """Independent joint placement review of the exact proposed sentence cuts."""
     from PIL import Image, ImageDraw
     from . import ai_editor as editor
+    # The allocation and receipt retain the cap. Identical physical cuts,
+    # evidence and sentence targets present the same question to the reviewer.
+    context = {k: v for k, v in context.items() if k != "task_absorb_speed_cap"}
     rows, tiles = [], []
     for member in context["members"]:
         for i, cut in enumerate(member["parts"]):
@@ -286,6 +289,10 @@ def validate_plan(manifest, analysis, plan, group, narration_timing):
                for m in group["input"]["members"]]
     context = _context(manifest, analysis, members, narration_timing, group["evidence"]["pair"],
                        group["evidence"]["motion"], group["input"]["pair_shot_ids"])
+    # Existing bounded groups predate the digest. Their underlying pair/motion
+    # artifacts were validated while reconstructing the allocation above.
+    if "evidence_digest" not in group["input"]:
+        context.pop("evidence_digest")
     if context != group["input"]:
         raise ValueError("CONTINUITY_INPUT_CHANGED")
     from . import ai_editor as editor

@@ -140,6 +140,67 @@ def other_task_usage(manifest: dict[str, Any]) -> tuple[dict[str, int], dict[str
             {key: len(tasks) for key, tasks in sources.items()})
 
 
+def segment_uses(segments: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One placed window per physical cut, so another task can avoid that segment."""
+    found: list[dict[str, Any]] = []
+    for seg in segments or []:
+        if not isinstance(seg, dict) or seg.get("visual_missing"):
+            continue
+        parts = seg.get("span_parts") if seg.get("multi_shot") else None
+        items = parts if isinstance(parts, list) and parts else [seg]
+        for part in items:
+            if not isinstance(part, dict):
+                continue
+            video = part.get("video") or seg.get("video")
+            if not video:
+                continue
+            start = part.get("source_start")
+            end = part.get("source_end")
+            try:
+                start_us = int(round(float(start) * 1_000_000))
+                end_us = int(round(float(end) * 1_000_000))
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if not 0 <= start_us < end_us:
+                continue
+            found.append({"key": shot_key(video, part.get("scene_source_start", start)), "video": str(video),
+                          "start_us": start_us, "end_us": end_us})
+    return found
+
+
+def other_task_windows(manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    """Physical windows used by other tasks with known bounds."""
+    found: list[dict[str, Any]] = []
+    for key, use, same in _other_uses(manifest):
+        if same or not isinstance(use, dict):
+            continue
+        # Legacy key-only uses still contribute to scene ranking. They cannot
+        # establish overlap between two cuts. Older single-window uses can.
+        for window in use.get("windows", [use]):
+            start, end = window.get("start_us"), window.get("end_us")
+            if isinstance(window.get("video"), str) and type(start) is int and type(end) is int and end > start:
+                found.append({"video": window["video"], "start_us": start, "end_us": end})
+    return found
+
+
+def overlaps_recorded_window(video: Any, start_us: int, end_us: int,
+                             others: Iterable[dict[str, Any]], *, frame_us: int) -> bool:
+    """True when this cut replays more than one frame of another task's segment."""
+    if type(start_us) is not int or type(end_us) is not int or end_us <= start_us:
+        return False
+    path = _norm_path(video)
+    for other in others:
+        if not isinstance(other, dict):
+            continue
+        recorded_start, recorded_end = other.get("start_us"), other.get("end_us")
+        if isinstance(other.get("video"), str) and type(recorded_start) is int and type(recorded_end) is int:
+            if _norm_path(other["video"]) != path:
+                continue
+            if min(end_us, recorded_end) - max(start_us, recorded_start) > frame_us:
+                return True
+    return False
+
+
 def segment_keys(segments: Iterable[dict[str, Any]]) -> list[str]:
     keys: list[str] = []
     for seg in segments or []:
@@ -214,14 +275,20 @@ def _record_presentations(manifest, segments, task, draft):
 
 
 def record(manifest: dict[str, Any], segments: Iterable[dict[str, Any]], *,
-           reserved: bool = False) -> dict[str, Any]:
+           reserved: bool = False, placed_cuts: Iterable[dict] | None = None) -> dict[str, Any]:
     """落本草稿用到的镜头；``reserved`` 是选镜后、成稿前的占位。"""
     raw = str(manifest.get("usage_ledger_path") or "").strip()
     task, draft = _identity(manifest)
     if not raw or not draft:
         return {"recorded": 0, "path": raw}
     segments = list(segments or [])
-    keys = segment_keys(segments)
+    cuts = segments if placed_cuts is None else list(placed_cuts)
+    keys = segment_keys(cuts)
+    windows = {}
+    for cut in segment_uses(cuts):
+        key = cut.pop("key")
+        if cut not in windows.setdefault(key, []):
+            windows[key].append(cut)
     now = time.strftime("%Y-%m-%dT%H:%M:%S")
     use = {"task": task, "draft": draft, "at": now, **({"reserved": True} if reserved else {})}
 
@@ -230,7 +297,7 @@ def record(manifest: dict[str, Any], segments: Iterable[dict[str, Any]], *,
         shots = data.setdefault("shots", {})
         for key in keys:
             uses = shots.setdefault(key, [])
-            uses.append(dict(use))
+            uses.append({**use, "windows": windows.get(key, [])})
             del uses[:-MAX_USES_PER_SHOT]
         if not reserved:
             data.setdefault("drafts", {})[draft] = {"task": task, "at": now, "shots": keys}

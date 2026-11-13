@@ -12,7 +12,7 @@
 - [0004 逐句 TTS 字幕与必要校验](0004-subtitles-and-hashes.md)
 - [0005 原生写稿、兼容回退与独立 QC](0005-writing-qc.md)
 - [0006 短窗证据继承与放置](0006-short-window.md)
-- [0007 实验组与默认接入意图](0007-experiment-groups.md)
+- [0007 实验组与默认接入意图](0007-experiment-groups.md)（含已确认窗口的精确计时、分相限速和复核缓存）
 - [0008 独立时间线与预览边界](0008-timeline-preview.md)
 - [0009 冻结输入与有界阶段恢复](0009-frozen-input-recovery.md)
 

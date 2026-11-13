@@ -89,6 +89,56 @@ class DefaultExperimentGroupTests(unittest.TestCase):
         matched["segments"][0]["selection_mode"] = "rule"
         return matched
 
+    def test_review_cache_depends_on_window_and_evidence_independently_of_cap(self):
+        from PIL import Image
+        source = contract.source_identity(self.shots[0]["video"])
+        cut = {"start_us": 0, "end_us": 100000, "target_us": 100000, "source_identity": source}
+        context = {"members": [{"index": 1, "parts": [cut]}], "evidence_digest": "original",
+                   "task_absorb_speed_cap": 2}
+        tile = self.root / "tile.jpg"
+        Image.new("RGB", (10, 10)).save(tile)
+        with patch.object(editor, "_review_media", return_value={"before": source, "sheet": tile}), \
+             patch.object(editor, "_call") as call:
+            def request():
+                groups.review_group(self.manifest, context, self.root)
+                return call.call_args.args[:2]
+            original = request()
+            context["task_absorb_speed_cap"] = 3
+            self.assertEqual(request(), original)
+            context["evidence_digest"] = "different observation"
+            self.assertNotEqual(request(), original)
+            context["evidence_digest"] = "original"
+            cut["end_us"] += 1
+            self.assertNotEqual(request(), original)
+
+    def test_exact_paired_cut_obeys_phase_and_task_speed_limits(self):
+        from orchestrator.selection import timing_contract as timing
+        engine = OrchestrationEngine.__new__(OrchestrationEngine)
+        engine.m = {**self.manifest, "max_absorb_demo_speed": 2}
+        start, end, target = 123457, 1987654, 1000000
+        clip = Clip(video="source", text="吸收", source_start=start / 1e6,
+            source_end=end / 1e6, video_duration=10, duration=1, guard_override=[0, 0],
+            continuity_group={"schema": continuity.EXPERIMENT_SCHEMA}, stable_start=0.8,
+            playback_observation={"schema": contract.playback.OBSERVATION_SCHEMA, "kind": "process",
+                "observed": "continuous absorption", "start_us": start, "end_us": end})
+        def solve():
+            return timing.solve_window(engine._timing_request(clip, target))
+        fitted = solve()
+        self.assertTrue(fitted.ok, fitted.to_dict())
+        self.assertEqual((fitted.source_start_us, fitted.source_end_us), (start, end))
+        self.assertEqual(round(fitted.speed * target), end - start)
+        engine.m["max_absorb_demo_speed"] = 1.5
+        self.assertFalse(solve().ok)
+        engine.m["max_absorb_demo_speed"] = 10
+        clip.time_sensitive = True
+        self.assertFalse(solve().ok)
+        clip.time_sensitive = False
+        clip.playback_observation["kind"] = "experiment_unbounded"
+        self.assertFalse(solve().ok)
+        clip.playback_observation["kind"] = "process"
+        target = 500000
+        self.assertFalse(solve().ok)
+
     def test_experiment_group_requires_observed_tissue_contact_and_lift(self):
         result = self.repair()
         group = copy.deepcopy(result["segments"][0]["continuity_group"])
@@ -348,6 +398,21 @@ class DefaultExperimentGroupTests(unittest.TestCase):
         segment = copy.deepcopy(result["segments"][0])
         segment.pop("continuity_group"); segment["ai_selection"].pop("continuity_group")
         self.assertFalse(contract.validate_segment_receipt(segment, index=1, manifest=self.manifest)["ok"])
+
+    def test_event_images_require_requested_coverage_in_initial_and_dense_reviews(self):
+        sheet = self.root / "coverage.jpg"
+        sheet.write_bytes(b"fixture")
+        for wrong_call in (1, 2):
+            with self.subTest(wrong_call=wrong_call):
+                responses = [facts("A") for _ in range(wrong_call)]
+                responses[-1]["coverage"] = "absorption_focus"
+                with patch.object(experiment_event_review, "_frame_sheet", return_value=sheet), \
+                     patch.object(editor, "_call", side_effect=responses) as call:
+                    with self.assertRaisesRegex(ValueError, "EXPERIMENT_EVENTS_COVERAGE_CHANGED"):
+                        experiment_event_review.review(self.manifest, self.fixture.evidence,
+                            self.root / f"coverage-{wrong_call}.json", focus="complete_pour",
+                            frames_only=True, font_path="unused")
+                    self.assertEqual(call.call_count, wrong_call)
 
     def test_event_observation_uses_configured_image_route_without_qwen_video(self):
         output = self.root / "default-events.json"

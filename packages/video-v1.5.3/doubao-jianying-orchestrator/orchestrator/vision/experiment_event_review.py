@@ -92,6 +92,24 @@ def snap_boundaries(row,shown,tolerance=BOUNDARY_SNAP_FRAMES):
     return row,moves
 
 
+CHAIN_FORMAT_ERRORS = (
+    "EXPERIMENT_EVENTS_COVERAGE_INVALID",
+    "EXPERIMENT_EVENTS_CONTACT_RELEASE_MARKER_REQUIRED",
+)
+
+
+def chain_format_error(exc):
+    text = str(exc)
+    return any(code in text for code in CHAIN_FORMAT_ERRORS)
+
+
+def _chain_note(exc):
+    return ("\n上次事件链未通过：" + str(exc)
+            + "。events必须从有效窗口第一帧连续铺到最后一帧，下一段first_frame等于上一段last_frame+1。"
+            + "B的contact_first_frame、release_first_frame、result_first_frame必须分别等于press、lift、result的first_frame。"
+            + "只重新输出JSON。")
+
+
 def settle_boundaries(row,shown,validate,reask):
     """Accept shown boundaries, snap a <=1 frame miss, else ask once more."""
     missing=unshown_boundaries(row,shown)
@@ -131,6 +149,8 @@ def review(manifest,pair,output,*,focus='complete_pour',ffmpeg='ffmpeg',ffprobe=
                 ('.jpg','.prompt.txt','.request.json','.facts.json','.candidate.json'))
     observations=[];facts=[]
     for member in pair['members']:
+        reasked={'done':False}
+
         target=output.with_name(output.stem+'-'+member['part']+'.json')
         window=None if frames_only else window_video(member,target,ffmpeg=ffmpeg,ffprobe=ffprobe)
         coverage=focus if member['part']=='A' else 'complete_verification'
@@ -158,6 +178,18 @@ complete_pour须保留倒液的开始和完成；absorption_focus允许从实际
             save(target.with_suffix('.candidate.json'),row)
             if row.get('coverage')!=coverage:raise ValueError('EXPERIMENT_EVENTS_COVERAGE_CHANGED')
             return bool(compile_events(row,member))
+        def chain_or_reask(row, ask_prompt, ask_target, ask_sheet):
+            try:
+                validate(row)
+                return row
+            except ValueError as exc:
+                if reasked['done'] or not chain_format_error(exc):
+                    raise
+                reasked['done']=True
+                retried=ai_editor._call(ask_prompt+_chain_note(exc),
+                    ask_target.with_name(ask_target.stem+'-format-reask.json'), ask_sheet)
+                validate(retried)
+                return retried
         if frames_only:
             left,right=member['window_frame_ids']
             anchors={round(left+i*(right-left)/15) for i in range(16)}
@@ -166,7 +198,7 @@ complete_pour须保留倒液的开始和完成；absorption_focus允许从实际
             frames_prompt=(prompt+'\n本次为实际顺序源帧，未提供连续视频；边界只使用已展示编号。'
                 '中间段last_frame按规则等于下一段first_frame-1。'+json.dumps({'shown_frame_ids':shown}))
             row=ai_editor._call(frames_prompt,target,sheet)
-            validate(row)
+            row=chain_or_reask(row, frames_prompt, target, sheet)
             row,settled=settle_boundaries(row,shown,validate,lambda missing,p=frames_prompt,t=target,s=sheet,sh=shown:
                 ai_editor._call(p+_reask_note(missing,sh),t.with_name(t.stem+'-reask.json'),s))
             if settled:save(target.with_name(target.stem+'-boundary.json'),settled)
@@ -186,7 +218,7 @@ complete_pour须保留倒液的开始和完成；absorption_focus允许从实际
         detail_prompt=prompt+'\n依据本次实际编号帧校正以下视频事件边界。边界必须使用本图实际展示的编号；中间状态不能从旧描述推断。'+json.dumps(
             {'video_observation':row,'shown_frame_ids':ids},ensure_ascii=False)
         refined=ai_editor._call(detail_prompt,target,sheet)
-        validate(refined)
+        refined=chain_or_reask(refined, detail_prompt, target, sheet)
         refined,settled=settle_boundaries(refined,ids,validate,lambda missing,p=detail_prompt,t=target,s=sheet,sh=ids:
             ai_editor._call(p+_reask_note(missing,sh),t.with_name(t.stem+'-reask.json'),s))
         if settled:save(target.with_name(target.stem+'-boundary.json'),settled)

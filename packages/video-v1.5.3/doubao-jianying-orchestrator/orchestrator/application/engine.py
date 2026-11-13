@@ -1491,6 +1491,12 @@ class OrchestrationEngine:
             candidate = int(round(float(stable) * US))
             if source_in * US <= candidate <= source_out * US:
                 preferred_us = candidate
+        from ..policy import continuity
+        paired = continuity.is_experiment(clip.continuity_group)
+        if paired:
+            # The joint review certified the entire physical cut. Re-solving it
+            # against final narration must cover both endpoints at a legal speed.
+            span = (min(source_in, span[0]), max(source_out, span[1])) if span else (source_in, source_out)
         phase = timing_contract.presentation.get(raw.get('presentation_observation'))
         if phase:
             head_guard = tail_guard = 0
@@ -1508,7 +1514,7 @@ class OrchestrationEngine:
             preferred_speed=clip.preferred_speed,
             preferred_start_us=preferred_us,
             video_duration_us=int(round(float(clip.video_duration) * US)), fps=frm,
-            exact_source_timing=bool(phase))
+            exact_source_timing=bool(phase) or paired)
 
     def _clip_role(self, clip: Clip) -> str:
         """段落声明的视觉角色（决定变速范围；定案第 6 条）。
@@ -3119,4 +3125,20 @@ class OrchestrationEngine:
                 "message": "已确认的背景音乐无法下载或处理，未写入草稿。",
                 "task_log_hint": "请检查 BGM 直链/本地路径后重新运行。",
             }
-        return self._timed("draft_write", self.write_draft, clips, bgm_path)   # 需求7
+        return self._timed("draft_write", self.write_draft, clips, bgm_path)
+
+    def placed_cuts(self):
+        """Return the original sources and integer-microsecond cuts sent to the writer."""
+        cuts = []
+        for clip in self._clips:
+            if clip.visual_missing:
+                continue
+            raw = self._raw_segment_for(clip)
+            parts = raw.get("span_parts") or []
+            part = parts[clip.span_index] if clip.multi_shot and clip.span_index < len(parts) else raw
+            start = to_us(clip.source_start)
+            end = start + round(to_us(clip.duration) * clip.video_speed)
+            cuts.append({"video": part.get("video") or raw.get("video") or clip.video,
+                "scene_source_start": part.get("scene_source_start", part.get("source_start", clip.source_start)),
+                "source_start": start / US, "source_end": end / US})
+        return cuts

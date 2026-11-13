@@ -49,3 +49,5 @@
 ## 8. 测试
 - `test_timing_contract.py` 覆盖窗口求解/多镜/不变量/速度吸附/证据覆盖/边界容差；`test_video_decode.py`/`test_video_encode.py` 覆盖 GPU/回退链
 
+
+同次实验组以联合复核的完整入出点求解。帧栅格取整可能移动出点，因此对已确认窗口保留精确倍率，同时继续执行过程、保护阶段和任务的速度限制。详见 [ADR 0007](../adr/0007-experiment-groups.md)。
