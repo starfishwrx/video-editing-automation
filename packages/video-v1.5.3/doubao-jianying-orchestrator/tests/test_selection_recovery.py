@@ -321,6 +321,46 @@ class SelectionRecoveryTests(unittest.TestCase):
         before.pop('timing_certainty', None)
         self.assertEqual(preserved, before)
 
+    def test_placement_keeps_action_and_result_frames_when_model_shortens_evidence(self):
+        shot = {**self.shots[1], "source_start": 3., "source_end": 9.}
+        parent = {**self.reviews["2"][0], "claim_checks": [{"id": "p1", "action_us": 4000000,
+            "result_us": 8000000}], "supported_point_ids": ["p1"]}
+        media = {"start": 3., "end": 9., "before": contract.source_identity(shot["video"]),
+                 "times": [3., 4., 5., 6., 7., 8.], "sheet": self.root / "screen.jpg"}
+        response = {"verdict": "suitable", "same_product": True, "confidence": .95,
+                    "observation": "动作连续", "reason": "可看清动作",
+                    "evidence_intervals_us": [{"start": 5000000, "end": 6000000}]}
+        sentence = {"index": 2, "text": "演示", "kind": "selling_point", "selling_points": [{"id": "p1"}]}
+        with patch.object(editor, "_review_media", return_value=media), patch.object(editor, "_call", return_value=response), \
+                patch.object(editor, "_source_frame_us", return_value=33333):
+            revised = editor._review_placement_window(self.manifest, sentence, shot, self.root, parent=parent)
+        self.assertIn({"start": 4000000, "end": 8033333}, revised["evidence_intervals_us"])
+        self.assertEqual(revised["claim_checks"], parent["claim_checks"])
+
+    def test_result_anchor_must_survive_output_fps_and_actual_speed(self):
+        plan = self.plan()
+        base = editor._assemble(self.manifest, self.analysis, plan, narration_timing=None, verify_sources=True)
+        segment = base["segments"][1]
+        end = round(segment["source_end"] * 1e6)
+        reviewed = plan["reviews"]["2"][0]
+        reviewed["claim_checks"] = [{"id": reviewed["supported_point_ids"][0],
+            "action_us": round(segment["source_start"] * 1e6), "result_us": end - 1000}]
+        for fps in (30, None, 0, -30):
+            with self.subTest(fps=fps), self.assertRaisesRegex(editor.WindowFailure, "RESULT_FRAME_OUTSIDE_CUT"):
+                editor._assemble({**self.manifest, "fps": fps}, self.analysis, plan,
+                                 narration_timing=None, verify_sources=True)
+
+    def test_failed_window_is_bound_to_source_and_frame_rounded_endpoints(self):
+        source = {"path": "video", "size": 100, "mtime_ns": 1}
+        feedback = {"failed_windows": [{"source_identity": source, "start_us": 1000000, "end_us": 3000000}]}
+        part = {"ai_selection": {"source_identity": source}, "source_start": 1.01, "source_end": 3.01}
+        with patch.object(editor, "_source_frame_us", return_value=33333):
+            self.assertTrue(editor._repeats_failed_cut(part, feedback))
+            self.assertFalse(editor._repeats_failed_cut({**part, "source_start": 1.2}, feedback))
+            self.assertFalse(editor._repeats_failed_cut({**part, "source_end": 3.4}, feedback))
+            self.assertFalse(editor._repeats_failed_cut({**part, "ai_selection": {"source_identity": {
+                **source, "mtime_ns": 2}}}, feedback))
+
     def test_confirmed_recut_is_retained_when_alternative_pool_has_no_match(self):
         baseline = editor._assemble(self.manifest, self.analysis, self.plan(), narration_timing=None, verify_sources=True)
         self.shots[1].update(source_end=100, action_segments=[{"start": 90, "end": 91}])
@@ -337,7 +377,7 @@ class SelectionRecoveryTests(unittest.TestCase):
             return [], {"feasible": False, "reason": "NO_SUPPORT_AFTER_REVIEW"}
         with patch.object(editor, "_review_pool", side_effect=observe) as observed:
             result = editor.refill_indices(request, self.analysis, baseline, [2], self.root)
-        self.assertEqual(observed.call_count, 2)
+        self.assertEqual(observed.call_count, 1)
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["segments"][1]["shot_id"], "shot2")
 
@@ -442,11 +482,13 @@ class SelectionRecoveryTests(unittest.TestCase):
                 self.assertGreaterEqual(shot['source_end'] - shot['source_start'], 1.279 + .3 - 0.00001)
                 return {'start': shot['source_start'], 'end': shot['source_end'],
                         'before': contract.source_identity(shot['video']),
-                        'times': [5.7, 6.0, 6.18], 'sheet': self.root / 'synthetic.jpg'}
+                        'times': [5.7, 6.0, 6.1, 6.18], 'sheet': self.root / 'synthetic.jpg'}
             def call(prompt, _path, _sheet=None):
                 self.assertIn('the actual action is not visible', prompt)
                 self.assertIn('反馈与规则冲突时不得把反馈中的额外要求变成新规则', prompt)
-                return copy.deepcopy(review)
+                return {**copy.deepcopy(review), "claim_checks": [{"id": "p1", "object_matches": True,
+                    "action_seen": True, "result_seen": True, "action_us": 5700000, "result_us": 6100000,
+                    "result_observed": "visible result"}]}
             with patch.object(editor, '_review_media', side_effect=media), patch.object(editor, '_call', side_effect=call):
                 observed = editor._review(_m, sentence, shots['direct-action'], _directory)
             return [observed], {'feasible': True}

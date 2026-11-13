@@ -377,6 +377,7 @@ start/end使用原素材秒数，选择与该素材action_segments重叠且包�
         ids, row["inventory_ignored_candidate_ids"], row["inventory_resolved_candidate_ids"] = resolve_ids(ids)
         ids.sort(key=history.__getitem__)
         row["candidate_ids"] = ids
+        row["first_look_ids"] = ids[:3]
         priorities[index] = ids
         by_index[index] = {**row, "text": timing_contract.sentence_text(rows[index - 1]),
                            "candidate_ids": list(dict.fromkeys(ids + [str(s["shot_id"]) for s in shots]))}
@@ -498,6 +499,8 @@ def _iter_review_round(ids, shots, directory, review, *, dense=False, on_error=N
     policy = load_policy()
     def prepare(sid):
         # The API worker consumes exactly the sheet produced here.
+        if shots[sid].get("_review_focus_window"):
+            return _review_media(shots[sid], directory, dense=dense, fit=True)
         return _review_media(shots[sid], directory, dense=dense)
     def error(sid, exc):
         if not isinstance(exc, (ValueError, OSError, TypeError, KeyError, TimeoutError)):
@@ -626,6 +629,15 @@ shot_value_request非空时，可额外返回shot_value_observation，逐项评�
 根据原文、备注和本次窗口的实际图片，判断是否确为纯衔接语，以及该段能否自然引出下一镜或延续上一镜的同一动作／展示。
 有独立痛点、价格数量、功能、指向对象或指定画面时，不能仅凭同商品通过。准备空镜、遮挡、跳切或无关动作也不通过。
 返回 hook_link_supported 布尔值；仅两项判断均有依据时填 true 并说明所见。"""
+    claim_checks = bool(sentence.get("first_look_ids") and sentence.get("selling_points"))
+    if claim_checks:
+        prompt += """
+逐项检查口播对象、动作以及必要结果。如果一项要求先动作后检查结果，必须在同一次演示中都看见。
+例如揉搓不掉絮要先捏揉再重新展开检查表面；仅湿水拉伸或揉成团均不支持。声称擦脸须看到脸部接触。
+对每项支持的卖点附上 claim_checks=[{"id":"p1","object_matches":true,"action_seen":true,"result_seen":true,
+"action_us":1000000,"result_us":1200000,"result_observed":"直接可见的结果或特征"}]。
+时间使用画面上的原片微秒，填写能看清这次关键动作和结果的两个时刻。静态规格/标称填 kind="readable_label"，只需实际读到对应文字并记录展示时间；无需动作。静态可填同一时刻。
+动作或结果缺失的卖点从 supported_point_ids 删去。没有支持项时返回 mismatch 或 uncertain。"""
     result = _call(prompt, directory / "reviews" / f"{key}.json", sheet)
     if result.get("verdict") not in {"matched", "mismatch", "uncertain"} or type(result.get("same_product")) is not bool:
         raise ValueError("AI_EDITOR_REVIEW_INVALID")
@@ -671,6 +683,37 @@ shot_value_request非空时，可额外返回shot_value_observation，逐项评�
             if (not isinstance(ev, dict) or any(type(ev.get(k)) is not int for k in ("start", "end"))
                     or not round(start * 1e6) <= ev["start"] < ev["end"] <= round(end * 1e6)):
                 raise ValueError("AI_EDITOR_EVIDENCE_INVALID")
+        if claim_checks:
+            facts = result.get("claim_checks")
+            verified = set()
+            checked_facts = []
+            for fact in facts if isinstance(facts, list) else []:
+                if not isinstance(fact, dict) or fact.get("id") not in ids:
+                    continue
+                a, b = fact.get("action_us"), fact.get("result_us")
+                static = fact.get("kind") == "readable_label" and result.get("basis") == "readable_label"
+                if (fact.get("object_matches") is True and (static or fact.get("action_seen") is True)
+                        and fact.get("result_seen") is True
+                        and isinstance(fact.get("result_observed"), str) and fact["result_observed"].strip()
+                        and type(a) is int and type(b) is int and round(start * 1e6) <= a <= b <= round(end * 1e6)):
+                    # Keep both visually confirmed anchors through assembly and speed fitting.
+                    checked_facts.append(fact)
+                    verified.add(fact["id"])
+                    last_frame_end = b + (_source_frame_us(shot) or 1)
+                    if last_frame_end <= round(end * 1e6):
+                        intervals.append({"start": a, "end": last_frame_end})
+                    else:
+                        verified.discard(fact["id"])
+            if (any(scene.get("id") == "fluorescence_zero_test" for scene in scenes)
+                    and re.search(r"(?:无|没有|不含|零|0)荧光", sentence["text"])
+                    and "fluorescence_zero_test" not in result["scene_ids"]):
+                for point in sentence["selling_points"]:
+                    if "荧光" in point["text"]:
+                        verified.discard(point["id"])
+            result["claim_checks"] = checked_facts
+            result["supported_point_ids"] = [pid for pid in ids if pid in verified]
+            if not result["supported_point_ids"]:
+                result["verdict"] = "uncertain"
         playback_observation = result.get("playback_observation")
         if playback_observation is not None:
             process = contract.playback.process_window(playback_observation)
@@ -843,6 +886,86 @@ def qc_rejected_shots(manifest: dict) -> dict[int, set[str]]:
     return out
 
 
+def _first_look_review(manifest, sentence, shot, directory):
+    """Locate a demonstration on the first-look timeline, then review the proposed crop."""
+    sid = shot["shot_id"]
+    phases = shot.get("action_segments") or []
+    hints = [h for h in sentence.get("candidate_windows") or []
+             if isinstance(h, dict) and h.get("shot_id") == sid]
+    start, end = float(shot["source_start"]), float(shot["source_end"])
+    focus = None
+    for hint in hints:
+        a, b = hint.get("start"), hint.get("end")
+        if type(a) in (int, float) and type(b) in (int, float) and start <= a < b <= end:
+            focus = [a, b]
+            break
+    scan = {**shot, "_review_focus_window": focus}
+    media = _review_media(scan, directory, dense=True, fit=True)
+    prompt = contract.policy_prompt(manifest) + "\n" + json.dumps({
+        "claim": sentence["text"], "selling_points": sentence["selling_points"],
+        "audio_durations_us": sentence.get("audio_durations_us"),
+        "first_pass_phases": phases, "first_pass_window": focus,
+        "failed_windows": [w for w in (sentence.get("qc_feedback") or {}).get("failed_windows", [])
+                           if w.get("source_identity") == media["before"]],
+        "source_seconds": [start, end]}, ensure_ascii=False) + """
+首看记录只是检索线索，时间可能有偏差。按图片上的原片秒数定位最有可能的一次动作及其紧接的结果。
+观察动作的对象、动作变化和结果。揉成团后重新展开，与始终展开或湿水拉伸要区分。
+口播有指定对象时必须看清对象。按生效的场景规则核对性能或标称；普通展示无需做实验。
+输出JSON {"found":true,"start":0.0,"end":1.0,"action":"看到的动作和对象","result":"看到的结果或仍需核实之处"}。
+start/end覆盖一次动作的关键接触到结果首次展示。可给结果尚待近看确认的片段，后续会看放大画面。
+对“揉搓不掉絮”需定位最后一次有效揉捏到紧接着重新展开检查的时刻，尚未展开不算结果。擦脸需定位实际脸部接触，荧光检测需定位检测动作与读数。首看动作标签与图不符时以像素为准。
+已失败的切片不能原样重选。静态标称定位清楚读到标称的区间；没有相关画面则返回found=false并说明看到什么。"""
+    key = contract.digest([sentence["index"], sid, media["before"], start, end])[:24]
+    found = _call(prompt, directory / "first_look" / f"{key}.json", media["sheet"])
+    a, b = found.get("start"), found.get("end")
+    if (found.get("found") is not True or type(a) not in (int, float) or type(b) not in (int, float)
+            or not start <= a < b <= end):
+        return None
+    # The location pass can miss the landing by a frame. Show adjacent footage
+    # for confirmation, and bind the resulting evidence to its actual source times.
+    durations = sentence.get("audio_durations_us") or []
+    pad = max(.35, (max(durations, default=0) / 1e6 - (b - a)) / 2 + .2)
+    from . import shot_analyzer
+    guard = sum(max(0., shot_analyzer._number(manifest.get(k), default)) for k, default in (
+        ("head_trim_s", shot_analyzer.DEFAULT_HEAD_TRIM_S), ("tail_trim_s", shot_analyzer.DEFAULT_TAIL_TRIM_S),
+        ("tail_pad_s", shot_analyzer.NARRATION_TAIL_PAD)))
+    pad = max(pad, min(1.2, (b - a) / 2), (max(durations, default=0) / 1e6 + guard - (b - a)) / 2 + .05)
+    windows = [(max(start, a - pad), min(end, b + pad), a, b)]
+    # A coarse scan can stop at the last squeeze. Re-observe the transition
+    # into the next recorded phase at a density suitable for the real audio.
+    duration = max(durations, default=0) / 1e6
+    if duration > 0:
+        boundary = next((phase["start"] for phase in phases if isinstance(phase, dict)
+                         and type(phase.get("start")) in (int, float)
+                         and abs(phase["start"] - b) < .35 and start < phase["start"] < end), None)
+        if boundary is not None:
+            lo, hi = max(start, boundary - duration), min(end, boundary + duration)
+            windows.insert(0, (max(start, lo - .35), min(end, hi + .35), lo, hi))
+    for left, right, onset, landing in windows:
+        crop = {**shot, "source_start": left, "source_end": right,
+                "_review_focus_window": [onset, landing]}
+        pixels = _review_media(crop, directory, dense=True, fit=True)
+        if pixels["before"] != media["before"]:
+            raise ValueError("AI_EDITOR_SOURCE_CHANGED_DURING_REVIEW")
+        confirmed = _review(manifest, sentence, crop, directory, dense=True, prepared_media=pixels)
+        if confirmed.get("verdict") == "matched":
+            break
+    return {**confirmed, "first_look_location": {"start": a, "end": b}}
+
+
+
+def _repeats_failed_cut(row, feedback):
+    for part in row.get("span_parts") or [row]:
+        identity = (part.get("ai_selection") or {}).get("source_identity")
+        for cut in (feedback or {}).get("failed_windows") or []:
+            if identity and identity == cut.get("source_identity"):
+                a, b = (round(float(part[k]) * 1e6) for k in ("source_start", "source_end"))
+                frame = _source_frame_us(part) or 1000
+                if abs(a - cut["start_us"]) <= frame and abs(b - cut["end_us"]) <= frame:
+                    return True
+    return False
+
+
 def _review_pool(manifest: dict, sentence: dict, shots: dict, directory: Path, audio: dict, *,
                  exhaustive: bool = False,
                  existing_reviews: list[dict] | None = None,
@@ -885,7 +1008,32 @@ def _review_pool(manifest: dict, sentence: dict, shots: dict, directory: Path, a
                       and not failure_fields(str(row.get("error", ""))).get("retryable")}
     ids = [sid for sid in sentence["candidate_ids"] if sid not in (excluded_ids or set())]
     required = {p["id"] for p in sentence["selling_points"]}
+    # Both entry points use the same first-pass shortlist. Only a fresh
+    # pixel review can populate the evidence used by the placement solver.
+    located = []
+    hints = sentence.get("first_look_ids") or []
+    for sid in dict.fromkeys(hints):
+        if not required or exhaustive or sid not in ids or sid in reviewed_by_id:
+            continue
+        try:
+            candidate = _first_look_review(manifest, sentence, shots[sid], directory)
+        except (ValueError, OSError, TypeError, KeyError) as exc:
+            located.append({"shot_id": sid, "error": str(exc)})
+            continue
+        located.append({"shot_id": sid, "verdict": (candidate or {}).get("verdict", "not_located"),
+                        "location": (candidate or {}).get("first_look_location"),
+                        "observation": (candidate or {}).get("observation")})
+        if candidate and candidate.get("verdict") == "matched":
+            reviewed_by_id[sid] = candidate
+            if feasible([candidate]):
+                break
+    focused_ready = any(r.get("first_look_location") and feasible([r]) for r in reviewed_by_id.values())
+    if located:
+        _save(directory / f"first_look_{sentence['index']:02d}.json",
+              {"attempts": located, "focused_feasible": focused_ready})
     for offset in range(0, len(ids), ROUND_SIZE):
+        if focused_ready:
+            break
         existing_good = [r for r in reviewed_by_id.values() if r.get("verdict") == "matched"]
         existing_points = {p for r in existing_good for p in r.get("supported_point_ids", [])}
         evidence_found = bool(required) and contract.points_supported(required, existing_points)
@@ -902,13 +1050,24 @@ def _review_pool(manifest: dict, sentence: dict, shots: dict, directory: Path, a
         chunk = [sid for sid in ids[offset:offset + ROUND_SIZE] if sid not in reviewed_by_id]
         if not chunk:
             continue
+        round_shots = dict(shots)
+        for sid in (chunk if required and hints else []):
+            shot = shots[sid]
+            phases = {str(i): row for i, row in enumerate(shot.get("action_segments") or [])
+                      if isinstance(row, dict) and type(row.get("start")) in (int, float)
+                      and type(row.get("end")) in (int, float)
+                      and float(shot["source_start"]) <= row["start"] < row["end"] <= float(shot["source_end"])}
+            ranked = _observed_text_shortlist(sentence["text"], phases, limit=1)
+            if ranked:
+                phase = phases[ranked[0]]
+                round_shots[sid] = {**shot, "_review_focus_window": [phase["start"], phase["end"]]}
         def review(sid: str, media=None) -> dict:
             try:
                 return _review(manifest, sentence, shots[sid], directory, prepared_media=media)
             except (ValueError, OSError, TypeError, KeyError) as exc:
                 return {"shot_id": sid, "verdict": "uncertain", "error": str(exc)}
         completed = {}
-        for sid, result in _iter_review_round(chunk, shots, directory, review):
+        for sid, result in _iter_review_round(chunk, round_shots, directory, review):
             completed[sid] = result
             _save(directory / f"review_checkpoint_{sentence['index']}.json", {
                 "review_phase": "initial",
@@ -1013,7 +1172,7 @@ def _review_pool(manifest: dict, sentence: dict, shots: dict, directory: Path, a
         reason = "EVIDENCE_UNKNOWN" if uncertain or not exhausted else "NO_DISPLAY_AFTER_REVIEW"
     else:
         reason = "KNOWN_WINDOWS_INFEASIBLE"
-    return reviewed, {"checked": len(reviewed), "total": len(ids), "exhausted": exhausted,
+    return reviewed, {"first_look_attempts": located, "expanded": bool(set(reviewed_by_id) - set(hints)), "checked": len(reviewed), "total": len(ids), "exhausted": exhausted,
                       "feasible": is_feasible, "evidence_found": evidence_found, "reason": reason,
                       "failed_calls": sum("error" in r for r in reviewed),
                       "uncertain": uncertain}
@@ -1229,6 +1388,12 @@ def _assemble_segments(manifest, analysis, plan, narration_timing, verify_source
                 manifest=cfg, time_sensitive=review["time_sensitive"])
             if not solution.ok:
                 raise WindowFailure(index, sid, solution.reason, part_index=n)
+            for fact in review.get("claim_checks") or []:
+                if fact.get("id") in review.get("supported_point_ids", []):
+                    source_step = math.ceil(solution.speed * timing_contract.frame_us(cfg.get("fps")))
+                    if (fact["action_us"] < solution.source_start_us
+                            or fact["result_us"] > solution.source_end_us - source_step):
+                        raise WindowFailure(index, sid, "RESULT_FRAME_OUTSIDE_CUT", part_index=n)
             item = {**solution.to_dict(), "video": shot["video"], "shot_id": sid,
                     "temporary_shot_id": sid, "source_start": solution.source_start_us / 1e6,
                     "source_end": solution.source_end_us / 1e6, "duration": solution.material_us / 1e6,
@@ -1453,6 +1618,10 @@ def _review_placement_window(manifest: dict, sentence: dict, shot: dict, directo
     """
     media = _review_media(shot, directory, dense=True)
     start, end, before, times, sheet = (media[k] for k in ("start", "end", "before", "times", "sheet"))
+    for fact in parent.get("claim_checks") or []:
+        if isinstance(fact, dict) and fact.get("id") in (parent.get("supported_point_ids") or []):
+            if not round(start * 1e6) <= fact["action_us"] <= fact["result_us"] < round(end * 1e6):
+                raise ValueError("AI_EDITOR_CROP_OMITS_CLAIM_EVIDENCE")
     phase = contract.presentation.get(parent.get("presentation_observation"))
     if phase and (round(start * 1e6) > phase["start_us"] or round(end * 1e6) <= phase["reveal_us"]):
         raise ValueError("PRESENTATION_CROP_CUTS_ACTION")
@@ -1575,6 +1744,14 @@ suitable=裁切内是一段完整、未拦腰切断关键动作/结果的可用�
             process = contract.playback.process_window(playback_observation)
             if process is None or not round(start * 1e6) <= process[0] < process[1] <= round(end * 1e6):
                 raise ValueError("AI_EDITOR_PLAYBACK_OBSERVATION_INVALID")
+    if verdict == "suitable":
+        for fact in parent.get("claim_checks") or []:
+            if fact.get("id") in parent.get("supported_point_ids", []):
+                a, b = fact["action_us"], fact["result_us"]
+                result_end = b + (_source_frame_us(shot) or 1)
+                if result_end > hi_us:
+                    raise ValueError("AI_EDITOR_CROP_OMITS_RESULT_FRAME")
+                intervals.append({"start": a, "end": result_end})
     mapped = "matched" if verdict == "suitable" else ("mismatch" if verdict == "unsuitable" else "uncertain")
     # Inherit certified selling-point identity; placement must not rewrite it.
     return {
@@ -1589,6 +1766,7 @@ suitable=裁切内是一段完整、未拦腰切断关键动作/结果的可用�
         "time_sensitive": bool(parent.get("time_sensitive")),
         "scene_ids": list(parent.get("scene_ids") or []),
         "preferred_speed": parent.get("preferred_speed", 1.0),
+        "claim_checks": copy.deepcopy(parent.get("claim_checks") or []),
         "parent_evidence_intervals_us": copy.deepcopy(parent.get("evidence_intervals_us") or []),
         "presentation_observation": refined_phase if verdict == 'suitable' else None,
         "parent_presentation_observation": copy.deepcopy(phase),
@@ -1623,6 +1801,8 @@ def _review_proposed_window(manifest, plan, directory, sentence, shot, window, *
     identity = [
         "placement" if parent else "semantic", sentence, shot["shot_id"], source, window,
         (parent or {}).get("evidence_intervals_us")]
+    if (parent or {}).get("claim_checks"):
+        identity.append(["placement-claim-anchors-v1", parent["claim_checks"]])
     if (parent or {}).get('presentation_observation'):
         identity.extend([parent['presentation_observation'], 'readability-inside-usable-end-v2'])
     continuation_protocol = 'continuation-frame-bounds-v2' if sentence.get('action_continuation') else None
@@ -4295,7 +4475,8 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
         observed = _observed_text_shortlist(sentence["text"], allowed)
         feedbacks = manifest.get("ai_refill_feedback")
         feedback = feedbacks.get(str(index)) if isinstance(feedbacks, dict) else None
-        recalled, previous, window_hints, recut_id = [], set(), {}, None
+        recalled, previous, recut_id = [], set(), None
+        candidate_windows = []
         if (allowed and isinstance(feedback, dict) and feedback.get("claim") == sentence["text"]
                 and all(isinstance(feedback.get(k), str) and feedback[k].strip() for k in ("observed", "reason"))):
             sentence["qc_feedback"] = copy.deepcopy(feedback)
@@ -4318,46 +4499,18 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
                         recut_id = recut["shot_id"]
                 except (ValueError, TypeError, KeyError, OverflowError):
                     pass
+            if not recut_id:
+                recut_id = next((sid for sid in feedback.get("prior_shot_ids") or []
+                                 if sid in allowed and allowed[sid].get("action_segments")
+                                 and feedback.get("failed_windows")), None)
             try:
-                inventory = ([{"candidate_ids": [recut_id], "candidate_windows": [recut]}] if recut_id else
+                inventory = ([{"candidate_ids": [recut_id], "candidate_windows": [recut] if recut else []}] if recut_id else
                     _inventory(retrieval_manifest, list(allowed.values()), directory / f"qc_recall_{index:02d}"))
             except (ValueError, KeyError, TypeError, OSError) as exc:
                 errors.append(str(exc))
                 continue
             recalled = inventory[0].get("candidate_ids") or []
-            for hint in inventory[0].get("candidate_windows") or []:
-                if not isinstance(hint, dict) or hint.get("shot_id") not in allowed:
-                    continue
-                sid = hint["shot_id"]
-                shot = allowed[sid]
-                try:
-                    start, end = float(hint["start"]), float(hint["end"])
-                    lo, hi = float(shot["source_start"]), float(shot["source_end"])
-                    segments = shot.get("action_segments") or []
-                    overlaps = any(isinstance(a, dict) and float(a["start"]) < end and float(a["end"]) > start
-                                   for a in segments)
-                    if not (math.isfinite(start) and math.isfinite(end) and lo <= start < end <= hi and overlaps):
-                        continue
-                    # A hint identifies the action, not the editable source
-                    # boundary. Include enough surrounding footage for the
-                    # frozen narration and normal head/tail guards when possible.
-                    from . import shot_analyzer
-                    head = max(0.0, shot_analyzer._number(manifest.get("head_trim_s"), shot_analyzer.DEFAULT_HEAD_TRIM_S))
-                    tail = max(0.0, shot_analyzer._number(manifest.get("tail_trim_s"), shot_analyzer.DEFAULT_TAIL_TRIM_S))
-                    pad = max(0.0, shot_analyzer._number(manifest.get("tail_pad_s"), 0.0))
-                    desired = max(end - start + .5, audio_us / 1_000_000 + head + tail + pad)
-                    # Cached action ends are coarse recall hints. Observe some
-                    # landing beyond them so an incomplete result can be found,
-                    # rather than clipping every re-look to the old estimate.
-                    landing_context = min(1., max(.5, (end - start) / 2 + .25))
-                    window_end = min(hi, end + landing_context)
-                    window_start = max(lo, min(start - .35, window_end - desired))
-                    window_end = min(hi, max(window_end, window_start + desired))
-                    window_hints[sid] = {**shot, "source_start": window_start, "source_end": window_end}
-                    if sid == recut_id:
-                        window_hints[sid]["_review_focus_window"] = [start, end]
-                except (ValueError, TypeError, KeyError, OverflowError):
-                    continue
+            candidate_windows = inventory[0].get("candidate_windows") or []
         # Give both retrieval signals room in the first review round. Existing
         # QC feedback remains first, and none of these hints certify a shot.
         interleaved = [group[i] for i in range(ROUND_SIZE)
@@ -4367,6 +4520,9 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
         first, rest = ranked[:ROUND_SIZE], ranked[ROUND_SIZE:]
         sentence["candidate_ids"] = ([sid for sid in first if sid not in previous] +
                                      [sid for sid in first if sid in previous] + rest)
+        sentence["first_look_ids"] = list(dict.fromkeys(
+            [sid for sid in [recut_id, *recalled[:3], *observed[:3], *preferred[:3]] if sid in allowed]))[:3]
+        sentence["candidate_windows"] = candidate_windows
         sentence["audio_durations_us"] = [audio_us]
         try:
             if not sentence["candidate_ids"]:
@@ -4376,35 +4532,22 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
             explicit = any(str(raw).strip() == str(index) for raw in (manifest.get("ai_refill_indices") or []))
             review_manifest = ({**manifest, "allow_partial_selling_points": False}
                                if explicit and len(sentence["selling_points"]) > 1 else manifest)
-            review_shots = {**shots, **window_hints}
-            if recut_id in window_hints:
-                # Re-look at the actual omitted source interval first. A hint
-                # neither certifies the action nor forces it into the final cut.
-                focused = {**sentence, "candidate_ids": [recut_id]}
-                reviews, coverage = _review_pool(review_manifest, focused, review_shots, directory, narration_timing or {})
-                alternatives = [sid for sid in sentence["candidate_ids"] if sid != recut_id]
-                if not coverage.get("feasible") and alternatives:
-                    alternate_reviews, alternate_coverage = _review_pool(
-                        review_manifest, {**sentence, "candidate_ids": alternatives},
-                        review_shots, directory, narration_timing or {})
-                    # A confirmed same-shot action may still need the existing
-                    # short-window/retiming placement repair. Do not discard it
-                    # just because the alternative pool has no usable match.
-                    required_points = {p['id'] for p in sentence['selling_points']}
-                    confirmed_recut = any(r.get('verdict') == 'matched' and
-                        required_points <= set(r.get('supported_point_ids', [])) for r in reviews)
-                    if confirmed_recut:
-                        # Let the existing placement solver try the actual
-                        # correction before replacing it with an easier static
-                        # shot. Alternatives remain available if that fails.
-                        seen = {r.get('shot_id') for r in reviews}
-                        reviews += [r for r in alternate_reviews if r.get('shot_id') not in seen]
-                        if alternate_coverage.get('feasible'):
-                            coverage = {**alternate_coverage, 'confirmed_recut_retained': recut_id}
-                    else:
-                        reviews, coverage = alternate_reviews, alternate_coverage
-            else:
-                reviews, coverage = _review_pool(review_manifest, sentence, review_shots, directory, narration_timing or {})
+            # Give the failed source a placement attempt before examining alternatives.
+            primary = [recut_id] if recut_id else sentence["candidate_ids"]
+            remainder = [sid for sid in sentence["candidate_ids"] if sid not in primary]
+            primary_shots = dict(shots)
+            if recut_id and isinstance(recut, dict) and recut.get("shot_id") == recut_id:
+                lo, hi = recut.get("start"), recut.get("end")
+                if (type(lo) in (float, int) and type(hi) in (float, int)
+                        and float(shots[recut_id]["source_start"]) <= lo < hi <= float(shots[recut_id]["source_end"])):
+                    primary_shots[recut_id] = {**shots[recut_id], "_review_focus_window": [lo, hi]}
+            def review_candidates(ids):
+                return _review_pool(review_manifest, {**sentence, "candidate_ids": ids},
+                                    primary_shots, directory, narration_timing or {})
+            reviews, coverage = review_candidates(primary)
+            if not any(r.get("verdict") == "matched" for r in reviews) and remainder:
+                reviews, coverage = review_candidates(remainder)
+                remainder = []
             good = [r for r in reviews if r.get("verdict") == "matched"
                     and r.get("shot_id") in allowed]
             partial = manifest.get("delivery_mode") == "preview" and manifest.get("allow_partial_selling_points") is True
@@ -4445,7 +4588,7 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
                 ordered_good.sort(key=lambda r: not bool(r.get("presentation_observation")))
             # Singles stay first; multi-shot combinations are considered only
             # when their real reviewed evidence covers the whole sentence.
-            def candidate_groups():
+            def candidate_groups(ordered_good):
                 for size in range(1, min(len(ordered_good), int(manifest.get("span_max_parts", 3))) + 1):
                     for group in combinations(ordered_good, size):
                         covered = {p for review in group for p in review.get("supported_point_ids", [])}
@@ -4453,7 +4596,21 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
                             yield group
                 if partial:
                     yield from ((r,) for r in ordered_good if not required <= set(r.get("supported_point_ids", [])))
-            for group in candidate_groups():
+            def placement_groups():
+                nonlocal coverage
+                yield from candidate_groups(ordered_good)
+                # A semantic match can still fail placement, source reuse, or the
+                # exact failed-window check. Search remaining candidates on demand.
+                seen = {r.get("shot_id") for r in reviews}
+                remaining = [sid for sid in sentence["candidate_ids"] if sid not in seen]
+                if remaining and (remainder or coverage.get("first_look_attempts")):
+                    others, other_coverage = review_candidates(remaining)
+                    coverage = {**other_coverage, "expanded_after_placement": True}
+                    extra = sorted((r for r in others if r.get("verdict") == "matched"), key=candidate_order)
+                    extra_ids = {r["shot_id"] for r in extra}
+                    yield from (g for g in candidate_groups(ordered_good + extra)
+                                if any(r["shot_id"] in extra_ids for r in g))
+            for group in placement_groups():
                 def point_span(review):
                     positions = [point_order[p] for p in review.get("supported_point_ids", []) if p in point_order]
                     return (min(positions), max(positions)) if positions else (len(point_order), len(point_order))
@@ -4499,6 +4656,8 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
                         retained + [{**row, "_source_reuse_index": index}], reuse_limit)
                     if reuse_errors:
                         raise ValueError(reuse_errors[0][0])
+                    if _repeats_failed_cut(row, sentence.get("qc_feedback")):
+                        raise ValueError(f"AI_REFILL_REPEATED_FAILED_WINDOW:{index}")
                     by_index[index] = row
                     actual_parts = row.get('span_parts') or [row]
                     actual_ids = list(dict.fromkeys(str(p.get('shot_id') or p.get('temporary_shot_id') or
@@ -4549,7 +4708,14 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
     sequence_errors = contract.sequence_errors_all(ordered, ai_only=True)
     errors.extend(error for error in sequence_errors if error not in errors)
     def keep(row):
-        return not isinstance(row, dict) or row.get("index") not in replaced
+        if not isinstance(row, dict) or row.get("index") not in replaced:
+            if isinstance(row, dict) and row.get("type") == "AI_EDITOR_UNCERTIFIED":
+                failed = re.fullmatch(r"AI_REFILL_(?:NO_MATCH|WINDOW_INFEASIBLE|NO_UNIQUE_CANDIDATES):(\d+)",
+                                      str(row.get("message") or ""))
+                if failed and int(failed[1]) in replaced:
+                    return False
+            return True
+        return False
     output_manifest = dict(matched.get("manifest") or manifest)
     # Reuse the selected visual rows, not the prior run's writer controls.
     # In particular a refill must never write into the previous draft name.
