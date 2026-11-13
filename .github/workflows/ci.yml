@@ -5,6 +5,11 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      scope_base:
+        description: "Full base commit SHA for the repository scope comparison"
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -14,6 +19,27 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  repository-scope:
+    name: Repository change scope
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Check out complete history
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+      - name: Check committed paths
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before || inputs.scope_base }}
+          HEAD_SHA: ${{ github.sha }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          args=()
+          if [ "$EVENT_NAME" = "pull_request" ]; then args+=(--pull-request); fi
+          python3 packages/video-v1.5.3/tools/check_repository_scope.py --base "$BASE_SHA" --head "$HEAD_SHA" "${args[@]}"
+
   suites:
     name: ${{ matrix.label }} / Windows Python 3.11
     strategy:
@@ -72,15 +98,16 @@ jobs:
   offline-windows:
     name: Windows Python 3.11
     if: ${{ always() }}
-    needs: [suites]
+    needs: [suites, repository-scope]
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
       - name: Require both complete suites
         env:
           SUITES_RESULT: ${{ needs.suites.result }}
+          SCOPE_RESULT: ${{ needs.repository-scope.result }}
         run: |
-          if [ "$SUITES_RESULT" != "success" ]; then
-            echo "Full Windows suites did not both pass: $SUITES_RESULT"
+          if [ "$SUITES_RESULT" != "success" ] || [ "$SCOPE_RESULT" != "success" ]; then
+            echo "Required checks did not pass: suites=$SUITES_RESULT scope=$SCOPE_RESULT"
             exit 1
           fi

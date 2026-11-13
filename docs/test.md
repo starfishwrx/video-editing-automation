@@ -53,11 +53,22 @@ uv run --frozen python -X utf8 -m tools.check_architecture
 
 ## 1.1 GitHub 离线 CI 与示例
 
-`.github/workflows/ci.yml` 在 PR、`main` push 和手动触发时使用 Windows / Python 3.11、uv 与冻结锁文件运行上述两套测试，另核对 CLI `--help` 与 `examples/manifest.preview.json` 的 JSON 语法。两套 discover 在独立 Windows job 并行，`fail-fast: false`；两者固定 checkout 同一个事件 SHA。稳定聚合检查名仍为 `Windows Python 3.11`，使用 always 并仅接受整个矩阵 success，失败/取消/意外跳过不放行。三个触发都全量，不以 PR head 或 artifact 自报替代 main 回归，选择与代价见 [ADR 0011](adr/0011-layered-offline-validation.md)。CI 不注入生产密钥，不执行真实模型/TTS、NAS/飞书或生产部署。workflow 文件不等于仓库已开启必须通过检查的分支保护，维护者需在 Settings 中单独设置。
+`.github/workflows/ci.yml` 在 PR、`main` push 和手动触发时使用 Windows / Python 3.11、uv 与冻结锁文件运行上述两套测试，另核对 CLI `--help` 与 `examples/manifest.preview.json` 的 JSON 语法。两套 discover 在独立 Windows job 并行，`fail-fast: false`；两者固定 checkout 同一个事件 SHA。稳定聚合检查名仍为 `Windows Python 3.11`，使用 always 并仅接受整个矩阵 success，失败/取消/意外跳过不放行。三个触发都全量，聚合同时要求下述目录范围检查成功；不以 PR head 或 artifact 自报替代 main 回归，选择与代价见 [ADR 0011](adr/0011-layered-offline-validation.md)。CI 不注入生产密钥，不执行真实模型/TTS、NAS/飞书或生产部署。workflow 文件不等于仓库已开启必须通过检查的分支保护，维护者需在 Settings 中单独设置。
 
 媒体测试前使用已有 `run.py setup-ffmpeg` 准备绿色 FFmpeg/ffprobe，并将路径传入 runner 后续步骤。依赖准备允许下载可执行文件；离线回归指不调用业务模型/服务，不表示 runner 已预装媒体工具。字幕 ASR 为显式注入，模型权重和真实任务数据不进 CI。
 
 文档中的合成视频/`analyze-shots --no-vision` 示例见 `docs/quickstart.md`，可在准备 FFmpeg 后本地验证；它验证素材解析与抽帧，不作为视觉效果验收。模型、prompt 或选镜逻辑变更还需单独记录真实图片观察和人工审阅。
+
+### 提交目录范围检查
+
+CI 另运行 `tools.check_repository_scope` 并纳入 `Windows Python 3.11` 聚合结果；两套 Windows 或范围检查失败、取消、跳过都不放行。PR 使用 merge-base，main push 使用事件 before SHA；手动触发须填写完整的 `scope_base`。本地从活包执行：
+
+```powershell
+uv run --frozen python -X utf8 -m tools.check_repository_scope --base <完整目标提交SHA> --head <完整候选提交SHA> --pull-request
+uv run --frozen python -X utf8 -m unittest discover -s tests -p test_repository_scope.py -q
+```
+
+它只检查已提交路径，不含未提交工作树；对象缺失或无共同历史是错误，先获取相应 Git 历史。历史包/vendor/未知 package 根变更默认阻断，不以 PR 自填理由豁免；政策例外及非安全沙箱边界见 [ADR 0011](adr/0011-layered-offline-validation.md#2026-11-12-增量提交范围检查)。现有模块映射和架构检查继续负责活包内部边界，不另造映射。
 
 ## 2. 定向回归（小改动默认）
 

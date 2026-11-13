@@ -65,3 +65,9 @@
 整个项目的运行入口为 `scripts/run_pipeline.ps1`，内部调用 `tools/workflow/scheduled.py` 和 dispatcher；Windows 计划任务只负责周期触发这一完整入口。验收计算集中在 `tools/acceptance`，worker 负责调度适配与阶段调用。交付上下文显式传参，不修改 worker 全局路径或调用方环境。
 
 Mac 交接及人工准备／收集已删除，正式交付只依据四项当前证据。历史导入仅保留仍有效的 `production_eval` 兼容层，不为退役交接保留可执行实现。详细运行方式见 [Windows 脚本流水线](windows-pipeline.md)。本次真实删除旧路径，因此同步路径型库存清单；不新增文件哈希门槛，不升级 VERSION。
+
+## 提交范围与静态检查边界
+
+活包内部继续使用 `module_map.json` 和 `tools.check_architecture`。提交目录范围由 `tools.check_repository_scope` 检查，不引入另一份模块映射；本地命令、历史/vendor例外流程和CI行为见[测试策略](test.md#提交目录范围检查)及[ADR 0011](adr/0011-layered-offline-validation.md#2026-11-12-增量提交范围检查)。该检查防止误改，不认证生产行为。
+
+AST 检查包含函数内普通 import，但不解析任意运行时动态加载。兼容适配器与独立合同已有合法的按名称/文件加载；本轮不改变它们，也不把静态 PASS 当成动态依赖完全安全。新增动态加载仍需核对调用层级并补独立加载行为测试。

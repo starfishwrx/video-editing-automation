@@ -25,3 +25,13 @@
 - `tests/offline_host.py`：显式 opt-in 宿主事实；`test_resource_profile.py` 保留资源策略行为。
 - `test_modular_architecture.py`、`test_bounded_frame_batch.py`、`test_acceptance_delivery_gate.py`：最小故障图、带音轨真实媒体、整任务收集后统一交付。
 - `.github/workflows/ci.yml`、[测试策略](../test.md)、[发布流程](../release-process.md)。独立设计审阅采纳保留 main 全量的建议；当前 PR 的实际验证见 PR Checks。
+
+## 2026-11-12 增量：提交范围检查
+
+- 状态：已采纳的开发检查方案；本候选 PR 实现，合并/分支保护启用分别核验。
+- 背景：文档禁止修改历史包，但活包测试无法发现误改历史目录、vendor 或复制新版本目录。
+- 选择：新增 `tools.check_repository_scope`，只检查显式 base/head 提交之间的路径，不读取运行素材、不修改工作树。历史包只读；既有活包和 1.5.4/1.5.5 实验允许变更；其他 package 根及 vendor 改动阻断。重命名按删除加新增检查两端，Git 输出使用 NUL 分隔。PR 从 merge-base 比较，main push 从事件 before 比较，手动 CI 必须填写完整 `scope_base`；缺失对象、全零 SHA、无法比较均失败，不降级为全绿。
+- 例外：不接受 PR 文本、标签或 `--allow` 参数自行放行。确需 vendor/目录政策变化时，先单独审阅政策修改与适用范围，再提交受其覆盖的变更；不要关闭聚合检查。此检查用于防误改，不是防恶意 PR 的安全沙箱；PR 中修改 checker/workflow 本身仍须人审，仓库分支保护不由本变更配置。
+- 原因与代价：增加一次完整 Git 历史 checkout 和轻量路径扫描；不改变两套 Windows 回归及生产行为。聚合检查同时要求两套 Windows 和范围检查成功。手动运行新增明确 base 输入，避免任意猜测“上一次”基线。
+- 动态加载：本次不新增全局禁令。现有 `_compat.py`、独立质量合同、queueing 合同和发布工具有按名称/文件加载的合法职责；继续用现有兼容形状、模块映射和独立加载测试约束。静态 AST 检查不是完整动态依赖图，后续若收紧需先逐条验证合法适配边界。
+- 证据：`tests/test_repository_scope.py` 使用真实临时 Git 仓库覆盖历史路径、vendor、未知 package、重命名两端、中文空格路径、分叉 base、无关历史与错误提交；`test_modular_architecture.py` 继续验证兼容入口不可新增业务实现。
