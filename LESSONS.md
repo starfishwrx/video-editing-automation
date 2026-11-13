@@ -7,6 +7,14 @@
 
 ## 新增条目
 
+### L-20261112-repository-scope 检索命中不等于当前范例
+- status: OPEN
+- hits: 1
+- 模块: repository / documentation
+- 以后怎么做: 先定位活包与实际功能模块，再显式查历史。历史代号不等于运行版本，隔离实验不等于升级包，薄兼容入口不等于可删文件。归档前核对外部调用，保留失败和决策证据。
+- 证据: docs/repository-navigation.md、docs/modular-development.md、docs/release-process.md。
+
+
 ### L-20261112-media-duration-concurrency 并行切镜须核对两种写入器的时长
 
 - status: OPEN
