@@ -6,6 +6,8 @@ import importlib.util
 import json
 from pathlib import Path
 
+from tools import check_dynamic_loading
+
 ROOT = Path(__file__).resolve().parents[1] / "doubao-jianying-orchestrator" / "orchestrator"
 RUNNABLE = {"cli", "draft_visual_qc", "legacy_cache_import", "platform_env"}
 ROOT_MODULES = {"__init__", "_compat", "paths"}
@@ -110,6 +112,8 @@ def check(root: Path = ROOT, *, tools_root: Path | None = None) -> list[str]:
                 issues.append(f"DOMAIN_DEPENDENCY:{relative.as_posix()}:{target}")
     issues.extend(_tool_boundaries(
         tools_root if tools_root is not None else root.parent.parent / "tools", set(mapping)))
+    if root.resolve() == ROOT.resolve():
+        issues.extend(check_dynamic_loading.check())
     return sorted(set(issues))
 
 

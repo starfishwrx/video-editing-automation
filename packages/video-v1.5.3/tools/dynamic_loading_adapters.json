@@ -1,0 +1,145 @@
+{
+  "schema_version": 1,
+  "adapters": [
+    {
+      "path": "closed_loop.py",
+      "purpose": "Compatibility fallback executes the single maintained source in an isolated import namespace; preserve patch/state semantics.",
+      "verification": "tests/test_closed_loop_entrypoints.py",
+      "calls": {
+        "exec": 1
+      }
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/_compat.py",
+      "purpose": "Legacy aliases share module state; direct CLI forwarding.",
+      "verification": "tests/test_modular_architecture.py",
+      "calls": {
+        "importlib.import_module": 1,
+        "runpy.run_module": 1
+      }
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/ai_editor_contract.py",
+      "purpose": "Standalone Eval loads playback, continuity, presentation and rulepack from this package copy.",
+      "verification": "tests/test_modular_architecture.py; tests/test_visual_qc_delivery_contract.py",
+      "calls": {
+        "importlib.util.spec_from_file_location": 4,
+        "loader.exec_module": 4
+      }
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/media/caption_layout.py",
+      "purpose": "Reuse editor subtitle geometry; do not duplicate rendering rules.",
+      "verification": "doubao-jianying-orchestrator/tests/test_timeline_render.py",
+      "calls": {
+        "importlib.util.spec_from_file_location": 1,
+        "loader.exec_module": 1
+      }
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/policy/continuity.py",
+      "purpose": "Standalone continuity contract loads its local presentation contract.",
+      "verification": "doubao-jianying-orchestrator/tests/test_sentence_continuity.py",
+      "calls": {
+        "importlib.util.spec_from_file_location": 1,
+        "loader.exec_module": 1
+      }
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/runtime/draft_documents.py",
+      "purpose": "Standalone draft reader loads adjacent headless backend.",
+      "verification": "tests/test_visual_qc_delivery_contract.py",
+      "calls": {
+        "importlib.util.spec_from_file_location": 1,
+        "loader.exec_module": 1
+      }
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/runtime/headless.py",
+      "purpose": "Load editor production_library after selecting the correct editor root.",
+      "verification": "doubao-jianying-orchestrator/tests/test_default_headless.py",
+      "calls": {
+        "importlib.import_module": 1
+      }
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/visual_qc_contract.py",
+      "purpose": "Standalone QC reads local draft documents and AI contract, not an installed stale package.",
+      "verification": "tests/test_acceptance_delivery_gate.py",
+      "calls": {
+        "importlib.util.spec_from_file_location": 2,
+        "loader.exec_module": 2
+      }
+    },
+    {
+      "path": "jianying-editor/scripts/utils/subtitle_layout.py",
+      "purpose": "Load adjacent phrase boundary implementation from standalone editor scripts.",
+      "verification": "doubao-jianying-orchestrator/tests/test_timeline_render.py",
+      "calls": {
+        "importlib.util.spec_from_file_location": 1,
+        "loader.exec_module": 1
+      }
+    },
+    {
+      "path": "tools/acceptance/evaluation.py",
+      "purpose": "Independent acceptance loads same-copy public QC contracts.",
+      "verification": "tests/test_acceptance_delivery_gate.py",
+      "calls": {
+        "importlib.util.spec_from_file_location": 2,
+        "loader.exec_module": 2
+      }
+    },
+    {
+      "path": "tools/closed_loop.py",
+      "purpose": "Compatibility fallback executes the single maintained source in an isolated import namespace; preserve patch/state semantics.",
+      "verification": "tests/test_closed_loop_entrypoints.py",
+      "calls": {
+        "exec": 1
+      }
+    },
+    {
+      "path": "tools/draft_delivery.py",
+      "purpose": "Load anchored ship_distribute adapter for package-root delivery.",
+      "verification": "tests/test_nas_portable.py",
+      "calls": {
+        "importlib.util.spec_from_file_location": 1,
+        "loader.exec_module": 1
+      }
+    },
+    {
+      "path": "tools/native_drafts.py",
+      "purpose": "Package tools read native drafts via same-copy runtime adapter.",
+      "verification": "tests/test_visual_qc_delivery_contract.py",
+      "calls": {
+        "importlib.util.spec_from_file_location": 1,
+        "loader.exec_module": 1
+      }
+    },
+    {
+      "path": "tools/production_eval.py",
+      "purpose": "Compatibility fallback executes the single maintained source in an isolated import namespace; preserve patch/state semantics.",
+      "verification": "tests/test_acceptance_delivery_gate.py",
+      "calls": {
+        "exec": 1
+      }
+    },
+    {
+      "path": "tools/queueing/contracts.py",
+      "purpose": "Pure queue normalization loads standalone BGM request contract without engine.",
+      "verification": "tests/test_queue_contracts.py",
+      "calls": {
+        "importlib.util.spec_from_file_location": 1,
+        "loader.exec_module": 1
+      }
+    },
+    {
+      "path": "tools/release_package.py",
+      "purpose": "Release tooling loads the requested package build_manifest.",
+      "verification": "tests/test_release_version.py",
+      "calls": {
+        "importlib.util.spec_from_file_location": 1,
+        "loader.exec_module": 1
+      }
+    }
+  ]
+}

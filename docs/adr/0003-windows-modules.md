@@ -18,3 +18,12 @@ Windows 脚本、dispatcher 统一单任务、批量和定时路径；历史 Age
 ## 证据
 
 [模块化说明](../modular-development.md)、[Windows 流水线](../windows-pipeline.md)、[调度与闭环合同](../subsystems/package-tools.md)、[环境合同](../../packages/video-v1.5.3/ENVIRONMENT.md)、[开发日志](../working.md)。
+
+## 2026-11-12 增补：动态加载盘点与有限漂移检查
+
+- 状态：候选实现，随本清理 PR 审查；未合入/部署不作运行事实。
+- 背景：静态导入检查不认识按文件独立合同、旧入口状态共享等动态适配；直接禁止会破坏包外工具。既有适配需要可见、可检查的清单。
+- 选择：保留当前加载代码，活包建立 `tools/dynamic_loading_adapters.json` 用途/验证/API计数盘点，接入现有架构检查及 Package CI。新增动态加载文件或 API 数量变化要求更新清单并审查。测试与vendor不在此扫描范围。
+- 原因：先限制明显的新增加载入口，不为清理引入生产加载行为变更或第二套导入架构。
+- 代价/限制：这是源码漂移信号，不是安全许可；不追踪运行时目标、赋值/反射别名，也不能发现同数量替换目标。跨作用域别名保守合并有误报可能。真正的资源身份和导入状态仍靠独立合同测试，不能声称整个动态依赖图已被强制验证。
+- 证据：`tests/test_dynamic_loading.py` 正反例；既有 `test_modular_architecture.py` 独立包资源与模块身份回归；[模块边界](../modular-development.md)、[脚本与规则清单](../repository-cleanup-inventory.md)。
