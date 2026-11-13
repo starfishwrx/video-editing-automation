@@ -7,6 +7,14 @@
 
 ## 新增条目
 
+### L-20261112-test-history 历史运行结果不能成为当前通过凭据
+- status: OPEN
+- hits: 1
+- 模块: documentation / validation
+- 以后怎么做: 将执行方法与日期观察分开，迁移时保留原文、相对链接和未验证边界；不要把旧记录的“最终”当成当前提交结果，不删除失败证据来让入口显得整洁。
+- 证据: docs/test.md、docs/archive/test-observations-20261111.md。
+
+
 ### L-20261112-media-duration-concurrency 并行切镜须核对两种写入器的时长
 
 - status: OPEN
