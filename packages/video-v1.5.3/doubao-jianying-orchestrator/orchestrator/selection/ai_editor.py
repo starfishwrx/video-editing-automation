@@ -10,6 +10,7 @@ import json
 import math
 import os
 import re
+import sys
 from collections import Counter
 from itertools import combinations
 from pathlib import Path
@@ -26,6 +27,20 @@ ROUND_SIZE = 8
 # Explore at most one additional round for an editorial alternative after a
 # feasible selling-point match. Matching and evidence still take precedence.
 ALTERNATIVE_REVIEW_LIMIT = 2 * ROUND_SIZE
+
+
+def _fluorescence_label_claim_only(text: str) -> bool:
+    """Recognize only explicit packaging-label claims, never a mixed performance claim."""
+    # Only remove an explicit packaging statement followed by known label
+    # values. Unlabelled fluorescence mentions elsewhere remain performance
+    # claims, including in the same sentence as a valid package label.
+    value = r"(?:医护级|医用级|医疗级|(?:0|零)(?:致敏|刺激|荧光))[”’]*(?:的?字样)?"
+    label = (r"(?:^|[，,。；;！？!?])\s*(?:这个|这款|该)?包装(?:上|盒上|袋上)?(?:明确|清楚)?"
+             r"(?:标着|标注(?:着|了)?|写着|印着|标有|印有|写明|标明)[：:\s“‘]*"
+             + value + r"(?:[、，,\s“‘]*" + value + r")*\s*(?=$|[，,。；;！？!?])")
+    matches = list(re.finditer(label, text))
+    return (any("荧光" in match.group() for match in matches)
+            and "荧光" not in re.sub(label, "", text))
 
 
 def _analysis_digest(analysis: dict) -> str:
@@ -629,7 +644,17 @@ shot_value_request非空时，可额外返回shot_value_observation，逐项评�
 根据原文、备注和本次窗口的实际图片，判断是否确为纯衔接语，以及该段能否自然引出下一镜或延续上一镜的同一动作／展示。
 有独立痛点、价格数量、功能、指向对象或指定画面时，不能仅凭同商品通过。准备空镜、遮挡、跳切或无关动作也不通过。
 返回 hook_link_supported 布尔值；仅两项判断均有依据时填 true 并说明所见。"""
-    claim_checks = bool(sentence.get("first_look_ids") and sentence.get("selling_points"))
+    if sentence.get("require_sentence_fit"):
+        prompt += ("\n独立检查本句原文与实际裁切，不得把通用产品展示当成具体事实证据。"
+                   "返回sentence_fit=true|false和sentence_observation（本窗支持本句的具体依据）；"
+                   "不支持或看不清时不能返回matched。")
+    fluorescence_rule = any(scene.get("id") == "fluorescence_zero_test" for scene in
+                            contract.editorial_context(manifest)["rules"].get("semantic_contracts", []))
+    fluorescence_performance = (fluorescence_rule
+        and re.search(r"(?:无|没有|不含|零|0)(?:任何|添加|含有|含)?荧光", sentence["text"])
+        and not _fluorescence_label_claim_only(sentence["text"]))
+    claim_checks = bool(sentence.get("selling_points") and
+                        (sentence.get("first_look_ids") or fluorescence_performance))
     if claim_checks:
         prompt += """
 逐项检查口播对象、动作以及必要结果。如果一项要求先动作后检查结果，必须在同一次演示中都看见。
@@ -650,6 +675,13 @@ shot_value_request非空时，可额外返回shot_value_observation，逐项评�
         raise ValueError("AI_EDITOR_REVIEW_OBSERVATION_MISSING")
     if not result["same_product"] or confidence < .6:
         result["verdict"] = "uncertain" if result["same_product"] else "mismatch"
+    if sentence.get("require_sentence_fit"):
+        result.pop("sentence_fit_claim", None)
+        if not (result.get("sentence_fit") is True and isinstance(result.get("sentence_observation"), str)
+                and result["sentence_observation"].strip()):
+            result["verdict"] = "uncertain"
+        else:
+            result["sentence_fit_claim"] = sentence["text"]
     if result["verdict"] == "matched":
         context = contract.editorial_context(manifest)
         scenes = context["rules"].get("semantic_contracts", [])
@@ -705,10 +737,20 @@ shot_value_request非空时，可额外返回shot_value_observation，逐项评�
                     else:
                         verified.discard(fact["id"])
             if (any(scene.get("id") == "fluorescence_zero_test" for scene in scenes)
-                    and re.search(r"(?:无|没有|不含|零|0)荧光", sentence["text"])
-                    and "fluorescence_zero_test" not in result["scene_ids"]):
+                    and re.search(r"(?:无|没有|不含|零|0)(?:任何|添加|含有|含)?荧光", sentence["text"])):
+                label_only = _fluorescence_label_claim_only(sentence["text"])
                 for point in sentence["selling_points"]:
-                    if "荧光" in point["text"]:
+                    point_text = point["text"]
+                    label_point = (_fluorescence_label_claim_only(point_text)
+                                   or re.fullmatch(r"(?:0|零)荧光(?:字样)?", point_text.strip()))
+                    performance_observed = ("fluorescence_zero_test" in result["scene_ids"]
+                        and result.get("basis") != "readable_label"
+                        and any(f.get("id") == point["id"] and f.get("kind") != "readable_label"
+                                and f.get("action_seen") is True for f in checked_facts))
+                    label_observed = (label_only and label_point and result.get("basis") == "readable_label"
+                        and any(f.get("id") == point["id"] and f.get("kind") == "readable_label"
+                                and re.search(r"(?:0|零)荧光", f["result_observed"]) for f in checked_facts))
+                    if "荧光" in point_text and not (label_observed or performance_observed):
                         verified.discard(point["id"])
             result["claim_checks"] = checked_facts
             result["supported_point_ids"] = [pid for pid in ids if pid in verified]
@@ -1461,6 +1503,9 @@ def _assemble_segments(manifest, analysis, plan, narration_timing, verify_source
 
 def _assemble(manifest: dict, analysis: dict, plan: dict, *, narration_timing: dict | None,
               verify_sources: bool = False, validate_sequence: bool = True) -> dict:
+    pending_camera = plan.get("camera_reselect_groups") or []
+    if pending_camera:
+        raise ValueError(f"AI_EDITOR_CAMERA_REVIEW_PENDING:{pending_camera[0]['indices'][0]}")
     output, unresolved = _assemble_segments(manifest, analysis, plan, narration_timing, verify_sources)
     sentences = plan["sentences"]
     for index, neighbor in _linked_hooks(plan):
@@ -3331,6 +3376,84 @@ def _repair_reviewed_rows(manifest, analysis, plan, directory, narration_timing,
     raise ValueError("AI_EDITOR_REPAIR_PROGRESS_LIMIT")
 
 
+def _invalidate_camera_groups(plan, indices, *, clear_members):
+    """Retire touched bindings and require fresh per-line and joint observation."""
+    touched = set(indices)
+    keep, invalid = [], []
+    for group in plan.get("camera_continuous_groups", []):
+        (invalid if touched.intersection(group["indices"]) else keep).append(group)
+    if not invalid:
+        return
+    plan["camera_continuous_groups"] = keep
+    pending = plan.setdefault("camera_reselect_groups", [])
+    for group in invalid:
+        members = list(group["indices"])
+        if not any(g["indices"] == members for g in pending):
+            pending.append({"indices": members})
+        if clear_members:
+            plan["rows"] = [
+                {"index": row["index"], "parts": [], "reason": "camera group changed; reselect"}
+                if row.get("index") in members else row for row in plan.get("rows", [])]
+
+
+def _rebind_camera_groups(manifest, analysis, plan, directory, narration_timing):
+    """Review the newly selected exact cuts and bind their actual continuous seam."""
+    from . import camera_variety
+    shots = {str(shot["shot_id"]): shot for shot in analysis.get("shots", [])}
+    while plan.get("camera_reselect_groups"):
+        indices = plan["camera_reselect_groups"][0]["indices"]
+        rows = {row["index"]: row for row in plan.get("rows", [])}
+        cuts, selected = [], []
+        for index in indices:
+            row = rows.get(index) or {}
+            parts = row.get("parts") or []
+            if len(parts) != 1 or parts[0].get("shot_id") not in shots:
+                raise ValueError(f"AI_EDITOR_NO_SELECTION:{index}")
+            cut = _assemble_segments(manifest, analysis, plan, narration_timing, True, only_index=index)[0][0]
+            feedbacks = manifest.get("ai_refill_feedback") or {}
+            feedback = feedbacks.get(str(index), {}) if isinstance(feedbacks, dict) else {}
+            if cut.get("span_parts") or _repeats_failed_cut(cut, feedback):
+                raise ValueError(f"AI_EDITOR_NO_SELECTION:{index}")
+            cuts.append(cut)
+            selected.append(parts[0])
+        identities = [cut["ai_selection"]["source_identity"] for cut in cuts]
+        windows = [cut["ai_selection"]["window_us"] for cut in cuts]
+        pad = timing_contract.us_of(manifest.get("tail_pad_s"), 0)
+        if (any(identity != identities[0] for identity in identities)
+                or any(a["end"] != b["start"] for a, b in zip(windows, windows[1:]))
+                or any(window["end"] - window["start"] != cut["audio_duration_us"] + pad
+                       for window, cut in zip(windows, cuts))):
+            raise ValueError(f"AI_EDITOR_NO_SELECTION:{indices[0]}")
+        revised = []
+        for index, part, window in zip(indices, selected, windows):
+            sentence = plan["sentences"][index - 1]
+            key = _review_proposed_window(manifest, plan, directory,
+                {**sentence, "require_sentence_fit": True}, shots[part["shot_id"]],
+                (window["start"], window["end"]))
+            if not key:
+                raise ValueError(f"AI_EDITOR_NO_SELECTION:{index}")
+            revised.append({**part, "source_start_us": window["start"],
+                            "window_review_key": key, "sentence_fit_required": True})
+        group = {"indices": indices, "texts": [plan["sentences"][i - 1]["text"] for i in indices],
+                 "durations": {i: cut["audio_duration_us"] for i, cut in zip(indices, cuts)}, "pad": pad}
+        join = camera_variety.verify_join(group, {"start": windows[0]["start"]},
+                                          shots[selected[0]["shot_id"]], directory, sys.modules[__name__])
+        if not join or join["source_identity"] != identities[0] or join["windows"] != windows:
+            raise ValueError(f"AI_EDITOR_NO_SELECTION:{indices[0]}")
+        trial = copy.deepcopy(plan)
+        replacements = dict(zip(indices, revised))
+        for row in trial["rows"]:
+            if row.get("index") in replacements:
+                row["parts"] = [replacements[row["index"]]]
+        for index, window in zip(indices, windows):
+            cut = _assemble_segments(manifest, analysis, trial, narration_timing, True, only_index=index)[0][0]
+            if cut["ai_selection"]["window_us"] != window:
+                raise ValueError(f"AI_EDITOR_NO_SELECTION:{index}")
+        trial.setdefault("camera_continuous_groups", []).append(join)
+        trial["camera_reselect_groups"].pop(0)
+        plan.update(trial)
+
+
 def _clear_incomplete_groups(plan):
     """Unselect orphaned group members; never promote old group observations."""
     rows = plan.get('rows') or []
@@ -3344,6 +3467,9 @@ def _clear_incomplete_groups(plan):
             rows = [{'index': r['index'], 'parts': [], 'reason': 'incomplete continuous group; reselect'}
                     if r.get('continuity_key') == key else r for r in rows]
     plan['rows'] = rows
+    incomplete = {i for group in plan.get('camera_continuous_groups', []) for i in group['indices']
+                  if not any(row.get('index') == i and row.get('parts') for row in rows)}
+    _invalidate_camera_groups(plan, incomplete, clear_members=True)
 
 
 def _restore_interrupted_groups(manifest, analysis, plan, previous, narration_timing):
@@ -3375,6 +3501,8 @@ def _restore_interrupted_groups(manifest, analysis, plan, previous, narration_ti
 def _replace_focused_row(plan, index, revised):
     """A partial edit dissolves the old group and reselects other members."""
     old = next((r for r in plan['rows'] if r.get('index') == index), None)
+    if old != revised:
+        _invalidate_camera_groups(plan, {index}, clear_members=True)
     key = old.get('continuity_key') if old else None
     if key:
         group = plan.get('continuity_reviews', {}).get(key)
@@ -3824,22 +3952,39 @@ technical_option是按本句完整配音求出的实际可行窗口；分配多�
                 + json.dumps(current_inventory, ensure_ascii=False) + instructions + history_hint)
 
     focus = None
+    focus_group = None
     duplicate_expanded: set[int] = set()
     repair_instruction = ""
-    for attempt in range(3):
+    ordinary_failures = 0
+    # Each existing/pending camera group may need one whole-group replan in
+    # addition to the ordinary bounded editor retries.
+    max_attempts = 3 + len(plan.get("camera_continuous_groups", [])) + len(plan.get("camera_reselect_groups", []))
+    for attempt in range(max_attempts):
         current_inventory = _build_edit_inventory(manifest, analysis, plan, narration_timing)
         prompt = make_prompt(current_inventory) + repair_instruction
         if attempt == 0 and plan.pop("_resume_rows", False):
             response = {"rows": plan["rows"]}
         else:
             response = _call(prompt, directory / f"edit_{attempt}.json")
-        if focus is not None:
+        if focus_group is not None:
+            revised = [r for r in response.get("rows", []) if isinstance(r, dict) and r.get("index") in focus_group]
+            if len(revised) != len(focus_group) or {r["index"] for r in revised} != set(focus_group):
+                raise ValueError(f"AI_EDITOR_NO_SELECTION:{focus_group[0]}")
+            by_index = {r["index"]: r for r in revised}
+            plan["rows"] = [by_index.get(r.get("index"), r) for r in plan["rows"]]
+        elif focus is not None:
             revised = [r for r in response.get("rows", []) if isinstance(r, dict) and r.get("index") == focus]
             if len(revised) != 1:
                 raise ValueError(f"AI_EDITOR_NO_SELECTION:{focus}")
             _replace_focused_row(plan, focus, revised[0])
         else:
-            plan["rows"] = response.get("rows")
+            revised_rows = response.get("rows")
+            if isinstance(revised_rows, list) and isinstance(plan.get("rows"), list):
+                previous_rows = {r.get("index"): r for r in plan["rows"] if isinstance(r, dict)}
+                changed = {r.get("index") for r in revised_rows if isinstance(r, dict)
+                           and previous_rows.get(r.get("index")) != r}
+                _invalidate_camera_groups(plan, changed, clear_members=False)
+            plan["rows"] = revised_rows
         if attempt == 0:
             expanded = False
             for row in plan.get("rows") or []:
@@ -3863,6 +4008,7 @@ technical_option是按本句完整配音求出的实际可行窗口；分配多�
             if expanded:
                 continue  # second and final editor call sees the complete audited pool
         try:
+            _rebind_camera_groups(manifest, analysis, plan, directory, narration_timing)
             sentence_continuity.clear_conflicting_presentations(manifest, plan)
             _prefer_presentation_groups(manifest, analysis, plan, directory, narration_timing)
             _repair_reviewed_rows(manifest, analysis, plan, directory, narration_timing, duplicate_expanded)
@@ -3880,13 +4026,22 @@ technical_option是按本句完整配音求出的实际可行窗口；分配多�
             plan.setdefault("repair_history", []).append({"round": attempt + 1, "reason": str(failure),
                                                            "index": failed_index(failure)})
             _save(directory / "plan.json", plan)
-            if attempt == 2:
+            if attempt == max_attempts - 1:
                 raise failure
             focus = _duplicate_repair_focus(plan, failure)
             if focus is None:
                 focus = failed_index(failure)
+            focus_group = next((g["indices"] for g in plan.get("camera_reselect_groups", [])
+                                if focus in g["indices"]), None)
+            if focus_group is None:
+                ordinary_failures += 1
+                if ordinary_failures >= 3:
+                    raise failure
             repair_instruction = "\n上一版技术检查失败：" + str(failure) + "。"
-            if focus is not None:
+            if focus_group is not None:
+                repair_instruction += (f"整组重选index={focus_group}，为每句各返回一行rows，"
+                    "选择同源相接的实际候选和起点；其他句由程序原样保留。")
+            elif focus is not None:
                 repair_instruction += f"只返回index={focus}的一行rows，更换无效候选或起点；其他句由程序原样保留。"
             else:
                 repair_instruction += "重新输出完整rows。"
@@ -4064,7 +4219,7 @@ def prepare(manifest: dict, analysis: dict, report_dir: Path, *, narration_timin
                 plan['presentation_policy_version'] = None
             for key in ("sentences", "reviews", "display_reviews", "coverage", "rows", "window_reviews",
                         "presentation_reviews", "presentation_conflict_repairs",
-                        "display_extra_round", "camera_continuous_groups", "camera_variety",
+                        "display_extra_round", "camera_continuous_groups", "camera_reselect_groups", "camera_variety",
                         "duration_migration", "duration_migrations",
                         "window_repair_attempts", "repair_history", "duplicate_repair_reviews", "continuity_reviews", "continuity_attempts", "continuity_repairs", "experiment_attempts"):
                 if key in previous:
@@ -4072,6 +4227,11 @@ def prepare(manifest: dict, analysis: dict, report_dir: Path, *, narration_timin
             if not duration_resume or identity_only_resume:
                 _restore_interrupted_groups(manifest, analysis, plan, previous, narration_timing)
             _clear_incomplete_groups(plan)
+            rejected = qc_rejected_shots(manifest)
+            touched = {row.get("index") for row in plan.get("rows", [])
+                       if any(part.get("shot_id") in rejected.get(row.get("index"), set())
+                              for part in row.get("parts", []))}
+            _invalidate_camera_groups(plan, touched, clear_members=True)
             plan["_resume_rows"] = bool(plan.get("rows"))
             plan["_legacy_presentation_frozen"] = frozen_legacy
             if duration_resume:

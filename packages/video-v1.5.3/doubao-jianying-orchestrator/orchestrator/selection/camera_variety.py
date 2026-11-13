@@ -424,8 +424,17 @@ def replacement(manifest, analysis, plan, timing, group, candidate, shot, direct
         else r
         for r in plan["rows"]
     ]
+    # A replacement must not inherit a binding for the previous pixels.
+    # Keep disjoint bindings, and refuse to split an existing one.
+    members = set(indices)
+    existing = plan.get("camera_continuous_groups", [])
+    if any(members.intersection(g["indices"]) and not set(g["indices"]) <= members for g in existing):
+        return None
+    retained = [g for g in existing if not members.intersection(g["indices"])]
+    trial_groups = retained + ([join] if join else [])
     trial = editor._assemble(
-        manifest, analysis, {**plan, "rows": rows}, narration_timing=timing, verify_sources=True
+        manifest, analysis, {**plan, "rows": rows, "camera_continuous_groups": trial_groups},
+        narration_timing=timing, verify_sources=True
     )
     for index, part in changes.items():
         cut = trial["segments"][index - 1]
@@ -584,8 +593,12 @@ def refine(manifest, analysis, plan, timing, inventory, directory):
                         continue
                     if result is not None:
                         plan["rows"], segments, join = result
+                        members = set(indices)
+                        plan["camera_continuous_groups"] = [
+                            g for g in plan.get("camera_continuous_groups", [])
+                            if not members.intersection(g["indices"])]
                         if join:
-                            plan.setdefault("camera_continuous_groups", []).append(join)
+                            plan["camera_continuous_groups"].append(join)
                         group.update(
                             video=shots[candidate["shot_id"]]["video"],
                             start=candidate["start"],
