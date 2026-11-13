@@ -1,5 +1,6 @@
 """Selection behavior and stale/fabricated receipt blockers without API calls."""
 import copy
+from contextlib import ExitStack
 import json
 from pathlib import Path
 import sys
@@ -50,6 +51,244 @@ class AIEditorTests(unittest.TestCase):
 
     def result(self, plan=None):
         return editor.match_manifest(self.manifest, {"shots": [self.shot], "ai_editor_plan": plan or self.plan()})
+
+    def test_camera_group_recovery_reselects_and_reviews_the_whole_group(self):
+        from orchestrator.selection import camera_variety
+        manifest = {**self.manifest, "segments": [
+            {"text": f"第{i}句展示", "audio_duration_us": 2_000_000} for i in range(1, 5)]}
+        sources = []
+        for name in ("old", "other", "new"):
+            path = self.root / (name + ".mp4")
+            path.write_bytes(name.encode())
+            sources.append(path)
+        shots, rows, sentences, reviews = [], [], [], {}
+        for index in range(1, 5):
+            source = sources[0 if index <= 2 else 1]
+            start = 0 if index % 2 else 2
+            sid = f"original{index}"
+            shot = {**self.shot, "shot_id": sid, "video": str(source), "source_start": start,
+                    "source_end": start + 2, "duration": 2}
+            shots.append(shot)
+            sentence = {**self.sentence, "index": index, "text": manifest["segments"][index - 1]["text"],
+                        "selling_points": [{"id": "p1", "text": "展示"}], "candidate_ids": [sid],
+                        "audio_durations_us": [2_000_000]}
+            sentences.append(sentence)
+            row = {"index": index, "parts": [{"shot_id": sid, "audio_duration_us": 2_000_000,
+                                                "source_start_us": start * 1_000_000}]}
+            rows.append(row)
+            reviews[str(index)] = [{**self.review, "shot_id": sid, "source_identity": contract.source_identity(source),
+                "evidence_intervals_us": [{"start": start * 1_000_000 + 200_000,
+                                           "end": start * 1_000_000 + 1_000_000}]}]
+            if index <= 2:
+                alt = {**shot, "shot_id": f"new{index}", "video": str(sources[2])}
+                shots.append(alt)
+                reviews[str(index)].append({**reviews[str(index)][0], "shot_id": alt["shot_id"],
+                                             "source_identity": contract.source_identity(sources[2])})
+        analysis = {"shots": shots}
+        groups = [{"indices": [1, 2], "key": "old", "observation": "continuous",
+                   "source_identity": contract.source_identity(sources[0]),
+                   "windows": [{"start": 0, "end": 2_000_000}, {"start": 2_000_000, "end": 4_000_000}]},
+                  {"indices": [3, 4], "key": "other", "observation": "continuous",
+                   "source_identity": contract.source_identity(sources[1]),
+                   "windows": [{"start": 0, "end": 2_000_000}, {"start": 2_000_000, "end": 4_000_000}]}]
+        captured = []
+        def stop(_path, plan):
+            captured.append(copy.deepcopy(plan))
+            raise RuntimeError("stop before model")
+        with mock.patch.object(editor, "_editor_model", return_value="offline"), \
+             mock.patch.object(editor, "_save", side_effect=stop):
+            with self.assertRaisesRegex(RuntimeError, "stop before model"):
+                editor.prepare(manifest, analysis, self.root)
+        plan = {**captured[0], "ok": True, "sentences": sentences, "rows": rows, "reviews": reviews,
+                "display_reviews": [], "camera_continuous_groups": groups}
+        self.assertTrue(editor._assemble(manifest, analysis, plan, narration_timing=None)["ok"])
+        path = self.root / "ai_editor" / "plan.json"
+        path.write_text(json.dumps(plan), encoding="utf-8")
+        recovered_manifest = {**manifest, "qc_rejected_shots": {"1": ["original1"]}}
+        captured.clear()
+        with mock.patch.object(editor, "_editor_model", return_value="offline"), \
+             mock.patch.object(editor, "_save", side_effect=stop):
+            with self.assertRaisesRegex(RuntimeError, "stop before model"):
+                editor.prepare(recovered_manifest, analysis, self.root)
+        resumed = captured[0]
+        self.assertEqual(resumed["camera_continuous_groups"], [groups[1]])
+        self.assertEqual(resumed["camera_reselect_groups"], [{"indices": [1, 2]}])
+        self.assertEqual([r["parts"] for r in resumed["rows"][:2]], [[], []])
+        self.assertEqual(resumed["rows"][2:], rows[2:])
+        with self.assertRaisesRegex(ValueError, "AI_EDITOR_CAMERA_REVIEW_PENDING"):
+            editor._assemble(recovered_manifest, analysis, resumed, narration_timing=None)
+        for index in (1, 2):
+            editor._replace_focused_row(resumed, index, {"index": index, "parts": [{
+                "shot_id": f"new{index}", "audio_duration_us": 2_000_000,
+                "source_start_us": (index - 1) * 2_000_000}]})
+        editor._clear_incomplete_groups(resumed)
+        sheet = self.root / "sheet.jpg"
+        sheet.write_bytes(b"synthetic reviewed frames")
+        current = {}
+        def media(shot, *_args, **_kwargs):
+            current.update(start=shot["source_start"], end=shot["source_end"])
+            return {"start": shot["source_start"], "end": shot["source_end"],
+                    "before": contract.source_identity(shot["video"]), "times": [shot["source_start"]], "sheet": sheet}
+        def call(prompt, *_args):
+            if "按实际帧和原素材微秒" in prompt:
+                return {"continuous": True, "complete": True, "observation": "连续展示"}
+            start = round(current["start"] * 1_000_000)
+            return {"verdict": "suitable", "same_product": True, "confidence": .9,
+                    "observation": "展示画面", "reason": "支持本句", "sentence_fit": True,
+                    "sentence_observation": "本句展示清楚", "evidence_intervals_us": [
+                        {"start": start + 200_000, "end": start + 1_000_000}]}
+        failed = {**recovered_manifest, "ai_refill_feedback": {"1": {"failed_windows": [{
+            "source_identity": contract.source_identity(sources[2]), "start_us": 0, "end_us": 2_000_000}]}}}
+        with mock.patch.object(editor, "_review_media", side_effect=media), \
+             mock.patch.object(editor, "_call", side_effect=call):
+            with self.assertRaisesRegex(ValueError, "AI_EDITOR_NO_SELECTION:1"):
+                editor._rebind_camera_groups(failed, analysis, resumed, self.root, None)
+            editor._rebind_camera_groups(recovered_manifest, analysis, resumed, self.root, None)
+        self.assertFalse(resumed["camera_reselect_groups"])
+        self.assertEqual(resumed["camera_continuous_groups"][0], groups[1])
+        self.assertEqual(resumed["camera_continuous_groups"][1]["source_identity"], contract.source_identity(sources[2]))
+        self.assertTrue(editor._assemble(recovered_manifest, analysis, resumed, narration_timing=None)["ok"])
+        # A later whole-group camera replacement must validate against its new
+        # binding while preserving the unrelated group.
+        next_source = self.root / "next.mp4"
+        next_source.write_bytes(b"next source")
+        next_shot = {**self.shot, "shot_id": "next", "video": str(next_source), "source_end": 4, "duration": 4}
+        analysis["shots"].append(next_shot)
+        for index in (1, 2):
+            resumed["reviews"][str(index)].append({**reviews[str(index)][0], "shot_id": "next",
+                "source_identity": contract.source_identity(next_source)})
+        group = {"indices": [1, 2], "texts": [s["text"] for s in sentences[:2]],
+                 "durations": {1: 2_000_000, 2: 2_000_000}, "pad": 0}
+        with mock.patch.object(editor, "_review_media", side_effect=media), \
+             mock.patch.object(editor, "_call", side_effect=call):
+            replacement = camera_variety.replacement(recovered_manifest, analysis, resumed, None,
+                                                    group, {"start": 0}, next_shot, self.root, editor)
+        self.assertIsNotNone(replacement)
+        self.assertEqual(replacement[2]["source_identity"], contract.source_identity(next_source))
+        # Camera groups are normally generic introduction/hook lines. A broad
+        # shared display observation needs a fresh semantic review for each line.
+        generic = copy.deepcopy(plan)
+        generic["identity"] = copy.deepcopy(resumed["identity"])
+        for sentence in generic["sentences"][:2]:
+            sentence.update(kind="product_intro", selling_points=[])
+        generic["display_reviews"] = [copy.deepcopy(r) for i in (1, 2) for r in reviews[str(i)]]
+        for review in generic["display_reviews"]:
+            review.update(basis="product_display", supported_point_ids=[])
+        editor._invalidate_camera_groups(generic, {1}, clear_members=True)
+        for index in (1, 2):
+            editor._replace_focused_row(generic, index, {"index": index, "parts": [{
+                "shot_id": f"new{index}", "audio_duration_us": 2_000_000,
+                "source_start_us": (index - 1) * 2_000_000}]})
+        def generic_call(prompt, *_args):
+            if "按实际帧和原素材微秒" in prompt:
+                return {"continuous": True, "complete": True, "observation": "连续展示"}
+            start = round(current["start"] * 1_000_000)
+            return {"verdict": "matched", "same_product": True, "confidence": .9,
+                    "basis": "product_display", "time_sensitive": False, "scene_ids": [],
+                    "supported_point_ids": [], "observation": "展示画面", "reason": "支持本句",
+                    "sentence_fit": True, "sentence_observation": "本句展示清楚",
+                    "evidence_intervals_us": [{"start": start + 200_000, "end": start + 1_000_000}]}
+        unreviewed = copy.deepcopy(generic)
+        def no_sentence_fit(prompt, *args):
+            response = generic_call(prompt, *args)
+            response.pop("sentence_observation", None)
+            return response
+        with mock.patch.object(editor, "_review_media", side_effect=media), \
+             mock.patch.object(editor, "_call", side_effect=no_sentence_fit):
+            with self.assertRaisesRegex(ValueError, "AI_EDITOR_NO_SELECTION:1"):
+                editor._rebind_camera_groups(recovered_manifest, analysis, unreviewed, self.root, None)
+        with self.assertRaisesRegex(ValueError, "AI_EDITOR_CAMERA_REVIEW_PENDING"):
+            editor._assemble(recovered_manifest, analysis, unreviewed, narration_timing=None)
+        with mock.patch.object(editor, "_review_media", side_effect=media), \
+             mock.patch.object(editor, "_call", side_effect=generic_call):
+            editor._rebind_camera_groups(recovered_manifest, analysis, generic, self.root, None)
+        self.assertTrue(editor._assemble(recovered_manifest, analysis, generic, narration_timing=None)["ok"])
+        self.assertTrue(all(generic["window_reviews"][generic["rows"][i]["parts"][0]["window_review_key"]]
+                            ["sentence_fit"] for i in (0, 1)))
+        # Exercise the real editor loop: one resumed empty group of three
+        # members must be requested and reselected in a single model response.
+        analysis3 = copy.deepcopy(analysis)
+        old3 = next(s for s in analysis3["shots"] if s["shot_id"] == "original3")
+        old3.update(video=str(sources[0]), source_start=4, source_end=6, duration=2)
+        new3 = {**old3, "shot_id": "new3", "video": str(sources[2])}
+        analysis3["shots"].append(new3)
+        plan3 = copy.deepcopy(plan)
+        plan3["identity"] = copy.deepcopy(resumed["identity"])
+        plan3["rows"][2]["parts"][0]["source_start_us"] = 4_000_000
+        base3 = {**reviews["3"][0], "source_identity": contract.source_identity(sources[0]),
+                 "evidence_intervals_us": [{"start": 4_200_000, "end": 5_000_000}]}
+        plan3["reviews"]["3"] = [base3, {**base3, "shot_id": "new3",
+            "source_identity": contract.source_identity(sources[2])}]
+        plan3["camera_continuous_groups"] = [{**groups[0], "indices": [1, 2, 3],
+            "windows": groups[0]["windows"] + [{"start": 4_000_000, "end": 6_000_000}]}]
+        self.assertTrue(editor._assemble(manifest, analysis3, plan3, narration_timing=None)["ok"])
+        plan3["identity"]["analysis_sha256"] = editor._analysis_digest(analysis3)
+        plan3["resume_identity"]["analysis_sha256"] = editor._analysis_digest(analysis3)
+        path.write_text(json.dumps(plan3), encoding="utf-8")
+        captured.clear()
+        with mock.patch.object(editor, "_editor_model", return_value="offline"), \
+             mock.patch.object(editor, "_save", side_effect=stop):
+            with self.assertRaisesRegex(RuntimeError, "stop before model"):
+                editor.prepare(recovered_manifest, analysis3, self.root)
+        plan3 = captured[0]
+        self.assertEqual(plan3["camera_reselect_groups"], [{"indices": [1, 2, 3]}])
+        self.assertTrue(plan3["_resume_rows"])
+        editor_requests = []
+        def group_call(prompt, path, *args):
+            if path.name.startswith("edit_"):
+                editor_requests.append(prompt)
+                return {"rows": [{"index": index, "parts": [{"shot_id": f"new{index}",
+                    "audio_duration_us": 2_000_000, "source_start_us": (index - 1) * 2_000_000}]}
+                    for index in (1, 2, 3)]}
+            return call(prompt, path, *args)
+        with ExitStack() as stack:
+            stack.enter_context(mock.patch.object(editor, "_review_media", side_effect=media))
+            stack.enter_context(mock.patch.object(editor, "_call", side_effect=group_call))
+            for name in ("_prefer_presentation_groups", "_mix_repeated_displays", "_place_hook_neighbors",
+                         "_vary_repeated_actions", "_vary_shared_comfort"):
+                stack.enter_context(mock.patch.object(editor, name))
+            stack.enter_context(mock.patch.object(camera_variety, "refine"))
+            stack.enter_context(mock.patch.object(editor, "_repair_reviewed_rows", side_effect=
+                lambda m, a, p, d, t, expanded: editor._assemble(m, a, p, narration_timing=t, verify_sources=True)))
+            editor._edit_plan(recovered_manifest, analysis3, plan3, self.root, None)
+        self.assertEqual(len(editor_requests), 1)
+        self.assertIn("index=[1, 2, 3]", editor_requests[0])
+        self.assertEqual(plan3["rows"][3], rows[3])
+        self.assertEqual(plan3["camera_continuous_groups"][0]["indices"], [1, 2, 3])
+        self.assertTrue(editor._assemble(recovered_manifest, analysis3, plan3, narration_timing=None)["ok"])
+        plan2 = copy.deepcopy(plan)
+        plan2["identity"] = copy.deepcopy(resumed["identity"])
+        editor._invalidate_camera_groups(plan2, {1, 3}, clear_members=True)
+        plan2["_resume_rows"] = True
+        editor_requests.clear()
+        def two_groups_call(prompt, path, *args):
+            if path.name.startswith("edit_"):
+                editor_requests.append(prompt)
+                indices = (1, 2) if len(editor_requests) == 1 else (3, 4)
+                return {"rows": [{"index": index, "parts": [{
+                    "shot_id": f"new{index}" if index <= 2 else f"original{index}",
+                    "audio_duration_us": 2_000_000, "source_start_us": ((index - 1) % 2) * 2_000_000}]}
+                    for index in indices]}
+            return call(prompt, path, *args)
+        with ExitStack() as stack:
+            stack.enter_context(mock.patch.object(editor, "_review_media", side_effect=media))
+            stack.enter_context(mock.patch.object(editor, "_call", side_effect=two_groups_call))
+            for name in ("_prefer_presentation_groups", "_mix_repeated_displays", "_place_hook_neighbors",
+                         "_vary_repeated_actions", "_vary_shared_comfort"):
+                stack.enter_context(mock.patch.object(editor, name))
+            stack.enter_context(mock.patch.object(camera_variety, "refine"))
+            stack.enter_context(mock.patch.object(editor, "_repair_reviewed_rows", side_effect=
+                lambda m, a, p, d, t, expanded: editor._assemble(m, a, p, narration_timing=t, verify_sources=True)))
+            editor._edit_plan(recovered_manifest, analysis, plan2, self.root, None)
+        self.assertEqual(len(editor_requests), 2)
+        self.assertIn("index=[1, 2]", editor_requests[0])
+        self.assertIn("index=[3, 4]", editor_requests[1])
+        self.assertTrue(editor._assemble(recovered_manifest, analysis, plan2, narration_timing=None)["ok"])
+        changed = copy.deepcopy(resumed)
+        editor._replace_focused_row(changed, 1, {"index": 1, "parts": [{"shot_id": "original1", "audio_duration_us": 2_000_000}]})
+        self.assertEqual(changed["camera_reselect_groups"], [{"indices": [1, 2]}])
+        self.assertEqual(changed["rows"][1]["parts"], [])
+        self.assertEqual(changed["camera_continuous_groups"], [groups[1]])
 
     def test_qc_rejected_shot_cannot_be_reselected_for_that_sentence(self):
         alt_video = self.root / "alt.mp4"
@@ -338,6 +577,54 @@ class AIEditorTests(unittest.TestCase):
             self.assertNotEqual(first, prompt({**changed, "sku": "other"}, generic))
             call.return_value = dict(self.review)
             self.assertNotEqual(prompt(self.manifest, self.sentence), prompt(changed, self.sentence))
+
+    def test_fluorescence_label_is_not_a_performance_claim(self):
+        manifest = {**self.manifest, "category": "zhipin"}
+        media = {"start": 0, "end": 6, "before": contract.source_identity(self.video),
+                 "times": [0, 3, 5], "sheet": self.root / "sheet.jpg"}
+        fact = {"id": "p1", "kind": "readable_label", "object_matches": True, "result_seen": True,
+                "action_us": 2_000_000, "result_us": 2_000_000, "result_observed": "0荧光字样清晰可读"}
+        model = {**self.review, "basis": "readable_label", "scene_ids": ["medical_grade_package_claims"],
+                 "claim_checks": [fact]}
+        cases = [
+            ("包装上标着0荧光", "包装上标着0荧光", True),
+            ("包装上标着0荧光，纸张柔软", "包装上标着0荧光", True),
+            ("包装标注医护级0致敏0荧光", "包装标注医护级0致敏0荧光", True),
+            ("包装上写着‘0荧光’的字样", "包装上写着‘0荧光’的字样", True),
+            ("这个包装上标着0荧光", "这个包装上标着0荧光", True),
+            ("不是这个包装上标着0荧光", "不是这个包装上标着0荧光", False),
+            ("包装标注医护级、0致敏、0荧光", "包装标注医护级、0致敏、0荧光", True),
+            ("包装标注医护级、0致敏、0荧光，产品不含荧光", "包装标注医护级、0致敏、0荧光", False),
+            ("包装上标着0荧光，产品不含荧光", "包装上标着0荧光", False),
+            ("包装上标着0荧光剂含量不为零", "包装上标着0荧光剂含量不为零", False),
+            ("包装上标着0荧光但产品不含荧光", "包装上标着0荧光但产品不含荧光", False),
+            ("包装上标着0荧光，产品不含任何荧光剂", "包装上标着0荧光", False),
+            ("产品不含荧光", "产品不含荧光", False),
+            ("不是包装上标着0荧光", "不是包装上标着0荧光", False),
+            ("包装上标着0荧光", "产品不含荧光", False),
+        ]
+        with mock.patch.object(editor, "_review_media", return_value=media), \
+             mock.patch.object(editor, "_call", side_effect=lambda *args: copy.deepcopy(model)):
+            for text, point, accepted in cases:
+                with self.subTest(text=text, point=point):
+                    sentence = {**self.sentence, "text": text, "first_look_ids": ["handfeel"],
+                                "selling_points": [{"id": "p1", "text": point}]}
+                    result = editor._review(manifest, sentence, self.shot, self.root)
+                    self.assertEqual(result["verdict"], "matched" if accepted else "uncertain")
+                    self.assertEqual(result["supported_point_ids"], ["p1"] if accepted else [])
+            sentence = {**self.sentence, "text": "包装上标着0荧光", "first_look_ids": [],
+                        "selling_points": [{"id": "p1", "text": "包装上标着0荧光"}]}
+            self.assertEqual(editor._review(manifest, sentence, self.shot, self.root)["supported_point_ids"], ["p1"])
+            sentence["first_look_ids"] = ["handfeel"]
+            model["claim_checks"][0]["result_observed"] = "包装清晰"
+            self.assertEqual(editor._review(manifest, sentence, self.shot, self.root)["supported_point_ids"], [])
+            model["claim_checks"][0]["result_observed"] = "0荧光字样清晰可读"
+            model["scene_ids"] = ["fluorescence_zero_test"]
+            sentence = {**sentence, "text": "产品不含荧光", "first_look_ids": ["handfeel"],
+                        "selling_points": [{"id": "p1", "text": "产品不含荧光"}]}
+            self.assertEqual(editor._review(manifest, sentence, self.shot, self.root)["supported_point_ids"], [])
+            sentence["first_look_ids"] = []
+            self.assertEqual(editor._review(manifest, sentence, self.shot, self.root)["supported_point_ids"], [])
 
     def test_review_accepts_unambiguous_interval_pair(self):
         media = {"start": 0, "end": 6, "before": contract.source_identity(self.video),

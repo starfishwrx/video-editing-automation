@@ -7,6 +7,20 @@
 
 ## 新增条目
 
+### L-20261113-camera-recovery 连续机位绑定随组员重选失效
+
+- status: OPEN
+- hits: 1
+- 模块: ai_editor / camera_variety
+- 恢复时 QC 排除不改变像素观察身份，但会改变可选镜头；重选任一组员时须整组重看并绑定新接缝，不能把旧接缝收据套给新窗口。保留未受影响组和失败窗口拒绝。回归见 `test_camera_group_recovery_reselects_and_reviews_the_whole_group`。
+
+### L-20261113-fluorescence-label 包装标称与性能证据分开
+
+- status: OPEN
+- hits: 1
+- 模块: ai_editor / zhipin
+- 可读包装标称只证明包装上写了什么；含产品无荧光性能主张的句子不能因包装标签或模型场景标签通过检测门禁。回归见 `test_fluorescence_label_is_not_a_performance_claim`。
+
 ### L-20261113-claim-window 复核结果必须留在成稿最后可播放帧以内
 
 - status: OPEN
