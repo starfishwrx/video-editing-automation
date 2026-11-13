@@ -1396,6 +1396,36 @@ class MaterialDurationProbeTests(unittest.TestCase):
        源窗口 ÷ video_speed ≈ segment_us（容差 1 帧）。
     """
 
+    def test_parallel_sources_keep_the_legacy_writer_duration(self):
+        from concurrent.futures import ThreadPoolExecutor
+        import threading
+        import time
+
+        library = _fake_pymediainfo(video_ms=5303)
+        parse = library.MediaInfo.parse
+        busy = threading.Lock()
+        start = threading.Barrier(4)
+
+        def parse_one(path, **kwargs):
+            if not busy.acquire(blocking=False):
+                raise ValueError("overlapping library options")
+            try:
+                time.sleep(.02)
+                return parse(path, **kwargs)
+            finally:
+                busy.release()
+
+        def probe(index):
+            start.wait(5)
+            return tc.probe_material_duration_us(f"{index}.mov", ffprobe="ffprobe")
+
+        with mock.patch.dict(sys.modules, {"pymediainfo": library}), \
+                mock.patch.object(library.MediaInfo, "parse", side_effect=parse_one), \
+                mock.patch.object(tc.subprocess, "run", return_value=mock.Mock(stdout="5.303333")), \
+                ThreadPoolExecutor(4) as pool:
+            results = list(pool.map(probe, range(4)))
+        self.assertEqual([r["duration_us"] for r in results], [5_303_000] * 4)
+
     def test_pymediainfo_video_track_is_the_truth(self):
         """4.984s 视频轨一期到位，与容器 4.99 无关；来源/置信度必须如实带出。"""
         fake = _fake_pymediainfo(video_ms=4984)

@@ -489,7 +489,7 @@ def _review_media(shot: dict, directory: Path, *, dense: bool = False, fit: bool
         raise ValueError("AI_EDITOR_CONTACT_SHEET_FAILED")
     if before != contract.source_identity(source):
         raise ValueError("AI_EDITOR_SOURCE_CHANGED_DURING_REVIEW")
-    return {"start": start, "end": end, "before": before, "times": times, "sheet": sheet}
+    return {"start": start, "end": end, "before": before, "times": times, "sheet": sheet, "frames": frames}
 
 
 def _iter_review_round(ids, shots, directory, review, *, dense=False, on_error=None):
@@ -1301,6 +1301,12 @@ def _assemble(manifest: dict, analysis: dict, plan: dict, *, narration_timing: d
     for index, neighbor in _linked_hooks(plan):
         if not _touching(output, index, neighbor):
             raise ValueError(f"AI_EDITOR_NO_SELECTION:{index}")
+    for join in plan.get("camera_continuous_groups", []):
+        indices = join["indices"]
+        receipts = [output[n-1]["ai_selection"] for n in indices]
+        if (not all(receipt["source_identity"] == join.get("source_identity") for receipt in receipts)
+                or [receipt["window_us"] for receipt in receipts] != join.get("windows")):
+            raise ValueError(f"AI_EDITOR_CAMERA_JOIN_CHANGED:{indices[0]}")
     out_manifest = {**manifest, "selection_mode": "ai_editor", "segments": output,
                     "temporary_material_analysis": True,
                     "temporary_shot_ids": [s.get("temporary_shot_id") or s.get("shot_id") for s in output]}
@@ -3243,7 +3249,10 @@ def _prefer_presentation_groups(manifest, analysis, plan, directory, narration_t
                     WindowFailure(index, sid, solution.reason), narration_timing, presentation_only=True):
                 break
 def _linked_hooks(plan):
-    """Yield the two sentence indices bound by each accepted hook review."""
+    """Yield neighbouring indices bound by an accepted continuous-window review."""
+    for join in plan.get("camera_continuous_groups", []):
+        indices = join["indices"]
+        yield from zip(indices, indices[1:])
     for row in plan["rows"]:
         for part in row.get("parts") or []:
             review = plan.get("window_reviews", {}).get(part.get("window_review_key"), {})
@@ -3681,6 +3690,8 @@ technical_option是按本句完整配音求出的实际可行窗口；分配多�
             _place_hook_neighbors(manifest, analysis, plan, directory, narration_timing)
             _vary_repeated_actions(manifest, analysis, plan, narration_timing, current_inventory,directory=directory)
             _vary_shared_comfort(manifest, analysis, plan, narration_timing, current_inventory)
+            from . import camera_variety
+            camera_variety.refine(manifest, analysis, plan, narration_timing, current_inventory, directory)
             plan["ok"] = True
             plan["phase"] = "selection_complete"
             return
@@ -3873,7 +3884,7 @@ def prepare(manifest: dict, analysis: dict, report_dir: Path, *, narration_timin
                 plan['presentation_policy_version'] = None
             for key in ("sentences", "reviews", "display_reviews", "coverage", "rows", "window_reviews",
                         "presentation_reviews", "presentation_conflict_repairs",
-                        "display_extra_round",
+                        "display_extra_round", "camera_continuous_groups", "camera_variety",
                         "duration_migration", "duration_migrations",
                         "window_repair_attempts", "repair_history", "duplicate_repair_reviews", "continuity_reviews", "continuity_attempts", "continuity_repairs", "experiment_attempts"):
                 if key in previous:

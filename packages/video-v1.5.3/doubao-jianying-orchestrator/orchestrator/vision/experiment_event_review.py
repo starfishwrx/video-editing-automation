@@ -151,18 +151,6 @@ def review(manifest,pair,output,*,focus='complete_pour',ffmpeg='ffmpeg',ffprobe=
     for member in pair['members']:
         reasked={'done':False}
 
-        def chain_or_reask(row, ask_prompt, ask_target, ask_sheet, member=member):
-            try:
-                compile_events(row, member)
-                return row
-            except ValueError as exc:
-                if reasked['done'] or not chain_format_error(exc):
-                    raise
-                reasked['done']=True
-                retried=ai_editor._call(ask_prompt+_chain_note(exc),
-                    ask_target.with_name(ask_target.stem+'-format-reask.json'), ask_sheet)
-                compile_events(retried, member)
-                return retried
         target=output.with_name(output.stem+'-'+member['part']+'.json')
         window=None if frames_only else window_video(member,target,ffmpeg=ffmpeg,ffprobe=ffprobe)
         coverage=focus if member['part']=='A' else 'complete_verification'
@@ -190,6 +178,18 @@ complete_pour须保留倒液的开始和完成；absorption_focus允许从实际
             save(target.with_suffix('.candidate.json'),row)
             if row.get('coverage')!=coverage:raise ValueError('EXPERIMENT_EVENTS_COVERAGE_CHANGED')
             return bool(compile_events(row,member))
+        def chain_or_reask(row, ask_prompt, ask_target, ask_sheet):
+            try:
+                validate(row)
+                return row
+            except ValueError as exc:
+                if reasked['done'] or not chain_format_error(exc):
+                    raise
+                reasked['done']=True
+                retried=ai_editor._call(ask_prompt+_chain_note(exc),
+                    ask_target.with_name(ask_target.stem+'-format-reask.json'), ask_sheet)
+                validate(retried)
+                return retried
         if frames_only:
             left,right=member['window_frame_ids']
             anchors={round(left+i*(right-left)/15) for i in range(16)}
@@ -222,7 +222,6 @@ complete_pour须保留倒液的开始和完成；absorption_focus允许从实际
         refined,settled=settle_boundaries(refined,ids,validate,lambda missing,p=detail_prompt,t=target,s=sheet,sh=ids:
             ai_editor._call(p+_reask_note(missing,sh),t.with_name(t.stem+'-reask.json'),s))
         if settled:save(target.with_name(target.stem+'-boundary.json'),settled)
-        refined=chain_or_reask(refined, detail_prompt, target, sheet)
         validate_samples(member['samples']);observations.append(compile_events(refined,member))
         facts.append({'video':row,'frame_refinement':refined,'shown_frame_ids':ids,'sheet':identity.source_identity(sheet)})
     artifact={'protocol':PROTOCOL,'task_id':manifest['task_id'],'rules':identity.rules_identity(manifest),

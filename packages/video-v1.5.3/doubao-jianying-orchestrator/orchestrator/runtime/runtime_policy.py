@@ -24,15 +24,20 @@ class RuntimePolicy:
     qc_stage_timeout: float = 900
     task_timeout: float = 14400
     slot_dir: str = field(default_factory=lambda: str(Path(tempfile.gettempdir()) / "jy_slots"))
+    source_prep_slots: int | None = None
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        values = asdict(self)
+        if self.source_prep_slots is None:
+            values["source_prep_slots"] = self.prep_slots
+        return values
 
 
 _LEGACY = {
     "task_workers": "JY_TASK_WORKERS",
     "prep_workers": "JY_VISION_PREP_WORKERS",
     "prep_slots": "JY_VISION_PREP_SLOTS",
+    "source_prep_slots": "JY_SOURCE_PREP_SLOTS",
     "api_workers": "JY_VISION_BATCH_WORKERS",
     "vision_slots": "JY_VISION_SLOTS",
     "request_timeout": "JY_VISION_TIMEOUT",
@@ -47,7 +52,7 @@ def load_policy() -> RuntimePolicy:
     Missing/malformed explicit files fail closed instead of silently restoring
     an independently chosen account budget in a child process.
     """
-    defaults = RuntimePolicy()
+    defaults = RuntimePolicy(source_prep_slots=8)
     path = os.environ.get("JY_CONCURRENCY_POLICY_FILE", "").strip()
     if path:
         data = json.loads(Path(path).read_text(encoding="utf-8-sig"))
@@ -71,6 +76,9 @@ def load_policy() -> RuntimePolicy:
                 data[key] = min(value, getattr(defaults, key))
         if os.environ.get("JY_SLOT_DIR", "").strip():
             data["slot_dir"] = os.environ["JY_SLOT_DIR"].strip()
+    # Existing explicit budgets also bound source preparation until opted in.
+    if "prep_slots" in data:
+        data.setdefault("source_prep_slots", data["prep_slots"])
     values = defaults.to_dict()
     values.update(data)
     for key in _LEGACY:
@@ -97,9 +105,12 @@ def vision_slot(timeout: float | None = None) -> Iterator[SlotHandle]:
 
 
 @contextmanager
-def media_slot(timeout: float | None = None) -> Iterator[SlotHandle]:
+def media_slot(timeout: float | None = None, *, cold_source: bool = False) -> Iterator[SlotHandle]:
     policy = load_policy()
-    with slot("vision_prepare", policy.prep_slots,
+    capacity = policy.source_prep_slots if cold_source else policy.prep_slots
+    # An expanded cold pool leaves slot zero available to ordinary media/QC.
+    first_index = 1 if cold_source and capacity > policy.prep_slots else 0
+    with slot("vision_prepare", capacity, prefer_high=cold_source, first_index=first_index,
               timeout=_remaining_timeout(policy.task_timeout if timeout is None else timeout),
               slot_dir=Path(policy.slot_dir)) as handle:
         yield handle

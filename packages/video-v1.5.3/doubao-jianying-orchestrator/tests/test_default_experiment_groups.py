@@ -399,6 +399,21 @@ class DefaultExperimentGroupTests(unittest.TestCase):
         segment.pop("continuity_group"); segment["ai_selection"].pop("continuity_group")
         self.assertFalse(contract.validate_segment_receipt(segment, index=1, manifest=self.manifest)["ok"])
 
+    def test_event_images_require_requested_coverage_in_initial_and_dense_reviews(self):
+        sheet = self.root / "coverage.jpg"
+        sheet.write_bytes(b"fixture")
+        for wrong_call in (1, 2):
+            with self.subTest(wrong_call=wrong_call):
+                responses = [facts("A") for _ in range(wrong_call)]
+                responses[-1]["coverage"] = "absorption_focus"
+                with patch.object(experiment_event_review, "_frame_sheet", return_value=sheet), \
+                     patch.object(editor, "_call", side_effect=responses) as call:
+                    with self.assertRaisesRegex(ValueError, "EXPERIMENT_EVENTS_COVERAGE_CHANGED"):
+                        experiment_event_review.review(self.manifest, self.fixture.evidence,
+                            self.root / f"coverage-{wrong_call}.json", focus="complete_pour",
+                            frames_only=True, font_path="unused")
+                    self.assertEqual(call.call_count, wrong_call)
+
     def test_event_observation_uses_configured_image_route_without_qwen_video(self):
         output = self.root / "default-events.json"
         sheet = self.root / "event-sheet.jpg"; sheet.write_bytes(b"frozen sheet")

@@ -7,6 +7,15 @@
 
 ## 新增条目
 
+### L-20261112-media-duration-concurrency 并行切镜须核对两种写入器的时长
+
+- status: OPEN
+- hits: 1
+- 模块: material_cache / timing_contract
+- 并发调用 libmediainfo 偶尔返回无效 XML，导致时长探测只取 FFprobe 的视频轨。同一原片的代表帧一致，结束时间仍可能多出 333 微秒。
+- 同进程串行调用 libmediainfo。对照每个源的精确时长、切点、镜头编号和代表帧，测试失败后仅重做未成功的源。
+- 证据见 ADR 0012、test_timing_contract.py、test_material_cache.py。
+
 ### L-20261111-presentation-window 清晰稳定不能替代有效动作阶段
 - status: OPEN
 - hits: 2
