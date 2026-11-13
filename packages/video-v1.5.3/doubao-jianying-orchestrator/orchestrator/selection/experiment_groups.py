@@ -298,6 +298,12 @@ def validate_plan(manifest, analysis, plan, group, narration_timing):
     from . import ai_editor as editor
     rejected = editor.qc_rejected_shots(manifest)
     for member in context["members"]:
+        feedback = (manifest.get("ai_refill_feedback") or {}).get(str(member["index"])) or {}
+        for part in member["parts"]:
+            row = {"video": part["source_identity"]["path"], "ai_selection": part,
+                   "source_start": part["start_us"] / 1e6, "source_end": part["end_us"] / 1e6}
+            if editor._repeats_failed_cut(row, feedback):
+                raise ValueError("AI_REFILL_EXPERIMENT_REPEATED_FAILED_WINDOW")
         if any(p["shot_id"] in rejected.get(member["index"], set()) for p in member["parts"]):
             raise ValueError("CONTINUITY_INPUT_CHANGED")
 

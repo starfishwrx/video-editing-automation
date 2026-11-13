@@ -7,6 +7,14 @@
 
 ## 新增条目
 
+### L-20261113-claim-window 复核结果必须留在成稿最后可播放帧以内
+
+- status: OPEN
+- hits: 1
+- 模块: ai_editor / batch_worker
+- 初筛定位到完整动作后，短窗求解仍可能把结果移到裁切末端以外。按实际倍速和输出帧率检查最终可见范围，并通过独立成稿质检回看。回归见 `test_result_anchor_must_survive_output_fps_and_actual_speed`。
+
+
 ### L-20261112-media-duration-concurrency 并行切镜须核对两种写入器的时长
 
 - status: OPEN

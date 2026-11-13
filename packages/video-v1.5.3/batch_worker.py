@@ -1379,7 +1379,15 @@ def qc_refill_feedback_from_report(rd: pathlib.Path, report: dict, targets, *, e
             continue
         out[str(index)] = {"claim": row["claim"], "observed": row["observed"],
                            "reason": row["reason"], "match_level": row["match_level"],
-                           "prior_shot_ids": source_ids}
+                           "prior_shot_ids": source_ids,
+                           "failed_windows": [{
+                               "source_identity": part["ai_selection"]["source_identity"],
+                               "start_us": round(actual_by_index[i]["source_start"] * 1e6),
+                               "end_us": round((actual_by_index[i]["source_start"] +
+                                                actual_by_index[i]["source_duration"]) * 1e6),
+                           } for i, part in zip(actual_indices, parts)
+                               if actual_by_index[i].get("source_start") is not None
+                               and actual_by_index[i].get("source_duration", 0) > 0]}
     return out
 
 
@@ -1399,12 +1407,26 @@ def action_refill_controls(rd, report, *, expected_sources):
         if not item:
             continue
         method = row.get('action_repair')
-        if method == 'replace' or row.get('match_level') == 'MISMATCH':
+        if not item.get('failed_windows') and (method == 'replace' or row.get('match_level') == 'MISMATCH'):
             rejected[index] = set(item['prior_shot_ids'])
             recuts.pop(index, None)
         elif index in recuts:
             item['same_shot_recut'] = recuts[index]
     return feedback, rejected, recuts
+
+
+def retain_failed_windows(current, previous):
+    """Carry forward only the same claim's bound crop exclusions."""
+    for key, item in current.items():
+        old = previous.get(key) or {}
+        if old.get("claim") == item.get("claim"):
+            windows = list(old.get("failed_windows") or [])
+            for cut in item.get("failed_windows") or []:
+                if cut not in windows:
+                    windows.append(cut)
+            if windows:
+                item["failed_windows"] = windows
+    return current
 
 
 def qc_current_refill_feedback(rd: pathlib.Path, report: dict, *, expected_sources) -> dict | None:
@@ -1521,7 +1543,7 @@ def restore_qc_rejections(rd: pathlib.Path, manifest: dict) -> tuple[dict, dict]
     if directed is not None:
         current_feedback, rejected_actions, _ = directed
         repair_indices = {int(key) for key in current_feedback}
-        active_feedback.update(current_feedback)
+        active_feedback.update(retain_failed_windows(current_feedback, feedback))
         for index, ids in rejected_actions.items():
             rejected.setdefault(index, set()).update(ids)
     elif (input_matches and repair_indices
@@ -1778,7 +1800,6 @@ def process_task(task: dict, *, retry_partial: bool = False,
         qc_reports = []
         distribution_receipts = []
         qc_gaps = []
-        repair_visual_missing_indices = set()
         analysis_cache = None
         # A partial task may already have shipped draft 1 before the queue
         # moved on.  Recover its validated candidate report so draft 2/3 do
@@ -1806,6 +1827,7 @@ def process_task(task: dict, *, retry_partial: bool = False,
         log("task_wall_clock_budget=%ss candidate_pool=%d" % (
             task_budget_seconds, len(sources)))
         for i in range(1, count + 1):
+            repair_visual_missing_indices = set()
             name = base_draft if i == 1 else f"{base_draft}-{i}"
 
             # A partial task is resumable: keep already shipped drafts and only
@@ -1865,6 +1887,7 @@ def process_task(task: dict, *, retry_partial: bool = False,
                 rejection_identity, qc_rejected = restore_qc_rejections(rd, {**manifest, **variant_controls})
             saved_repairs = _read_json(rd / "qc_rejected_shots.json")
             repair_visual_missing_indices.update(saved_repairs.get("repair_indices") or [])
+            feedback_history = saved_repairs.get("repair_feedback") or {}
             repair_feedback = saved_repairs.get("active_repair_feedback") or {}
             if qc_rejected:
                 log("restore post-draft QC rejections: %s" % {
@@ -2022,6 +2045,7 @@ def process_task(task: dict, *, retry_partial: bool = False,
                                 failure_class="environment", failure_code="ENVIRONMENT_PRECHECK_FAILED")
                             log("selection recovery preflight blocked; retain audio and retry budget")
                             break
+                        new_cut_failure = False
                         if qc_result is not None:
                             last_failure["qc_report"] = qc_result.get("output")
                             last_failure["qc_status"] = qc_result.get("status")
@@ -2037,7 +2061,10 @@ def process_task(task: dict, *, retry_partial: bool = False,
                             sources = rejection_identity["sources"]
                             directed = action_refill_controls(rd, report, expected_sources=sources)
                             if directed is not None:
-                                repair_feedback, rejected_actions, recut_windows = directed
+                                current_feedback, rejected_actions, recut_windows = directed
+                                new_cut_failure = any(w not in (repair_feedback.get(key) or {}).get("failed_windows", [])
+                                    for key, item in current_feedback.items() for w in item.get("failed_windows", []))
+                                repair_feedback = retain_failed_windows(current_feedback, feedback_history)
                                 repair_visual_missing_indices = {int(key) for key in repair_feedback}
                                 for index, ids in rejected_actions.items():
                                     qc_rejected.setdefault(index, set()).update(ids)
@@ -2058,8 +2085,9 @@ def process_task(task: dict, *, retry_partial: bool = False,
                                 for index, window in recut_windows.items():
                                     if str(index) in repair_feedback:
                                         repair_feedback[str(index)]["same_shot_recut"] = window
+                            feedback_history.update(repair_feedback)
                             save_qc_rejections(rd, rejection_identity, qc_rejected,
-                                               repair_visual_missing_indices, repair_feedback)
+                                               repair_visual_missing_indices, feedback_history, repair_feedback)
                         log("DRAFT %d/%d attempt %d failed (%s): %s" % (
                             i, count, attempt,
                             "hard" if cls["vision_hard"] else "transient",
@@ -2077,7 +2105,7 @@ def process_task(task: dict, *, retry_partial: bool = False,
                         qc_repairable = bool(qc_result and (
                             repair_visual_missing_indices.difference(applied_repair_indices)
                             or {(k, s) for k, v in qc_rejected.items() for s in v}.difference(applied_rejections)
-                            or fresh_recuts))
+                            or new_cut_failure or fresh_recuts))
                         if fresh_recuts:
                             seen_recut_windows.update((index, window["shot_id"], window["start"], window["end"])
                                                       for index, window in fresh_recuts.items())
