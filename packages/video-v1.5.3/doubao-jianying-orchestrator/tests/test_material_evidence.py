@@ -117,6 +117,17 @@ class EvidenceTest(unittest.TestCase):
         put({**facts,"text_agreed":["70抽"]})
         self.assertIsNone(store.portable_text(self.manifest,self.shot))
 
+    def test_worker_category_alias_reuses_existing_preparation_evidence(self):
+        m = {**self.manifest,"category":"纸品"}
+        old = contract.digest(store._scope_fields(m))
+        with store.connect() as db:
+            store.put(db,old,store.identity(self.path),self.path,2000000,5000000,
+                      "qc",store.protocol(m),self.facts,self.proof)
+        worker = {**m,"category":"zhipin"}
+        self.assertEqual(store.scope(worker),store.scope(m))
+        self.assertEqual(len(store.windows(worker,self.shot)),1)
+        self.assertEqual(store.windows({**worker,"category":"weipin"},self.shot),[])
+
     def test_independent_ocr_version(self):
         with patch.dict(os.environ,{"JY_VISION_TEXT_PASS":"1"}):
             row={"action_complete":True,"text_pass":"hires","ocr_protocol":vision._ocr_protocol()}

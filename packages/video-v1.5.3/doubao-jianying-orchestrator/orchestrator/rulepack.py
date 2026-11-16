@@ -41,6 +41,10 @@ def normalize_category(value: Any) -> str:
     return _CATEGORY_ALIASES.get(str(value or "").strip().lower(), "")
 
 
+def category_aliases(category: str) -> list[str]:
+    return [alias for alias, target in _CATEGORY_ALIASES.items() if target == category]
+
+
 def detect_category(manifest: dict[str, Any] | None) -> tuple[str, str]:
     """返回 ``(品类, 依据)``。识别不了时返回 ``("general", "")``。"""
     source = manifest if isinstance(manifest, dict) else {}

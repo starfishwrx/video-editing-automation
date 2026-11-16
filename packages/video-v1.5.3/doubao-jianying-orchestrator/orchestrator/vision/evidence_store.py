@@ -39,10 +39,25 @@ def database():
     return Path(value) if value and value.casefold() != "off" else None
 
 
+def _scope_fields(manifest):
+    return [str(manifest.get(k) or "").strip().casefold() for k in
+            ("category", "product_id", "product", "sku", "brand", "product_key")]
+
+
 def scope(manifest):
-    fields = [str(manifest.get(k) or "").strip().casefold() for k in
-              ("category", "product_id", "product", "sku", "brand", "product_key")]
+    from .. import rulepack
+    fields = _scope_fields(manifest)
+    fields[0] = rulepack.normalize_category(fields[0]) or fields[0]
     return contract.digest(fields) if any(fields[i] for i in (1, 2, 3, 5)) else None
+
+
+def _read_scopes(manifest):
+    # Older data was keyed before the editor translated category names (纸品 -> zhipin).
+    from .. import rulepack
+    fields = _scope_fields(manifest)
+    normalized = rulepack.normalize_category(fields[0])
+    categories = rulepack.category_aliases(normalized) if normalized else [fields[0]]
+    return json.dumps([contract.digest([name, *fields[1:]]) for name in categories])
 
 
 def protocol(manifest):
@@ -251,10 +266,10 @@ def windows(manifest, shot):
     sha = identity(shot["video"])
     with connect() as db:
         version = protocol(manifest)
-        rows = db.execute("""SELECT * FROM observations WHERE product=? AND sha=?
+        rows = db.execute("""SELECT * FROM observations WHERE product IN (select value from json_each(?)) AND sha=?
             AND (protocol=? OR grade='qc') AND grade != 'visual' AND start_us>=? AND end_us<=?
             ORDER BY CASE grade WHEN 'qc' THEN 0 WHEN 'review' THEN 1 WHEN 'label' THEN 2 ELSE 3 END, start_us, id""",
-            (scope(manifest), sha, version, round(shot["source_start"]*1e6), round(shot["source_end"]*1e6)))
+            (_read_scopes(manifest), sha, version, round(shot["source_start"]*1e6), round(shot["source_end"]*1e6)))
         found = []
         for row in rows:
             facts = json.loads(row["payload"])
@@ -316,9 +331,9 @@ def portable_visual(manifest, shot):
     if not database() or not scope(manifest):
         return None
     with connect() as db:
-        rows = db.execute("""SELECT payload FROM observations WHERE grade='visual' AND
-            product=? AND sha=? AND protocol=? AND start_us=? AND end_us=?""",
-            (scope(manifest),identity(shot["video"]),visual_protocol(manifest),
+        rows = db.execute("""SELECT DISTINCT payload FROM observations WHERE grade='visual' AND
+            product IN (select value from json_each(?)) AND sha=? AND protocol=? AND start_us=? AND end_us=?""",
+            (_read_scopes(manifest),identity(shot["video"]),visual_protocol(manifest),
              round(shot["source_start"]*1e6),round(shot["source_end"]*1e6))).fetchall()
     # Divergent historical observations need another look.
     return json.loads(rows[0][0]) if len(rows)==1 else None
@@ -333,11 +348,11 @@ def portable_text(manifest, shot):
     current = vision._ocr_protocol()
     sha = identity(shot["video"])
     with connect() as db:
-        rows = db.execute("""SELECT payload FROM observations WHERE product=? AND sha=?
+        rows = db.execute("""SELECT DISTINCT payload FROM observations WHERE product IN (select value from json_each(?)) AND sha=?
             AND grade='visual' AND start_us=? AND end_us=? AND json_extract(payload,'$.text_pass')='hires'
             AND (json_extract(payload,'$.ocr_protocol')=? OR
             (json_extract(payload,'$.ocr_protocol') IS NULL AND protocol=?))""",
-            (scope(manifest), sha, round(shot["source_start"]*1e6), round(shot["source_end"]*1e6),
+            (_read_scopes(manifest), sha, round(shot["source_start"]*1e6), round(shot["source_end"]*1e6),
              current, visual_protocol(manifest)))
         alternatives = {}
         for row in rows:
