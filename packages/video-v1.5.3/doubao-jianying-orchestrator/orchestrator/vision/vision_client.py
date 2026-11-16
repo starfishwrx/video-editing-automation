@@ -443,8 +443,11 @@ def post_chat(url: str, api_key: str, body: dict, output: Path, *, timeout: floa
                         result = asyncio.run(_http(url, api_key, request_body, budget, validator))
                         if os.environ.get("JY_MATERIAL_EVIDENCE_DB"):
                             from . import evidence_store
-                            evidence_store.record({}, "model_http", {"file":output.name,
-                                                  "request_kind":evidence_store.request_kind.get()})
+                            evidence_store.record({}, "model_http", {
+                                "file":output.name, "request_kind":evidence_store.request_kind.get(),
+                                "gap":evidence_store.request_gap.get(), "ok":result.ok,
+                                "http_status":result.http_status, "error":result.error_code,
+                                "tokens":result.usage, "request_id":result.request_id})
                         result.attempts = int(ledger["attempts"])
                         result.metadata.update(inflight=inflight, started_at=request_started, finished_at=time.time())
                         result.metadata["slot_wait_s"] = float(getattr(handle, "waited", 0))

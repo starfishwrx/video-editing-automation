@@ -16,6 +16,7 @@ import logging
 from .. import ai_editor_contract as contract
 
 
+request_gap = ContextVar("material_window_gap", default=None)
 request_kind = ContextVar("evidence_request_kind", default="visual_analysis")
 
 

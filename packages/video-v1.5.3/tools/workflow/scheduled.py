@@ -325,6 +325,13 @@ def run_once(queue_path, work_root, *, dry_run: bool = False, dispatcher=None,
                     conn.execute("""SELECT stage,coalesce(json_extract(detail,'$.request_kind'),
                        json_extract(detail,'$.basis'),''),count(*) FROM usage WHERE run=?
                        GROUP BY 1,2""", (run_id,))]
+                summary["material_evidence_gap_requests"] = [
+                    {"evidence_id":eid,"missing":json.loads(missing),"http_requests":count,
+                     "successful_responses":ok} for eid, missing, count, ok in
+                    conn.execute("""SELECT json_extract(detail,'$.gap.id'),json_extract(detail,'$.gap.missing'),
+                       count(*),sum(json_extract(detail,'$.ok')) FROM usage
+                       WHERE run=? AND stage='model_http' AND json_extract(detail,'$.gap.id') IS NOT NULL
+                       GROUP BY 1,2""", (run_id,))]
         except sqlite3.Error as exc:
             summary["material_evidence_warning"] = str(exc)
     summary["finished_at"] = _now()

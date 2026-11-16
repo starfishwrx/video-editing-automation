@@ -59,7 +59,12 @@ def first_look(manifest, sentence, shot, directory, call, original, review, medi
                 "window_us":[row["start_us"],row["end_us"]], "missing":missing or ["claim_fit"],
                 "previous_observation":row["facts"].get("observation") or row["facts"].get("action")}}
             pixels = media(crop,directory,dense=True,fit=True)
-            candidate = review(manifest,sentence,crop,directory,dense=True,prepared_media=pixels)
+            token = store.request_gap.set({"id":row["id"],"missing":missing or ["claim_fit"],
+                                           "shot":shot["shot_id"],"window_us":crop["_evidence_gap"]["window_us"]})
+            try:
+                candidate = review(manifest,sentence,crop,directory,dense=True,prepared_media=pixels)
+            finally:
+                store.request_gap.reset(token)
             if candidate.get("verdict") == "matched":
                 return candidate
         return original(manifest,sentence,shot,directory)
