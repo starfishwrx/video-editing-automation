@@ -6,7 +6,7 @@
     "machine-specific paths",
     "knowledge-base bodies"
   ],
-  "file_count": 463,
+  "file_count": 478,
   "files": [
     {
       "path": ".gitignore"
@@ -318,6 +318,9 @@
       "path": "doubao-jianying-orchestrator/orchestrator/policy/playback.py"
     },
     {
+      "path": "doubao-jianying-orchestrator/orchestrator/policy/presentation.py"
+    },
+    {
       "path": "doubao-jianying-orchestrator/orchestrator/policy/production_parameters.py"
     },
     {
@@ -444,6 +447,18 @@
       "path": "doubao-jianying-orchestrator/orchestrator/selection/ai_editor_recovery.py"
     },
     {
+      "path": "doubao-jianying-orchestrator/orchestrator/selection/camera_variety.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/selection/editorial_actions.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/selection/evidence_queries.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/selection/evidence_recall.py"
+    },
+    {
       "path": "doubao-jianying-orchestrator/orchestrator/selection/experiment_contract.py"
     },
     {
@@ -549,6 +564,15 @@
       "path": "doubao-jianying-orchestrator/orchestrator/vision/display_compare.py"
     },
     {
+      "path": "doubao-jianying-orchestrator/orchestrator/vision/evidence_import.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/vision/evidence_media.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/vision/evidence_store.py"
+    },
+    {
       "path": "doubao-jianying-orchestrator/orchestrator/vision/experiment_detail.py"
     },
     {
@@ -633,6 +657,9 @@
       "path": "doubao-jianying-orchestrator/references/production_quality_and_lessons.md"
     },
     {
+      "path": "doubao-jianying-orchestrator/references/requirement_levels.md"
+    },
+    {
       "path": "doubao-jianying-orchestrator/references/runtime_contract.md"
     },
     {
@@ -648,6 +675,9 @@
       "path": "doubao-jianying-orchestrator/tests/offline_host.py"
     },
     {
+      "path": "doubao-jianying-orchestrator/tests/test_action_source_pts.py"
+    },
+    {
       "path": "doubao-jianying-orchestrator/tests/test_ai_editor.py"
     },
     {
@@ -661,6 +691,9 @@
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_bounded_frame_batch.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/tests/test_camera_variety.py"
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_capacity_and_sync.py"
@@ -720,6 +753,9 @@
       "path": "doubao-jianying-orchestrator/tests/test_material_cache.py"
     },
     {
+      "path": "doubao-jianying-orchestrator/tests/test_material_evidence.py"
+    },
+    {
       "path": "doubao-jianying-orchestrator/tests/test_material_preparation_recovery.py"
     },
     {
@@ -771,6 +807,9 @@
       "path": "doubao-jianying-orchestrator/tests/test_preferred_speed.py"
     },
     {
+      "path": "doubao-jianying-orchestrator/tests/test_presentation_windows.py"
+    },
+    {
       "path": "doubao-jianying-orchestrator/tests/test_production_playback.py"
     },
     {
@@ -784,6 +823,9 @@
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_ready_work.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/tests/test_recovery_audio_preparation.py"
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_reference_sentence_planning.py"
@@ -811,6 +853,9 @@
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_sentence_planning.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/tests/test_shared_comfort.py"
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_shared_product_vision_cache.py"

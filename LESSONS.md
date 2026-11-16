@@ -849,3 +849,5 @@
 - 证据: `packages/video-v1.5.3/doubao-jianying-orchestrator/tests/test_ai_editor.py`。
 
 2026-11-10 旧纸品配音恢复修复。semantic_match 复用缓存音频并在重选前完成归一、边缘静音处理和五帧预检，发布独立句长文件。draft_write 继续保留已匹配句长，旧任务气口超限需恢复 semantic_match。
+
+跨任务复用画面观察时，原片内容、证据窗口和观察等级共同决定是否可用；任务中的卖点编号仅在该句内有效。

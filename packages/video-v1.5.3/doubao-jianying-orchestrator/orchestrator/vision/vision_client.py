@@ -441,6 +441,10 @@ def post_chat(url: str, api_key: str, body: dict, output: Path, *, timeout: floa
                         inflight = active_vision_slots()
                         request_started = time.time()
                         result = asyncio.run(_http(url, api_key, request_body, budget, validator))
+                        if os.environ.get("JY_MATERIAL_EVIDENCE_DB"):
+                            from . import evidence_store
+                            evidence_store.record({}, "model_http", {"file":output.name,
+                                                  "request_kind":evidence_store.request_kind.get()})
                         result.attempts = int(ledger["attempts"])
                         result.metadata.update(inflight=inflight, started_at=request_started, finished_at=time.time())
                         result.metadata["slot_wait_s"] = float(getattr(handle, "waited", 0))

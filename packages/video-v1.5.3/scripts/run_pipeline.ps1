@@ -32,6 +32,12 @@ $DraftRoot = [IO.Path]::GetFullPath($DraftRoot)
 $QueuePath = [IO.Path]::GetFullPath($QueuePath)
 $env:JY_WORK_ROOT = $WorkRoot
 $env:JY_PIPE_ROOT = $packageRoot
+if (-not $env:JY_VISION_CACHE_DIR) {
+    $env:JY_VISION_CACHE_DIR = Join-Path $packageRoot 'work/.cache'
+}
+if (-not $env:JY_MATERIAL_EVIDENCE_DB) {
+    $env:JY_MATERIAL_EVIDENCE_DB = Join-Path $env:JY_VISION_CACHE_DIR 'material_evidence.sqlite3'
+}
 $env:JY_EVAL_RUNTIME_ROOT = $packageRoot
 $env:JY_ORCHESTRATOR_ROOT = Join-Path $packageRoot 'doubao-jianying-orchestrator'
 $env:JY_PYTHON_EXE = $PythonPath

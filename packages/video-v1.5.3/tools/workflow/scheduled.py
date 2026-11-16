@@ -295,7 +295,15 @@ def run_once(queue_path, work_root, *, dry_run: bool = False, dispatcher=None,
             _execute(queue_path, work, summary, dispatcher, record_id)
         else:
             with _pipeline_lock(work):
-                _execute(queue_path, work, summary, dispatcher, record_id)
+                previous_batch = os.environ.get("JY_EVIDENCE_BATCH_ID")
+                os.environ["JY_EVIDENCE_BATCH_ID"] = run_id
+                try:
+                    _execute(queue_path, work, summary, dispatcher, record_id)
+                finally:
+                    if previous_batch is None:
+                        os.environ.pop("JY_EVIDENCE_BATCH_ID", None)
+                    else:
+                        os.environ["JY_EVIDENCE_BATCH_ID"] = previous_batch
         if any(row["status"] in {"ERROR", "UNKNOWN"} for row in summary["tasks"]):
             summary["status"] = "ERROR"
         if any(isinstance(row, dict) and (row.get("rc", 0) != 0 or row.get("status") in {
@@ -306,6 +314,19 @@ def run_once(queue_path, work_root, *, dry_run: bool = False, dispatcher=None,
         summary.update(status="SKIPPED", reason=str(exc))
     except Exception as exc:
         summary.update(status="ERROR", reason="PIPELINE_RUN_FAILED", error=str(exc))
+    evidence_db = os.environ.get("JY_MATERIAL_EVIDENCE_DB", "")
+    if evidence_db and Path(evidence_db).is_file() and not dry_run:
+        import sqlite3
+        from contextlib import closing
+        try:
+            with closing(sqlite3.connect(evidence_db, timeout=60)) as conn:
+                summary["material_evidence"] = [
+                    {"event": event, "kind": kind, "count": count} for event, kind, count in
+                    conn.execute("""SELECT stage,coalesce(json_extract(detail,'$.request_kind'),
+                       json_extract(detail,'$.basis'),''),count(*) FROM usage WHERE run=?
+                       GROUP BY 1,2""", (run_id,))]
+        except sqlite3.Error as exc:
+            summary["material_evidence_warning"] = str(exc)
     summary["finished_at"] = _now()
     summary["summary_path"] = str(work / "pipeline_runs" / (run_id + ".json"))
     _write(Path(summary["summary_path"]), summary)
@@ -319,6 +340,9 @@ def main(argv=None) -> int:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--record-id")
     args = parser.parse_args(argv)
+    # Both supported entry points share the installed package cache.
+    cache = os.environ.setdefault("JY_VISION_CACHE_DIR", str(Path(__file__).resolve().parents[2] / "work" / ".cache"))
+    os.environ.setdefault("JY_MATERIAL_EVIDENCE_DB", str(Path(cache) / "material_evidence.sqlite3"))
     result = run_once(args.queue, args.work_root, dry_run=args.dry_run, record_id=args.record_id)
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return int(result["status"] == "ERROR")

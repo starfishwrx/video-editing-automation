@@ -148,13 +148,33 @@ def _prepare_source(source: Path, *, manifest: dict, base_dir: Path, root: Path,
     key = contract.digest(identity)
     source_dir = root / "sources" / key
     path = source_dir / "prepared.json"
-    with file_lock(path, timeout=7200):
+    from . import evidence_store
+    content = evidence_store.identity(source) if evidence_store.database() else None
+    prep_policy = contract.digest({k:v for k,v in identity.items() if k != "source"})
+    lock = root / "locks" / contract.digest([content, prep_policy]) if content else path
+    with file_lock(lock, timeout=7200):
         prepared = _read(path)
+        if prepared and content and prepared.get("source_sha256") not in (None, content):
+            prepared = None
+        if content and not prepared:
+            old_path = evidence_store.preparation(content, prep_policy)
+            prior = _read(old_path) if old_path else None
+            if (prior and prior.get("source_sha256") == content and prior.get("analysis", {}).get("ok")
+                    and {k:v for k,v in prior["identity"].items() if k != "source"}
+                        == {k:v for k,v in identity.items() if k != "source"}):
+                prepared = copy.deepcopy(prior)
+                prepared["identity"] = identity
+                prepared["analysis"]["sources"] = [str(source)]
+                for row in prepared["analysis"].get("shots", []):
+                    row["video"] = str(source)
+                _save(path, prepared)
         reusable = (isinstance(prepared, dict) and prepared.get("identity") == identity
                     and prepared.get("analysis", {}).get("ok")
                     and _present(p for row in prepared["analysis"].get("shots", [])
                                  for p in row.get("frame_paths", [])))
         if reusable and (not ffprobe or prepared.get("duration_contract") == DURATION_CONTRACT):
+            if content and prepared.get("source_sha256") == content:
+                evidence_store.preparation(content, prep_policy, path)
             return signature, prepared["analysis"], True
         with media_slot(timeout=600, cold_source=True) as handle:
             if not handle.acquired:
@@ -174,8 +194,10 @@ def _prepare_source(source: Path, *, manifest: dict, base_dir: Path, root: Path,
                            for row in result.get("shots", [])):
             raise ValueError("MATERIAL_DURATION_BOUND_UNCONFIRMED")
         if result.get("ok"):
-            _save(path, {"identity": identity, "analysis": result,
+            _save(path, {"identity": identity, "analysis": result, "source_sha256": content,
                          **({"duration_contract": DURATION_CONTRACT} if ffprobe else {})})
+            if content:
+                evidence_store.preparation(content, prep_policy, path)
     return signature, result, False
 
 
@@ -247,6 +269,9 @@ def analyze_product(manifest: dict, base_dir: Path, report_dir: Path, *, ffmpeg=
                                     "shots_excluded_unauditable": sorted(excluded),
                                     "ready": complete if vision else bool(shots) and not issues}
         _save(report_dir / "shot_candidates.json", result)
+        if vision:
+            from . import evidence_store
+            evidence_store.index_analysis(manifest, result, report_dir / "shot_candidates.json")
         atomic_write_text(report_dir / "shot_analysis_prompt.md", result["analysis_prompt"])
         return result
 

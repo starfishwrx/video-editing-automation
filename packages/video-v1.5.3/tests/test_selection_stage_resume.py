@@ -53,10 +53,10 @@ class WorkerSelectionRecoveryTests(unittest.TestCase):
     def test_worker_handoff_preserves_bound_exclusion_warning(self):
         cached = self.root / "shared.json"
         warning = {"type": "shot_skipped_unauditable", "shot_id": "bad", "reasks": 2}
-        good = {"shot_id": "good", "description": "No action", "visual_tags": ["paper"],
+        good = {"shot_id": "good", "video": "source.mp4", "description": "No action", "visual_tags": ["paper"],
                 "evidence_tags": [], "analysis_confidence": .9, "visual_observation_complete": True,
                 "action_complete": False, "status": "pending_analysis"}
-        bad = {"shot_id": "bad", "status": "pending_analysis", "excluded_from_pool": True,
+        bad = {"shot_id": "bad", "video": "source.mp4", "status": "pending_analysis", "excluded_from_pool": True,
                "exclusion_cache_key": "bound-input", "exclusion_reason": "VISION_UNAUDITABLE_AFTER_REASK"}
         cached.write_text(json.dumps({"shots": [good, bad], "warnings": [warning]}))
         with patch.object(selection_recovery, "pending", return_value=False), \

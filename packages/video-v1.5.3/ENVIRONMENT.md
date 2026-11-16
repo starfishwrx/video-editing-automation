@@ -340,3 +340,5 @@ current Windows draft, explicit formal build provenance, independent visual PASS
 and complete package/input/runtime checks. A matching directory or file hash is
 not a substitute for visual QC. Failed or incomplete checks remain blocked and
 preserve their evidence for targeted recovery on the next full-pipeline run.
+
+正式入口默认以安装目录 work/.cache 共享素材。JY_VISION_CACHE_DIR 可指定其他本地缓存目录，JY_MATERIAL_EVIDENCE_DB 指定 SQLite 文件，off 可关闭证据库。用 python -m orchestrator.vision.evidence_import --help 查看历史资料导入方式。

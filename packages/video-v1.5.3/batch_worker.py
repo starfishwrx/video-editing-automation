@@ -654,6 +654,15 @@ def run_build(manifest: dict, report_dir: pathlib.Path, draft_name: str, *,
                             if isinstance(cached_payload, dict) else [])
             reusable = [row for row in cached_shots
                         if _is_reusable_analysis_row(row)]
+            if reusable and manifest.get("material_sources"):
+                allowed = {os.path.normcase(str(pathlib.Path(path).resolve())) for path in manifest["material_sources"]}
+                covered = {os.path.normcase(str(pathlib.Path(row["video"]).resolve()))
+                           for row in cached_shots if isinstance(row, dict) and row.get("video")}
+                inventory = (cached_payload.get("material_cache") or {}).get("source_inventory") or []
+                if allowed != covered or any(not pathlib.Path(sig["path"]).is_file()
+                        or pathlib.Path(sig["path"]).stat().st_size != sig["size"]
+                        or pathlib.Path(sig["path"]).stat().st_mtime_ns != sig["mtime_ns"] for sig in inventory):
+                    reusable = []
             if reusable:
                 # The orchestrator consumes inline `shot_analysis`; the old
                 # `shot_analysis_file` manifest key was ignored, so retries

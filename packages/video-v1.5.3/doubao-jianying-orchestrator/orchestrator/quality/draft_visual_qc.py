@@ -1051,6 +1051,13 @@ def main() -> int:
         result["release_eligibility"] = "BLOCKED"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    from orchestrator.vision import evidence_store
+    if evidence_store.database() and result.get("selection_sha256"):
+        from orchestrator.vision.evidence_import import import_qc
+        if result["status"] == "PASS":
+            import_qc(match_data.get("manifest") or {}, result, out_path)
+        evidence_store.record(match_data.get("manifest") or {}, "final_qc",
+                              {"status":result["status"], "report":str(out_path)})
     print(json.dumps({"status": result["status"], "issues": result["issues"][-8:], "output": str(out_path)}, ensure_ascii=False))
     return 0 if result["status"] in {"PASS", "PASS_WITH_DEGRADED", "PASS_WITH_GAPS"} else 2
 

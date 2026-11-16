@@ -67,7 +67,7 @@ _VISION_CACHE_FIELDS = (
     "pointing_to_text", "explicit_pointing", "pointing_action", "gesture",
     "evidence_intervals", "action_segments", "action_complete_source", "text_pass",
     "text_agreed", "pointed_agreed", "rule_checks",
-    "visual_observation_complete", "text_reads", "shot_label_sources",
+    "visual_observation_complete", "text_reads", "shot_label_sources", "ocr_protocol", "source_sha256",
 )
 # A long take often holds several demonstrations (hang it, then pull one
 # sheet); two frames per shot missed them, so frames follow the shot length.
@@ -760,9 +760,22 @@ def _cache_projection(row: dict[str, Any]) -> dict[str, Any] | None:
     return projection
 
 
+def _ocr_protocol():
+    qwen = _vision_transport() == "qwen"
+    cfg = _qwen_settings() if qwen else (
+        (_text_settings() if os.environ.get("JY_VISION_TEXT_DISABLE") != "1" else None)
+        or _volc_settings())
+    return hashlib.sha256(json.dumps(["hires-two-reads-v1", cfg["base_url"], cfg["model"]],
+                                     ensure_ascii=False).encode()).hexdigest()
+
+
 def _needs_text_backfill(row: dict[str, Any]) -> bool:
     return (_text_pass_enabled() and row.get("action_complete") is True
-            and row.get("text_pass") not in ("hires", "not_applicable"))
+            and (row.get("text_pass") not in ("hires", "not_applicable")
+                 or (row.get("text_pass") == "hires" and row.get("ocr_protocol")
+                     and row["ocr_protocol"] != _ocr_protocol())
+                 or (row.get("text_pass") == "hires" and not row.get("ocr_protocol")
+                     and _vision_transport() != "qwen" and _text_settings())))
 
 
 def _reusable_visual_observation(row: dict[str, Any]) -> bool:
@@ -1424,6 +1437,13 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
             analysis.setdefault("warnings", []).append(prior_exclusion_warnings[shot_id])
             continue
         cached = cache.get(key) if key else None
+        from . import evidence_store
+        if key and evidence_store.database():
+            if cached and cached.get("source_sha256") and cached["source_sha256"] != evidence_store.identity(shot["video"]):
+                cached = None
+                shot.pop("analysis_cache_key", None)
+            if cached is None:
+                cached = evidence_store.portable_visual(manifest, shot)
         prior_origin = None
         cached_key = key
         # An explicitly named prior backend may supply its original observation.
@@ -1657,6 +1677,7 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
         if pointed:
             row["pointing_to_text"] = True
         row["text_pass"] = "hires"
+        row["ocr_protocol"] = _ocr_protocol()
         row["text_frames"] = [{"path": item["path"], "timestamp": item["timestamp"]}
                               for item in items]
         _remember(shot_id)
@@ -1695,6 +1716,8 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
             if _vision_transport() == "qwen":
                 cfg = _qwen_settings()
                 route = "\n" + cfg["base_url"] + "\n" + cfg["model"]
+            if prefix.startswith("text_read"):
+                route += "\n" + _ocr_protocol()
             identity = hashlib.sha256((prompt + "\n" + str(sheet) + route).encode("utf-8")).hexdigest()
             return cache_path.parent / "calls" / f"{prefix}_{identity}.txt"
 
@@ -1813,6 +1836,8 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
                     if f.get("replaced"):
                         entry["replaced"] = True
                     row["vision_frames"].append(entry)
+                if evidence_store.database():
+                    row["source_sha256"] = evidence_store.identity(row["video"])
                 row["action_segments"] = _action_segments(raw.get("action_segments"), row)
                 if isinstance(raw.get("evidence_time"), (int, float)):
                     frame = _nearest_frame(frames, float(raw["evidence_time"]))

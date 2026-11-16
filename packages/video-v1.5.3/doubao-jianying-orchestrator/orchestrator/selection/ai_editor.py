@@ -186,6 +186,15 @@ def _source_frame_us(shot: dict) -> int:
 
 
 def _call(prompt: str, path: Path, sheet: Path | None = None) -> dict:
+    from ..vision import evidence_store
+    token = evidence_store.request_kind.set(path.parent.name)
+    try:
+        return _model_call(prompt, path, sheet)
+    finally:
+        evidence_store.request_kind.reset(token)
+
+
+def _model_call(prompt: str, path: Path, sheet: Path | None = None) -> dict:
     from ..vision import vision_analyzer as vision
     from ..vision import material_cache
     from ..runtime.file_safety import file_lock
@@ -273,6 +282,11 @@ def _inventory(manifest: dict, shots: list[dict], directory: Path) -> list[dict]
                 "action": s.get("action"), "object": s.get("object"), "result": s.get("result"),
                 "action_segments": (s.get("action_segments") or [])[:6],
                 "duration_us": round((float(s["source_end"]) - float(s["source_start"])) * 1e6)} for s in shots]
+    from . import evidence_recall
+    stored = evidence_recall.catalog(manifest, shots)
+    for entry in catalog:
+        if entry["shot_id"] in stored:
+            entry["verified_windows"] = stored[entry["shot_id"]]
     def inventory_prompt(sentence_rows):
         return contract.policy_prompt(manifest) + "\n你负责整稿用途分类和宽召回，本轮描述只是索引，不是画面证据。\n" + json.dumps({
         "product": manifest.get("product"), "category": manifest.get("category"),
@@ -430,6 +444,8 @@ def _review_media(shot: dict, directory: Path, *, dense: bool = False, fit: bool
         raise ValueError("AI_EDITOR_SOURCE_WINDOW_INVALID")
     source = str(shot["video"])
     before = contract.source_identity(source)
+    from ..vision import evidence_store
+    sha = evidence_store.identity(source) if evidence_store.database() else None
     count = 16 if dense else 8
     last = end - min(.04, (end - start) / 10)
     times = [start + (last - start) * n / (count - 1) for n in range(count)]
@@ -454,7 +470,7 @@ def _review_media(shot: dict, directory: Path, *, dense: bool = False, fit: bool
             raise ValueError("AI_EDITOR_REVIEW_FOCUS_INVALID")
         focus_last = hi - min(.04, (hi - lo) / 10)
         times = sorted(set([*times, lo, (lo + focus_last) / 2, focus_last]))
-        protocol = f"candidate-focus-window-{count}-v1:{lo}:{hi}"
+        protocol = f"candidate-focus-window-{count}-v2:{contract.digest(times)}"
     def prepare_frames(frame_dir):
         ffmpeg, _ = platform_env.find_ffmpeg()
         if not ffmpeg:
@@ -473,6 +489,8 @@ def _review_media(shot: dict, directory: Path, *, dense: bool = False, fit: bool
                     raise ValueError("AI_EDITOR_FRAME_EXTRACTION_FAILED")
                 frames.append({"path": str(target), "timestamp": timestamp})
         return frames
+    if sha:
+        protocol += ":content:" + sha
     frames = material_cache.cached_frames(shot, directory, prepare_frames,
         protocol=protocol)
     tiles = [{**frame, "label": f"t={frame['timestamp']:.3f}s"} for frame in frames]
@@ -490,7 +508,7 @@ def _review_media(shot: dict, directory: Path, *, dense: bool = False, fit: bool
         raise ValueError("AI_EDITOR_CONTACT_SHEET_FAILED")
     if before != contract.source_identity(source):
         raise ValueError("AI_EDITOR_SOURCE_CHANGED_DURING_REVIEW")
-    return {"start": start, "end": end, "before": before, "times": times, "sheet": sheet, "frames": frames}
+    return {"start": start, "end": end, "before": before, "source_sha256": sha, "times": times, "sheet": sheet, "frames": frames}
 
 
 def _iter_review_round(ids, shots, directory, review, *, dense=False, on_error=None):
@@ -564,6 +582,22 @@ def _evidence_intervals(value):
 
 def _review(manifest: dict, sentence: dict, shot: dict, directory: Path, *, dense: bool = False,
             prepared_media=None) -> dict:
+    from . import evidence_queries, evidence_recall
+    from ..vision import evidence_store
+    from ..runtime.file_safety import file_lock
+    if not dense and evidence_recall._eligible(manifest, sentence):
+        key = contract.digest([evidence_store.scope(manifest), evidence_store.identity(shot["video"]),
+                               shot["source_start"], shot["source_end"], evidence_store.protocol(manifest)])
+        with file_lock(evidence_store.database().parent / "pixel-locks" / key, timeout=7200):
+            found, _ = evidence_queries.lookup(manifest, sentence, shot, directory, _call)
+            if found:
+                return found
+            return _pixel_review(manifest, sentence, shot, directory, dense=dense, prepared_media=prepared_media)
+    return _pixel_review(manifest, sentence, shot, directory, dense=dense, prepared_media=prepared_media)
+
+
+def _pixel_review(manifest: dict, sentence: dict, shot: dict, directory: Path, *, dense: bool = False,
+                  prepared_media=None) -> dict:
     media = prepared_media if prepared_media is not None else _review_media(shot, directory, dense=dense)
     if prepared_media is not None and media["before"] != contract.source_identity(shot["video"]):
         raise ValueError("AI_EDITOR_SOURCE_CHANGED_DURING_REVIEW")
@@ -629,6 +663,10 @@ shot_value_request非空时，可额外返回shot_value_observation，逐项评�
 根据原文、备注和本次窗口的实际图片，判断是否确为纯衔接语，以及该段能否自然引出下一镜或延续上一镜的同一动作／展示。
 有独立痛点、价格数量、功能、指向对象或指定画面时，不能仅凭同商品通过。准备空镜、遮挡、跳切或无关动作也不通过。
 返回 hook_link_supported 布尔值；仅两项判断均有依据时填 true 并说明所见。"""
+    if shot.get("_evidence_gap"):
+        prompt += "\n这是同一原片区间的补查。只补查缺少的条件，不重复拆解已记录的动作。"
+        prompt += "完整卖点仍须有本窗口可见依据；缺少条件时返回 uncertain。"
+        prompt += json.dumps(shot["_evidence_gap"], ensure_ascii=False)
     claim_checks = bool(sentence.get("first_look_ids") and sentence.get("selling_points"))
     if claim_checks:
         prompt += """
@@ -772,10 +810,17 @@ shot_value_request非空时，可额外返回shot_value_observation，逐项评�
     broad = (result["verdict"] == "matched" and valid_durations and intervals
              and max(ev["end"] for ev in intervals) - min(ev["start"] for ev in intervals)
              > 2 * min(valid_durations))
-    return {**result, "dense_required": not dense and (result["verdict"] == "uncertain" or bool(broad) or phase_uncertain),
+    reviewed = {**result, "dense_required": not dense and (result["verdict"] == "uncertain" or bool(broad) or phase_uncertain),
             "review_window_us": {"start": round(start * 1e6), "end": round(end * 1e6)},
             "shot_id": shot["shot_id"], "source_identity": before,
             "frame_times_us": [round(t * 1e6) for t in times], "sheet": str(sheet)}
+    from ..vision import evidence_store
+    if media.get("source_sha256") and evidence_store.identity(shot["video"]) != media["source_sha256"]:
+        raise ValueError("AI_EDITOR_SOURCE_CHANGED_DURING_REVIEW")
+    reviewed["source_sha256"] = media.get("source_sha256")
+    reviewed["completed_dense_review"] = bool(dense and not reviewed["dense_required"])
+    evidence_store.remember_review(manifest, sentence, shot, reviewed)
+    return reviewed
 
 
 def _reviewed_allocations(manifest, shots, group, duration):
@@ -887,6 +932,12 @@ def qc_rejected_shots(manifest: dict) -> dict[int, set[str]]:
 
 
 def _first_look_review(manifest, sentence, shot, directory):
+    from . import evidence_queries
+    return evidence_queries.first_look(manifest, sentence, shot, directory, _call,
+                                       _locate_window, _review, _review_media)
+
+
+def _locate_window(manifest, sentence, shot, directory):
     """Locate a demonstration on the first-look timeline, then review the proposed crop."""
     sid = shot["shot_id"]
     phases = shot.get("action_segments") or []
@@ -1027,7 +1078,7 @@ def _review_pool(manifest: dict, sentence: dict, shots: dict, directory: Path, a
             reviewed_by_id[sid] = candidate
             if feasible([candidate]):
                 break
-    focused_ready = any(r.get("first_look_location") and feasible([r]) for r in reviewed_by_id.values())
+    focused_ready = any((r.get("first_look_location") or r.get("evidence_id")) and feasible([r]) for r in reviewed_by_id.values())
     if located:
         _save(directory / f"first_look_{sentence['index']:02d}.json",
               {"attempts": located, "focused_feasible": focused_ready})
