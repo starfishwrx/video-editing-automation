@@ -75,6 +75,9 @@ class EvidenceTest(unittest.TestCase):
         self.assertEqual(bind([view], partner)["verdict"], "uncertain")
         label = {**view, "collaboration_text": "Hello Kitty 联名"}
         self.assertEqual(bind([label], partner)["verdict"], "matched")
+        panel = {**view, "design": "背面粉色包装上的条形码、授权小字"}
+        self.assertEqual(bind([panel])["verdict"], "uncertain")
+        self.assertEqual(bind([panel], ("", True))["verdict"], "uncertain")
         named = {**view, "cute_detail": "Hello Kitty卡通形象", "collaboration_text": "Hello Kitty"}
         self.assertEqual(bind([named], partner)["verdict"], "matched")
         self.assertEqual(bind([{**view, "collaboration_text": "Hello Kitty"}], partner)["verdict"], "uncertain")

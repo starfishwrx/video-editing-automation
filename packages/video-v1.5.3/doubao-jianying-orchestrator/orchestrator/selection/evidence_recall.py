@@ -100,6 +100,16 @@ _LOOK_FEATURE = re.compile(r"图案|卡通|印花|外观|配色|设计|(?:粉|�
 _LOOK_DOUBT = re.compile(r"不清|看不|看不到|不可见|无法|模糊|遮挡|疑似|可能|未见|未展示|没有|普通款|非联名")
 
 
+def _information_panel(observation, design):
+    """A filmed instruction, barcode or license panel does not establish a style."""
+    if "正面" in design and not _LOOK_DOUBT.search(design):
+        return False
+    text = observation + design
+    panel = re.search(r"背面|反面|侧面", text)
+    information = re.search(r"说明|使用方法|注意事项|产品信息|条形码|条码|二维码|授权|license", text, re.I)
+    return bool(panel and information)
+
+
 def _look_requirement(text, points):
     point = points[0] if isinstance(points, list) and len(points) == 1 else {}
     if not isinstance(point, dict) or not point.get("id") or not isinstance(point.get("text"), str):
@@ -182,7 +192,7 @@ def bind_appearance(answer, requirement, point_id, start_us, end_us, samples):
         design, style, label = (view.get(k) for k in ("design","cute_detail","collaboration_text"))
         if not all(isinstance(x,str) for x in (design,style,label)) or not design.strip():
             continue
-        if not _LOOK_FEATURE.search(design) or _LOOK_DOUBT.search(design):
+        if not _LOOK_FEATURE.search(design) or _LOOK_DOUBT.search(design) or _information_panel(answer["observation"], design):
             continue
         if cute and (not style.strip() or _LOOK_DOUBT.search(style) or re.search(r"未|无|不|仅", style)):
             continue
@@ -248,7 +258,7 @@ def appearance_review(manifest, sentence, shot, rows, *, dense_sheet=None):
         check = checked[0]
         detail = check.get("result_observed") or ""
         if ("包装" not in observation or not _LOOK_FEATURE.search(observation)
-                or not detail or _LOOK_DOUBT.search(observation + detail)
+                or not detail or _LOOK_DOUBT.search(observation + detail) or _information_panel(observation, detail)
                 or not all(check.get(k) is True for k in ("object_matches","action_seen","result_seen"))
                 or check.get("id") != f["claims"][0]["id"]
                 or (cute and not (old[1] or re.search(r"可爱|卡通", detail)))
