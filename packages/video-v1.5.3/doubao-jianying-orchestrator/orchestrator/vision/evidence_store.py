@@ -53,6 +53,22 @@ def protocol(manifest):
                             contract.POLICY_VERSION, contract.policy_prompt({**manifest, "revision_feedback":""})])
 
 
+def scene_protocol(manifest, scene_ids):
+    """Bind a factual cut observation to the visual requirements for its named scenes."""
+    if not scene_ids:
+        return None
+    from . import vision_analyzer as vision
+    context = contract.editorial_context(manifest)
+    rules = {item["id"]:item for item in context["rules"].get("semantic_contracts", [])}
+    if not set(scene_ids) <= rules.keys():
+        return None
+    route = vision._vision_transport()
+    cfg = vision._qwen_settings() if route == "qwen" else vision._text_settings() or vision._volc_settings()
+    return contract.digest(["qc-visible-scene-v1", context["category"], context["versions"].get("global"),
+                            contract.POLICY_VERSION, route, cfg["model"], cfg["base_url"],
+                            [rules[s] for s in sorted(scene_ids)]])
+
+
 def _version(stream):
     stat = os.fstat(stream.fileno())
     changed = stat.st_ctime_ns
@@ -233,12 +249,20 @@ def windows(manifest, shot):
         return []
     sha = identity(shot["video"])
     with connect() as db:
-        rows = db.execute("""SELECT * FROM observations WHERE product=? AND sha=? AND protocol=?
-            AND grade != 'visual' AND start_us>=? AND end_us<=? ORDER BY CASE grade WHEN 'qc' THEN 0 WHEN 'review'
-            THEN 1 WHEN 'label' THEN 2 ELSE 3 END, start_us, id""",
-            (scope(manifest), sha, protocol(manifest), round(shot["source_start"]*1e6),
-             round(shot["source_end"]*1e6)))
-        return [{**dict(row), "facts": json.loads(row["payload"])} for row in rows]
+        version = protocol(manifest)
+        rows = db.execute("""SELECT * FROM observations WHERE product=? AND sha=?
+            AND (protocol=? OR grade='qc') AND grade != 'visual' AND start_us>=? AND end_us<=?
+            ORDER BY CASE grade WHEN 'qc' THEN 0 WHEN 'review' THEN 1 WHEN 'label' THEN 2 ELSE 3 END, start_us, id""",
+            (scope(manifest), sha, version, round(shot["source_start"]*1e6), round(shot["source_end"]*1e6)))
+        found = []
+        for row in rows:
+            facts = json.loads(row["payload"])
+            if row["protocol"] != version:
+                bound = facts.get("scene_protocol")
+                if not bound or bound != scene_protocol(manifest, facts.get("scene_ids")):
+                    continue
+            found.append({**dict(row), "facts":facts})
+        return found
 
 
 

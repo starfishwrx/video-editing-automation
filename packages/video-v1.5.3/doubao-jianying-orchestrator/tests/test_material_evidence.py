@@ -94,6 +94,16 @@ class EvidenceTest(unittest.TestCase):
             with self.subTest(field=field), patch.dict(point,{field:invalid}):
                 self.assertIsNone(evidence_recall.inspect(self.manifest,sentence,self.shot,judge=judge)[0])
 
+    def test_historical_qc_requires_the_same_relevant_scene_contract(self):
+        self.facts.update(scene_ids=["lint_rub_unfold"], scene_protocol="authenticated-original-scene")
+        with store.connect() as db:
+            store.put(db,store.scope(self.manifest),store.identity(self.path),self.path,2000000,5000000,
+                      "qc","historical-policy",self.facts,self.proof)
+        with patch.object(store,"scene_protocol",return_value="different-scene"):
+            self.assertEqual(store.windows(self.manifest,self.shot), [])
+        with patch.object(store,"scene_protocol",return_value="authenticated-original-scene"):
+            self.assertEqual(len(store.windows(self.manifest,self.shot)),1)
+
     def test_independent_ocr_version(self):
         with patch.dict(os.environ,{"JY_VISION_TEXT_PASS":"1"}):
             row={"action_complete":True,"text_pass":"hires","ocr_protocol":vision._ocr_protocol()}

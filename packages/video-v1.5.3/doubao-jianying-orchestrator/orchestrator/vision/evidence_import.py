@@ -63,7 +63,8 @@ def import_qc(manifest, report, path):
         facts.update(observation=r["observed"], claims=points, claim_context=r["claim"],
                      confidence=r.get("confidence"), same_product=True, verdict="matched",
                      evidence_intervals_us=[win], report_sha256=store.identity(path),
-                     historical_identity=selection.get("identity"), segment_index=seg["index"])
+                     historical_identity=selection.get("identity"), segment_index=seg["index"],
+                     scene_protocol=store.scene_protocol(manifest, selection.get("scene_ids")))
         asset = assets.get(source, {})
         sha = store.identity(source)
         if sha != asset.get("sha256"):
@@ -147,4 +148,3 @@ def import_reviews(manifest, plan, path, frozen):
 
 if __name__ == "__main__":
     main()
-
