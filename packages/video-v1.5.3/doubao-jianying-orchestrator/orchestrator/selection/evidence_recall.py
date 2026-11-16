@@ -100,6 +100,21 @@ _LOOK_FEATURE = re.compile(r"图案|卡通|印花|外观|配色|设计|(?:粉|�
 _LOOK_DOUBT = re.compile(r"不清|看不|看不到|不可见|无法|模糊|遮挡|疑似|可能|未见|未展示|没有|普通款|非联名")
 
 
+def _shows_front(detail, observation=""):
+    """Use a local view, or an unambiguous single-view description, for aesthetic copy."""
+    if not isinstance(detail, str) or re.search(r"背面|反面|侧面|底面", detail):
+        return False
+    text = detail
+    if "正面" not in text:
+        if re.search(r"背面|反面|侧面|底面|翻转|翻面|随后|后半段|最后", observation):
+            return False
+        text = observation
+    if re.search(r"(?:未|没有|看不|无法|并非|不是)[^，。；]{0,14}正面|正面(?:朝下|朝内|背向|不可见|看不清|无法看清|被.{0,4}遮|未展示)", text):
+        return False
+    return bool(re.search(r"(?:包装[袋盒]?|产品|商品|外袋|盒身|袋身)(?:的)?正面|"
+                          r"正面(?:印|展示|包装|朝向镜头|有|图案|设计|朝前|写|清晰可见)", text))
+
+
 def _information_panel(observation, design):
     """A filmed instruction, barcode or license panel does not establish a style."""
     if "正面" in design and not _LOOK_DOUBT.search(design):
@@ -190,7 +205,15 @@ def bind_appearance(answer, requirement, point_id, start_us, end_us, samples):
         if t not in samples or not a <= t <= b:
             continue
         design, style, label = (view.get(k) for k in ("design","cute_detail","collaboration_text"))
-        if not all(isinstance(x,str) for x in (design,style,label)) or not design.strip():
+        if not isinstance(design, str) or not design.strip():
+            continue
+        # In a pure aesthetic line a clear product front is sufficient, even
+        # when the inventory suggested a character as an example of the style.
+        observation = answer["observation"] if len(answer["views"]) == 1 else ""
+        if cute and _shows_front(design, observation):
+            possible.append((b-a, a, b, t, design if "正面" in design else observation))
+            continue
+        if not isinstance(style, str) or not isinstance(label, str):
             continue
         if not _LOOK_FEATURE.search(design) or _LOOK_DOUBT.search(design) or _information_panel(answer["observation"], design):
             continue
@@ -239,7 +262,8 @@ def appearance_review(manifest, sentence, shot, rows, *, dense_sheet=None):
         lo, hi = row["start_us"], row["end_us"]
         if ((f.get("verdict") == "mismatch" and
                 _look_requirement(f.get("claim_context"), sentence["selling_points"]) is not None)
-                or (partner and _LOOK_DOUBT.search(observation) and "包装" in observation)):
+                or (partner and _LOOK_DOUBT.search(observation) and "包装" in observation
+                    and not (cute and _shows_front(observation)))):
             if store.proof_available(row):
                 blocked.append((lo, hi))
             continue
@@ -250,20 +274,22 @@ def appearance_review(manifest, sentence, shot, rows, *, dense_sheet=None):
                 or not round(shot["source_start"]*1e6) <= lo < hi <= round(shot["source_end"]*1e6)):
             continue
         old = _look_requirement(f.get("claim_context"), f.get("claims"))
-        if old is None or (partner and old[0] != partner):
+        if old is None:
             continue
         checked = f.get("claim_checks") or []
         if len(checked) != 1 or not isinstance(checked[0], dict):
             continue
         check = checked[0]
         detail = check.get("result_observed") or ""
-        if ("包装" not in observation or not _LOOK_FEATURE.search(observation)
-                or not detail or _LOOK_DOUBT.search(observation + detail) or _information_panel(observation, detail)
-                or not all(check.get(k) is True for k in ("object_matches","action_seen","result_seen"))
-                or check.get("id") != f["claims"][0]["id"]
+        front = cute and _shows_front(detail)
+        if (not detail or not all(check.get(k) is True for k in ("object_matches","action_seen","result_seen"))
+                or check.get("id") != f["claims"][0]["id"]):
+            continue
+        if not front and ("包装" not in observation or not _LOOK_FEATURE.search(observation)
+                or _LOOK_DOUBT.search(observation + detail) or _information_panel(observation, detail)
                 or (cute and not (old[1] or re.search(r"可爱|卡通", detail)))
-                or (partner and not (partner in _canonical(detail) and "联名" in detail
-                                    and not re.search(r"未|无|并非|不含", detail)))):
+                or (partner and not (old[0] == partner and partner in _canonical(detail)
+                                     and "联名" in detail and not re.search(r"未|无|并非|不含", detail)))):
             continue
         intervals = f.get("evidence_intervals_us") or []
         if not intervals or not all(isinstance(i,dict) and type(i.get("start")) is int

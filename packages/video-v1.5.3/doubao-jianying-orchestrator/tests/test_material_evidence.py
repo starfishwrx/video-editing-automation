@@ -73,6 +73,12 @@ class EvidenceTest(unittest.TestCase):
         self.assertEqual(bind([view], ("", True))["supported_point_ids"], ["new"])
         partner = ("hellokitty", True)
         self.assertEqual(bind([view], partner)["verdict"], "uncertain")
+        front = {**view, "design": "包装正面清晰可见", "cute_detail": "", "collaboration_text": ""}
+        self.assertEqual(bind([front], partner)["verdict"], "matched")
+        for design in ("只拍到包装背面，未展示包装正面", "包装正面朝下", "只有粉色侧面"):
+            self.assertEqual(bind([{**front, "design": design}], partner)["verdict"], "uncertain")
+        self.assertIsNone(evidence_recall._look_requirement(
+            "还是和Hello Kitty联名的", [{"id":"p", "text":"颜值可爱（Hello Kitty联名）"}]))
         label = {**view, "collaboration_text": "Hello Kitty 联名"}
         self.assertEqual(bind([label], partner)["verdict"], "matched")
         panel = {**view, "design": "背面粉色包装上的条形码、授权小字"}

@@ -10,8 +10,9 @@
 ### L-20261116-packaging-facts 同图复看要按画面事实归并
 
 - status: OPEN
-- hits: 1
+- hits: 2
 - 将包装设计、可爱装饰、明确联名原文分别绑定到同一段画面。复用时重新核对新文案要求。回归见 `test_packaging_features_are_bound_to_one_witnessed_view`。
+- 对纯形容词按编辑要求检查同商品正面展示。不要把模型在卖点拆解中举出的装饰示例强加给口播。
 
 ### L-20261113-claim-window 复核结果必须留在成稿最后可播放帧以内
 
