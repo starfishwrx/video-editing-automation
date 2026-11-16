@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from orchestrator.application import recovery_audio
+from orchestrator.selection import timing_contract
 from orchestrator.audio import narration_preparation as preparation
 
 
@@ -30,13 +31,13 @@ class RecoveryPreparationTests(unittest.TestCase):
             (root / "selection_resume.json").write_text(json.dumps(frozen))
             logical = {"narration_timing_file": str(new), "_paper_fixed_narrations": {str(wave.resolve()): record},
                        "script": "new"}
-            self.assertEqual(recovery_audio.selection_review_input(logical, timing, root),
+            self.assertEqual(timing_contract.selection_review_input(logical, timing, root),
                              dict(original, script="new"))
             new.write_text("{}")
-            self.assertEqual(recovery_audio.selection_review_input(logical, timing, root), logical)
+            self.assertEqual(timing_contract.selection_review_input(logical, timing, root), logical)
             new.write_text(json.dumps(timing))
             wave.write_bytes(b"other")
-            self.assertEqual(recovery_audio.selection_review_input(logical, timing, root), logical)
+            self.assertEqual(timing_contract.selection_review_input(logical, timing, root), logical)
 
     def test_legacy_audio_updates_timing_before_preflight_without_changing_source(self):
         with tempfile.TemporaryDirectory() as temporary:

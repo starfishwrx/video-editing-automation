@@ -63,43 +63,6 @@ def bind_and_record(manifest: dict, matched: dict, report_dir: Path) -> dict:
     return bound
 
 
-def selection_review_input(logical: dict, timing: dict, directory: Path) -> dict:
-    """Match original review identity when recovery rewrapped identical frozen narration."""
-    from ..runtime.file_safety import content_identity
-
-    try:
-        frozen = json.loads((directory / "selection_resume.json").read_text(encoding="utf-8-sig"))
-        original = frozen["manifest"]
-        original_path = Path(original["narration_timing_file"])
-        recovered_path = Path(logical["narration_timing_file"])
-        if (recovered_path.resolve() != (directory / "recovery_narration_timing.json").resolve()
-                or not timing or frozen["timing"] != timing
-                or any(json.loads(p.read_text(encoding="utf-8-sig")) != timing
-                       for p in (original_path, recovered_path))):
-            return logical
-        files = {item["path"]: item for item in frozen["audio_files"]}
-        rows = {row["tts_path"]: row for row in timing["rows"]}
-        if not rows or rows.keys() != files.keys() or any(content_identity(p) != files[p] for p in rows):
-            return logical
-        fixed = logical["_paper_fixed_narrations"]
-        for path, record in fixed.items():
-            if (path not in rows or record["path"] != path
-                    or record["duration_us"] != rows[path]["audio_duration_us"]
-                    or record["output"]["sha256"] != files[path]["sha256"]
-                    or record != json.loads(Path(path + ".json").read_text(encoding="utf-8-sig"))):
-                return logical
-        if any(fixed.get(k) != v for k, v in original.get("_paper_fixed_narrations", {}).items()):
-            return logical
-        result = dict(logical, narration_timing_file=original["narration_timing_file"])
-        if "_paper_fixed_narrations" in original:
-            result["_paper_fixed_narrations"] = original["_paper_fixed_narrations"]
-        else:
-            result.pop("_paper_fixed_narrations")
-        return result
-    except (AttributeError, KeyError, OSError, TypeError, ValueError):
-        return logical
-
-
 def prepare_for_selection(manifest: dict, timing: dict, report_dir: Path, *, source_dir: Path | None = None) -> dict:
     """Finalize cached paper TTS before rematching, never after selection."""
     from .. import rulepack
