@@ -90,6 +90,11 @@ class EvidenceTest(unittest.TestCase):
             return {"entire_sentence_supported":True,"missing":[],"points":[point]}
         result, _ = evidence_recall.inspect(self.manifest,sentence,self.shot,judge=judge)
         self.assertEqual(result["supported_point_ids"], ["current"])
+        with patch.dict(point,{"prior_point":"撕开包装"}):
+            result, _ = evidence_recall.inspect(self.manifest,sentence,self.shot,judge=judge)
+            self.assertEqual(result["supported_point_ids"], ["current"])
+            ambiguous = {**self.facts, "claims":[{"id":"a","text":"撕开包装"},{"id":"b","text":"撕开包装"}]}
+            self.assertEqual(evidence_recall._mapped_claims(judge(),ambiguous,sentence["selling_points"]),{})
         for field, invalid in (("basis","readable_label"),("quote","手"),("prior_point","wrong"),("new_condition",True)):
             with self.subTest(field=field), patch.dict(point,{field:invalid}):
                 self.assertIsNone(evidence_recall.inspect(self.manifest,sentence,self.shot,judge=judge)[0])

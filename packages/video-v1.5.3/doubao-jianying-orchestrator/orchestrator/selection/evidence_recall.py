@@ -68,6 +68,11 @@ def _mapped_claims(answer, facts, points):
         if not isinstance(row, dict):
             return {}
         new, prior = row.get("id"), row.get("prior_point")
+        if isinstance(prior, str) and prior not in old:
+            # Model responses sometimes return the old label verbatim. Resolve it
+            # only when exactly one stored ID has that complete label.
+            aliases = [key for key, point in old.items() if point.get("text") == prior]
+            prior = aliases[0] if len(aliases) == 1 else None
         if (not isinstance(new, str) or new not in requested or new in mapped
                 or not isinstance(prior, str) or prior not in old
                 or row.get("relation") != "same_meaning" or row.get("new_condition") is not False
