@@ -7,6 +7,13 @@
 
 ## 新增条目
 
+### L-20261116-packaging-facts 同图复看要按画面事实归并
+
+- status: OPEN
+- hits: 2
+- 将包装设计、可爱装饰、明确联名原文分别绑定到同一段画面。复用时重新核对新文案要求。回归见 `test_packaging_features_are_bound_to_one_witnessed_view`。
+- 对纯形容词按编辑要求检查同商品正面展示。不要把模型在卖点拆解中举出的装饰示例强加给口播。
+
 ### L-20261113-claim-window 复核结果必须留在成稿最后可播放帧以内
 
 - status: OPEN
@@ -849,3 +856,5 @@
 - 证据: `packages/video-v1.5.3/doubao-jianying-orchestrator/tests/test_ai_editor.py`。
 
 2026-11-10 旧纸品配音恢复修复。semantic_match 复用缓存音频并在重选前完成归一、边缘静音处理和五帧预检，发布独立句长文件。draft_write 继续保留已匹配句长，旧任务气口超限需恢复 semantic_match。
+
+跨任务复用画面观察时，原片内容、证据窗口和观察等级共同决定是否可用；任务中的卖点编号仅在该句内有效。
