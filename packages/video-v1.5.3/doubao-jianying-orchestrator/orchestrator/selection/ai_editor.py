@@ -4115,6 +4115,9 @@ def prepare(manifest: dict, analysis: dict, report_dir: Path, *, narration_timin
         logical_input = {k: v for k, v in manifest.items() if k not in {
             "draft_name", "force_overwrite", "parent_run_id", "recovery_stage", "shot_analysis_file", "_selection_attempt",
             "qc_rejected_shots"}}
+        if manifest.get("recovery_stage") == "semantic_match":
+            from ..application import recovery_audio
+            logical_input = recovery_audio.selection_review_input(logical_input, narration_timing, report_dir)
         plan["resume_identity"] = {**plan["identity"], "manifest_sha256": contract.digest(logical_input),
                                    "editorial_prompt_sha256": contract.digest(contract.policy_prompt(manifest))}
         try:

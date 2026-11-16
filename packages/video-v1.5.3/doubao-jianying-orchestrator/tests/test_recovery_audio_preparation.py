@@ -12,6 +12,32 @@ from orchestrator.audio import narration_preparation as preparation
 
 
 class RecoveryPreparationTests(unittest.TestCase):
+    def test_recovery_identity_keeps_reviews_only_for_unchanged_audio_and_timing(self):
+        from orchestrator.runtime.file_safety import content_identity
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            wave = root / "prepared.wav"
+            wave.write_bytes(b"audio")
+            asset = content_identity(wave)
+            timing = {"rows": [{"tts_path": str(wave.resolve()), "audio_duration_us": 123}]}
+            old, new = root / "narration_timing.json", root / "recovery_narration_timing.json"
+            for path in (old, new):
+                path.write_text(json.dumps(timing))
+            original = {"narration_timing_file": str(old), "script": "old"}
+            record = {"path": str(wave.resolve()), "duration_us": 123, "output": asset}
+            Path(str(wave) + ".json").write_text(json.dumps(record))
+            frozen = {"manifest": original, "timing": timing, "audio_files": [asset]}
+            (root / "selection_resume.json").write_text(json.dumps(frozen))
+            logical = {"narration_timing_file": str(new), "_paper_fixed_narrations": {str(wave.resolve()): record},
+                       "script": "new"}
+            self.assertEqual(recovery_audio.selection_review_input(logical, timing, root),
+                             dict(original, script="new"))
+            new.write_text("{}")
+            self.assertEqual(recovery_audio.selection_review_input(logical, timing, root), logical)
+            new.write_text(json.dumps(timing))
+            wave.write_bytes(b"other")
+            self.assertEqual(recovery_audio.selection_review_input(logical, timing, root), logical)
+
     def test_legacy_audio_updates_timing_before_preflight_without_changing_source(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
