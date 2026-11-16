@@ -108,5 +108,8 @@ class EvidenceTest(unittest.TestCase):
         with patch.dict(os.environ,{"JY_VISION_TEXT_PASS":"1"}):
             row={"action_complete":True,"text_pass":"hires","ocr_protocol":vision._ocr_protocol()}
             self.assertFalse(vision._needs_text_backfill(row))
-            with patch.dict(os.environ,{"JY_QWEN_MODEL":"changed"}):
+            visual = store.visual_protocol(self.manifest)
+            with patch.dict(os.environ,{"JY_OCR_MODEL":"changed"}):
                 self.assertTrue(vision._needs_text_backfill(row))
+                self.assertEqual(vision._qwen_ocr_override()["model"],"changed")
+                self.assertEqual(store.visual_protocol(self.manifest),visual)

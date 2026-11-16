@@ -760,9 +760,16 @@ def _cache_projection(row: dict[str, Any]) -> dict[str, Any] | None:
     return projection
 
 
+def _qwen_ocr_override():
+    model = os.environ.get("JY_OCR_MODEL", "").strip()
+    if model and _vision_transport() == "qwen":
+        return {**_qwen_settings(), "model":model}
+    return None
+
+
 def _ocr_protocol():
     qwen = _vision_transport() == "qwen"
-    cfg = _qwen_settings() if qwen else (
+    cfg = (_qwen_ocr_override() or _qwen_settings()) if qwen else (
         (_text_settings() if os.environ.get("JY_VISION_TEXT_DISABLE") != "1" else None)
         or _volc_settings())
     return hashlib.sha256(json.dumps(["hires-two-reads-v1", cfg["base_url"], cfg["model"]],
@@ -775,7 +782,7 @@ def _needs_text_backfill(row: dict[str, Any]) -> bool:
                  or (row.get("text_pass") == "hires" and row.get("ocr_protocol")
                      and row["ocr_protocol"] != _ocr_protocol())
                  or (row.get("text_pass") == "hires" and not row.get("ocr_protocol")
-                     and _vision_transport() != "qwen" and _text_settings())))
+                     and (_qwen_ocr_override() or (_vision_transport() != "qwen" and _text_settings())))))
 
 
 def _reusable_visual_observation(row: dict[str, Any]) -> bool:
@@ -2036,7 +2043,12 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
                     prompt = _text_prompt(shot_id, items)
                     output = _call_path(prompt, sheet, f"text_read_{read + 1}")
                     note = _attempts(f"text_read_{read + 1}", text_index, text_total, [shot_id])
-                    if (_vision_transport() != "qwen" and _text_settings()
+                    override = _qwen_ocr_override()
+                    if override:
+                        note(1, 2, "")
+                        ok, text = _run_compatible_chat(override, sheet, prompt, output, timeout=timeout,
+                                                       validator=validate_text)
+                    elif (_vision_transport() != "qwen" and _text_settings()
                             and os.environ.get("JY_VISION_TEXT_DISABLE", "").strip() != "1"):
                         note(1, 2, "")
                         ok, text = _run_text_chat(

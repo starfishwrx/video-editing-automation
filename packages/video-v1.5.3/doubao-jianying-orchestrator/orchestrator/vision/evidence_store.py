@@ -258,6 +258,11 @@ def windows(manifest, shot):
         found = []
         for row in rows:
             facts = json.loads(row["payload"])
+            if row["grade"] == "label":
+                from . import vision_analyzer as vision
+                if vision._needs_text_backfill({"action_complete":True, "text_pass":"hires",
+                                                "ocr_protocol":facts.get("ocr_protocol")}):
+                    continue
             if row["protocol"] != version:
                 bound = facts.get("scene_protocol")
                 if not bound or bound != scene_protocol(manifest, facts.get("scene_ids")):
