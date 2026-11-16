@@ -80,10 +80,23 @@ class EvidenceTest(unittest.TestCase):
         answer, _ = evidence_recall.inspect(self.manifest,self.sentence("揉过再展开，纸面还是完整的"), self.shot)
         self.assertIsNone(answer)
 
+    def test_paraphrase_requires_bound_basis_and_all_old_point_ids(self):
+        self.facts.update(claim_context="沿边撕开包装封口", observation="手从左侧撕开外袋封口。", claims=[{"id":"old","text":"撕开包装"}])
+        self.add()
+        sentence = self.sentence("从左边把包装封口撕开")
+        point = {"id":"current","prior_point":"old","relation":"same_meaning","new_condition":False,
+                 "quote":self.facts["observation"],"basis":"visible_result"}
+        def judge(*args):
+            return {"entire_sentence_supported":True,"missing":[],"points":[point]}
+        result, _ = evidence_recall.inspect(self.manifest,sentence,self.shot,judge=judge)
+        self.assertEqual(result["supported_point_ids"], ["current"])
+        for field, invalid in (("basis","readable_label"),("quote","手"),("prior_point","wrong"),("new_condition",True)):
+            with self.subTest(field=field), patch.dict(point,{field:invalid}):
+                self.assertIsNone(evidence_recall.inspect(self.manifest,sentence,self.shot,judge=judge)[0])
+
     def test_independent_ocr_version(self):
         with patch.dict(os.environ,{"JY_VISION_TEXT_PASS":"1"}):
             row={"action_complete":True,"text_pass":"hires","ocr_protocol":vision._ocr_protocol()}
             self.assertFalse(vision._needs_text_backfill(row))
             with patch.dict(os.environ,{"JY_QWEN_MODEL":"changed"}):
                 self.assertTrue(vision._needs_text_backfill(row))
-
