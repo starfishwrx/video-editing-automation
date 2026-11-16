@@ -44,6 +44,44 @@ class EvidenceTest(unittest.TestCase):
     def sentence(self,text):
         return {"index":1,"text":text,"selling_points":[{"id":"current","text":text}]}
 
+    def test_packaging_appearance_uses_source_facts_across_copy(self):
+        sentence = {**self.sentence("这颜值真是太可爱了"), "kind": "selling_point"}
+        general = {**sentence, "text": "这包装设计真的太戳我啦",
+                   "selling_points": [{"id": "next", "text": "包装设计好看/戳人"}]}
+        named = {**sentence, "selling_points": [{"id": "next", "text": "颜值可爱（Hello Kitty联名）"}]}
+        ask = evidence_recall.appearance_requirement
+        self.assertEqual(ask(self.manifest, general, self.shot), ("", False))
+        self.assertEqual(ask(self.manifest, named, self.shot), ("hellokitty", True))
+        for change in ({"text": "湿水后包装也好看"}, {"qc_feedback": {"failed": True}},
+                       {"text": "这个包装有50抽"}, {"experiment_role": "result"}):
+            self.assertIsNone(ask(self.manifest, {**general, **change}, self.shot))
+        self.assertIsNone(ask({**self.manifest, "qc_rejected_shots": {"1": ["one"]}}, general, self.shot))
+        self.assertIsNone(ask(self.manifest, general, {**self.shot, "_evidence_gap": "verify label"}))
+        prompt = evidence_recall.appearance_prompt
+        with patch.object(contract, "policy_prompt", return_value="rules"):
+            first = prompt(self.manifest, "sha", 0, 200, [50, 100])
+            self.assertEqual(first, prompt({**self.manifest, "copy": general["text"]}, "sha", 0, 200, [50, 100]))
+            self.assertNotEqual(first, prompt({**self.manifest, "sku": "other"}, "sha", 0, 200, [50, 100]))
+            self.assertNotEqual(first, prompt(self.manifest, "sha", 0, 200, [51, 100]))
+
+    def test_packaging_features_are_bound_to_one_witnessed_view(self):
+        view = {"start_us": 10, "end_us": 90, "sample_us": 50, "design": "粉色包装",
+                "cute_detail": "卡通蝴蝶结", "collaboration_text": ""}
+        facts = {"same_product": True, "confidence": .95, "observation": "粉色包装上有卡通蝴蝶结"}
+        def bind(views, requirement=("", False)):
+            return evidence_recall.bind_appearance({**facts, "views": views}, requirement, "new", 0, 200, [50, 100])
+        self.assertEqual(bind([view], ("", True))["supported_point_ids"], ["new"])
+        partner = ("hellokitty", True)
+        self.assertEqual(bind([view], partner)["verdict"], "uncertain")
+        label = {**view, "collaboration_text": "Hello Kitty 联名"}
+        self.assertEqual(bind([label], partner)["verdict"], "matched")
+        self.assertEqual(bind([view, {**label, "cute_detail": ""}], partner)["verdict"], "uncertain")
+        self.assertEqual(bind([{**label, "collaboration_text": "未看到Hello Kitty联名"}], partner)["verdict"], "uncertain")
+        self.assertEqual(bind([{**view, "sample_us": 70}])["verdict"], "uncertain")
+        self.assertEqual(bind([{**view, "end_us": 201}])["verdict"], "uncertain")
+        with self.assertRaises(ValueError):
+            evidence_recall.bind_appearance({"views": []}, partner, "new", 0, 200, [50])
+
     def test_new_wording_current_path_and_missing_condition(self):
         self.add()
         renamed=self.root/"b.mov"

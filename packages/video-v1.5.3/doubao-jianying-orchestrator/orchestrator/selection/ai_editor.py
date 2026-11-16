@@ -585,11 +585,18 @@ def _review(manifest: dict, sentence: dict, shot: dict, directory: Path, *, dens
     from . import evidence_queries, evidence_recall
     from ..vision import evidence_store
     from ..runtime.file_safety import file_lock
-    if not dense and evidence_recall._eligible(manifest, sentence):
+    check_dense = dense and prepared_media and evidence_recall.appearance_requirement(manifest, sentence, shot)
+    if evidence_recall._eligible(manifest, sentence) and (not dense or check_dense):
         key = contract.digest([evidence_store.scope(manifest), evidence_store.identity(shot["video"]),
                                shot["source_start"], shot["source_end"], evidence_store.protocol(manifest)])
         with file_lock(evidence_store.database().parent / "pixel-locks" / key, timeout=7200):
-            found, _ = evidence_queries.lookup(manifest, sentence, shot, directory, _call)
+            if dense:
+                found = evidence_recall.appearance_review(manifest, sentence, shot,
+                    evidence_store.windows(manifest, shot), dense_sheet=prepared_media["sheet"])
+                if found:
+                    evidence_queries.record_hit(manifest, shot, found)
+            else:
+                found, _ = evidence_queries.lookup(manifest, sentence, shot, directory, _call)
             if found:
                 return found
             return _pixel_review(manifest, sentence, shot, directory, dense=dense, prepared_media=prepared_media)
@@ -676,7 +683,22 @@ shot_value_request非空时，可额外返回shot_value_observation，逐项评�
 "action_us":1000000,"result_us":1200000,"result_observed":"直接可见的结果或特征"}]。
 时间使用画面上的原片微秒，填写能看清这次关键动作和结果的两个时刻。静态规格/标称填 kind="readable_label"，只需实际读到对应文字并记录展示时间；无需动作。静态可填同一时刻。
 动作或结果缺失的卖点从 supported_point_ids 删去。没有支持项时返回 mismatch 或 uncertain。"""
-    result = _call(prompt, directory / "reviews" / f"{key}.json", sheet)
+    from . import evidence_recall
+    requirement = evidence_recall.appearance_requirement(manifest, sentence, shot)
+    output = directory / "reviews" / f"{key}.json"
+    if requirement is not None and value_request is None and media.get("source_sha256"):
+        start_us, end_us = round(start * 1e6), round(end * 1e6)
+        samples = [round(t * 1e6) for t in times]
+        visual_question = evidence_recall.appearance_prompt(manifest, media["source_sha256"], start_us, end_us, samples)
+        answer = _call(visual_question, output, sheet)
+        try:
+            result = evidence_recall.bind_appearance(answer, requirement, sentence["selling_points"][0]["id"],
+                                                     start_us, end_us, samples)
+        except ValueError:
+            # Keep the original review available if the provider cannot return this schema.
+            result = _call(prompt, output, sheet)
+    else:
+        result = _call(prompt, output, sheet)
     if result.get("verdict") not in {"matched", "mismatch", "uncertain"} or type(result.get("same_product")) is not bool:
         raise ValueError("AI_EDITOR_REVIEW_INVALID")
     if sentence.get("hook_neighbor_context") and result.get("hook_link_supported") is not True:
