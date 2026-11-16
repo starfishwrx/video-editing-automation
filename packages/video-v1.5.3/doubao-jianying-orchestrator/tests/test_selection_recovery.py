@@ -65,6 +65,22 @@ class SelectionRecoveryTests(unittest.TestCase):
         plan["rows"][1]["parts"][0]["source_start_us"] = 6_000_000
         return plan
 
+    def test_short_alternative_returns_to_placement_before_reading_rest_of_pool(self):
+        sentence = copy.deepcopy(self.sentences[0])
+        shots = {f"s{i}":{**self.shots[0], "shot_id":f"s{i}"} for i in range(24)}
+        sentence["candidate_ids"] = list(shots)
+        def reviewed(_manifest, _sentence, shot, _directory, **kwargs):
+            return {**copy.deepcopy(self.reviews["1"][0]),"shot_id":shot["shot_id"]}
+        def serial(ids, _shots, _directory, call, **kwargs):
+            return ((sid,call(sid)) for sid in ids)
+        with patch.object(editor,"_review",side_effect=reviewed), patch.object(editor,"_iter_review_round",side_effect=serial), \
+             patch.object(editor,"_cached_reviews_feasible",side_effect=lambda m,s,shots,rows,a:bool(rows)):
+            reviews, coverage = editor._review_pool(self.manifest,sentence,shots,self.root,{},
+                                                    exhaustive=True,stop_at_short_alternative=True)
+        self.assertEqual(len(reviews),editor.ROUND_SIZE)
+        self.assertTrue(coverage["feasible"])
+        self.assertFalse(coverage["exhausted"])
+
     def test_matched_infeasible_evidence_stops_before_full_pool(self):
         sentence = copy.deepcopy(self.sentences[0])
         shots = {}

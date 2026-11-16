@@ -25,9 +25,13 @@ def lookup(manifest, sentence, shot, directory, call):
             return {}
     result, hint = recall.inspect(manifest, sentence, shot, judge=judge)
     if result:
-        store.record(manifest, "evidence_hit", {"shot":shot["shot_id"],"id":result["evidence_id"],
-                     "basis":result["basis"], "points":result["supported_point_ids"]})
+        record_hit(manifest, shot, result)
     return result, hint
+
+
+def record_hit(manifest, shot, result):
+    store.record(manifest, "evidence_hit", {"shot":shot["shot_id"],"id":result["evidence_id"],
+                 "basis":result["basis"], "points":result["supported_point_ids"]})
 
 
 def first_look(manifest, sentence, shot, directory, call, original, review, media):

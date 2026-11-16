@@ -1021,7 +1021,7 @@ def _review_pool(manifest: dict, sentence: dict, shots: dict, directory: Path, a
                  exhaustive: bool = False,
                  existing_reviews: list[dict] | None = None,
                  excluded_ids: set[str] | None = None,
-                 early_window_repair: bool = False) -> tuple[list[dict], dict]:
+                 early_window_repair: bool = False, stop_at_short_alternative: bool = False) -> tuple[list[dict], dict]:
     """Review candidates until selling-point evidence is matched or the pool ends.
 
     ``early_window_repair`` is retained for call-site compatibility. Matched
@@ -1082,7 +1082,21 @@ def _review_pool(manifest: dict, sentence: dict, shots: dict, directory: Path, a
     if located:
         _save(directory / f"first_look_{sentence['index']:02d}.json",
               {"attempts": located, "focused_feasible": focused_ready})
+    from . import evidence_queries, evidence_recall
+    library_alternative = False
+    if stop_at_short_alternative and evidence_recall._eligible(manifest, sentence):
+        for sid in ids:
+            if sid in reviewed_by_id:
+                continue
+            found, _ = evidence_recall.inspect(manifest, sentence, shots[sid])
+            if found and feasible([found]):
+                reviewed_by_id[sid] = found
+                evidence_queries.record_hit(manifest, shots[sid], found)
+                library_alternative = True
+                break
     for offset in range(0, len(ids), ROUND_SIZE):
+        if library_alternative:
+            break
         if focused_ready:
             break
         existing_good = [r for r in reviewed_by_id.values() if r.get("verdict") == "matched"]
@@ -1198,6 +1212,10 @@ def _review_pool(manifest: dict, sentence: dict, shots: dict, directory: Path, a
         good = [r for r in reviewed if r["verdict"] == "matched"]
         covered = {p for r in good for p in r.get("supported_point_ids", [])}
         evidence_found = bool(required) and contract.points_supported(required, covered)
+        if stop_at_short_alternative and any(feasible([review]) for review in good if review["shot_id"] in chunk):
+            # This fresh window can cover the current points and audio on its own.
+            # Assembly still checks neighboring shots, presentation and actual trims.
+            break
         if not exhaustive and evidence_found and feasible(good):
             if (len(good) >= 2 or len(reviewed) >= min(ALTERNATIVE_REVIEW_LIMIT, len(ids))
                     or len(reviewed) == len(ids)):
@@ -4001,6 +4019,7 @@ def _edit_with_review_fallback(manifest, analysis, plan, directory, narration_ti
     shots = {str(s['shot_id']): s for s in analysis['shots']}
     rejected = qc_rejected_shots(manifest)
     expanded_indices = set()
+    shorter_window_tried = set()
     while True:
         _resume_display_round(manifest, analysis, plan, directory, narration_timing)
         try:
@@ -4041,13 +4060,19 @@ def _edit_with_review_fallback(manifest, analysis, plan, directory, narration_ti
                 previous.update((r["shot_id"], r) for r in reviews)
                 plan["display_reviews"] = list(previous.values())
             else:
-                if coverage.get("exhausted") or coverage.get("reason") != "KNOWN_WINDOWS_INFEASIBLE":
+                if coverage.get("exhausted") or (coverage.get("reason") != "KNOWN_WINDOWS_INFEASIBLE"
+                                                  and index not in shorter_window_tried):
                     raise
+                previous = plan["reviews"].get(str(index), [])
                 reviews, coverage = _review_pool(manifest, sentence, shots, directory, narration_timing or {},
-                    exhaustive=True, existing_reviews=plan["reviews"].get(str(index), []),
-                    excluded_ids=rejected.get(index, set()))
+                    exhaustive=True, stop_at_short_alternative=index not in shorter_window_tried,
+                    existing_reviews=previous, excluded_ids=rejected.get(index, set()))
                 plan["reviews"][str(index)] = reviews
-            expanded_indices.add(index)
+            if (sentence["kind"] == "selling_point" and coverage.get("feasible")
+                    and coverage.get("exhausted") is False and index not in shorter_window_tried):
+                shorter_window_tried.add(index)
+            else:
+                expanded_indices.add(index)
             plan['coverage'][str(index)] = coverage
             plan.setdefault('review_expansions', []).append({'index': index, 'reason': str(exc),
                                                             'checked': coverage['checked']})
