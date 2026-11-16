@@ -38,8 +38,8 @@ def _analysis_digest(analysis: dict) -> str:
 
 
 def _save(path: Path, data: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8")
+    from ..runtime.file_safety import atomic_write_text
+    atomic_write_text(path, json.dumps(data, ensure_ascii=False, indent=2, allow_nan=False))
 
 
 def snapshot_previous_analysis(analysis: dict, report_dir: Path) -> None:
