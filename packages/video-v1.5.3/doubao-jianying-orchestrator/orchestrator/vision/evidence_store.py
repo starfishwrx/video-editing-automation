@@ -320,10 +320,11 @@ def portable_visual(manifest, shot):
 
 
 @optional()
-def preparation(sha, policy, save=None):
+def preparation(sha, policy, save=None, *, preserve_existing=False):
     with connect() as db:
         if save:
-            db.execute("INSERT OR REPLACE INTO preparations VALUES(?,?,?)",(sha,policy,str(save)))
+            insert = "INSERT OR IGNORE" if preserve_existing else "INSERT OR REPLACE"
+            db.execute(insert + " INTO preparations VALUES(?,?,?)",(sha,policy,str(save)))
             return
         row = db.execute("SELECT record_path FROM preparations WHERE sha=? AND protocol=?",
                          (sha,policy)).fetchone()

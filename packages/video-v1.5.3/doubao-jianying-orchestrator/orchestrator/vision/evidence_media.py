@@ -48,18 +48,28 @@ def seed(manifest, analysis, destination, frozen):
                 disk[key] = facts
         return disk
     count = 0
+    policy = {"threshold":.30, "min_shot_s":.45, "protocol":"scene-representatives-us-v1"}
+    db = evidence_store.database()
+    persistent = db is not None and target.resolve() == db.parent.resolve()
+    def register(sha, path):
+        if persistent:
+            evidence_store.preparation(sha, contract.digest(policy), path, preserve_existing=True)
     for sig in eligible.values():
         # Legacy scene preparation uses this default protocol. Nondefault settings
         # keep their own key and can be produced normally when needed.
-        key = contract.digest({"source":sig,"threshold":.30,"min_shot_s":.45,
-                               "protocol":"scene-representatives-us-v1"})
+        source = sig["path"]
+        if (source not in allowed or contract.source_identity(source) != sig
+                or hashes.get(source) != evidence_store.identity(source)):
+            raise ValueError("HISTORICAL_PREPARATION_IDENTITY_MISMATCH")
+        key = contract.digest({"source":sig, **policy})
         base = source_root/key
         path = target/"media"/"sources"/key/"prepared.json"
         with file_lock(path,timeout=600):
             current = material_cache._read(path)
             if current and current.get("identity",{}).get("source")==sig and material_cache._present(
                     f for s in current["analysis"]["shots"] for f in s["frame_paths"]):
-                if current.get("source_sha256") == hashes[sig["path"]]:
+                if current.get("source_sha256") == hashes[source]:
+                    register(hashes[source], path)
                     continue
                 # A weak legacy entry cannot establish a content binding. Recheck
                 # its actual representative pixels against the verified report.
@@ -71,6 +81,7 @@ def seed(manifest, analysis, destination, frozen):
                     if frame_hashes(prior) == frame_hashes(current):
                         current["source_sha256"] = hashes[sig["path"]]
                         material_cache._save(path,current)
+                        register(hashes[source], path)
                         continue
                 raise ValueError("CONFLICTING_LEGACY_MEDIA_PREPARATION")
             data = material_cache._read(base/"prepared.json")
@@ -95,7 +106,7 @@ def seed(manifest, analysis, destination, frozen):
                 shot["frame_paths"] = list(images.values())
             data["source_sha256"] = hashes[sig["path"]]
             material_cache._save(path,data)
+            register(hashes[source], path)
             count+=1
     locked_json_update(target/"material_vision.json",merge,default={},timeout=120)
     return {"sources_imported":count,"validated_visual_keys":len(rows)}
-

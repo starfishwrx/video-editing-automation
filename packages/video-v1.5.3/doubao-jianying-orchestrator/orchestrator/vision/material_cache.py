@@ -154,7 +154,7 @@ def _prepare_source(source: Path, *, manifest: dict, base_dir: Path, root: Path,
     lock = root / "locks" / contract.digest([content, prep_policy]) if content else path
     with file_lock(lock, timeout=7200):
         prepared = _read(path)
-        if prepared and content and prepared.get("source_sha256") not in (None, content):
+        if prepared and content and prepared.get("source_sha256") != content:
             prepared = None
         if content and not prepared:
             old_path = evidence_store.preparation(content, prep_policy)
