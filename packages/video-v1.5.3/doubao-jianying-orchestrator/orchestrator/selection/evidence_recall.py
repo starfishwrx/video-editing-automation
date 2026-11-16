@@ -169,8 +169,15 @@ def bind_appearance(answer, requirement, point_id, start_us, end_us, samples):
         if not isinstance(view, dict):
             continue
         a,b,t = (view.get(k) for k in ("start_us","end_us","sample_us"))
-        if (any(type(n) is not int for n in (a,b,t)) or not start_us <= a <= t <= b <= end_us
-                or a == b or t not in samples):
+        if (any(type(n) is not int for n in (a,b,t)) or not start_us <= a < b <= end_us):
+            continue
+        if t not in samples and t % 1000 == 0:
+            # Contact sheets print seconds to three decimals. Resolve only a
+            # unique printed time, then carry the original microsecond anchor.
+            printed = [v for v in samples if f"{v / 1e6:.3f}" == f"{t / 1e6:.3f}"]
+            if len(printed) == 1:
+                t = printed[0]
+        if t not in samples or not a <= t <= b:
             continue
         design, style, label = (view.get(k) for k in ("design","cute_detail","collaboration_text"))
         if not all(isinstance(x,str) for x in (design,style,label)) or not design.strip():
@@ -179,9 +186,16 @@ def bind_appearance(answer, requirement, point_id, start_us, end_us, samples):
             continue
         if cute and (not style.strip() or _LOOK_DOUBT.search(style) or re.search(r"未|无|不|仅", style)):
             continue
-        if partner and (partner not in _canonical(label) or not re.search(r"联名|聯名|collab|\s[x×]\s",label,re.I)
-                        or _LOOK_DOUBT.search(label) or re.search(r"未|无|并非|不含", label)):
-            continue
+        if partner:
+            # An aesthetic brief can specify a named package design. Require
+            # its readable name plus the identifiable character in this view,
+            # or an explicit collaboration mark. Spoken licensing claims do
+            # not enter this path.
+            named_character = partner in _canonical(style) and re.search(r"图案|卡通|角色|形象|插画|头像", style)
+            collaboration = re.search(r"联名|聯名|collab|\s[x×]\s", label, re.I)
+            if (partner not in _canonical(label) or _LOOK_DOUBT.search(label)
+                    or re.search(r"未|无|并非|不含", label) or not (collaboration or named_character)):
+                continue
         possible.append((b-a, a, b, t, "，".join(v for v in (design,style if cute else "",label if partner else "") if v)))
     if possible:
         _,a,b,t,detail = min(possible)

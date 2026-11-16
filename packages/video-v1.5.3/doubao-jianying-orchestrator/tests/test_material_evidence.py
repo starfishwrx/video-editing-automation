@@ -75,6 +75,14 @@ class EvidenceTest(unittest.TestCase):
         self.assertEqual(bind([view], partner)["verdict"], "uncertain")
         label = {**view, "collaboration_text": "Hello Kitty 联名"}
         self.assertEqual(bind([label], partner)["verdict"], "matched")
+        named = {**view, "cute_detail": "Hello Kitty卡通形象", "collaboration_text": "Hello Kitty"}
+        self.assertEqual(bind([named], partner)["verdict"], "matched")
+        self.assertEqual(bind([{**view, "collaboration_text": "Hello Kitty"}], partner)["verdict"], "uncertain")
+        rounded = {**view, "start_us": 1000, "end_us": 4000, "sample_us": 2000}
+        def at(samples):
+            return evidence_recall.bind_appearance({**facts, "views": [rounded]}, ("", False), "new", 0, 4500, samples)
+        self.assertEqual(at([1987])["claim_checks"][0]["result_us"], 1987)
+        self.assertEqual(at([1987, 2004])["verdict"], "uncertain")
         self.assertEqual(bind([view, {**label, "cute_detail": ""}], partner)["verdict"], "uncertain")
         self.assertEqual(bind([{**label, "collaboration_text": "未看到Hello Kitty联名"}], partner)["verdict"], "uncertain")
         self.assertEqual(bind([{**view, "sample_us": 70}])["verdict"], "uncertain")
