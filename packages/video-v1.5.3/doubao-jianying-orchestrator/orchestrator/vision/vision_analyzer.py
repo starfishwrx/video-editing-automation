@@ -1280,7 +1280,7 @@ def _text_prompt(shot_id: str, items: list[dict[str, Any]]) -> str:
 - 抄录品名、卖点短语、规格数字、图标旁边的文字，每条一个短语，保持原文用字，不翻译、不改写。
 - 只写确实看清的字；看不清、被遮挡或反光的部分不要猜，也不要用字形相近的词替代。
 - 指尖附近那一块文案写进 pointed_text，可以是这块里的几条短语。包装其他位置的文字只放 readable_claims；没有指到一块可读文案就让 pointed_text 为空数组。
-不要裁剪、放大或使用任何工具，严格只输出 JSON 对象：{{"shot_id": "{shot_id}", "readable_claims": ["..."], "pointed_text": ["..."]}}
+如果没有包装或完全读不到，两个字段都返回空数组 []。shot_id 必须原样照抄。不得返回 null、字符串或嵌套对象。不要裁剪、放大或使用任何工具，严格只输出 JSON 对象：{{"shot_id": "{shot_id}", "readable_claims": ["..."], "pointed_text": ["..."]}}
 """
 
 
@@ -1451,6 +1451,14 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
                 shot.pop("analysis_cache_key", None)
             if cached is None:
                 cached = evidence_store.portable_visual(manifest, shot)
+            if cached and _needs_text_backfill(cached):
+                text = evidence_store.portable_text(manifest, shot)
+                if text:
+                    cached = {**cached, **text, "readable_claims":text["text_agreed"],
+                              "pointed_claims":text["pointed_agreed"]}
+                    cache[key] = cached
+                    changed_cache_keys.add(key)
+                    evidence_store.record(manifest, "evidence_hit", {"shot":shot_id,"basis":"readable_label"})
         prior_origin = None
         cached_key = key
         # An explicitly named prior backend may supply its original observation.

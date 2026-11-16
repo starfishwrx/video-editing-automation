@@ -104,6 +104,19 @@ class EvidenceTest(unittest.TestCase):
         with patch.object(store,"scene_protocol",return_value="authenticated-original-scene"):
             self.assertEqual(len(store.windows(self.manifest,self.shot)),1)
 
+    def test_recover_only_consistent_text_at_the_same_window(self):
+        facts = {"text_pass":"hires","action_complete":True,"text_agreed":["50抽"],
+                 "pointed_agreed":[],"ocr_protocol":vision._ocr_protocol()}
+        def put(f):
+            with store.connect() as db:
+                store.put(db,store.scope(self.manifest),store.identity(self.path),self.path,0,8000000,
+                          "visual",store.visual_protocol(self.manifest),f,self.proof)
+        put(facts)
+        self.assertEqual(store.portable_text(self.manifest,self.shot)["text_agreed"],["50抽"])
+        self.assertIsNone(store.portable_text(self.manifest,{**self.shot,"source_end":7}))
+        put({**facts,"text_agreed":["70抽"]})
+        self.assertIsNone(store.portable_text(self.manifest,self.shot))
+
     def test_independent_ocr_version(self):
         with patch.dict(os.environ,{"JY_VISION_TEXT_PASS":"1"}):
             row={"action_complete":True,"text_pass":"hires","ocr_protocol":vision._ocr_protocol()}

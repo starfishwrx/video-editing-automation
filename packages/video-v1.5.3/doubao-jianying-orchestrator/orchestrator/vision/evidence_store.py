@@ -325,6 +325,33 @@ def portable_visual(manifest, shot):
 
 
 @optional()
+def portable_text(manifest, shot):
+    """Recover only agreed high-resolution text at the exact original window."""
+    if not database() or not scope(manifest):
+        return None
+    from . import vision_analyzer as vision
+    current = vision._ocr_protocol()
+    sha = identity(shot["video"])
+    with connect() as db:
+        rows = db.execute("""SELECT payload FROM observations WHERE product=? AND sha=?
+            AND grade='visual' AND start_us=? AND end_us=? AND json_extract(payload,'$.text_pass')='hires'
+            AND (json_extract(payload,'$.ocr_protocol')=? OR
+            (json_extract(payload,'$.ocr_protocol') IS NULL AND protocol=?))""",
+            (scope(manifest), sha, round(shot["source_start"]*1e6), round(shot["source_end"]*1e6),
+             current, visual_protocol(manifest)))
+        alternatives = {}
+        for row in rows:
+            facts = json.loads(row[0])
+            if not isinstance(facts.get("text_agreed"), list) or vision._needs_text_backfill(facts):
+                continue
+            text = {key:facts.get(key,[]) for key in ("text_agreed","pointed_agreed")}
+            alternatives[contract.digest(text)] = text
+        if len(alternatives) == 1:
+            return {**next(iter(alternatives.values())), "text_pass":"hires", "ocr_protocol":current}
+    return None
+
+
+@optional()
 def preparation(sha, policy, save=None, *, preserve_existing=False):
     with connect() as db:
         if save:
