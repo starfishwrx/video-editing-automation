@@ -446,7 +446,37 @@ def _lock_voice_once(manifest: dict) -> tuple[object | None, dict | None]:
 from ..audio.narration_preparation import NarrationError
 
 
-def _pre_synthesize_narration(manifest: dict, report_dir: Path, preset) -> dict:
+def _short_sentence_merges(manifest: dict) -> dict:
+    """Only replan unbound semantic text before selection; preserve source text."""
+    from ..selection import sentence_planner, shot_notes
+    segments = manifest.get("segments")
+    if (manifest.get("sentence_plan_version") != "semantic-v1" or not isinstance(segments, list)
+            or any(not isinstance(row, dict) or set(row) != {"text"} for row in segments)
+            or shot_notes.has_frozen_binding(manifest) or manifest.get("shot_notes")
+            or manifest.get(shot_notes.remark_field()) or manifest.get("ai_refill_indices")
+            or manifest.get("narration_timing_file")):
+        return {}
+    source = str(manifest.get("full_script") or manifest.get("script") or "")
+    candidates = {}
+    for index, (left, right) in enumerate(zip(segments, segments[1:])):
+        text, following = left["text"], right["text"]
+        if (not isinstance(text, str) or not isinstance(following, str)
+                or len(text.strip()) > 12 or not text.rstrip().endswith(("，", ",", "、"))):
+            continue
+        parts = [row["text"] for row in segments]
+        parts[index:index + 2] = [text + following]
+        try:
+            checked = sentence_planner.validate(source, {"segments": parts})
+        except (ValueError, TypeError):
+            continue
+        merged = checked[index]["text"]
+        if merged != text + following:
+            continue
+        candidates[timing_contract.sentence_key(left, index + 1)] = (index, checked)
+    return candidates
+
+
+def _pre_synthesize_narration(manifest: dict, report_dir: Path, preset, *, _replans: int = 0) -> dict:
     """选镜**之前**拿到逐句真实配音时长（定案第 3 条）。
 
     切句口径与规划层共用 `timing_contract.split_sentences`（否则真值表的键对不
@@ -477,6 +507,10 @@ def _pre_synthesize_narration(manifest: dict, report_dir: Path, preset) -> dict:
     from ..audio import narration_preparation
     paper = rulepack.for_manifest(manifest).get("category") == "zhipin"
     final_options = {"final_narration": manifest.get("narration_loudness") or {}} if paper else {}
+    merges = _short_sentence_merges(manifest) if paper and _replans < 3 else {}
+    if merges:
+        final_options["merge_candidates"] = {key: rows[index]["text"]
+                                               for key, (index, rows) in merges.items()}
     paths: dict[str, str] = {}
     tts_error = ""
     if tts_items:
@@ -488,6 +522,16 @@ def _pre_synthesize_narration(manifest: dict, report_dir: Path, preset) -> dict:
         except Exception as exc:  # noqa: BLE001
             if paper:
                 if isinstance(exc, narration_preparation.NarrationError):
+                    key = getattr(exc, "narration_key", None)
+                    if str(exc) == "NARRATION_EDGE_REPAIR_UNSAFE" and key in merges:
+                        index, replacement = merges[key]
+                        original = [manifest["segments"][index]["text"], manifest["segments"][index + 1]["text"]]
+                        manifest["segments"] = replacement
+                        manifest.setdefault("narration_replans", []).append({
+                            "reason": "NARRATION_EDGE_REPAIR_UNSAFE", "source": original,
+                            "text": replacement[index]["text"],
+                        })
+                        return _pre_synthesize_narration(manifest, report_dir, preset, _replans=_replans + 1)
                     raise
                 raise narration_preparation.NarrationError("NARRATION_PREPARATION_FAILED:" + str(exc),
                     status="NARRATION_PREPARATION_FAILED") from exc

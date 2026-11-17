@@ -12,6 +12,7 @@ from pathlib import Path
 import subprocess
 from typing import Any
 
+from ..selection.fixed_narration import fixed_narration_segments
 
 def _as_list(value: Any) -> list[Any]:
     if value is None or value == "":
@@ -76,40 +77,6 @@ def done_meeting_fields(task: dict[str, Any]) -> dict[str, Any]:
     """Task-to-output/eval association, explicitly not a PASS verdict."""
     return {"meeting_inputs": normalize_meeting_task(task)["meeting_inputs"],
             "meeting_reference_evaluation": "unknown"}
-
-
-def fixed_narration_segments(task: dict[str, Any]) -> list[dict[str, str]] | None:
-    """Accept explicit sentence audio without importing old selections or timing."""
-    nested = task.get("manifest")
-    if nested is None:
-        return None
-    if not isinstance(nested, dict):
-        raise ValueError("INVALID_TASK_MANIFEST")
-    if "segments" not in nested:
-        return None
-    rows = nested["segments"]
-    if not isinstance(rows, list) or not rows:
-        raise ValueError("FIXED_NARRATION_SEGMENTS_REQUIRED")
-    allowed = {"text", "audio", "audio_mode"}
-    if any(not isinstance(row, dict) or set(row) - allowed for row in rows):
-        raise ValueError("FIXED_NARRATION_FIELDS_INVALID")
-    if any(str(row.get("audio_mode") or "file").strip().lower() != "file" for row in rows):
-        raise ValueError("FIXED_NARRATION_FILE_MODE_REQUIRED")
-    from ..selection import sentence_planner
-    script = str(task.get("script") or "")
-    texts = [row.get("text") for row in rows]
-    try:
-        validated = sentence_planner.validate(script, {"segments": texts})
-    except (TypeError, ValueError) as exc:
-        raise ValueError("FIXED_NARRATION_SCRIPT_MISMATCH: " + str(exc)) from exc
-    result = []
-    for index, (row, text) in enumerate(zip(rows, validated), 1):
-        raw = str(row.get("audio") or "").strip()
-        path = Path(raw).expanduser()
-        if not raw or not path.is_absolute() or not path.is_file():
-            raise ValueError("FIXED_NARRATION_AUDIO_MISSING:S%d" % index)
-        result.append({"text": text["text"], "audio": str(path.resolve()), "audio_mode": "file"})
-    return result
 
 
 def validate_explicit_audio(segments: Any, base_dir: Path, *, ffprobe: str) -> Any:
