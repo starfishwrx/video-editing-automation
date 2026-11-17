@@ -60,6 +60,10 @@ uv run --frozen python -X utf8 -m tools.weipin_experiment optimize --manifest wo
 
 ## 召回与画面配对
 
+实验组观察与素材证据库共用 `JY_MATERIAL_EVIDENCE_DB`。同商品、规则及视觉模型配置一致时，源文件内容、归一化画面、编号帧时钟和原片窗口均相同的已复核组合可跨任务找回；迁移目录后仍以内容识别。相同的事件观察分别按完整倒液和定性吸收窗口复用。缺证明、证据矛盾、结果不确定或输入变化时重新观察。已知组只作为当前允许素材中的召回优先项，当前配音时长、实验阶段、最终切片和独立 QC 仍重新验证。并发相同组合通过锁共用观察，证据库不可用时仍走原有观察流程。
+
+历史已复核的配对可用 `python -m orchestrator.vision.evidence_import experiment --manifest <原任务manifest> --report <pair.pair.json> --contract <原任务冻结contract.json>` 导入。导入会核对原任务、原片 SHA-256、两组源窗、画面、请求和复核结果；旧证据缺这些来源时不能导入。导入只恢复配对观察，不代表已完成事件定位或成片验收。
+
 `weipin.json`的`experiment_contracts.absorb_rewet`声明同次实验、可跨文件和结果最低帧数。有效规则同时进入新旧文案识别；旧描述只作召回，原文按当前规则重新编译，旧的支持结论不会自动获得当前认证。
 
 `purpose_production.select`分别召回吸收及反渗候选，输出`experiment_pair_candidates`。同目录相邻序号优先，其他候选仍保留；相邻标记的`acceptance_evidence`始终为false。

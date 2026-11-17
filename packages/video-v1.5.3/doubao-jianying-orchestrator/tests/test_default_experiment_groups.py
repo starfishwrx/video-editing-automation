@@ -63,6 +63,16 @@ class DefaultExperimentGroupTests(unittest.TestCase):
             "demonstration_observation": "同一样品倒液吸收后纸巾按压并提起，纸面干燥", "observation": "complete experiment",
             "reason": "fixed phases support each clause", "confidence": .9, "members": rows}
 
+    def test_known_experiment_is_tried_before_unrelated_shortlisted_pairs(self):
+        from orchestrator.vision import experiment_evidence
+        with patch.object(experiment_evidence, "preferred_pairs", return_value=[("shot2", "shot3")]), \
+             patch.object(groups, "observe_pair", side_effect=ValueError("no valid evidence")) as observe:
+            with self.assertRaisesRegex(ValueError, "EXPERIMENT_GROUP_PENDING"):
+                groups.repair(self.manifest, self.analysis, self.plan, self.root, None)
+        self.assertGreater(observe.call_count, 0)
+        self.assertEqual([observe.call_args_list[0].args[2]["shot_id"],
+                          observe.call_args_list[0].args[3]["shot_id"]], ["shot2", "shot3"])
+
     def repair(self):
         with patch.object(editor, "_place_absorb_experiment", return_value=False), \
              patch.object(groups, "observe_pair", return_value=(self.fixture.evidence, self.fixture.motion)) as observe, \

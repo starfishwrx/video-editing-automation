@@ -6,7 +6,7 @@
     "machine-specific paths",
     "knowledge-base bodies"
   ],
-  "file_count": 478,
+  "file_count": 483,
   "files": [
     {
       "path": ".gitignore"
@@ -154,6 +154,9 @@
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/audio/subtitle_units.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/audio/verified_narration_cache.py"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/audio/voice_catalog.py"
@@ -471,6 +474,9 @@
       "path": "doubao-jianying-orchestrator/orchestrator/selection/experiment_retiming.py"
     },
     {
+      "path": "doubao-jianying-orchestrator/orchestrator/selection/fixed_narration.py"
+    },
+    {
       "path": "doubao-jianying-orchestrator/orchestrator/selection/opening_hook.py"
     },
     {
@@ -577,6 +583,9 @@
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/vision/experiment_event_review.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/vision/experiment_evidence.py"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/vision/experiment_motion_review.py"
@@ -714,6 +723,9 @@
       "path": "doubao-jianying-orchestrator/tests/test_experiment_events.py"
     },
     {
+      "path": "doubao-jianying-orchestrator/tests/test_experiment_evidence.py"
+    },
+    {
       "path": "doubao-jianying-orchestrator/tests/test_experiment_optimization.py"
     },
     {
@@ -769,6 +781,9 @@
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_meeting_voice.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/tests/test_narration_auto_repair.py"
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_narration_preparation.py"

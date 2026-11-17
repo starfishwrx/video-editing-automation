@@ -96,7 +96,7 @@ def _pour_focus_ranges(manifest, first, directory):
 def observe_pair(manifest, analysis, first, second, directory, *, focus="complete_pour"):
     """Pair actual source frames, then locate/refine events on the configured route."""
     from ..runtime.platform_env import find_ffmpeg
-    from ..vision import experiment_pair_review, experiment_event_review
+    from ..vision import experiment_pair_review, experiment_event_review, experiment_evidence
     ffmpeg, ffprobe = find_ffmpeg()
     if not ffmpeg or not ffprobe:
         raise ValueError("AI_EDITOR_FFMPEG_MISSING")
@@ -123,17 +123,31 @@ def observe_pair(manifest, analysis, first, second, directory, *, focus="complet
                   "source_end": min(second["source_end"], phases["wipe"][1])}
     samples = [_samples(s, directory, ffmpeg=ffmpeg, ffprobe=ffprobe, font_path=font)
                for s in (first, second)]
-    focus_ranges = _pour_focus_ranges(manifest, first, directory) if first["shot_id"] != second["shot_id"] else {}
+    windows = [_window(first, samples[0]), _window(second, samples[1])]
+    cache_key = experiment_evidence.pair_key(scoped, samples, windows)
+    with experiment_evidence.pair_lock(cache_key):
+        return _observe_bound_pair(scoped, manifest, first, second, samples, windows, directory,
+                                   cache_key, focus, ffmpeg, ffprobe, font)
+
+
+def _observe_bound_pair(scoped, manifest, first, second, samples, windows, directory,
+                        cache_key, focus, ffmpeg, ffprobe, font):
+    from ..vision import experiment_pair_review, experiment_event_review, experiment_evidence
     saved_pair = directory / "pair.pair.json"
     if saved_pair.is_file():
         pair = json.loads(saved_pair.read_text("utf-8"))
-        if ([m["window_frame_ids"] for m in pair["members"]] !=
-                [list(_window(first, samples[0])), list(_window(second, samples[1]))]):
+        if [m["window_frame_ids"] for m in pair["members"]] != [list(w) for w in windows]:
             raise ValueError("EXPERIMENT_PAIR_REVIEW_INPUT_CHANGED")
     else:
-        pair = experiment_pair_review.review(scoped, *samples, _window(first, samples[0]),
-            _window(second, samples[1]), directory / "pair.json",
-            ffmpeg=ffmpeg, ffprobe=ffprobe, font_path=font, focus_ranges_us=focus_ranges)
+        pair = experiment_evidence.reuse_pair(scoped, cache_key, samples, directory)
+        if pair is None:
+            focus_ranges = _pour_focus_ranges(manifest, first, directory) if first["shot_id"] != second["shot_id"] else {}
+            pair = experiment_pair_review.review(scoped, *samples, *windows, directory / "pair.json",
+                ffmpeg=ffmpeg, ffprobe=ffprobe, font_path=font, focus_ranges_us=focus_ranges)
+    if [member.get("samples") for member in pair.get("members", [])] != samples:
+        raise ValueError("EXPERIMENT_PAIR_REVIEW_INPUT_CHANGED")
+    if not pair.get("reused_from_task"):
+        experiment_evidence.remember_pair(scoped, cache_key, pair)
     experiment_contract.validate_pair_evidence(scoped, pair, require_disjoint_windows=False)
     # GLM and Qwen both use the existing image client; no implicit switch to a
     # separate Qwen video service is needed by the default production entry.
@@ -144,8 +158,12 @@ def observe_pair(manifest, analysis, first, second, directory, *, focus="complet
         motion = json.loads(saved_motion.read_text("utf-8"))
         validate(scoped, pair, motion)
     else:
-        motion = experiment_event_review.review(scoped, pair, output,
-            focus=focus, frames_only=True, ffmpeg=ffmpeg, ffprobe=ffprobe, font_path=font)
+        motion = experiment_evidence.reuse_motion(scoped, cache_key, focus, pair, directory)
+        if motion is None:
+            motion = experiment_event_review.review(scoped, pair, output,
+                focus=focus, frames_only=True, ffmpeg=ffmpeg, ffprobe=ffprobe, font_path=font)
+    if not motion.get("reused_from_task"):
+        experiment_evidence.remember_motion(scoped, cache_key, focus, pair, motion, directory)
     return pair, motion
 
 
@@ -417,13 +435,19 @@ def repair(manifest, analysis, plan, directory, narration_timing):
         # A bounded search should cover different hypotheses rather than spend
         # every review on one pour paired with several verification sources;
         # adjacent-file pairs are tried first.
-        pending_pairs = [(a, b) for a in first_ids for b in second_ids if a != b]
+        from ..vision import experiment_evidence
+        preferred = [pair for pair in experiment_evidence.preferred_pairs(_scope(manifest, analysis), shots)
+                     if not any(sid in rejected.get(i, set()) for sid in pair for i in indices)]
+        pending_pairs = list(dict.fromkeys(preferred + [(a, b) for a in first_ids for b in second_ids if a != b]))
+        preferred_set = set(preferred)
         pairs, seen_a, seen_b = [], set(), set()
         while pending_pairs:
             chosen = min(pending_pairs, key=lambda p: (
+                p not in preferred_set,
                 not experiment_contract.adjacency_hint(shots[p[0]]["video"], shots[p[1]]["video"])["adjacent"],
                 (p[0] in seen_a) + (p[1] in seen_b),
-                first_ids.index(p[0]) + second_ids.index(p[1])))
+                (first_ids.index(p[0]) if p[0] in first_ids else len(first_ids))
+                + (second_ids.index(p[1]) if p[1] in second_ids else len(second_ids))))
             pending_pairs.remove(chosen); pairs.append(chosen)
             seen_a.add(chosen[0]); seen_b.add(chosen[1])
         scope = identity.digest({"indices": indices, "sentences": members,

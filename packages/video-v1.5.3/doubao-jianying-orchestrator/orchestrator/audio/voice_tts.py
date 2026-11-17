@@ -5,6 +5,7 @@ import asyncio
 import contextlib
 import hashlib
 import json
+import os
 import random
 import re
 import subprocess
@@ -207,7 +208,7 @@ async def _synthesize_one(utts, text: str, target: Path, speaker: str,
 
 
 async def _gather(items: list[dict], out_dir: Path, preset: VoicePreset,
-                  concurrency: int) -> dict:
+                  concurrency: int, retries: int = 3) -> dict:
     utts = _import_tts()
     out_dir.mkdir(parents=True, exist_ok=True)
     sem = asyncio.Semaphore(concurrency)
@@ -216,7 +217,7 @@ async def _gather(items: list[dict], out_dir: Path, preset: VoicePreset,
         # 音频缓存键只看「文本+音色+后端+后处理版本」。item 上的 video_speed /
         # source_start 只影响**画面**，绝不能进键（用户定案第 2 条）。
         target = out_dir / _cache_name(it["text"], preset.sami)
-        tasks.append(_synthesize_one(utts, it["text"], target, preset.sami, sem))
+        tasks.append(_synthesize_one(utts, it["text"], target, preset.sami, sem, retries=retries))
     paths = await asyncio.gather(*tasks)
     return {it["key"]: p for it, p in zip(items, paths)}
 
@@ -336,19 +337,65 @@ def postprocess_voice(path, *, tempo=1.0, edge_trim: bool = True,
 
 def _postprocess_all(paths: dict, *, tempo: float, edge_trim: bool) -> dict:
     from concurrent.futures import ThreadPoolExecutor
-    keys = list(paths)
+    # Several sentence keys can reference the same deterministic TTS cache
+    # entry. Process each input once so concurrent workers do not replace the
+    # same derived file, then bind that output back to every sentence.
+    inputs = {os.path.normcase(str(Path(path).resolve())): path for path in paths.values()}
 
-    def one(key):
-        return postprocess_voice(paths[key], tempo=tempo, edge_trim=edge_trim)
+    def one(source):
+        return postprocess_voice(inputs[source], tempo=tempo, edge_trim=edge_trim)
 
-    with ThreadPoolExecutor(max_workers=min(4, max(1, len(keys)))) as pool:
-        processed = list(pool.map(one, keys))
-    return dict(zip(keys, processed))
+    with ThreadPoolExecutor(max_workers=min(4, max(1, len(inputs)))) as pool:
+        processed = dict(zip(inputs, pool.map(one, inputs)))
+    return {key: processed[os.path.normcase(str(Path(path).resolve()))] for key, path in paths.items()}
+
+
+def _repair_short_narration(item, original, out_dir, preset, *, tempo, edge_trim,
+                            loudness, ffmpeg, ffprobe):
+    """Try one fresh synthesis for an unsafe short sentence without touching the raw cache."""
+    from . import narration_preparation as preparation
+    from ..runtime.file_safety import atomic_write_text, content_identity, file_lock
+
+    identity = {
+        "source": content_identity(original)["sha256"], "text": item["text"],
+        "speaker": preset.sami, "tempo": tempo,
+        "policy": preparation.settings(loudness, edge_trim=edge_trim),
+    }
+    fingerprint = hashlib.sha256(json.dumps(identity, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+    directory = out_dir / "short-repair" / fingerprint
+    receipt = directory / "attempt.json"
+    with file_lock(receipt, timeout=300):
+        if receipt.is_file():
+            record = json.loads(receipt.read_text(encoding="utf-8"))
+            if record.get("status") == "PASS":
+                final = preparation.prepared(record["path"], identity["policy"])
+                if final and final["output"]["sha256"] == record.get("sha256"):
+                    return final["path"]
+                raise preparation.NarrationError("NARRATION_REPAIR_ASSET_CHANGED")
+            if record.get("status") == "FAILED":
+                raise preparation.NarrationError(record.get("reason") or "NARRATION_REPAIR_FAILED")
+            raise preparation.NarrationError("NARRATION_REPAIR_INCOMPLETE")
+        # Persist the attempt before making the request so an interrupted run
+        # cannot silently repeat paid synthesis on every resume.
+        atomic_write_text(receipt, json.dumps({"status": "STARTED"}))
+        fresh = _quiet_async_run(_gather([item], directory, preset, 1, retries=1))[item["key"]]
+        if edge_trim or abs(tempo - 1.0) >= 1e-6:
+            fresh = postprocess_voice(fresh, tempo=tempo, edge_trim=False)
+        try:
+            final = preparation.prepare(fresh, out_dir / "final", loudness=loudness,
+                edge_trim=edge_trim, ffmpeg=ffmpeg, ffprobe=ffprobe)
+        except preparation.NarrationError as exc:
+            atomic_write_text(receipt, json.dumps({"status": "FAILED", "reason": str(exc)}))
+            raise
+        atomic_write_text(receipt, json.dumps({"status": "PASS", "path": final["path"],
+                                              "sha256": final["output"]["sha256"]}))
+        return final["path"]
 
 
 def generate_batch(items: list[dict], out_dir: Path, voice_spec=None, *,
                    concurrency: int | None = None, tempo: float | None = None,
-                   edge_trim: bool = True, final_narration: dict | None = None) -> tuple[VoicePreset, dict]:
+                   edge_trim: bool = True, final_narration: dict | None = None,
+                   merge_candidates: dict | None = None) -> tuple[VoicePreset, dict]:
     """并发生成一批口播。
 
     items: [{"key": "s3", "text": "..."}]；同文本+同音色直接命中缓存。
@@ -370,17 +417,56 @@ def generate_batch(items: list[dict], out_dir: Path, voice_spec=None, *,
     if loop and loop.is_running():
         # 调用方已在事件循环中时，返回协程由其 await（少见）；不做后处理
         return preset, _gather(items, out_dir, preset, concurrency)
-    paths = _quiet_async_run(_gather(items, out_dir, preset, concurrency))
     tempo = request.tempo
+    cached = {}
+    cache = None
+    cache_root = None
+    if final_narration is not None:
+        from . import verified_narration_cache as cache
+        cache_root = cache.cache_root()
+        for item in items:
+            identity = cache.identity(item["text"], preset.sami, tempo, final_narration, edge_trim)
+            found = cache.lookup(cache_root, identity)
+            if found:
+                cached[item["key"]] = found
+    missing = [item for item in items if item["key"] not in cached]
+    paths = _quiet_async_run(_gather(missing, out_dir, preset, concurrency)) if missing else {}
     if edge_trim or abs(tempo - 1.0) >= 1e-6:
         paths = _postprocess_all(paths, tempo=tempo,
             edge_trim=False if final_narration is not None else edge_trim)
     if final_narration is not None:
         from .narration_preparation import prepare
         ffmpeg, ffprobe = find_ffmpeg()
-        paths = {key: prepare(path, out_dir / "final", loudness=final_narration,
+        from .narration_preparation import NarrationError
+        items_by_key = {item["key"]: item for item in items}
+        final_paths = {}
+        for key, path in paths.items():
+            try:
+                final_paths[key] = prepare(path, out_dir / "final", loudness=final_narration,
                     edge_trim=edge_trim, ffmpeg=str(ffmpeg or "ffmpeg"),
-                    ffprobe=str(ffprobe or "ffprobe"))["path"] for key, path in paths.items()}
+                    ffprobe=str(ffprobe or "ffprobe"))["path"]
+            except NarrationError as exc:
+                item = items_by_key[key]
+                if str(exc) != "NARRATION_EDGE_REPAIR_UNSAFE" or len(item["text"].strip()) > 12:
+                    raise
+                merged_text = (merge_candidates or {}).get(key)
+                if merged_text and cache.lookup(cache_root, cache.identity(
+                        merged_text, preset.sami, tempo, final_narration, edge_trim)):
+                    exc.narration_key = key
+                    exc.narration_text = item["text"]
+                    raise
+                try:
+                    final_paths[key] = _repair_short_narration(item, path, out_dir, preset,
+                        tempo=tempo, edge_trim=edge_trim, loudness=final_narration,
+                        ffmpeg=str(ffmpeg or "ffmpeg"), ffprobe=str(ffprobe or "ffprobe"))
+                except NarrationError as repair_error:
+                    repair_error.narration_key = key
+                    repair_error.narration_text = item["text"]
+                    raise
+            cache.remember(cache_root, cache.identity(items_by_key[key]["text"], preset.sami,
+                           tempo, final_narration, edge_trim), final_paths[key])
+        paths = final_paths
+    paths.update(cached)
     return preset, paths
 
 

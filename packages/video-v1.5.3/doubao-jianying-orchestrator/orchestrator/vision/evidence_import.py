@@ -96,21 +96,23 @@ def import_product(manifest, analysis, path, frozen):
 
 def main():
     cli = argparse.ArgumentParser()
-    cli.add_argument("kind",choices=["product","qc","review"])
+    cli.add_argument("kind",choices=["product","qc","review","experiment"])
     cli.add_argument("--manifest", type=Path, required=True)
     cli.add_argument("--report", type=Path, required=True)
     cli.add_argument("--contract", type=Path, help="Frozen input SHA-256 contract for historical product or review")
     args = cli.parse_args()
-    if args.kind in ("product","review") and not args.contract:
-        cli.error("--contract is required for historical product or review")
+    if args.kind in ("product","review","experiment") and not args.contract:
+        cli.error("--contract is required for historical product, review or experiment")
     manifest, report = (json.loads(read(p)) for p in (args.manifest,args.report))
     if args.kind == "qc":
         count = import_qc(manifest,report,args.report)
     elif args.kind == "product":
         import_product(manifest, report, args.report, json.loads(read(args.contract)))
         count = len(report["shots"])
-    else:
+    elif args.kind == "review":
         count = import_reviews(manifest,report,args.report,json.loads(read(args.contract)))
+    else:
+        count = import_experiment(manifest, report, args.report, json.loads(read(args.contract)))
     print(json.dumps({"kind":args.kind,"admitted":count},ensure_ascii=False))
 
 
@@ -144,6 +146,52 @@ def import_reviews(manifest, plan, path, frozen):
                 store.remember_review(manifest,sentence,{"video":source},reviewed)
                 count += 1
     return count
+
+
+def import_experiment(manifest, pair, path, frozen):
+    """Admit a historical joint review only with its actual request and frozen inputs."""
+    from ..selection import experiment_contract
+    from . import experiment_evidence, purpose_review
+
+    frozen = dict(frozen)
+    if frozen.pop("contract_hash", "") != "sha256:" + contract.digest(frozen):
+        raise ValueError("FROZEN_MATERIAL_CONTRACT_INVALID")
+    task_file = next((parent / "task.json" for parent in Path(path).parents
+                      if (parent / "task.json").is_file()), None)
+    task = json.loads(read(task_file)) if task_file else {}
+    if (contract.digest(task) != frozen.get("task_sha256")
+            or task.get("record_id") != frozen.get("task_id")
+            or task.get("record_id") != pair.get("task_id")
+            or task.get("product") != manifest.get("product")):
+        raise ValueError("HISTORICAL_EXPERIMENT_TASK_CHANGED")
+    experiment_contract.validate_pair_evidence(manifest, pair, require_disjoint_windows=False)
+    inputs = {str(Path(row["path"]).resolve()): row["sha256"] for row in frozen["inputs"]}
+    samples = [member["samples"] for member in pair["members"]]
+    if any(inputs.get(s["original"]["path"]) != store.identity(s["original"]["path"]) for s in samples):
+        raise ValueError("HISTORICAL_EXPERIMENT_SOURCE_CHANGED")
+    base = Path(path).with_name("pair")
+    request = json.loads(read(base.with_suffix(".request.json")))
+    prompt = read(base.with_suffix(".prompt.txt"))
+    observation = json.loads(read(base.with_suffix(".json")))
+    binding = json.loads(read(pair["input_binding"]["file"]["path"]))
+    cfg = vision._qwen_settings() if vision._vision_transport() == "qwen" else vision._text_settings() or vision._volc_settings()
+    # The deployed paper-specific mirror equivalence overlay is unrelated to
+    # hygiene absorption. No other changed policy is accepted as equivalent.
+    mirror_overlay = ("唯一对象等效例外：口播卖点为擦镜子/镜面时，清晰展示擦拭光滑反光玻璃面"
+        "（窗玻璃、玻璃面板、烤箱/油烟机玻璃、镜面类表面）且可见擦拭后清洁效果的镜头可支持该卖点；"
+        "看不到清洁效果、非光滑反光表面或其他卖点不适用此等效。\n")
+    comparable_prompt = prompt.replace(mirror_overlay, "", 1)
+    if (request.get("model") != cfg["model"] or request.get("endpoint", "").rstrip("/") != cfg["base_url"].rstrip("/")
+            or request.get("prompt_sha256") != contract.digest(prompt)
+            or request.get("image_sha256") != store.identity(pair["sheet"]["path"])
+            or not comparable_prompt.startswith(purpose_review.policy(manifest))
+            or contract.digest(binding) not in prompt or observation != pair["observation"]):
+        raise ValueError("HISTORICAL_EXPERIMENT_REQUEST_CHANGED")
+    key = experiment_evidence.pair_key(manifest, samples, [m["window_frame_ids"] for m in pair["members"]])
+    if not key:
+        return 0
+    experiment_evidence.remember_pair(manifest, key, pair)
+    return 1
 
 
 if __name__ == "__main__":
