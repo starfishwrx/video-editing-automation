@@ -75,6 +75,13 @@ def replace_group(timeline, sentence_ids, clips, *, group_id, assets=(), group_k
     obsolete = tuple(u for u in timeline.unresolved if u.get("sentence_id") in replaced_placeholders
         and u.get("reason") == "NO_CONFIRMED_FIT_WITHIN_SEARCH_BUDGET; black is diagnostic only")
     videos, cursor, used = [], lo, []
+    def phase_of(clip):
+        return next((r["reviewed_experiment_phase"] for r in clip.get("evidence", [])
+                     if "reviewed_experiment_phase" in r), None)
+    phases = [phase_of(clip) for clip in clips]
+    if any(phases) and (group_kind != "continuous_experiment" or None in phases or
+                         [p for p in phases if p != "context"] != ["pour", "absorb", "press", "lift", "result"]):
+        raise ValueError("TEMPORAL_GROUP_EXPERIMENT_PHASES_INCOMPLETE")
     for i, clip in enumerate(clips):
         asset = by_id[clip["asset_id"]]
         if asset.kind != "video":
@@ -88,8 +95,17 @@ def replace_group(timeline, sentence_ids, clips, *, group_id, assets=(), group_k
         if any(path == _source_key(asset, by_id, original_paths) and max(start, left) < min(end, right)
                for path, left, right in prior):
             raise ValueError("TEMPORAL_GROUP_SOURCE_REPLAY")
-        plan = plan_retiming(start, end, clip["protected_intervals"], clip["target_duration_us"],
-            fps=timeline.canvas.fps_num / timeline.canvas.fps_den)
+        if phases[i]:
+            duration = clip["target_duration_us"]
+            protection = clip["protected_intervals"]
+            if (len(protection) != 1 or (protection[0]["start"], protection[0]["end"]) != (start, end)
+                    or not 0 < duration <= end - start or duration * timeline.canvas.fps_num <
+                    protection[0]["min_output_frames"] * 1_000_000 * timeline.canvas.fps_den):
+                raise ValueError("TEMPORAL_GROUP_EXPERIMENT_VISIBILITY")
+            plan = {"ok": True, "parts": [{"source_start_us": start, "source_end_us": end, "segment_us": duration}]}
+        else:
+            plan = plan_retiming(start, end, clip["protected_intervals"], clip["target_duration_us"],
+                fps=timeline.canvas.fps_num / timeline.canvas.fps_den)
         if not plan["ok"]:
             raise ValueError("TEMPORAL_GROUP_" + plan["reason"])
         evidence = tuple(clip.get("evidence", ())) + ({"group_id": group_id,

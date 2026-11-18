@@ -114,6 +114,10 @@ def _frame_plan(timeline, event, metadata, *, allow_real_tail=False):
     step=Fraction(US * timeline.canvas.fps_den * event.speed_num,timeline.canvas.fps_num * event.speed_den)
     caps=[row['bounded_process_speed_cap']for row in event.evidence
         if isinstance(row,dict)and 'bounded_process_speed_cap'in row]
+    if any(isinstance(row, dict) and "reviewed_experiment_phase" in row for row in event.evidence):
+        if not event.protected_intervals or end <= start:
+            raise TimelineError("EXPERIMENT_PHASE_VISIBILITY")
+        step = Fraction(source_end - first_pts, end - start)
     if caps:
         if caps!=[3]or event.protected_intervals or end<=start:
             raise TimelineError('BOUNDED_PROCESS_FRAME_CONTRACT_INVALID')

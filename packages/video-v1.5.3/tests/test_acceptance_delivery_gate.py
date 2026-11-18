@@ -113,6 +113,20 @@ class AcceptanceDeliveryGateTests(unittest.TestCase):
                 self.write(self.report, payload)
                 self.assertEqual(delivery_gate.qc_statuses(self.task_dir, self.done, self.drafts), ["UNCERTIFIED"])
 
+    def test_prior_legacy_absorption_pass_cannot_authorize_hygiene_delivery(self):
+        claim = "倒蓝水看它吸收完"
+        self.write(self.report, self.valid_report)
+        for route in ("task", "retained match"):
+            with self.subTest(route=route):
+                scope = {**self.task, "category": "weipin", "full_script": claim}
+                if route == "task":
+                    self.write(self.task_dir / "task.json", scope)
+                else:
+                    self.write(self.task_dir / "task.json", self.task)
+                    self.write(self.report.parent / "shot_match_report.json",
+                               {"manifest": scope, "segments": [{"text": claim, "selection_mode": "rule"}]})
+                self.assertEqual(delivery_gate.qc_statuses(self.task_dir, self.done, self.drafts), ["UNCERTIFIED"])
+
     def test_explicit_preview_blocks_archive_and_table_without_writes(self):
         self.write(self.task_dir / "task.json", dict(self.task, delivery_mode="preview"))
         before = (self.task_dir / "done.json").read_bytes()

@@ -17,7 +17,7 @@ from orchestrator.media.timeline_render import _frame_plan
 
 
 def observation(part):
-    phases=([('pour',0,0,False),('pour',1,36,True),('pour',37,37,False),('absorb',38,40,False)]
+    phases=([('pour',0,0,False),('pour',1,35,True),('pour',36,36,False),('absorb',37,40,False)]
         if part=='A'else [('press',0,0,False),('press',1,29,True),('press',30,30,False),('lift',31,33,False),('result',34,40,False)])
     return {'verdict':'observed','effective_window_frame_ids':[0,40],
         'segments':[{'kind':k,'first_frame':a,'last_frame':b,'can_speed':s,'observed':'actual visible phase'}for k,a,b,s in phases],
@@ -84,7 +84,7 @@ class ExperimentRetimingTests(unittest.TestCase):
         b=self.motion['observations'][1];b['segments'][-2]['last_frame']=38;b['segments'][-1]['first_frame']=39
         with self.assertRaisesRegex(ValueError,'RESULT_WINDOW_TOO_SHORT'):self.clips()
 
-    def test_real_apply_keeps_audio_and_sentences_and_speeds_only_unlocked_parts(self):
+    def test_real_apply_keeps_narration_and_all_five_visible_events(self):
         facts={'duration_us':10_000_000,'width':108,'height':192,'fps_num':60,'fps_den':1}
         with patch.object(app,'probe_media',return_value=facts):
             new=app.apply(self.base.manifest,self.base.timeline,('s1','s2'),self.base.roles,self.evidence,
@@ -92,9 +92,11 @@ class ExperimentRetimingTests(unittest.TestCase):
         self.assertEqual((new.sentences,new.audios,new.subtitles),(self.base.timeline.sentences,self.base.timeline.audios,self.base.timeline.subtitles))
         moving=[v for v in new.videos if v.event_id.startswith('motion-')]
         self.assertEqual(sum(v.duration_us for v in moving),4_000_000)
-        self.assertTrue(any(v.speed_num>2*v.speed_den for v in moving))
-        self.assertTrue(all(v.speed_num<=3*v.speed_den for v in moving))
-        self.assertTrue(all(v.speed_num==v.speed_den for v in moving if v.protected_intervals))
+        phases = [next(row['reviewed_experiment_phase'] for row in v.evidence if 'reviewed_experiment_phase' in row) for v in moving]
+        self.assertEqual(phases, ['pour', 'absorb', 'press', 'lift', 'result'])
+        self.assertTrue(all(v.speed_num > v.speed_den for v in moving))
+        self.assertTrue(all(v.protected_intervals for v in moving))
+        self.assertGreaterEqual(new.video_frame_range(moving[-1])[1] - new.video_frame_range(moving[-1])[0], 15)
 
     def test_motion_cannot_be_reused_on_other_pair_or_window(self):
         self.motion['pair_input_sha256']='old-window'

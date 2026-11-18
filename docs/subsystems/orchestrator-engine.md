@@ -26,7 +26,7 @@
 - 口播段时间等式：`segment_us == audio_duration_us + tail_pad_us`（容差 ≤1 帧，`timing_contract.check_invariants`）
 - 源窗口几何链：`0 <= source_start < source_end <= material_duration_us`（零容差；与写入层同尺）
 - 最终切片必须覆盖证据区间；证据窗口来自 AI 明确时间段或“审核帧邻域”
-- 默认选镜、补选、求解和写稿共用版本化播放政策：非 time_sensitive 的完整放置短窗在已复核窗口内最高 2 倍，不要求先标纯过程；分阶段纯过程优先≤2、最多3倍，关键接触／完成／提起／结果原速。time_sensitive 始终原速，没有过程或完整短窗许可时也原速。旧缓存重验，后端能力不授予加速许可，详见[生产播放规则](../production-playback.md)。
+- 卫品吸水组三段均可按需加速，写稿须校验动作顺序与实际源窗。普通画面的默认选镜、补选、求解和写稿共用版本化播放政策：非 time_sensitive 的完整放置短窗在已复核窗口内最高 2 倍，不要求先标纯过程；分阶段纯过程优先≤2、最多3倍，关键接触／完成／提起／结果原速。time_sensitive 始终原速，没有过程或完整短窗许可时也原速。旧缓存重验，后端能力不授予加速许可，详见[生产播放规则](../production-playback.md)。
 - 预览稿：不得标成正式交付；结果中带 `coverage.certification != CERTIFIED` 与逐条未认证理由。未认证状态以当前报告/交付合同判断，不以历史画面标注代替证据。
 
 ## 4. 输入/输出（字段与状态）

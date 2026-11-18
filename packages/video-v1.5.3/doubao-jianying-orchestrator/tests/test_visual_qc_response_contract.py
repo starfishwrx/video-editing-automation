@@ -94,12 +94,18 @@ class VisualQcResponseContractTests(unittest.TestCase):
             with self.subTest(observed=observed):
                 body = response([judgment(observed=observed,
                     reason="纸巾按压后提起即可证明不反渗")])
-                result, code, _, _ = self.run_main([body], claim="吸收后不反渗",
+                result, code, _, _ = self.run_main([body], claim="面层接触起来很干爽",
                     match_metadata={"delivery_mode": "formal", "manifest": {"category": "weipin"}})
                 self.assertEqual(result["status"], expected, result)
                 self.assertEqual(code, 0 if expected == "PASS" else 2)
                 self.assertEqual(result["release_eligibility"],
                                  "SHIP_ALLOWED" if expected == "PASS" else "BLOCKED")
+
+    def test_legacy_absorption_qc_needs_the_three_stage_group_even_if_paper_is_visible(self):
+        result, code, _, _ = self.run_main([response([judgment(observed="纸巾按压后提起，纸面干燥")])],
+            claim="吸收后不反渗", match_metadata={"delivery_mode": "formal", "manifest": {"category": "weipin"}})
+        self.assertEqual((code, result["status"], result["release_eligibility"]), (2, "UNCERTIFIED", "BLOCKED"))
+        self.assertIn("EXPERIMENT_THREE_STAGES_UNVERIFIED", " ".join(result["issues"]))
 
     def test_high_average_speed_is_advisory_and_uses_actual_timeline_durations(self):
         result, code, _, _ = self.run_main([response()], source_duration=8_000_000,

@@ -76,7 +76,7 @@ def source_identity(path: str | Path) -> dict:
     return {"path": str(source), "size": info.st_size, "mtime_ns": info.st_mtime_ns}
 
 
-def editorial_context(manifest: dict | None = None) -> dict:
+def _rulepack():
     # production_eval loads this contract as a standalone file. Load the sibling
     # rulepack from the same runtime, never an unrelated installed package.
     if __package__:
@@ -85,12 +85,54 @@ def editorial_context(manifest: dict | None = None) -> dict:
         spec = importlib.util.spec_from_file_location("_chatcut_editorial_rules", Path(__file__).with_name("rulepack.py"))
         rulepack = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(rulepack)
-    return rulepack.editorial_context(manifest)
+    return rulepack
+
+
+def editorial_context(manifest: dict | None = None) -> dict:
+    return _rulepack().editorial_context(manifest)
 
 
 def rules_identity(manifest: dict | None = None) -> dict:
     context = editorial_context(manifest)
     return {key: context[key] for key in ("category", "versions")}
+
+
+def unverified_absorption_indices(manifest, segments, *, allow_reviewed=True):
+    rules = _rulepack()
+    if rules.detect_category(manifest)[0] != "weipin":
+        return []
+    current = rules_identity(manifest)
+    missing = []
+    for i, row in enumerate(segments, 1):
+        if not isinstance(row, dict):
+            continue
+        receipt = row.get("ai_selection") or {}
+        role = rules.absorption_experiment_role({"text": row.get("text") or row.get("claim") or row.get("claim_text"),
+                                                "scene_ids": receipt.get("sentence_scene_ids")})
+        group = row.get("continuity_group")
+        if role not in {"absorption", "rewet"} and (row.get("scene_rule") or {}).get("id") != "absorb_test" and not continuity.is_experiment(group):
+            continue
+        context = (group or {}).get("input") or {}
+        if not (allow_reviewed and continuity.is_experiment(group) and context.get("rules") == current
+                and context.get("allow_experiment_phase_speedup") is True
+                and any(m.get("index") == i for m in context.get("members", []))):
+            missing.append(i)
+    return missing
+
+
+def reviewed_experiment_phase(manifest, group, observation):
+    """Only the observed physical cut of a certified hygiene group has this speed policy."""
+    window = playback.experiment_phase_window(observation)
+    if not window or not continuity.is_experiment(group):
+        return False
+    context = group.get("input") or {}
+    if (context.get("allow_experiment_phase_speedup") is not True
+            or context.get("rules", {}).get("category") != "weipin"
+            or (manifest is not None and rules_identity(manifest) != context["rules"])):
+        return False
+    return any((part.get("start_us"), part.get("end_us")) == window
+               and part.get("experiment_phase") == observation["phase"]
+               for member in context.get("members", []) for part in member["parts"])
 
 
 def policy_prompt(manifest: dict, *, include_presentation: bool = True) -> str:
@@ -306,6 +348,8 @@ def make_receipt(segment: dict, *, index: int, sentence: dict, observation: dict
         "evidence_intervals_us": observation["evidence_intervals_us"],
         "identity": identity, "judgment": "matched",
     }
+    if sentence.get("experiment_role") in {"absorption", "rewet"}:
+        receipt["experiment_role"] = sentence["experiment_role"]
     if task_speed_cap is not None:
         receipt["task_absorb_speed_cap"] = task_speed_cap
     if segment.get('sentence_fit_required'):
@@ -366,7 +410,9 @@ def validate_segment_receipt(item: dict, *, text: str | None = None,
         # The parent of a multi-shot sentence summarizes semantic coverage;
         # playback belongs to each physical part, checked recursively below.
         recorded_cap = playback.task_absorb_speed_cap({"max_absorb_demo_speed": receipt.get("task_absorb_speed_cap")})
-        current_cap = playback.task_absorb_speed_cap(manifest)
+        phase = receipt.get("playback_observation") or {}
+        phase_allowed = reviewed_experiment_phase(manifest, receipt.get("continuity_group"), phase)
+        current_cap = None if phase_allowed else playback.task_absorb_speed_cap(manifest)
         if recorded_cap is not None and manifest is not None and current_cap != recorded_cap:
             reasons.append("AI_SELECTION_TASK_SPEED_LIMIT_CHANGED")
         cap = min(recorded_cap, current_cap) if recorded_cap is not None and current_cap is not None else (
@@ -378,6 +424,8 @@ def validate_segment_receipt(item: dict, *, text: str | None = None,
         reasons.extend(p["code"] for p in problems)
         if item.get("playback_observation") != receipt.get("playback_observation"):
             reasons.append("PLAYBACK_OBSERVATION_CHANGED")
+        if isinstance(phase, dict) and phase.get("kind") == "experiment_phase" and not phase_allowed:
+            reasons.append("EXPERIMENT_SPEED_AUTHORIZATION_MISSING")
         if item.get("presentation_observation") != receipt.get("presentation_observation"):
             reasons.append("PRESENTATION_OBSERVATION_CHANGED")
         if not item.get("multi_shot"):

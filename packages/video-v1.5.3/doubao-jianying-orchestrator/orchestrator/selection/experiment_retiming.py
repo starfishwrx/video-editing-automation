@@ -1,7 +1,8 @@
-"""Fit verified experiment phases, keeping contact, completion and results real-time."""
+"""Fit verified experiment phases, preserving visible actions and results."""
 from fractions import Fraction
 import math
 
+from ..policy.continuity import experiment_minimum_frames
 from .paper_retiming import _allocate, _protected, plan_retiming
 
 
@@ -11,7 +12,7 @@ def boundary(samples,index,window_end):
     return samples['frames'][index]['pts_us']
 
 
-def validate_motion(row,member):
+def validate_motion(row,member,*,allow_phase_speedup=False):
     if not isinstance(row,dict)or row.get('verdict')not in {'observed','uncertain'}:
         raise ValueError('EXPERIMENT_MOTION_VERDICT_INVALID')
     if row['verdict']!='observed':raise ValueError('EXPERIMENT_MOTION_UNCERTAIN')
@@ -33,14 +34,14 @@ def validate_motion(row,member):
                 or kind not in allowed or type(segment.get('can_speed'))is not bool
                 or not isinstance(segment.get('observed'),str)or not segment['observed'].strip()):
             raise ValueError('EXPERIMENT_MOTION_COVERAGE_OR_FACT_INVALID')
-        if kind in {'lift','result'}and segment['can_speed']:
+        if not allow_phase_speedup and kind in {'lift','result'}and segment['can_speed']:
             raise ValueError('EXPERIMENT_MOTION_REQUIRED_PHASE_MUST_STAY_REALTIME')
         seen.setdefault(kind,[]).append(segment);cursor=b+1
     required={'pour','absorb'}if member['part']=='A'else {'press','lift','result'}
     if cursor!=window[1]+1 or not required<=seen.keys():
         raise ValueError('EXPERIMENT_MOTION_COMPLETE_CHAIN_REQUIRED')
     for kind in required:
-        if seen[kind][0]['can_speed']or seen[kind][-1]['can_speed']:
+        if not allow_phase_speedup and (seen[kind][0]['can_speed']or seen[kind][-1]['can_speed']):
             raise ValueError('EXPERIMENT_MOTION_CONTACT_OR_COMPLETION_UNPROTECTED')
     ordered=('pour','absorb')if member['part']=='A'else ('press','lift','result')
     if any(seen[a][-1]['last_frame']>=seen[b][0]['first_frame']for a,b in zip(ordered,ordered[1:])):
@@ -48,14 +49,14 @@ def validate_motion(row,member):
     return row
 
 
-def windows(members,observations,result_frames,*,fps=30):
+def windows(members,observations,result_frames,*,fps=30,allow_phase_speedup=False):
     result=[]
     if not isinstance(observations,list)or len(observations)!=len(members):
         raise ValueError('EXPERIMENT_MOTION_MEMBER_COVERAGE')
     for member,row in zip(members,observations):
-        validate_motion(row,member);samples=member['samples'];a,b=row['effective_window_frame_ids']
+        validate_motion(row,member,allow_phase_speedup=allow_phase_speedup);samples=member['samples'];a,b=row['effective_window_frame_ids']
         protected=[]
-        state_min=row.get('minimum_absorb_state_us',300_000 if member['part']=='A' and row.get('coverage') else None)
+        state_min=row.get('minimum_absorb_state_us',300_000 if member['part']=='A' and (allow_phase_speedup or row.get('coverage')) else None)
         if state_min is not None and (member['part']!='A' or type(state_min)is not int or state_min!=300_000):
             raise ValueError('EXPERIMENT_ABSORPTION_STATE_MINIMUM_INVALID')
         state=next((s for s in reversed(row['segments']) if s['kind']=='absorb'),None)
@@ -70,24 +71,91 @@ def windows(members,observations,result_frames,*,fps=30):
                     'min_output_frames':result_frames if segment['kind']=='result'else required})
         if any(p['kind']=='result'and (p['end']-p['start'])*fps<result_frames*1_000_000 for p in protected):
             raise ValueError('EXPERIMENT_RESULT_WINDOW_TOO_SHORT')
-        result.append({'source_start_us':boundary(samples,a,b),'source_end_us':boundary(samples,b+1,b),
-            'protected_intervals':protected})
+        clip={'source_start_us':boundary(samples,a,b),'source_end_us':boundary(samples,b+1,b),
+            'protected_intervals':protected}
+        if allow_phase_speedup:
+            phases=[]
+            for segment in row['segments']:
+                kind=segment['kind']
+                start=boundary(samples,segment['first_frame'],b)
+                end=boundary(samples,segment['last_frame']+1,b)
+                if phases and phases[-1]['kind']==kind:
+                    phases[-1]['end']=end
+                else:
+                    phases.append({'kind':kind,'start':start,'end':end})
+            for phase in phases:
+                frames=experiment_minimum_frames(phase['kind'],fps,result_frames)
+                phase['minimum_us']=math.ceil(frames*1_000_000/fps)
+                if phase['kind']=='absorb' and state_min:
+                    phase['minimum_us']=max(phase['minimum_us'],state_min)
+                if phase['end']-phase['start']<phase['minimum_us']:
+                    raise ValueError('EXPERIMENT_PHASE_VISIBILITY_TOO_SHORT')
+            clip['phase_intervals']=phases
+        result.append(clip)
     return result
 
 
-def fit_group(clips,target_us,*,fps=30,phase_boundary_us=None,max_speed=3.0):
+def _fit_accelerated_phases(clips,target_us,*,fps,max_speed):
+    """Compress reviewed phases while reserving visible output for each event."""
+    phases=[(index,phase) for index,clip in enumerate(clips) for phase in clip['phase_intervals']]
+    lengths=[phase['end']-phase['start'] for _,phase in phases]
+    allocation=None
+    # For a reviewed hygiene group no business speed ceiling applies. Every
+    # physical phase still needs a positive, visible output duration. Derive
+    # a finite computational bound from that duration, not a fixed speed cap.
+    calculated_cap = max(Fraction(length, phase['minimum_us'])
+                         for length, (_, phase) in zip(lengths, phases))
+    ceiling = Fraction(str(max_speed)) if max_speed is not None else calculated_cap
+    for cap in dict.fromkeys((min(Fraction(2), ceiling), ceiling)):
+        minimum=[max(phase['minimum_us'],math.ceil(Fraction(length,1)/Fraction(str(cap))))
+                 for length,(_,phase) in zip(lengths,phases)]
+        if any(low>length for low,length in zip(minimum,lengths)) or sum(minimum)>target_us:
+            continue
+        allocation=_allocate(lengths,target_us,Fraction(str(cap)))
+        if allocation is None:
+            continue
+        for index,low in enumerate(minimum):
+            need=max(0,low-allocation[index])
+            for donor in sorted(range(len(allocation)),key=lambda j:allocation[j]-minimum[j],reverse=True):
+                available=max(0,allocation[donor]-minimum[donor])
+                moved=min(need,available)
+                allocation[donor]-=moved;allocation[index]+=moved;need-=moved
+                if not need:break
+            if need:raise ValueError('EXPERIMENT_PHASE_VISIBILITY_INFEASIBLE')
+        break
+    if allocation is None:
+        raise ValueError('EXPERIMENT_DURATION_CONFLICT_WITH_PHASE_SPEEDUP')
+    result=[]
+    for index,clip in enumerate(clips):
+        parts=[];cursor=0
+        for (owner,phase),duration in zip(phases,allocation):
+            if owner!=index:continue
+            start,end=phase['start'],phase['end']
+            parts.append({'source_start_us':start,'source_end_us':end,'target_start_us':cursor,
+                'segment_us':duration,'speed':(end-start)/duration,'locked':False,'phase':phase['kind']})
+            cursor+=duration
+        result.append({**clip,'target_duration_us':cursor,'retiming':{'ok':True,'parts':parts,
+            'target_duration_us':cursor,'maximum_speed':max(p['speed'] for p in parts),'fps':fps}})
+    return result
+
+
+def fit_group(clips,target_us,*,fps=30,phase_boundary_us=None,max_speed=3.0,allow_phase_speedup=False):
     """Fit without cutting footage, respecting the task and production speed caps."""
-    if type(max_speed) not in (int, float) or not math.isfinite(max_speed) or not 1 <= max_speed <= 3:
+    if (max_speed is None and not allow_phase_speedup) or (max_speed is not None and
+            (type(max_speed) not in (int, float) or not math.isfinite(max_speed)
+             or max_speed < 1 or (not allow_phase_speedup and max_speed > 3))):
         raise ValueError('EXPERIMENT_SPEED_LIMIT_INVALID')
     if phase_boundary_us is not None:
         if len(clips)!=2 or not 0<phase_boundary_us<target_us:
             raise ValueError('EXPERIMENT_PHASE_BOUNDARY_INVALID')
         result=[]
         for index,(clip,budget) in enumerate(zip(clips,(phase_boundary_us,target_us-phase_boundary_us))):
-            try:result.extend(fit_group([clip],budget,fps=fps,max_speed=max_speed))
+            try:result.extend(fit_group([clip],budget,fps=fps,max_speed=max_speed,allow_phase_speedup=allow_phase_speedup))
             except ValueError as error:
                 raise ValueError(f'EXPERIMENT_PHASE_DURATION_CONFLICT:part={index};budget_us={budget};{error}') from error
         return result
+    if allow_phase_speedup:
+        return _fit_accelerated_phases(clips,target_us,fps=fps,max_speed=max_speed)
     lengths=[];owners=[];locked=[]
     for i,clip in enumerate(clips):
         start,end=clip['source_start_us'],clip['source_end_us']

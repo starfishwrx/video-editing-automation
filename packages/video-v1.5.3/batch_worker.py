@@ -802,7 +802,7 @@ def run_post_draft_qc(draft_dir: pathlib.Path, report_dir: pathlib.Path) -> dict
             payload = {}
     if not isinstance(payload, dict):
         payload = {}
-    status = production_eval.visual_qc_contract.report_status(payload)
+    status = production_eval.visual_qc_contract.report_status(payload, report_dir=output.parent)
     if p.returncode != 0 and status in {"PASS", "PASS_WITH_DEGRADED", "PASS_WITH_GAPS"}:
         status = "UNCERTIFIED"
         payload.setdefault("issues", []).append("QC_CHILD_EXIT_NONZERO")
@@ -1119,7 +1119,7 @@ def existing_task_has_nonpass_qc(task_dir: pathlib.Path) -> bool:
         if not path.is_file():
             return True
         payload = _read_json(path)
-        if (production_eval.visual_qc_contract.report_status(payload) != "PASS"
+        if (production_eval.visual_qc_contract.report_status(payload, report_dir=report_dir, manifest=_read_json(task_dir / "task.json")) != "PASS"
                 or not production_eval.visual_qc_contract.report_matches_draft(payload, DRAFTS / draft)):
             return True
     return False
@@ -1154,7 +1154,7 @@ def prior_draft_requires_recheck(task_dir: pathlib.Path, index: int,
     except (OSError, ValueError, TypeError):
         return True
     draft_name = base_draft if index == 1 else f"{base_draft}-{index}"
-    return (production_eval.visual_qc_contract.report_status(payload) != "PASS"
+    return (production_eval.visual_qc_contract.report_status(payload, report_dir=report_dir, manifest=_read_json(task_dir / "task.json")) != "PASS"
             or not production_eval.visual_qc_contract.report_matches_draft(payload, DRAFTS / draft_name))
 
 

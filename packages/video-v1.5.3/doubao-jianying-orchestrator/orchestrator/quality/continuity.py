@@ -9,6 +9,10 @@ from ..policy import continuity
 
 def runtime_errors(clips, segments):
     errors = continuity.sequence_errors(segments)
+    for segment in segments:
+        rule = segment.get("scene_rule") or {}
+        if rule.get("id") == "absorb_test" and not continuity.is_experiment(segment.get("continuity_group")):
+            errors.append("CONTINUITY_EXPERIMENT_THREE_STAGES_UNVERIFIED")
     if errors:
         return errors
     grouped = {i: s for i, s in enumerate(segments) if s.get("continuity_group")}

@@ -151,6 +151,62 @@ def bound_selection(report):
     return segments
 
 
+def valid_experiment_observations(events):
+    phases = ("pour", "absorb", "press", "lift", "result")
+    return isinstance(events, list) and all(
+        isinstance(entry, dict) and entry.get("event") in phases and isinstance(entry.get("frames"), list)
+        and bool(entry["frames"]) and all(type(n) is int and n > 0 for n in entry["frames"])
+        and entry["frames"] == sorted(set(entry["frames"])) for entry in events)
+
+
+def group_events_visible(group, model_rows):
+    """Check the independently reported events against the actual per-sentence cuts."""
+    observed = []
+    tissue = _ai_contract().continuity.tissue_event_observed
+    contact = lift = False
+    witnessed = {"pour": set(), "absorb": set(), "result": set()}
+    for member in group["input"]["members"]:
+        row = model_rows.get(member["index"]) or {}
+        entries = row.get("visible_experiment_events")
+        supplied = row.get("experiment_output_frames")
+        if row.get("visual_ok") is not True or not valid_experiment_observations(entries) or not isinstance(supplied, list):
+            return False
+        physical = [p.get("experiment_phase") for p in member["parts"]]
+        seen = [entry["event"] for entry in entries]
+        for entry in entries:
+            event = entry["event"]
+            for number in entry["frames"]:
+                sample = supplied[number - 1] if number <= len(supplied) else None
+                if (not isinstance(sample, list) or len(sample) != 2 or any(type(n) is not int for n in sample)
+                        or not 1 <= sample[0] <= len(physical) or physical[sample[0] - 1] != event):
+                    return False
+                if event in witnessed:
+                    witnessed[event].add(sample[1])
+            if not observed or event != observed[-1]:
+                observed.append(event)
+        fact = row.get("observed")
+        if not isinstance(fact, str) or not fact.strip():
+            return False
+        contact = contact or ("press" in seen and tissue(fact, "press"))
+        lift = lift or ("lift" in seen and tissue(fact, "lift"))
+    return (contact and lift and observed == ["pour", "absorb", "press", "lift", "result"]
+            and all(len(ticks) >= 2 for ticks in witnessed.values())
+            and max(witnessed["result"]) - min(witnessed["result"]) + 1
+                >= _ai_contract().continuity.experiment_minimum_frames("result", group["input"].get("fps", 30)))
+
+
+def experiment_selection_errors(segments, rows):
+    by_index = {row["index"]: row for row in rows}
+    for index, item in enumerate(segments, 1):
+        group = item.get("continuity_group") or {}
+        if group.get("schema") != "reviewed-experiment-sentence-group-v1":
+            continue
+        members = group["input"]["members"]
+        if index == members[0]["index"] and not group_events_visible(group, by_index):
+            return ["EXPERIMENT_OUTPUT_STAGES_UNVERIFIED"]
+    return []
+
+
 def presentation_expected_actors(phases):
     return sorted({p['change']['actor'] for p in phases
                    if (p.get('change') or {}).get('actor') in {'product','occluder'}})
@@ -271,7 +327,7 @@ def row_errors(row: Any) -> list[str]:
     return errors
 
 
-def response_errors(model: dict[str, Any], expected_count: int, *, expected_version: str = RESPONSE_VERSION) -> list[str]:
+def response_errors(model: dict[str, Any], expected_count: int, *, expected_version: str = RESPONSE_VERSION, experiment_indices=()) -> list[str]:
     errors = list(model.get("contract_errors") or [])
     if model.get("response_version") != expected_version:
         errors.append("RESPONSE_VERSION_UNSUPPORTED")
@@ -290,19 +346,41 @@ def response_errors(model: dict[str, Any], expected_count: int, *, expected_vers
             errors.append("AI_EDITOR_POSITIVE_CONFIDENCE_LOW")
         if isinstance(row, dict) and type(row.get("index")) is int:
             indices.append(row["index"])
+            if row["index"] in experiment_indices:
+                events = row.get("visible_experiment_events")
+                if not valid_experiment_observations(events):
+                    errors.append(f"S{row['index']}:EXPERIMENT_EVENT_OBSERVATIONS_REQUIRED")
     if sorted(indices) != list(range(1, expected_count + 1)):
         errors.append("BATCH_INDEX_COVERAGE_INVALID")
     return sorted(set(errors))
 
 
-def report_status(report: Any) -> str:
+def report_status(report: Any, *, report_dir=None, manifest=None) -> str:
     """Check report consistency; consumers must also call report_matches_draft.
 
     A self-contained report cannot authenticate its own selection digest. Only
     the draft identity in report_matches_draft anchors that digest to the build.
     """
     try:
-        return _report_status(report)
+        status = _report_status(report)
+        if status not in {"PASS", "PASS_WITH_DEGRADED", "PASS_WITH_GAPS"} or report.get("version") == AI_REPORT_VERSION:
+            return status
+        # Historical rule-only reports did not bind category or experiment cuts.
+        # Recover those facts from the retained selection and task before accepting one.
+        match = {}
+        path = Path(report_dir) / "shot_match_report.json" if report_dir else None
+        if path and path.is_file():
+            match = json.loads(path.read_text(encoding="utf-8-sig"))
+        scope = {**(manifest or {}), **(match.get("manifest") or {})}
+        rows = match.get("segments") or scope.get("segments") or report.get("model_review") or []
+        declared = [{"text": r.get("claim") or r.get("text") or ""} for r in rows if isinstance(r, dict)]
+        scope.setdefault("category", report.get("category"))
+        scope.setdefault("segments", declared)
+        if scope.get("full_script"):
+            rows = [*rows, {"text": scope["full_script"]}]
+        if _ai_contract().unverified_absorption_indices(scope, rows, allow_reviewed=False):
+            return "UNCERTIFIED"
+        return status
     except (OSError, RuntimeError, KeyError, TypeError, ValueError, AttributeError, OverflowError):
         return "FAIL" if isinstance(report, dict) and report.get("status") == "FAIL" else "UNCERTIFIED"
 
@@ -376,7 +454,9 @@ def _report_status(report: Any) -> str:
                 or report.get("issues")
                 or any(row.get("confidence", 0) < .6 for row in rows)):
             return "UNCERTIFIED"
-        if presentation_selection_errors(bound_selection(report),rows):
+        segments = bound_selection(report)
+        if (_ai_contract().unverified_absorption_indices(report["editorial_rules"], segments)
+                or experiment_selection_errors(segments, rows) or presentation_selection_errors(segments, rows)):
             return 'UNCERTIFIED'
     indices = [row["index"] for row in rows]
     mapping = report.get("segment_map") or []

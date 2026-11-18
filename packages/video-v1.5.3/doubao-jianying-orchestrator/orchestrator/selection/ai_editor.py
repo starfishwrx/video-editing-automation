@@ -381,6 +381,8 @@ start/end使用原素材秒数，选择与该素材action_segments重叠且包�
         scene_ids = row.get("scene_ids", [] if not known_scenes else None)
         row["scene_ids"], row["inventory_ignored_scene_ids"] = _scene_ids(
             scene_ids, manifest, "AI_EDITOR_SENTENCE_SCENE_INVALID")
+        if contract.rules_identity(manifest)["category"] == "weipin":
+            row["experiment_role"] = experiment_groups.inferred_role({**row, "text": timing_contract.sentence_text(rows[index - 1])})
         if not isinstance(points, list) or any(not isinstance(p, dict) or not p.get("id") or not p.get("text") for p in points):
             raise ValueError("AI_EDITOR_POINTS_INVALID")
         if len({p["id"] for p in points}) != len(points) or (row["kind"] == "selling_point") != bool(points):
@@ -2753,6 +2755,8 @@ def _revalidate_rows(manifest, analysis, plan, *, narration_timing=None):
         try:
             result = _assemble(manifest, analysis, plan, narration_timing=narration_timing,
                                verify_sources=True)
+            if contract.rules_identity(manifest)["category"] == "weipin":
+                experiment_groups.require_complete(plan["sentences"], result.get("segments", []))
             plan["playback_policy_version"] = contract.playback.VERSION
             return result
         except WindowFailure as failure:
@@ -3328,7 +3332,6 @@ def _repair_reviewed_rows(manifest, analysis, plan, directory, narration_timing,
     """
     # Empty OUT_OF_RANGE / SPAN seeds must place before earlier sentences spend
     # the vision budget on their own short-window repairs.
-    _place_absorb_experiment(manifest, analysis, plan, directory, narration_timing)
     experiment_groups.repair(manifest, analysis, plan, directory, narration_timing)
     _place_empty_matched_evidence(manifest, analysis, plan, directory, narration_timing)
     _prefer_reviewed_actions(manifest,analysis,plan,directory,narration_timing)
@@ -3894,7 +3897,7 @@ def _edit_plan(manifest: dict, analysis: dict, plan: dict, directory: Path,
 候选若带selling_point_value，它是本次画面中具体原文信息的辅助判断：同等匹配时优先能展示相关特征或直接演示的镜头；一般包装只适合无具体卖点的展示句。无此字段不代表不合格，不得把它当成独立质检或编造未展示的卖点。
 候选若带usability，仅表示所选实际窗口内主体的可见性与清晰时长；质量接近时优先主体清楚、呈现充分者。主体清晰不等于证明卖点；未返回该字段表示未知。
 technical_option是按本句完整配音求出的实际可行窗口；分配多镜后程序会重新求解，不可用单镜无解淘汰组合。
-匹配质量相近时优先within_preferred_speed=true；普通完整放置短窗保留最高2倍许可，2到3倍仅限已复看的纯过程。实验分相的关键动作结果原速，无许可时原速。technical_option无解时必须换完整短窗口或如实报告冲突。
+匹配质量相近时优先within_preferred_speed=true；普通完整放置短窗保留最高2倍许可，2到3倍仅限已复看的纯过程。卫品吸水组选用完整三阶段联合复核路径，可按需加速。technical_option无解时必须换完整短窗口或如实报告冲突。
 同品其他任务使用过该文件和镜头的任务数分别为prior_source_tasks和prior_scene_tasks。实际卖点、动作阶段、可读性和时长相当时，优先较少使用的文件、镜头及动作；同等条件按editorial_order选择，唯一贴切证据保留。
 根据source_identity、源区间及可见动作描述减少近重复。presentation_observation约束有效变化入点、首次到位及辨认出点，优先采用有完整变化和落点的可行候选；不能把稳定后段替代动作。无阶段事实时才用中后段偏好。
 普通展示按本句传达的信息判断重复：多次举起同一包装、没有新增信息时，优先其他同样贴切的画面。同动作展示不同特征或用途可以保留。
@@ -4280,8 +4283,9 @@ def prepare(manifest: dict, analysis: dict, report_dir: Path, *, narration_timin
                 if (row["kind"] in {"hook", "product_intro"} and not row["selling_points"]
                         and _hook_neighbor(manifest, original, sentence, {})):
                     continue  # An empty row still needs a reviewed adjoining cut in the edit.
-                if any(row["index"] in {s["index"] for s in group}
-                       for group in experiment_groups.groups(plan["sentences"])):
+                if (contract.rules_identity(manifest)["category"] == "weipin"
+                        and any(row["index"] in {s["index"] for s in group}
+                                for group in experiment_groups.groups(plan["sentences"]))):
                     # Individual fragments may not certify the whole experiment.
                     # Its bounded joint review will still have to pass before assembly.
                     continue

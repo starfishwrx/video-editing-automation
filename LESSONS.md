@@ -7,6 +7,12 @@
 
 ## 新增条目
 
+### L-20261118-absorption-output-frames 实验完整性须按实际输出帧判断
+
+- status: OPEN
+- hits: 1
+- 高倍速时原片上存在的阶段可能落在播放采样点之间。先分配每阶段的最短可见时长，再到实际输出帧检查倒液、吸收和纸巾验证。
+
 ### L-20261117-experiment-pair-reuse 实验配对应复用已核对的具体画面
 
 - status: OPEN
