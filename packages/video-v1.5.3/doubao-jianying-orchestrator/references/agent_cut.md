@@ -43,4 +43,4 @@ plan["rows"][index - 1] = row
 
 1. 写稿成功后，从 `tools.native_drafts.documents(draft)["timeline"]` 读取原生稿的活动时间线。
 2. 把读取结果另存到草稿外的审片目录。用包内命令 `python -m tools.selection_preview --draft <活动时间线.json> --draft-root <草稿目录> --output <新目录> --name preview` 生成带旁白、字幕和 BGM 的审片 MP4。
-3. 结合原生轨道和实际播放，检查句子、字幕、音频和留给动作的时间。运行 `orchestrator/draft_visual_qc.py --draft <草稿目录> --report-dir <本次匹配报告目录> --output <质检报告.json>`。有质量问题时，从相应镜头或关联组继续。记录剪映桌面实播和业务确认的实际状态，FFmpeg 审片件可能与剪映的字体和逐帧渲染有差异。
+3. 结合原生轨道和实际播放，检查句子、字幕、音频和留给动作的时间。运行 `orchestrator/draft_visual_qc.py --draft <草稿目录> --report-dir <本次匹配报告目录> --output <质检报告.json>`。有质量问题时，从相应镜头或关联组继续。若独立整组审片明确看见全部实验阶段，却把事件记到了错误的物理片段，可选 `--review-experiment-parts`。它把各实际片段的小组顺序帧分别交给独立审片，隐藏阶段意图，再用同一个完整性与可读时长检查核对新观察。保留首次编号和新观察；任一阶段仍无法确认时继续拦截。记录剪映桌面实播和业务确认的实际状态，FFmpeg 审片件可能与剪映的字体和逐帧渲染有差异。

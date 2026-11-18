@@ -460,6 +460,52 @@ def _inspect_member_stage(vision, frames, directory, index, ffmpeg):
     return validate(raw) if ok else {}
 
 
+def _inspect_experiment_part(vision, items, before, after, directory, index, part, ffmpeg):
+    from orchestrator import ai_editor_contract
+    prefix = directory / f"experiment_check_{index:03d}_p{part}"
+    frames = [dict(item, label=f"F{n:02d}") for n, item in enumerate(items, 1)]
+    timeout = _remaining_request_timeout()
+    sheet = prefix.with_suffix(".jpg")
+    context_before = [dict(item, label=f"BEFORE {n}") for n, item in enumerate(before, 1)]
+    context_after = [dict(item, label=f"AFTER {n}") for n, item in enumerate(after, 1)]
+    strip = context_before + frames + context_after
+    if timeout <= 0 or not frames or not vision._write_sheet(
+            strip, sheet, columns=min(4, len(strip)), tile_width=420, tile_height=400, ffmpeg=ffmpeg):
+        return {}
+    prompt = ("仅按时间顺序查看实验的实帧。BEFORE、AFTER 是紧邻的前后画面，帮助辨认动作与结果的关系。仅给 F 编号的帧赋值，所有判断以实图为依据。"
+              "液体实际倒下为pour，巾面液体由浓变浅或逐步扩散为absorb，纸巾接触并按擦为press，"
+              "纸巾离开巾面并上举的运动为lift，纸巾被举起后已朝向镜头、可辨纸面有无沾色为result。"
+              "只见杯子、静止不变的湿痕、手掌、空景或无法确定，填uncertain。"
+              "若看到纸巾已提起并稳定朝向镜头、纸面是否沾液看得清，按实际可见结果填 result 并描述纸面。观察湿痕深浅或轮廓是否变化，保持不变的湿痕填 uncertain。"
+              '返回 JSON 对象，observed 为该动作前后的具体事实，frame_events 为下列编号对应的事件代码。'
+              '每个值只填 pour、absorb、press、lift、result、uncertain 中的一项。实际编号：'
+              + "，".join(frame["label"] for frame in frames))
+    def validate(data):
+        value = data if isinstance(data, dict) else next((v for v in iter_json_values(data) if isinstance(v, dict)), {})
+        by_frame = value.get("frame_events")
+        labels = [frame["label"] for frame in frames]
+        if (not isinstance(value.get("observed"), str) or not value["observed"].strip()
+                or not isinstance(by_frame, dict) or set(by_frame) != set(labels)):
+            raise ValueError("EXPERIMENT_PART_FRAME_LABELS_REQUIRED")
+        citations = []
+        for number, label in enumerate(labels, 1):
+            event = by_frame[label]
+            if event not in ("pour", "absorb", "press", "lift", "result", "uncertain"):
+                raise ValueError("EXPERIMENT_PART_EVENT_INVALID")
+            if event == "uncertain":
+                continue
+            if citations and citations[-1]["event"] == event:
+                citations[-1]["frames"].append(number)
+            else:
+                citations.append({"event": event, "frames": [number]})
+        return {"observed": value["observed"], "frame_events": by_frame, "visible_experiment_events": citations}
+    ok, raw = vision._run_vision_with_retry(sheet, prompt, prefix.with_suffix(".json"),
+                                            timeout=timeout, max_retries=2, validator=validate)
+    if not ok:
+        return {}
+    return {**validate(raw), "part": part, "sheet": str(sheet), "sheet_sha256": ai_editor_contract.file_sha256(sheet)}
+
+
 def _checkpoint_binding(draft_identity: str, prompt: str, claims: list,
                         items: list, rows: list) -> dict:
     """Cache identity for the current final windows and the model's exact input."""
@@ -571,6 +617,8 @@ def main() -> int:
     parser.add_argument("--draft", required=True)
     parser.add_argument("--report-dir", required=True)
     parser.add_argument("--output", required=True)
+    parser.add_argument("--review-experiment-parts", action="store_true",
+                        help="Reobserve individual physical cuts when a positive group review cites inconsistent actual frames")
     args = parser.parse_args()
     draft = pathlib.Path(args.draft)
     report_dir = pathlib.Path(args.report_dir)
@@ -925,6 +973,15 @@ def main() -> int:
                                 if isinstance(x, dict) and str(x.get("index") or "").isdigit()
                             ),
                         })
+                        if ai_mode and args.review_experiment_parts and not contract_errors and overall == "PASS":
+                            for claim in claims:
+                                group = (claim.get("ai_segment") or {}).get("continuity_group")
+                                if (ai_editor_qc.contract.continuity.is_experiment(group)
+                                        and claim["index"] == group["input"]["members"][0]["index"]):
+                                    def inspect(index, part, images, before, after):
+                                        return _inspect_experiment_part(vision_analyzer, images, before, after,
+                                                                        report_dir, index, part, ffmpeg)
+                                    model_rows.update(ai_editor_qc.review_experiment_parts(group, model_rows, claim_frames, inspect))
                         for claim in claims:
                             raw_row = model_rows.get(claim["index"])
                             if not raw_row:

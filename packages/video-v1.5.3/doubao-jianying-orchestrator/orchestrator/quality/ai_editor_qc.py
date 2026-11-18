@@ -43,6 +43,57 @@ def experiment_sheet_legend(claims, claim_frames):
     return "\n附图索引。每句从 F01 重新编号，P 是时间线上的物理片段。\n" + "\n".join(lines)
 
 
+def review_experiment_parts(group, rows, frame_items, inspect_part):
+    """Resolve inconsistent citations after a positive whole-group observation."""
+    members = [m["index"] for m in group["input"]["members"]]
+    expected = ["pour", "absorb", "press", "lift", "result"]
+    events = []
+    for i in members:
+        row = rows.get(i) or {}
+        entries = row.get("visible_experiment_events")
+        if (row.get("visual_ok") is not True or row.get("match_level") != "DIRECT"
+                or not visual_qc_contract.valid_experiment_observations(entries)):
+            return {}
+        for entry in entries:
+            if not events or events[-1] != entry["event"]:
+                events.append(entry["event"])
+    if events != expected or visual_qc_contract.group_events_visible(group, rows):
+        return {}
+    timeline = [item for i in members for item in frame_items[i]]
+    offset = 0
+    updated = {}
+    for i in members:
+        samples = frame_items[i]
+        by_part = {}
+        for number, frame in enumerate(experiment_output_frames(samples), 1):
+            if frame is None:
+                return {}
+            by_part.setdefault(frame[0], []).append((number, samples[number - 1]))
+        records, observed, citations = [], [], []
+        for part, items in by_part.items():
+            # NOTE: The reviewer receives only ordered images, with no proposed phase or claim.
+            start = offset + items[0][0] - 1
+            end = offset + items[-1][0]
+            review = inspect_part(i, part, [item for _, item in items],
+                                  timeline[max(0, start - 3):start], timeline[end:end + 3])
+            if not review:
+                return {}
+            records.append(review)
+            observed.append(review["observed"])
+            for event in review["visible_experiment_events"]:
+                numbers = [items[n - 1][0] for n in event["frames"]]
+                if citations and citations[-1]["event"] == event["event"]:
+                    citations[-1]["frames"].extend(numbers)
+                else:
+                    citations.append({"event": event["event"], "frames": numbers})
+        offset += len(samples)
+        updated[i] = {**rows[i], "group_sheet_observed": rows[i]["observed"],
+                      "group_sheet_events": rows[i]["visible_experiment_events"],
+                      "part_observations": records, "visible_experiment_events": citations,
+                      "observed": " ".join(observed)}
+    return updated
+
+
 def _action_phases(claim):
     item=claim.get('ai_segment') or {}
     parts=item.get('span_parts') if item.get('multi_shot') else [item]
