@@ -391,6 +391,31 @@ def validate_plan(manifest, analysis, plan, group, narration_timing):
             raise ValueError("CONTINUITY_INPUT_CHANGED")
 
 
+def _clear_superseded_scene(segment):
+    """A verified paired cut supersedes the earlier single-source absorption decision."""
+    rule = segment.get("scene_rule") or {}
+    if rule and rule.get("id") != "absorb_test":
+        return segment
+    reason = segment.get("visual_missing_reason_code") or ""
+    placeholder = segment.get("visual_missing") and reason.startswith("SCENE_")
+    if not rule and not placeholder:
+        return segment
+    row = dict(segment)
+    row.pop("scene_rule", None)
+    if placeholder or row.get("scene_preview_unresolved"):
+        for key in ("scene_preview_unresolved", "preview_unresolved", "preview_reason"):
+            row.pop(key, None)
+        row["degraded_no_match"] = False
+    if placeholder:
+        for key in ("visual_missing", "visual_missing_reason_code", "visual_missing_reason"):
+            row.pop(key, None)
+        if row.get("window_reason") == reason:
+            row.pop("window_reason")
+        if (row.get("operator_note") or "").endswith("已留黑画面，保留旁白和字幕。补拍或换素材后重跑该句。"):
+            row.pop("operator_note")
+    return row
+
+
 def assemble_member(manifest, plan, group, index, original):
     member = next(m for m in group["input"]["members"] if m["index"] == index)
     observed = next(m for m in group["review"]["members"] if m["index"] == index)
@@ -443,7 +468,7 @@ def assemble_member(manifest, plan, group, index, original):
     check = identity.validate_segment_receipt(segment, index=index, manifest=manifest, verify_source=True)
     if not check["ok"]:
         raise ValueError("CONTINUITY_" + ";".join(check["reasons"]))
-    return segment
+    return _clear_superseded_scene(segment)
 
 
 def repair(manifest, analysis, plan, directory, narration_timing):
@@ -613,16 +638,21 @@ def certify_rule_groups(manifest, analysis, matched, directory, narration_timing
     existing = {tuple(i - 1 for i in rule["group"]) for row in segments
                 if (rule := row.get("scene_rule") or {}).get("id") == "absorb_test" and rule.get("group")}
     covered = set()
-    for positions in sorted(existing) + [tuple(p) for p in detected]:
+    candidate_groups = sorted(existing) + [tuple(p) for p in detected]
+    # NOTE: A single-source placeholder can split a complete narrated experiment into smaller runs.
+    for positions in sorted(candidate_groups, key=len, reverse=True):
         if not positions or covered.intersection(positions):
             continue
         covered.update(positions)
         first = positions[0]
         old = segments[first].get("continuity_group")
-        if continuity.is_experiment(old) and all(segments[i].get("continuity_group") == old for i in positions):
+        if (continuity.is_experiment(old) and old["input"].get("allow_experiment_phase_speedup")
+                and all(segments[i].get("continuity_group") == old for i in positions)):
             if [m["index"] for m in old["input"]["members"]] == [i + 1 for i in positions] and all(
                     identity.validate_segment_receipt(segments[i], index=i + 1, manifest=manifest,
                                                       verify_source=True)["ok"] for i in positions):
+                for i in positions:
+                    segments[i] = _clear_superseded_scene(segments[i])
                 continue
         sentences, rows, reviews = [], [], {}
         for pos, row in enumerate(segments):
@@ -653,6 +683,18 @@ def certify_rule_groups(manifest, analysis, matched, directory, narration_timing
     if covered:
         matched["selection_mode"] = matched["manifest"]["selection_mode"] = "rule_then_ai"
         matched["segments"] = matched["manifest"]["segments"] = segments
+        for field, counter, flag, marker, value in (
+            ("visual_missing_matches", "visual_missing_count", "visual_missing", "source", "scene_rules"),
+            ("preview_unresolved", "preview_unresolved_count", "preview_unresolved", "type", "SCENE_RELATED_PREVIEW_UNCERTIFIED"),
+        ):
+            resolved = {str(i + 1) for i in covered if not segments[i].get(flag)}
+            for report in (matched, matched["manifest"]):
+                if field in report:
+                    report[field] = [item for item in report[field]
+                                     if not isinstance(item, dict) or str(item.get("index")) not in resolved
+                                     or item.get(marker) != value]
+                    if counter in report:
+                        report[counter] = len(report[field])
 
 
 def refill_groups(manifest, analysis, by_index, wanted, directory, narration_timing):

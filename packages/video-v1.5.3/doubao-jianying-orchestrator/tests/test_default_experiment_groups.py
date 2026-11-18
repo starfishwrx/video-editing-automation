@@ -318,16 +318,46 @@ class DefaultExperimentGroupTests(unittest.TestCase):
         originals = self.manifest["segments"]
         rows = [{**m, "selection_mode": "rule", "video": s["video"], "temporary_shot_id": s["shot_id"]}
                 for m, s in zip(originals, self.shots)]
-        for row in rows[:2]:
-            row["scene_rule"] = {"id": "absorb_test", "group": [1, 2]}
+        for row, status in zip(rows[:2], ("unmet", "partial")):
+            row["scene_rule"] = {"id": "absorb_test", "group": [1, 2], "status": status,
+                                 "reason": "SCENE_ACTION_INCOMPLETE"}
+        rows[0].update(scene_preview_unresolved=True, preview_unresolved=True)
+        rows[1].update(visual_missing=True, preview_unresolved=True, visual_missing_reason_code="SCENE_ACTION_INCOMPLETE")
+        rows[2]["scene_rule"] = {"id": "other", "status": "unmet"}
         matched = {"ok": True, "manifest": {**self.manifest, "segments": rows}, "segments": rows}
-        cfg = {**self.manifest, "selection_mode": "legacy"}
+        cfg = {**matched["manifest"], "selection_mode": "rule_then_ai"}
         with patch.object(groups, "observe_pair", return_value=(self.fixture.evidence, self.fixture.motion)), \
                 patch.object(groups, "review_group", side_effect=self.observed_group):
             groups.certify_rule_groups(cfg, self.analysis, matched, self.root, None)
         self.assertEqual(matched["selection_mode"], "rule_then_ai")
         self.assertTrue(continuity.is_experiment(matched["segments"][0]["continuity_group"]))
         self.assertEqual(matched["segments"][2]["selection_mode"], "rule")
+        for segment in matched["segments"][:2]:
+            self.assertIsNone(segment.get("scene_rule"))
+            self.assertFalse(segment.get("visual_missing"))
+            self.assertFalse(segment.get("preview_unresolved"))
+        self.assertEqual(matched["segments"][2]["scene_rule"], {"id": "other", "status": "unmet"})
+        # Historical matches may already have a valid receipt and an obsolete placeholder.
+        cached = matched["segments"][0]
+        cached.update(visual_missing=True, visual_missing_reason_code="SCENE_ACTION_INCOMPLETE",
+                      preview_unresolved=True)
+        gaps = [{"index": 1, "source": "scene_rules"}, {"index": 3, "source": "scene_rules"}]
+        matched.update(visual_missing_matches=list(gaps), visual_missing_count=2)
+        matched["manifest"]["visual_missing_matches"] = list(gaps)
+        previews = [{"index": 1, "type": "SCENE_RELATED_PREVIEW_UNCERTIFIED"},
+                    {"index": 1, "type": "OTHER_PREVIEW_REASON"}]
+        matched.update(preview_unresolved=previews[:], preview_unresolved_count=2)
+        matched["manifest"]["preview_unresolved"] = previews[:]
+        with patch.object(groups, "observe_pair", side_effect=AssertionError("already reviewed")):
+            groups.certify_rule_groups(matched["manifest"], self.analysis, matched, self.root, None)
+        self.assertFalse(matched["segments"][0].get("visual_missing"))
+        self.assertFalse(matched["segments"][0].get("preview_unresolved"))
+        self.assertEqual(matched["visual_missing_count"], 1)
+        self.assertEqual(matched["visual_missing_matches"], [gaps[1]])
+        self.assertEqual(matched["manifest"]["visual_missing_matches"], [gaps[1]])
+        self.assertEqual(matched["preview_unresolved_count"], 1)
+        self.assertEqual(matched["preview_unresolved"], [previews[1]])
+        self.assertEqual(matched["manifest"]["preview_unresolved"], [previews[1]])
 
     def test_direct_legacy_match_and_recovery_reject_unverified_single_experiment_shot(self):
         from argparse import Namespace
