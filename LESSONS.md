@@ -7,6 +7,12 @@
 
 ## 新增条目
 
+### L-20261118-material-format 素材响应格式错误会影响共享同一商品的任务
+
+- status: OPEN
+- hits: 1
+- 初识与读字的重试应指出具体字段或语法位置，并保留原图和次数。只有两次均返回格式错误且商品仍有足够可用镜头时，才按镜头记录未知。空对象不能证明包装上没有文字。回归见 `test_material_format_recovery.py`。
+
 ### L-20261117-experiment-pair-reuse 实验配对应复用已核对的具体画面
 
 - status: OPEN

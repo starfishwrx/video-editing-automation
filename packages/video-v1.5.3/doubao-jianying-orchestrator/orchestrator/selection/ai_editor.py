@@ -4122,7 +4122,9 @@ def prepare(manifest: dict, analysis: dict, report_dir: Path, *, narration_timin
                   "playback_policy_version": contract.playback.VERSION,
                   "reviews": {}, "display_reviews": [], "coverage": {}, "issues": []}
     try:
-        shots = [s for s in analysis.get("shots", []) if isinstance(s, dict) and s.get("status") == "ready_for_matching"]
+        from ..vision.vision_analyzer import needs_vision
+        shots = [s for s in analysis.get("shots", []) if isinstance(s, dict)
+                 and not s.get("excluded_from_pool") and not needs_vision(s)]
         if not shots or len({s["shot_id"] for s in shots}) != len(shots):
             raise ValueError("AI_EDITOR_NO_UNIQUE_CANDIDATES")
         by_id = {str(s["shot_id"]): s for s in shots}

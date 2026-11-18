@@ -683,6 +683,17 @@ def _match_temporary_input(manifest: dict, input_path: Path, report_dir: Path,
     from ..vision import vision_analyzer
     vision_meta = analysis.get("vision_analysis")
     vision_meta = vision_meta if isinstance(vision_meta, dict) else {}
+    excluded = vision_analyzer.logged_pool_exclusions(analysis)
+    unresolved = [row for row in analysis["shots"] if row.get("shot_id") not in excluded
+                  and (row.get("text_pass") in ("failed", "pending") or
+                       (vision_meta and analysis.get("ok") is False
+                        and not vision_analyzer._reusable_visual_observation(row)))]
+    if ((analysis.get("material_cache") or {}).get("ready") is False or unresolved
+            or (vision_meta and (vision_meta.get("errors") or analysis.get("pending_items")))):
+        return manifest, {"status": "SHOT_MATCH_BLOCKED", "message": "素材识别尚未完成。",
+                          "pending_items": analysis.get("pending_items") or
+                              [{"type": "MATERIAL_PREP_INCOMPLETE", "shot_id": row.get("shot_id")} for row in unresolved],
+                          "report": str(report_dir / "shot_candidates.json")}
     refill_indices = []
     for raw in (manifest.get("ai_refill_indices") or []):
         try:

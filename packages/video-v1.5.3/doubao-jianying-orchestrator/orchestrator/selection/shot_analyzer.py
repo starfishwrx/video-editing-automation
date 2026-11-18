@@ -970,7 +970,7 @@ def match_manifest(manifest: dict[str, Any], analysis: dict[str, Any], *, topk: 
     if mode == "ai_editor" or (not mode and "ai_editor_plan" in analysis):
         from . import ai_editor
         return ai_editor.match_manifest(manifest, analysis, narration_timing=narration_timing)
-    shots = [s for s in analysis.get("shots", []) if isinstance(s, dict)]
+    shots = [s for s in analysis.get("shots", []) if isinstance(s, dict) and not s.get("excluded_from_pool")]
     recommendations: list[dict[str, Any]] = []
     segments: list[dict[str, Any]] = []
     pending: list[dict[str, Any]] = []

@@ -100,7 +100,7 @@ def safe_manifest_stem(name: str) -> str:
 
 
 def is_reusable_analysis_row(row: object) -> bool:
-    if not isinstance(row, dict):
+    if not isinstance(row, dict) or row.get("excluded_from_pool") is True:
         return False
     empty_rejection = (row.get("visual_observation_complete") is True
                        and row.get("action_complete") is False
