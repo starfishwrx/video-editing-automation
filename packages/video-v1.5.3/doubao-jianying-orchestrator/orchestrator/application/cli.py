@@ -904,6 +904,7 @@ def _match_temporary_input(manifest: dict, input_path: Path, report_dir: Path,
             scene_report = scene_rules.apply(manifest, matched, analysis, report_dir)
             matched["scene_rules"] = {k: scene_report.get(k) for k in
                                       ("category", "rulepacks", "versions", "applied", "partial", "unmet")}
+    _certify_rule_experiments(mode, manifest, analysis, matched, report_dir, narration_timing)
     if matching_input is not None:
         matched["input_manifest"] = matching_input
     (report_dir / "shot_match_report.json").write_text(
@@ -1243,6 +1244,17 @@ def cmd_analyze_shots(args) -> int:
     return _emit(result, 0 if result.get("shots") else 1)
 
 
+def _certify_rule_experiments(mode, manifest, analysis, matched, report_dir, narration_timing):
+    if mode == "ai_editor" or not matched.get("ok"):
+        return
+    from ..selection import experiment_groups
+    try:
+        experiment_groups.certify_rule_groups(manifest, analysis, matched, report_dir, narration_timing)
+    except (KeyError, ValueError, OSError, TypeError) as exc:
+        matched["ok"] = False
+        matched.setdefault("pending_items", []).append({"type": "EXPERIMENT_GROUP_PENDING", "message": str(exc)})
+
+
 def cmd_match_shots(args) -> int:
     input_path = Path(args.input).expanduser().resolve()
     manifest = _read(input_path)
@@ -1286,6 +1298,7 @@ def cmd_match_shots(args) -> int:
             analysis = ai_editor.prepare(manifest, analysis, report_dir)
         result = shot_analyzer.match_manifest(manifest, analysis, topk=args.topk,
                                               auto_accept_top1=not args.require_selection)
+        _certify_rule_experiments(manifest["selection_mode"], manifest, analysis, result, report_dir, None)
         result["input_manifest"] = matching_input
         report_dir.mkdir(parents=True, exist_ok=True)
         report_path = report_dir / "shot_match_report.json"

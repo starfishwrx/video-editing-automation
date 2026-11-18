@@ -22,7 +22,7 @@ class SelectionRecoveryTests(unittest.TestCase):
         self.manifest = {"category": "weipin", "selection_mode": "ai_editor", "head_trim_s": 0,
             "tail_trim_s": 0, "tail_pad_s": 0, "segments": [
                 {"text": "柔软的表层", "audio_duration_us": 1_000_000},
-                {"text": "没几下就吸收完了", "audio_duration_us": 1_000_000}]}
+                {"text": "面层纹路很细腻", "audio_duration_us": 1_000_000}]}
         self.shots, self.sentences, self.reviews, self.rows = [], [], {}, []
         for i, text in enumerate(self.manifest["segments"], 1):
             video = self.root / f"source{i}.mp4"
@@ -1440,27 +1440,13 @@ class SelectionRecoveryTests(unittest.TestCase):
         self.assertTrue(all(row.get("continuity_key") for row in plan["rows"]))
         self.assertTrue(editor._assemble(manifest, analysis, plan, narration_timing=None)["ok"])
 
-    def test_phase_repair_and_group_adapter_preserve_jointly_reviewed_cuts(self):
+    def test_phase_repair_requires_reviewed_experiment_even_when_ordinary_cuts_were_preselected(self):
         manifest, analysis, plan = self._absorb_plan((1_200_000, 1_300_000, 1_400_000))
-        phases = {"pour": [1.0, 2.5], "absorb": [2.5, 7.0], "wipe": [3.5, 5.5]}
-        real_groups = editor.experiment_groups.repair
-        def grouped(*args):
-            self.assertTrue(all(row.get("continuity_key") for row in plan["rows"]))
-            before = copy.deepcopy(plan["rows"])
-            result = real_groups(*args)
-            self.assertEqual(plan["rows"], before)
-            return result
-        with patch("orchestrator.vision.phase_timing.locate", return_value={"ok": True, "phases": phases}), \
-             patch.object(editor, "_review_proposed_window",
-                          side_effect=lambda *a, **kw: self._phase_review(plan, a[3], a[4], a[5])), \
-             patch.object(editor.sentence_continuity, "review_group", side_effect=self._joint_experiment_review), \
-             patch.object(editor.experiment_groups, "repair", side_effect=grouped) as groups, \
-             patch.object(editor.experiment_groups, "observe_pair", side_effect=AssertionError("already reviewed")):
-            result = editor._repair_reviewed_rows(manifest, analysis, plan, self.root, None, set())
-        groups.assert_called_once()
-        self.assertTrue(result["ok"])
-        self.assertFalse(contract.sequence_errors(result["segments"]))
-        self.assertTrue(editor._assemble(manifest, analysis, plan, narration_timing=None, verify_sources=True)["ok"])
+        for sentence, role in zip(plan["sentences"], ("absorption", "absorption", "rewet")):
+            sentence["experiment_role"] = role
+        with patch.object(editor.experiment_groups, "observe_pair", side_effect=ValueError("wipe unconfirmed")):
+            with self.assertRaisesRegex(ValueError, "EXPERIMENT_GROUP_PENDING"):
+                editor._repair_reviewed_rows(manifest, analysis, plan, self.root, None, set())
 
     def test_a_later_sentence_rejection_does_not_drop_the_pour(self):
         manifest, analysis, plan = self._absorb_plan((1_200_000, 1_300_000, 1_400_000))
@@ -1646,7 +1632,7 @@ class SelectionRecoveryTests(unittest.TestCase):
              patch.object(editor, "_place_absorb_experiment", return_value=False) as phases, \
              patch.object(editor.experiment_groups, "repair", return_value=False) as groups:
             editor._edit_plan(manifest, analysis, plan, self.root)
-        phases.assert_called_once()
+        phases.assert_not_called()
         groups.assert_called_once()
         self.assertTrue(plan["ok"])
         self.assertEqual(plan["rows"][1]["parts"][0]["shot_id"], "shot2")

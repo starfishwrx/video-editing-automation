@@ -58,15 +58,14 @@ class ExperimentOptimizationTests(unittest.TestCase):
         render.assert_not_called()
         self.assertEqual(json.loads((self.directory / 'result.json').read_text('utf-8'))['status'], 'BLOCKED')
 
-    def test_missing_review_or_unprotected_contact_is_not_silently_accepted(self):
+    def test_review_note_required_and_reviewed_contact_may_accelerate(self):
         self.spec['review_note'] = ''
         with self.assertRaisesRegex(ValueError, 'REVIEW_REQUIRED'):
             self.run_program()
         self.spec['review_note'] = 'reviewed'
         self.spec['members'][1]['observation']['segments'][0]['can_speed'] = True
         self.directory = self.base.root / 'different-output'
-        with self.assertRaisesRegex(ValueError, 'CONTACT_OR_COMPLETION'):
-            self.run_program()
+        self.assertEqual(self.run_program()['status'], 'PLANNED_OUTPUT_REVIEW_PENDING')
 
     def test_existing_output_is_preserved(self):
         self.run_program()

@@ -6,7 +6,7 @@
     "machine-specific paths",
     "knowledge-base bodies"
   ],
-  "file_count": 485,
+  "file_count": 487,
   "files": [
     {
       "path": ".gitignore"
@@ -453,6 +453,9 @@
       "path": "doubao-jianying-orchestrator/orchestrator/selection/camera_variety.py"
     },
     {
+      "path": "doubao-jianying-orchestrator/orchestrator/selection/directed_display.py"
+    },
+    {
       "path": "doubao-jianying-orchestrator/orchestrator/selection/editorial_actions.py"
     },
     {
@@ -718,6 +721,9 @@
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_default_headless.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/tests/test_directed_display.py"
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_edit_timeline.py"

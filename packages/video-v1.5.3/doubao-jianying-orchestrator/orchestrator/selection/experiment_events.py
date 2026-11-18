@@ -9,7 +9,7 @@ def allows_absorption_focus(text):
     return bool(text) and not re.search(r'秒|瞬吸|瞬间|立刻|马上|一倒就|倒|整杯|毫升|ml', text, re.I)
 
 
-def validate_focus(sentences,roles,observations):
+def validate_focus(sentences,roles,observations,*,allow_phase_speedup=False,members=None):
     """A partial pour supports qualitative absorption, never a complete/timed pour claim."""
     if (not isinstance(observations,list) or len(observations)!=2 or not isinstance(observations[0],dict)
             or not isinstance(observations[0].get('segments'),list)):
@@ -18,8 +18,28 @@ def validate_focus(sentences,roles,observations):
     text=''.join(s.text for s in sentences if role_map[s.sentence_id]=='absorption')
     focused=observations[0].get('coverage')=='absorption_focus'
     timed_process_faster=any(s['kind'] in {'pour','absorb'} and s['can_speed'] for s in observations[0]['segments'])
-    if timed_process_faster and re.search(r'秒|瞬吸|瞬间|立刻|马上|一倒就',text):
+    if timed_process_faster and not allow_phase_speedup and re.search(r'秒|瞬吸|瞬间|立刻|马上|一倒就',text):
         raise ValueError('EXPERIMENT_ABSORPTION_SPEED_INCOMPATIBLE_CLAIM')
+    if allow_phase_speedup:
+        # Compare a numeric elapsed-time promise to the observed source clock.
+        # The compressed duration on the edit timeline carries no such evidence.
+        from ..policy.demo_actions import _chinese_count_to_arabic
+        group_text = " ".join(sentence.text for sentence in sentences)
+        seconds = re.findall(r"(半|\d+(?:\.\d+)?|[零〇一二两三四五六七八九十百]+)\s*秒", group_text)
+        if seconds:
+            if not members or focused:
+                raise ValueError("EXPERIMENT_SOURCE_TIMING_REQUIRED")
+            observed = validate_motion(observations[0], members[0], allow_phase_speedup=True)
+            pour = next(s for s in observed["segments"] if s["kind"] == "pour")
+            absorb = [s for s in observed["segments"] if s["kind"] == "absorb"][-1]
+            frames = members[0]["samples"]["frames"]
+            # Flow can start between numbered samples. Use the previous sample
+            # as the earliest possible onset and the visibly completed state as the endpoint.
+            earliest = max(0, pour["first_frame"] - 1)
+            measured = frames[absorb["last_frame"]]["pts_us"] - frames[earliest]["pts_us"]
+            limits = [0.5 if token == "半" else float(_chinese_count_to_arabic(token)) for token in seconds]
+            if measured > min(limits) * 1_000_000:
+                raise ValueError("EXPERIMENT_SOURCE_TIMING_CLAIM_UNSUPPORTED")
     if focused and not allows_absorption_focus(text):
         raise ValueError('EXPERIMENT_ABSORPTION_FOCUS_INCOMPATIBLE_CLAIM')
 
@@ -80,14 +100,14 @@ def compile_events(row,member):
     return validate_motion(observation,member)
 
 
-def fit_phase_windows(members,observations,result_frames,target_us,phase_boundary_us,*,fps=30,max_speed=3.0):
+def fit_phase_windows(members,observations,result_frames,target_us,phase_boundary_us,*,fps=30,max_speed=3.0,allow_phase_speedup=False):
     """Select a continuous absorption-focused tail, then solve each clause's budget.
 
     This never omits an internal interval or claims to show the full pour.
     Actual observed phase boundaries remain unchanged; only the source in-point
     may advance inside the already observed pour, retaining >=400 ms of flow.
     """
-    windows(members,observations,result_frames,fps=fps)
+    windows(members,observations,result_frames,fps=fps,allow_phase_speedup=allow_phase_speedup)
     observed=deepcopy(observations)
     b_selection=None
     if phase_boundary_us is not None and observed[1]['segments'][0]['kind']=='context':
@@ -97,17 +117,17 @@ def fit_phase_windows(members,observations,result_frames,target_us,phase_boundar
         b_row['effective_window_frame_ids'][0]=start
         b_selection={'coverage':'complete_verification','omitted_preparation_frame_ids':[initial,start-1],
             'selected_window_frame_ids':b_row['effective_window_frame_ids'],'internal_omissions':False}
-    clips=windows(members,observed,result_frames,fps=fps)
+    clips=windows(members,observed,result_frames,fps=fps,allow_phase_speedup=allow_phase_speedup)
     if phase_boundary_us is None or observations[0].get('coverage')!='absorption_focus':
-        plans=fit_group(clips,target_us,fps=fps,phase_boundary_us=phase_boundary_us,max_speed=max_speed)
+        plans=fit_group(clips,target_us,fps=fps,phase_boundary_us=phase_boundary_us,max_speed=max_speed,allow_phase_speedup=allow_phase_speedup)
         if b_selection:plans[1]['source_selection']=b_selection
         return plans
     if not 0<phase_boundary_us<target_us:raise ValueError('EXPERIMENT_PHASE_BOUNDARY_INVALID')
-    b=fit_group([clips[1]],target_us-phase_boundary_us,fps=fps,max_speed=max_speed)
+    b=fit_group([clips[1]],target_us-phase_boundary_us,fps=fps,max_speed=max_speed,allow_phase_speedup=allow_phase_speedup)
     if b_selection:b[0]['source_selection']=b_selection
     original=observations[0];first=original['effective_window_frame_ids'][0]
     last=max(s['last_frame'] for s in original['segments'] if s['kind']=='pour')-3
-    for cap in dict.fromkeys((min(2,max_speed),max_speed)):
+    for cap in dict.fromkeys((min(2,max_speed) if max_speed is not None else 2, max_speed)):
         for start in range(first,last+1):
             cropped=deepcopy(original);cropped['effective_window_frame_ids'][0]=start
             cropped['segments']=[{**s,'first_frame':max(start,s['first_frame'])}
@@ -118,13 +138,13 @@ def fit_phase_windows(members,observations,result_frames,target_us,phase_boundar
                 if head['last_frame']>start:
                     cropped['segments'].insert(1,{**head,'first_frame':start+1})
                 head.update(last_frame=start,can_speed=False)
-            clip=windows(members,[cropped,observed[1]],result_frames,fps=fps)[0]
-            try:a=fit_group([clip],phase_boundary_us,fps=fps,max_speed=cap)
+            clip=windows(members,[cropped,observed[1]],result_frames,fps=fps,allow_phase_speedup=allow_phase_speedup)[0]
+            try:a=fit_group([clip],phase_boundary_us,fps=fps,max_speed=cap,allow_phase_speedup=allow_phase_speedup)
             except ValueError:continue
-            if max(p['speed'] for p in a[0]['retiming']['parts'])>cap:continue
+            if cap is not None and max(p['speed'] for p in a[0]['retiming']['parts'])>cap:continue
             a[0]['source_selection']={'coverage':'absorption_focus','observed_window_frame_ids':original['effective_window_frame_ids'],
                 'selected_window_frame_ids':cropped['effective_window_frame_ids'],
                 'omitted_pour_prefix_frame_ids':[first,start-1] if start>first else [],'internal_omissions':False}
             return a+b
-    limit='3X_CAP' if max_speed==3 else 'TASK_CAP'
+    limit='3X_CAP' if max_speed==3 else ('TASK_CAP' if max_speed is not None else 'VISIBILITY')
     raise ValueError(f'EXPERIMENT_PHASE_DURATION_CONFLICT:part=0;budget_us={phase_boundary_us};{limit}')

@@ -49,7 +49,7 @@ def bind_phase_spec(manifest, pair, spec, *, fps=30):
         if declared.get('reviewed_window_frame_ids') != actual['window_frame_ids']:
             raise ValueError('EXPERIMENT_PHASE_SPEC_REVIEW_INPUT_CHANGED')
         observations.append(deepcopy(declared.get('observation')))
-    windows(pair['members'], observations, contract_for(manifest)['minimum_result_frames'], fps=fps)
+    windows(pair['members'], observations, contract_for(manifest)['minimum_result_frames'], fps=fps, allow_phase_speedup=True)
     return {'protocol': PROTOCOL, 'task_id': manifest['task_id'], 'rules': identity.rules_identity(manifest),
         'pair_input_sha256': identity.digest(input_binding(manifest, pair['members'], pair['sheet']['path'])),
         'observations': observations, 'method': 'reviewed_phase_specification',
@@ -100,7 +100,7 @@ def _frame_execution(timeline, receipt, group_id):
         if not group['event_id'].startswith(group_id + '-'):
             continue
         event = events[group['event_id']]
-        if any('bounded_process_speed_cap' in e for e in event.evidence):
+        if any('reviewed_experiment_phase' in e or 'bounded_process_speed_cap' in e for e in event.evidence):
             rows.append({'event_id': event.event_id, 'output_frames': len(group['frames']),
                 'nominal_speed': event.speed_num / event.speed_den,
                 'frame_budget_speed': float(Fraction(event.source_duration_us, 1_000_000) * fps / len(group['frames']))})

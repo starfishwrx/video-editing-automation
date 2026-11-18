@@ -349,6 +349,7 @@ class WindowRequest:
     fps: float = DEFAULT_FPS
     preferred_speed: float = 1.0
     exact_source_timing: bool = False
+    allow_experiment_phase_speedup: bool = False
 
     @property
     def timeline_us(self) -> int:
@@ -512,7 +513,8 @@ def solve_window(req: WindowRequest) -> WindowSolution:
     speed_max = float(req.speed_max)
     if speed_max < speed_min:
         speed_min, speed_max = speed_max, speed_min
-    speed_max = min(speed_max, playback.PROCESS_MAX)
+    if not req.allow_experiment_phase_speedup:
+        speed_max = min(speed_max, playback.PROCESS_MAX)
     if not (math.isfinite(speed_min) and math.isfinite(speed_max) and 0 < speed_min <= speed_max):
         return _fail(REASON_SPEED_OUT_OF_RANGE, policy_version=playback.VERSION)
 
@@ -1283,7 +1285,8 @@ def check_invariants(items: Iterable[dict], *, fps: float = DEFAULT_FPS,
         allowed = item.get("speed_range") or [0.05, playback.PROCESS_MAX]
         if allowed:
             lo, hi = float(allowed[0]), float(allowed[1])
-            hi = min(hi, playback.PROCESS_MAX)
+            if not item.get("allow_experiment_phase_speedup"):
+                hi = min(hi, playback.PROCESS_MAX)
             # 变速吸附在 1µs 栅格上（frame_speed），区间收成一个点时吸附值最多偏半格。
             grid = 1.0 / frame_us(fps)
             if speed < lo - grid or speed > hi + grid:

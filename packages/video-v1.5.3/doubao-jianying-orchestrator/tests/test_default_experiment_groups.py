@@ -190,15 +190,14 @@ class DefaultExperimentGroupTests(unittest.TestCase):
         self.plan["reviews"]["1"] = []
         self.assertTrue(self.repair()["ok"])
 
-    def test_experiment_receipts_and_output_qc_bind_explicit_task_cap(self):
+    def test_reviewed_group_ignores_legacy_cap_and_qc_binds_actual_speed_material(self):
         self.manifest["max_absorb_demo_speed"] = 3.0
         result = self.repair()
         for index, row in enumerate(result["segments"][:2], 1):
-            self.assertEqual(row["ai_selection"]["task_absorb_speed_cap"], 3.0)
-            self.assertTrue(all(p["ai_selection"]["task_absorb_speed_cap"] == 3.0 for p in row["span_parts"]))
+            self.assertNotIn("task_absorb_speed_cap", row["ai_selection"])
+            self.assertTrue(all("task_absorb_speed_cap" not in p["ai_selection"] for p in row["span_parts"]))
             missing = {k: v for k, v in self.manifest.items() if k != "max_absorb_demo_speed"}
-            self.assertIn("AI_SELECTION_TASK_SPEED_LIMIT_CHANGED",
-                contract.validate_segment_receipt(row, index=index, manifest=missing)["reasons"])
+            self.assertTrue(contract.validate_segment_receipt(row, index=index, manifest=missing)["ok"])
             actual = [{"source": p["video"], "source_start": p["source_start"], "source_duration": p["duration"],
                 "target_duration": p["segment_s"], "segment": {"speed": p["video_speed"]},
                 "speed_materials": [{"type": "speed", "speed": p["video_speed"]}]} for p in row["span_parts"]]
@@ -206,9 +205,189 @@ class DefaultExperimentGroupTests(unittest.TestCase):
                 "ai_segment": row, "max_absorb_demo_speed": 3.0}
             self.assertFalse(ai_editor_qc.validate_cut(claim, actual))
             claim.pop("max_absorb_demo_speed")
-            self.assertIn("AI_SELECTION_TASK_SPEED_LIMIT_CHANGED", ai_editor_qc.validate_cut(claim, actual))
+            self.assertFalse(ai_editor_qc.validate_cut(claim, actual))
             actual[0]["speed_materials"] = []
             self.assertIn("AI_QC_FINAL_SPEED_MATERIAL_MISSING", ai_editor_qc.validate_cut(claim, actual))
+
+    def test_default_all_stages_can_exceed_old_limits_and_native_plan_binds_the_cut(self):
+        from orchestrator.application import headless_production
+        self.manifest["max_absorb_demo_speed"] = 2
+        self.manifest["segments"][0]["audio_duration_us"] = 400_000
+        result = self.repair()
+        parts = [p for s in result["segments"][:2] for p in s["span_parts"]]
+        self.assertEqual([p["playback_observation"]["phase"] for p in parts], ["pour", "absorb", "press", "lift", "result"])
+        self.assertTrue(all(p["video_speed"] > 1 for p in parts))
+        self.assertGreater(parts[0]["video_speed"], 20)
+        self.assertGreaterEqual(parts[-1]["segment_us"] * 30, 15_000_000)
+        engine = OrchestrationEngine.__new__(OrchestrationEngine)
+        engine.m = result["manifest"]
+        clips = self.clips(result)
+        for clip in clips:
+            clip.audio_mode = "native"
+        plan, _, _ = headless_production.make_plan(engine, clips, None, {}, [], "fixture", None)
+        actual = plan["tracks"][0]["segments"]
+        self.assertTrue(actual[0]["authorized_experiment_phase_speedup"])
+        self.assertEqual([v["speed"] for v in actual], [p["video_speed"] for p in parts])
+        clips[0].source_start += .05
+        with self.assertRaisesRegex(ValueError, "HEADLESS_EXPERIMENT_CUT_CHANGED"):
+            headless_production.make_plan(engine, clips, None, {}, [], "fixture", None)
+        clips[0].continuity_group = None
+        with self.assertRaisesRegex(ValueError, "HEADLESS_EXPERIMENT_SPEED_AUTHORIZATION_MISSING"):
+            headless_production.make_plan(engine, clips, None, {}, [], "fixture", None)
+
+    def test_output_stage_removal_or_crop_is_rejected(self):
+        original = self.repair()["segments"][0]["continuity_group"]
+        for missing in ("pour", "absorb", "press", "lift", "result"):
+            group = copy.deepcopy(original)
+            part = next(p for m in group["input"]["members"] for p in m["parts"] if p["experiment_phase"] == missing)
+            part["experiment_phase"] = "context"
+            with self.assertRaisesRegex(ValueError, "COMPLETE_CHAIN_REQUIRED"):
+                continuity.validate(group)
+        group = copy.deepcopy(original)
+        cut = group["input"]["members"][0]["parts"][0]
+        fact = group["review"]["members"][0]["parts"][0]
+        cut["start_us"] += 100_000
+        fact["evidence_intervals_us"][0]["start"] = cut["start_us"]
+        with self.assertRaisesRegex(ValueError, "PHASE_WINDOW_CHANGED"):
+            continuity.validate(group)
+
+    def test_short_single_claim_still_needs_a_complete_group(self):
+        for role in ("absorption", "rewet"):
+            sentences = [{**self.plan["sentences"][0], "experiment_role": role}]
+            with self.assertRaisesRegex(ValueError, "three_visible_stages_required"):
+                groups.require_complete(sentences, [{}])
+            context = groups._context(self.manifest, self.analysis, sentences, None,
+                self.fixture.evidence, self.fixture.motion, ("shot1", "shot2"))
+            self.assertEqual([p["experiment_phase"] for p in context["members"][0]["parts"]],
+                             ["pour", "absorb", "press", "lift", "result"])
+        for row in ({"text": "倒蓝水看它吸收完", "experiment_role": "promotion"},
+                    {"text": "看看这个效果", "experiment_role": "breathability", "scene_ids": ["absorb"]}):
+            with self.assertRaisesRegex(ValueError, "three_visible_stages_required"):
+                groups.require_complete([{"index": 1, **row}], [{}])
+        from orchestrator import rulepack
+        from orchestrator.policy import scene_rules
+        for text in ("吸水层的结构", "吸水层很柔软", "网面透气", "荧光检测"):
+            self.assertEqual(list(groups.groups([{"index": 1, "text": text}])), [])
+            rule_groups = scene_rules._split_groups([{"text": text, "video": "fixture.mp4"}],
+                                                   rulepack.load("weipin"), {}, category="weipin")
+            self.assertFalse(any(g["scene"]["id"] == "absorb_test" for g in rule_groups))
+
+    def test_independent_group_observations_can_span_sentences_but_must_cover_tissue_result(self):
+        from orchestrator.visual_qc_contract import group_events_visible
+        members = [{"index": 1, "parts": [{"experiment_phase": p} for p in ("pour", "absorb")]},
+                   {"index": 2, "parts": [{"experiment_phase": "press"}]},
+                   {"index": 3, "parts": [{"experiment_phase": p} for p in ("lift", "result")]}]
+        group = {"input": {"members": members}}
+        def event(name, *frames):
+            return {"event": name, "frames": list(frames)}
+        rows = {1: {"visual_ok": True, "visible_experiment_events": [event("pour", 1, 2), event("absorb", 3, 4)],
+                    "experiment_output_frames": [[1, 0], [1, 1], [2, 3], [2, 10]], "observed": "蓝水倒入并被吸收"},
+                2: {"visual_ok": True, "visible_experiment_events": [event("press", 1)],
+                    "experiment_output_frames": [[1, 20]], "observed": "纸巾按压巾面"},
+                3: {"visual_ok": True, "visible_experiment_events": [event("lift", 1), event("result", 2, 3)],
+                    "experiment_output_frames": [[1, 22], [2, 25], [2, 39]], "observed": "纸巾被提起，纸面干净"}}
+        for invalid in ([1], [1, 1], [1, 3], [1, 99]):
+            rows[1]["visible_experiment_events"][0]["frames"] = invalid
+            self.assertFalse(group_events_visible(group, rows))
+        rows[1]["visible_experiment_events"][0]["frames"] = [1, 2]
+        self.assertTrue(group_events_visible(group, rows))
+        for description in ("纸巾被手指按压在巾面上", "纸巾放在巾面上，手指轻轻按压"):
+            rows[2]["observed"] = description
+            self.assertTrue(group_events_visible(group, rows))
+        rows[3]["observed"] = "手指提起这张纸巾，纸面看得清"
+        self.assertTrue(group_events_visible(group, rows))
+        rows[2]["observed"] = "手掌按压巾体，旁边有纸巾"
+        self.assertFalse(group_events_visible(group, rows))
+        rows[2]["observed"] = "纸巾按压巾面"
+        rows[3]["experiment_output_frames"][-1] = [2, 26]
+        self.assertFalse(group_events_visible(group, rows))
+        rows[3]["visible_experiment_events"].pop()
+        self.assertFalse(group_events_visible(group, rows))
+
+    def test_fast_cut_is_reviewed_only_on_actual_output_ticks(self):
+        group = {"schema": continuity.EXPERIMENT_SCHEMA}
+        claim = {"ai_segment": {"continuity_group": group}}
+        cut = {"source_start": 0, "source_duration": 5, "target_start": .01, "target_duration": .066667}
+        plan = ai_editor_qc.frame_plan(claim, [cut], fps=30)
+        self.assertEqual(ai_editor_qc.experiment_output_frames([{"suffix": label} for _, label, _ in plan]),
+                         [[1, 1], [1, 2]])
+        for (_, label, fraction), tick in zip(plan, (1, 2)):
+            self.assertAlmostEqual(cut["target_start"] + fraction * cut["target_duration"], tick / 30)
+
+    def test_rule_selection_uses_the_same_review_for_its_group(self):
+        originals = self.manifest["segments"]
+        rows = [{**m, "selection_mode": "rule", "video": s["video"], "temporary_shot_id": s["shot_id"]}
+                for m, s in zip(originals, self.shots)]
+        for row, status in zip(rows[:2], ("unmet", "partial")):
+            row["scene_rule"] = {"id": "absorb_test", "group": [1, 2], "status": status,
+                                 "reason": "SCENE_ACTION_INCOMPLETE"}
+        rows[0].update(scene_preview_unresolved=True, preview_unresolved=True)
+        rows[1].update(visual_missing=True, preview_unresolved=True, visual_missing_reason_code="SCENE_ACTION_INCOMPLETE")
+        rows[2]["scene_rule"] = {"id": "other", "status": "unmet"}
+        matched = {"ok": True, "manifest": {**self.manifest, "segments": rows}, "segments": rows}
+        cfg = {**matched["manifest"], "selection_mode": "rule_then_ai"}
+        with patch.object(groups, "observe_pair", return_value=(self.fixture.evidence, self.fixture.motion)), \
+                patch.object(groups, "review_group", side_effect=self.observed_group):
+            groups.certify_rule_groups(cfg, self.analysis, matched, self.root, None)
+        self.assertEqual(matched["selection_mode"], "rule_then_ai")
+        self.assertTrue(continuity.is_experiment(matched["segments"][0]["continuity_group"]))
+        self.assertEqual(matched["segments"][2]["selection_mode"], "rule")
+        for segment in matched["segments"][:2]:
+            self.assertIsNone(segment.get("scene_rule"))
+            self.assertFalse(segment.get("visual_missing"))
+            self.assertFalse(segment.get("preview_unresolved"))
+        self.assertEqual(matched["segments"][2]["scene_rule"], {"id": "other", "status": "unmet"})
+        # Historical matches may already have a valid receipt and an obsolete placeholder.
+        cached = matched["segments"][0]
+        cached.update(visual_missing=True, visual_missing_reason_code="SCENE_ACTION_INCOMPLETE",
+                      preview_unresolved=True)
+        gaps = [{"index": 1, "source": "scene_rules"}, {"index": 3, "source": "scene_rules"}]
+        matched.update(visual_missing_matches=list(gaps), visual_missing_count=2)
+        matched["manifest"]["visual_missing_matches"] = list(gaps)
+        previews = [{"index": 1, "type": "SCENE_RELATED_PREVIEW_UNCERTIFIED"},
+                    {"index": 1, "type": "OTHER_PREVIEW_REASON"}]
+        matched.update(preview_unresolved=previews[:], preview_unresolved_count=2)
+        matched["manifest"]["preview_unresolved"] = previews[:]
+        with patch.object(groups, "observe_pair", side_effect=AssertionError("already reviewed")):
+            groups.certify_rule_groups(matched["manifest"], self.analysis, matched, self.root, None)
+        self.assertFalse(matched["segments"][0].get("visual_missing"))
+        self.assertFalse(matched["segments"][0].get("preview_unresolved"))
+        self.assertEqual(matched["visual_missing_count"], 1)
+        self.assertEqual(matched["visual_missing_matches"], [gaps[1]])
+        self.assertEqual(matched["manifest"]["visual_missing_matches"], [gaps[1]])
+        self.assertEqual(matched["preview_unresolved_count"], 1)
+        self.assertEqual(matched["preview_unresolved"], [previews[1]])
+        self.assertEqual(matched["manifest"]["preview_unresolved"], [previews[1]])
+
+    def test_direct_legacy_match_and_recovery_reject_unverified_single_experiment_shot(self):
+        from argparse import Namespace
+        from orchestrator.application import cli
+        from orchestrator.vision import material_cache
+        source = {**self.manifest, "selection_mode": "legacy", "segments": [self.manifest["segments"][0]]}
+        input_path = self.root / "input.json"
+        analysis_path = self.root / "analysis.json"
+        output = self.root / "match"
+        for path, data in [(input_path, source), (analysis_path, self.analysis)]:
+            path.write_text(json.dumps(data), encoding="utf-8")
+        row = {**source["segments"][0], "video": self.shots[0]["video"],
+               "temporary_shot_id": self.shots[0]["shot_id"], "selection_mode": "rule"}
+        initial = {"ok": True, "segments": [row], "manifest": {**source, "segments": [row]}}
+        args = Namespace(input=str(input_path), analysis=str(analysis_path), report_dir=str(output),
+                         topk=3, require_selection=False)
+        with patch.object(cli, "environment_report", return_value={}), \
+                patch.object(material_cache, "refresh_external_analysis", return_value=self.analysis), \
+                patch.object(cli.shot_analyzer, "match_manifest", return_value=initial), \
+                patch.object(groups, "observe_pair", side_effect=ValueError("missing tissue verification")), \
+                patch.object(cli, "_emit", side_effect=lambda result, code: code):
+            self.assertEqual(cli.cmd_match_shots(args), 1)
+            saved = json.loads((output / "shot_match_report.json").read_text(encoding="utf-8"))
+            self.assertFalse(saved["ok"])
+            self.assertEqual(saved["pending_items"][-1]["type"], "EXPERIMENT_GROUP_PENDING")
+            recovery = Namespace(input=str(input_path), report_dir=str(output), stage="draft_write")
+            with patch.object(cli, "_production_environment_report", return_value={"ready": True}), \
+                    patch.object(cli.OrchestrationEngine, "write_draft") as writer:
+                self.assertEqual(cli.cmd_recover(recovery), 1)
+                writer.assert_not_called()
 
     def test_outside_reuse_conflict_does_not_reject_experiment_pair(self):
         self.manifest.update(source_reuse_policy="strict-v1", max_source_reuse=1)
@@ -315,10 +494,11 @@ class DefaultExperimentGroupTests(unittest.TestCase):
 
     def test_topic_boundary_cannot_borrow_promotion_or_breathability_time(self):
         self.assertEqual([[m["index"] for m in g] for g in groups.groups(self.plan["sentences"])], [[1, 2]])
-        self.plan["sentences"][1]["experiment_role"] = "breathability"
-        with patch.object(groups, "observe_pair") as observe:
-            self.assertFalse(groups.repair(self.manifest, self.analysis, self.plan, self.root, None))
-        observe.assert_not_called()
+        self.plan["sentences"][1].update(text="网面透气", experiment_role="breathability")
+        self.assertEqual([[m["index"] for m in g] for g in groups.groups(self.plan["sentences"])], [[1]])
+        with patch.object(groups, "observe_pair", side_effect=ValueError("no complete same experiment")):
+            with self.assertRaisesRegex(ValueError, "EXPERIMENT_GROUP_PENDING:1"):
+                groups.repair(self.manifest, self.analysis, self.plan, self.root, None)
 
     def test_single_row_refill_does_not_rewrite_accepted_neighbour(self):
         original = copy.deepcopy(self.plan["rows"])
@@ -396,7 +576,10 @@ class DefaultExperimentGroupTests(unittest.TestCase):
         self.assertIn("同次演示", ai_editor_qc.prompt(claims, 24))
         for claim in claims:
             actual = [{"source": p["video"], "source_start": p["source_start"],
-                "source_duration": p["duration"], "target_duration": p["segment_s"]} for p in claim["ai_segment"]["span_parts"]]
+                "source_duration": p["duration"], "target_duration": p["segment_s"],
+                "segment": {"speed": p["video_speed"]},
+                "speed_materials": [{"type": "speed", "speed": p["video_speed"]}]}
+                for p in claim["ai_segment"]["span_parts"]]
             self.assertFalse(ai_editor_qc.validate_cut(claim, actual))
             actual[0]["target_duration"] += .01
             self.assertIn("CONTINUITY_QC_ALLOCATION_CHANGED", ai_editor_qc.validate_cut(claim, actual))
@@ -438,29 +621,14 @@ class DefaultExperimentGroupTests(unittest.TestCase):
         self.assertEqual(len(motion["observations"]), 2)
         self.assertEqual(motion["method"], "actual_frame_events_with_dense_refinement")
 
-    def test_same_source_can_use_the_existing_continuous_sentence_strategy(self):
+    def test_single_source_cannot_substitute_an_ordinary_continuity_review(self):
         self.plan["sentences"][1]["candidate_ids"] = ["shot1"]
         self.plan["rows"][1]["parts"][0]["shot_id"] = "shot1"
         self.plan["reviews"]["2"] = copy.deepcopy(self.plan["reviews"]["1"])
-        def reviewed(_manifest, context, _shot, _directory):
-            review = {"verdict": "matched", "same_product": True, "same_demonstration": True,
-                "same_selling_point": True, "semantic_continuity": True, "complete_action": True,
-                "result_preserved": True, "confidence": .9,
-                **{k: "actual source fact" for k in ("shared_point", "product_observation", "demonstration_observation", "observation", "reason")},
-                "demonstration_observation": "倒液吸收后纸巾按压巾体并提起，纸面干燥",
-                "complete_intervals_us": [context["window_us"]], "members": []}
-            for member in context["members"]:
-                review["members"].append({"index": member["index"], "verdict": "matched", "same_product": True,
-                    "basis": "editorial_fit", "phase": "observed phase", "observation": "actual frame",
-                    "reason": "supports sentence", "supported_point_ids": ["p1"], "time_sensitive": False,
-                    "scene_ids": [], "evidence_intervals_us": [{"start": member["start_us"], "end": member["end_us"]}]})
-            return {"schema": continuity.SCHEMA, "input": context, "review": review}
-        with patch.object(editor, "_place_absorb_experiment", return_value=False), \
-             patch.object(sentence_continuity, "review_group", side_effect=reviewed), \
-             patch.object(groups, "observe_pair", side_effect=AssertionError("unneeded pair review")):
-            result = editor._repair_reviewed_rows(self.manifest, self.analysis, self.plan, self.root, None, set())
-        self.assertTrue(result["ok"])
-        self.assertEqual(result["segments"][0]["continuity_group"]["schema"], continuity.SCHEMA)
+        with patch.object(groups, "observe_pair", side_effect=ValueError("wipe missing")) as observe:
+            with self.assertRaisesRegex(ValueError, "EXPERIMENT_GROUP_PENDING"):
+                groups.repair(self.manifest, self.analysis, self.plan, self.root, None)
+        self.assertTrue(any(call.args[2]["shot_id"] == call.args[3]["shot_id"] for call in observe.call_args_list))
 
     def test_qc_refill_rechecks_pair_but_freezes_accepted_neighbour_and_outside(self):
         matched = self.repair()

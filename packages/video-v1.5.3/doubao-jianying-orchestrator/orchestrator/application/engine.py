@@ -1426,9 +1426,16 @@ class OrchestrationEngine:
             start = span_start - (target - (span_end - span_start)) / 2.0
         return max(earliest, min(start, latest_end - target))
 
+    def _reviewed_experiment_phase(self, clip: Clip) -> bool:
+        from .. import ai_editor_contract
+        return ai_editor_contract.reviewed_experiment_phase(
+            self.m, getattr(clip, "continuity_group", None), getattr(clip, "playback_observation", None))
+
     def _task_speed_cap_for_clip(self, clip: Clip) -> float | None:
         """Unknown AI windows conservatively obey an explicit experiment cap."""
         from .. import ai_editor_contract
+        if self._reviewed_experiment_phase(clip):
+            return None
         raw = self._raw_segment_for(clip)
         if (ai_editor_contract.selection_mode(self.m) == "ai_editor" or raw.get("selection_mode") == "ai_editor"
                 or isinstance(raw.get("ai_selection"), dict)):
@@ -1514,7 +1521,8 @@ class OrchestrationEngine:
             preferred_speed=clip.preferred_speed,
             preferred_start_us=preferred_us,
             video_duration_us=int(round(float(clip.video_duration) * US)), fps=frm,
-            exact_source_timing=bool(phase) or paired)
+            exact_source_timing=bool(phase) or paired,
+            allow_experiment_phase_speedup=self._reviewed_experiment_phase(clip))
 
     def _clip_role(self, clip: Clip) -> str:
         """段落声明的视觉角色（决定变速范围；定案第 6 条）。
@@ -1993,6 +2001,7 @@ class OrchestrationEngine:
                 "material_duration_us": to_us(c.video_duration),
                 "video_speed": speed,
                 "speed_range": [speed_min, speed_max],
+                "allow_experiment_phase_speedup": self._reviewed_experiment_phase(c),
                 "evidence_start_us": None if span is None else to_us(span[0]),
                 "evidence_end_us": None if span is None else to_us(span[1]),
                 "actual_video_us": (int(row["duration_us"]) if row.get("duration_us")
@@ -2445,6 +2454,8 @@ class OrchestrationEngine:
                             "draft_path": None, "formal_delivery_allowed": False}
                 start = end = target = None
                 task_speed_cap = None
+            if playback.experiment_phase_window(clip.playback_observation) and not self._reviewed_experiment_phase(clip):
+                conflicts.append({"code": "EXPERIMENT_SPEED_AUTHORIZATION_MISSING", "index": index + 1})
             conflicts.extend(playback.conflicts(start_us=start, end_us=end, target_us=target,
                 speed=clip.video_speed, time_sensitive=clip.time_sensitive,
                 observation=clip.playback_observation, task_speed_cap=task_speed_cap,
@@ -2459,11 +2470,14 @@ class OrchestrationEngine:
 
     def write_draft(self, clips: list[Clip], bgm_path: Optional[str]) -> dict:
         from ..quality.continuity import runtime_errors
-        errors = runtime_errors(clips, self.m.get("segments", []))
+        from .. import ai_editor_contract
+        segments = self.m.get("segments", [])
+        errors = runtime_errors(clips, segments)
+        if not errors and ai_editor_contract.unverified_absorption_indices(self.m, segments):
+            errors.append("CONTINUITY_EXPERIMENT_THREE_STAGES_UNVERIFIED")
         if errors:
             return {"status": "TIMING_INFEASIBLE", "failure_code": "CONTINUITY_CONFLICT",
                     "issues": errors, "resume_stage": "semantic_match", "formal_delivery_allowed": False}
-        from .. import ai_editor_contract
         try:
             limit = ai_editor_contract.source_reuse_limit(self.m)
             if limit is not None and ai_editor_contract.selection_mode(self.m) != "legacy":
