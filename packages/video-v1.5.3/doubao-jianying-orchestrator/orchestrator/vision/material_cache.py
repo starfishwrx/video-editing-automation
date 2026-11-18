@@ -96,12 +96,15 @@ def refresh_external_analysis(analysis: dict, base_dir: Path, *, ffprobe, ffmpeg
         row["video"] = str(source)
         groups.setdefault(source, []).append(row)
     for source, rows in groups.items():
+        from . import evidence_store
         signature = contract.source_identity(source)
+        source_sha = evidence_store.identity(source)
         result = _refresh_duration({"analysis": {"shots": rows}}, source, signature,
                                    ffprobe=ffprobe, ffmpeg=ffmpeg)
         if result is None:
             raise ValueError(f"MATERIAL_GEOMETRY_REQUIRES_REANALYSIS:{source}")
         for row, updated in zip(rows, result["analysis"]["shots"]):
+            row["prepared_source_sha256"] = source_sha
             row.update({key: updated[key] for key in ("material_duration_us", "material_duration_source",
                                                        "material_duration_confidence")})
     return refreshed
@@ -115,7 +118,7 @@ def _restore_product_observations(manifest, result, prior):
     previous = {row.get("shot_id"): row for row in prior.get("shots") or [] if isinstance(row, dict)}
     exclusions = vision.logged_pool_exclusions(prior)
     warnings = {w.get("shot_id"): w for w in prior.get("warnings") or []
-                if isinstance(w, dict) and w.get("type") == vision.UNAUDITABLE_WARNING}
+                if isinstance(w, dict) and w.get("type") in vision.EXCLUSION_WARNINGS}
     for shot in result["shots"]:
         sid = shot["shot_id"]
         old = previous.get(sid)
@@ -149,14 +152,15 @@ def _prepare_source(source: Path, *, manifest: dict, base_dir: Path, root: Path,
     source_dir = root / "sources" / key
     path = source_dir / "prepared.json"
     from . import evidence_store
-    content = evidence_store.identity(source) if evidence_store.database() else None
+    content = evidence_store.identity(source)
+    shared = evidence_store.database()
     prep_policy = contract.digest({k:v for k,v in identity.items() if k != "source"})
-    lock = root / "locks" / contract.digest([content, prep_policy]) if content else path
+    lock = root / "locks" / contract.digest([content, prep_policy]) if shared else path
     with file_lock(lock, timeout=7200):
         prepared = _read(path)
-        if prepared and content and prepared.get("source_sha256") != content:
+        if prepared and prepared.get("source_sha256") != content:
             prepared = None
-        if content and not prepared:
+        if shared and not prepared:
             old_path = evidence_store.preparation(content, prep_policy)
             prior = _read(old_path) if old_path else None
             if (prior and prior.get("source_sha256") == content and prior.get("analysis", {}).get("ok")
@@ -173,9 +177,9 @@ def _prepare_source(source: Path, *, manifest: dict, base_dir: Path, root: Path,
                     and _present(p for row in prepared["analysis"].get("shots", [])
                                  for p in row.get("frame_paths", [])))
         if reusable and (not ffprobe or prepared.get("duration_contract") == DURATION_CONTRACT):
-            if content and prepared.get("source_sha256") == content:
+            if shared:
                 evidence_store.preparation(content, prep_policy, path)
-            return signature, prepared["analysis"], True
+            return signature, {**prepared["analysis"], "prepared_source_sha256": content}, True
         with media_slot(timeout=600, cold_source=True) as handle:
             if not handle.acquired:
                 raise TimeoutError("MEDIA_PREPARE_SLOT_TIMEOUT")
@@ -183,12 +187,12 @@ def _prepare_source(source: Path, *, manifest: dict, base_dir: Path, root: Path,
                 refreshed = _refresh_duration(prepared, source, signature, ffprobe=ffprobe, ffmpeg=ffmpeg)
                 if refreshed is not None:
                     _save(path, refreshed)
-                    return signature, refreshed["analysis"], True
+                    return signature, {**refreshed["analysis"], "prepared_source_sha256": content}, True
             result = shot_analyzer.analyze_manifest(
                 {**manifest, "material_sources": [str(source)], "shot_analysis": None},
                 base_dir, source_dir, ffmpeg=ffmpeg, ffprobe=ffprobe,
                 threshold=threshold, min_shot_s=min_shot_s)
-        if signature != contract.source_identity(source):
+        if signature != contract.source_identity(source) or evidence_store.identity(source) != content:
             raise ValueError("MATERIAL_SOURCE_CHANGED_DURING_PREPARATION")
         if ffprobe and any(row.get("material_duration_confidence") != "HIGH"
                            for row in result.get("shots", [])):
@@ -196,9 +200,9 @@ def _prepare_source(source: Path, *, manifest: dict, base_dir: Path, root: Path,
         if result.get("ok"):
             _save(path, {"identity": identity, "analysis": result, "source_sha256": content,
                          **({"duration_contract": DURATION_CONTRACT} if ffprobe else {})})
-            if content:
+            if shared:
                 evidence_store.preparation(content, prep_policy, path)
-    return signature, result, False
+    return signature, {**result, "prepared_source_sha256": content}, False
 
 
 def _prepare_sources(sources, prepare, workers):
@@ -245,6 +249,8 @@ def analyze_product(manifest: dict, base_dir: Path, report_dir: Path, *, ffmpeg=
             for number, original in enumerate(result.get("shots", []), 1):
                 row = copy.deepcopy(original)
                 row["shot_id"] = f"source_{index:03d}_shot_{number:03d}"
+                if result.get("prepared_source_sha256"):
+                    row["prepared_source_sha256"] = result["prepared_source_sha256"]
                 shots.append(row)
             issues.extend(result.get("issues", []))
             warnings.extend(result.get("warnings", []))
@@ -257,8 +263,8 @@ def analyze_product(manifest: dict, base_dir: Path, report_dir: Path, *, ffmpeg=
             _restore_product_observations(manifest, result, _read(report_dir / "shot_candidates.json"))
             result = vision_analyzer.enrich_with_vision(manifest, result, report_dir, ffmpeg=ffmpeg)
         excluded = vision_analyzer.logged_pool_exclusions(result)
-        complete = (bool(shots) and not issues and len(excluded) < len(result["shots"])
-                    and len(excluded) <= vision_analyzer._reask_max_shots(len(result["shots"])) and all(
+        complete = (not issues and not result.get("pending_items")
+                    and vision_analyzer.usable_pool(result["shots"], excluded) and all(
             str(row.get("shot_id")) in excluded or (
                 vision_analyzer._reusable_visual_observation(row)
                 and not vision_analyzer._needs_text_backfill(row)) for row in result["shots"]))
@@ -266,7 +272,10 @@ def analyze_product(manifest: dict, base_dir: Path, report_dir: Path, *, ffmpeg=
                                     "sources_hit": hits, "sources_prepared": len(inventory) - hits,
                                     "sources_skipped_not_video": sum(
                                         w.get("type") == "source_skipped_not_video" for w in warnings),
-                                    "shots_excluded_unauditable": sorted(excluded),
+                                    "shots_excluded_unauditable": sorted(w["shot_id"] for w in result["warnings"]
+                                        if w.get("type") == vision_analyzer.UNAUDITABLE_WARNING and w["shot_id"] in excluded),
+                                    "shots_excluded_invalid_format": sorted(w["shot_id"] for w in result["warnings"]
+                                        if w.get("type") == vision_analyzer.FORMAT_WARNING and w["shot_id"] in excluded),
                                     "ready": complete if vision else bool(shots) and not issues}
         _save(report_dir / "shot_candidates.json", result)
         if vision:
@@ -278,20 +287,33 @@ def analyze_product(manifest: dict, base_dir: Path, report_dir: Path, *, ffmpeg=
 
 def cached_frames(shot: dict, report_dir: Path, prepare: Callable[[Path], list[dict]], *,
                   protocol: str) -> list[dict]:
+    from . import evidence_store
     identity = {"source": contract.source_identity(shot["video"]),
                 "window": [shot["source_start"], shot["source_end"]], "protocol": protocol}
     directory = cache_root(report_dir) / "frames" / contract.digest(identity)
     path = directory / "frames.json"
     with file_lock(path, timeout=600):
-        frames = _read(path)
-        if isinstance(frames, list) and _present([f.get("path", "") for f in frames]):
-            return frames
-        directory.mkdir(parents=True, exist_ok=True)
-        frames = prepare(directory)
-        if identity["source"] != contract.source_identity(shot["video"]):
+        sha = evidence_store.identity(shot["video"])
+        shot["sampled_source_sha256"] = sha
+        record = _read(path)
+        if isinstance(record, dict) and record.get("source_sha256") == sha:
+            frames = record["frames"]
+            if _present([f.get("path", "") for f in frames]):
+                return frames
+        # Leave all older pixels and their model receipts available. Validate unsigned legacy
+        # frames against fresh pixels before retaining their exact paths and call budgets.
+        target = directory / sha if record is not None else directory
+        target.mkdir(parents=True, exist_ok=True)
+        frames = prepare(target)
+        if identity["source"] != contract.source_identity(shot["video"]) or sha != evidence_store.identity(shot["video"]):
             raise ValueError("MATERIAL_SOURCE_CHANGED_DURING_PREPARATION")
         if frames and _present([f["path"] for f in frames]):
-            _save(path, frames)
+            if isinstance(record, list) and len(record) == len(frames) and _present([f["path"] for f in record]):
+                if all(old.get("timestamp") == new.get("timestamp") and
+                       evidence_store.identity(old["path"]) == evidence_store.identity(new["path"])
+                       for old, new in zip(record, frames)):
+                    frames = record
+            _save(path, {"source_sha256": sha, "frames": frames})
         return frames
 
 

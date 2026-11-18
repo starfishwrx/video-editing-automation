@@ -31,6 +31,13 @@ _SCHEMA = 1
 _EMPTY_ERRORS = {"EMPTY_HTTP_BODY", "NO_CHOICES", "EMPTY_CONTENT"}
 _TRANSIENT_HTTP = {500, 502, 503, 504}
 _MIN_START_BUDGET = 0.02
+EXHAUSTED_FORMAT_ERRORS = {
+    f"vision format retry exhausted [{code}]": code for code in ("INVALID_JSON", "SCHEMA_INVALID")
+}
+
+
+class ResponseShapeError(ValueError):
+    """A validator's correction, containing only trusted schema or input field names."""
 
 
 @dataclass
@@ -49,6 +56,12 @@ class VisionCallResult:
     def legacy_tuple(self) -> tuple[bool, str]:
         if self.ok:
             return True, self.text
+        history = self.metadata.get("history") or []
+        exhausted = f"vision format retry exhausted [{self.error_code}]"
+        if (exhausted in EXHAUSTED_FORMAT_ERRORS and self.attempts == len(history) == 2
+                and all(isinstance(item, dict) and item.get("http_status") == 200 and item.get("error_code") in
+                        EXHAUSTED_FORMAT_ERRORS.values() for item in history)):
+            return False, exhausted
         # 旧调用方用 empty response 判断待恢复；保留它，但不再暴露响应正文。
         detail = "vision model returned an empty response" if self.error_code in _EMPTY_ERRORS else "vision request failed"
         return False, f"{detail} [{self.error_code}]"
@@ -139,19 +152,28 @@ def _final_json(text: str) -> Any:
     return value
 
 
-def _validate(text: str, validator: Callable[[Any], Any] | None) -> str:
+def _validation_error(text: str, validator: Callable[[Any], Any] | None) -> tuple[str, str]:
     try:
         parsed = _final_json(text)
         json.dumps(parsed, allow_nan=False)
+    except json.JSONDecodeError as exc:
+        return "INVALID_JSON", f"JSON 语法错误，检查第 {exc.lineno} 行第 {exc.colno} 列（{exc.msg}）。"
     except ValueError:
-        return "INVALID_JSON"
+        return "INVALID_JSON", "请返回单个完整的 JSON 结构，检查围栏、非有限数值和多余的顶层结果。"
     if validator is not None:
+        reason = ""
         try:
             if validator(parsed) is False:
-                return "SCHEMA_INVALID"
+                reason = "请核对原要求的字段、类型和编号。"
+        except ResponseShapeError as exc:
+            reason = str(exc)
         except Exception:
-            return "SCHEMA_INVALID"
-    return ""
+            reason = "字段校验失败，请核对原要求的字段、类型和编号。"
+        if reason:
+            if not parsed:
+                reason = "顶层为空，缺少本次识别的结果。" + reason
+            return "SCHEMA_INVALID", reason
+    return "", ""
 
 
 def _parse_response(raw: bytes, status: int, headers: dict[str, str],
@@ -210,8 +232,9 @@ def _parse_response(raw: bytes, status: int, headers: dict[str, str],
             elif is_blank(final):
                 result.error_code, result.retryable = "EMPTY_CONTENT", True
             else:
-                result.error_code = _validate(final, validator)
+                result.error_code, correction = _validation_error(final, validator)
                 if result.error_code:
+                    metadata["validation_error"] = correction
                     result.retryable = True
                 else:
                     result.ok, result.text = True, final
@@ -311,7 +334,8 @@ def _retry_body(body: dict, result: VisionCallResult) -> dict | None:
         messages = retry.get("messages")
         if not isinstance(messages, list):
             return None
-        messages.append({"role": "user", "content": "上次最终回答未通过 JSON 格式或结构校验。请严格按原要求重新给出完整合法 JSON；只输出最终 JSON，不要解释、代码围栏或中间草稿。"})
+        reason = result.metadata.get("validation_error", "")
+        messages.append({"role": "user", "content": f"上次最终回答未通过 JSON 格式或结构校验。{reason}请根据原输入重新给出完整合法 JSON，只输出最终 JSON。"})
         return retry
     return body
 
@@ -369,6 +393,12 @@ def post_chat(url: str, api_key: str, body: dict, output: Path, *, timeout: floa
                 ledger = {}
             except (ValueError, OSError):
                 return VisionCallResult(False, error_code="LEDGER_INVALID")
+            if (ledger and ledger.get("identity") != identity and getattr(validator, "expects_json_object", False)
+                    and body.get("response_format") == {"type": "json_object"}):
+                # A stored material call can predate explicit JSON mode. Its attempt budget still applies.
+                earlier_body = {key: value for key, value in body.items() if key != "response_format"}
+                if ledger.get("identity") == _identity(url, earlier_body):
+                    ledger["identity"] = identity
             if ledger.get("identity") != identity:
                 ledger = {"schema": _SCHEMA, "identity": identity, "attempts": 0,
                           "attempt_limit": attempt_limit, "history": [], "status": "pending"}
@@ -383,7 +413,7 @@ def post_chat(url: str, api_key: str, body: dict, output: Path, *, timeout: floa
             if ledger.get("status") == "success":
                 try:
                     text = output.read_text(encoding="utf-8")
-                    if _validate(text, validator):
+                    if _validation_error(text, validator)[0]:
                         raise ValueError("cached final content invalid")
                 except (OSError, ValueError):
                     return VisionCallResult(False, error_code="CACHED_OUTPUT_INVALID", attempts=attempts)
@@ -447,7 +477,8 @@ def post_chat(url: str, api_key: str, body: dict, output: Path, *, timeout: floa
                                 "file":output.name, "request_kind":evidence_store.request_kind.get(),
                                 "gap":evidence_store.request_gap.get(), "ok":result.ok,
                                 "http_status":result.http_status, "error":result.error_code,
-                                "tokens":result.usage, "request_id":result.request_id})
+                                "tokens":result.usage, "request_id":result.request_id,
+                                "validation_error": result.metadata.get("validation_error")})
                         result.attempts = int(ledger["attempts"])
                         result.metadata.update(inflight=inflight, started_at=request_started, finished_at=time.time())
                         result.metadata["slot_wait_s"] = float(getattr(handle, "waited", 0))

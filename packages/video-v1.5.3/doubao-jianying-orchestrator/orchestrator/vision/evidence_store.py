@@ -206,7 +206,16 @@ def index_analysis(manifest, analysis, origin):
         return
     version = protocol(manifest)
     from . import vision_analyzer as vision
+    failed_text = {w.get("shot_id") for w in analysis.get("warnings") or []
+                   if isinstance(w, dict) and w.get("type") == vision.FORMAT_WARNING and w.get("phase") == "text"}
     for shot in analysis.get("shots", []):
+        if shot.get("excluded_from_pool"):
+            if (shot.get("shot_id") not in failed_text or shot.get("text_pass") != "failed"
+                    or not shot.get("visual_observation_complete") or shot.get("action_complete") is not True):
+                continue
+            # Preserve the successful first pass. Text remains unknown on every future read.
+            shot = {**shot, "status": "ready_for_matching"}
+            shot.pop("analysis_error", None)
         path = shot.get("video")
         if not path or not shot.get("analysis_cache_key") or not shot.get("analysis_source"):
             continue
@@ -335,8 +344,25 @@ def portable_visual(manifest, shot):
             product IN (select value from json_each(?)) AND sha=? AND protocol=? AND start_us=? AND end_us=?""",
             (_read_scopes(manifest),identity(shot["video"]),visual_protocol(manifest),
              round(shot["source_start"]*1e6),round(shot["source_end"]*1e6))).fetchall()
-    # Divergent historical observations need another look.
-    return json.loads(rows[0][0]) if len(rows)==1 else None
+    if len(rows) == 1:
+        return json.loads(rows[0][0])
+    facts = [json.loads(row[0]) for row in rows]
+    basic = next((entry for entry in facts if entry.get("text_pass") == "failed"), None)
+    if basic is None:
+        return None
+    # OCR may finish later under a different protocol. Only merge identical first-pass facts.
+    text_fields = {"readable_claims", "pointed_claims", "text_agreed", "pointed_agreed", "text_pass",
+                   "ocr_protocol", "text_reads"}
+    def first_pass(entry):
+        result = {k: v for k, v in entry.items() if k not in text_fields}
+        if entry.get("text_pass") == "hires" and entry.get("pointed_agreed") and result.get("pointing_to_text") is True:
+            # The second read sets this flag on an agreed pointing result.
+            if "pointing_to_text" in basic:
+                result["pointing_to_text"] = basic["pointing_to_text"]
+            else:
+                result.pop("pointing_to_text")
+        return result
+    return basic if all(first_pass(entry) == first_pass(basic) for entry in facts) else None
 
 
 @optional()

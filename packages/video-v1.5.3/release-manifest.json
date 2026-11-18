@@ -6,7 +6,7 @@
     "machine-specific paths",
     "knowledge-base bodies"
   ],
-  "file_count": 483,
+  "file_count": 485,
   "files": [
     {
       "path": ".gitignore"
@@ -606,6 +606,9 @@
       "path": "doubao-jianying-orchestrator/orchestrator/vision/material_corrections.py"
     },
     {
+      "path": "doubao-jianying-orchestrator/orchestrator/vision/material_response.py"
+    },
+    {
       "path": "doubao-jianying-orchestrator/orchestrator/vision/phase_timing.py"
     },
     {
@@ -766,6 +769,9 @@
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_material_evidence.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/tests/test_material_format_recovery.py"
     },
     {
       "path": "doubao-jianying-orchestrator/tests/test_material_preparation_recovery.py"

@@ -97,9 +97,11 @@ strict-v1生效后，MUST按冻结的有效上限检查实际使用；局部补�
 
 ## 素材准备的有界恢复
 
-此节仅处理素材准备阶段缺少可审计描述、标签或置信度的回答，MUST NOT把所有视觉错误视为可排除项。单镜头额外重问由`JY_VISION_REASK_LIMIT`控制（默认2，范围0至2）；每产品可重问或排除的镜头总量MUST NOT超过`max(1, min(24, 镜头总数 // 100))`，已保留排除MUST计入总量。
+素材初识或包装读字的首答有 JSON 语法或字段错误时，同一调用 MAY 携带具体校验原因重试一次。两次 HTTP 200 均为上述错误，且输入身份可核对时，MAY 将该请求涉及的全部镜头标为未知，记录 `shot_skipped_invalid_format`。无可读文字须由合法的读字回答确认。
 
-重问后仍不可审计时，镜头MUST保持`pending_analysis`，同时记录`excluded_from_pool`及对应`shot_skipped_unauditable`警告，才MAY从候选池剔除，MUST NOT写成有效视觉缓存。任何就绪路径MUST保留至少一个非排除的有效镜头；禁用重问、超预算、传输或解析失败MUST继续阻断。被排除镜头MUST NOT用于选镜，最终当前草稿的独立QC与formal门禁不变。完整原因及恢复边界见[ADR 0012](../../../docs/adr/0012-bounded-material-recovery.md)。
+单镜头缺少可审计描述、标签或置信度时，额外重问由`JY_VISION_REASK_LIMIT`控制（默认2，范围0至2）。每产品可重问或排除的镜头总量MUST NOT超过`max(1, min(24, 镜头总数 // 100))`，已保留排除MUST计入总量。
+
+重问后仍不可审计的镜头记录 `shot_skipped_unauditable`。两种排除均要求镜头保持 `pending_analysis`、带有 `excluded_from_pool` 和对应警告。排除后 MUST 至少留下一个完成所需识别的可用镜头。禁用恢复、超预算、输入或传输错误仍阻断。选镜 MUST 使用有证据的候选。包装读字失败时，SQL 可保留已完成的画面初识，文字仍待核验。最终独立 QC 与 formal 门禁见 [ADR 0012](../../../docs/adr/0012-bounded-material-recovery.md)。
 
 ## 接口与下游
 
