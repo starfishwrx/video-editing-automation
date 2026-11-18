@@ -10,7 +10,8 @@
 ### L-20261118-absorption-output-frames 实验完整性须按实际输出帧判断
 
 - status: OPEN
-- hits: 1
+- hits: 2
+- 口播说“几秒吸完”时，核对可见吸收变化。用同一原片换两种口播，再去掉吸收画面做反例，可以发现把形容词当秒表的误拦。[回归用例](packages/video-v1.5.3/doubao-jianying-orchestrator/tests/test_experiment_events.py)
 - 高倍速时原片上存在的阶段可能落在播放采样点之间。先分配每阶段的最短可见时长，再到实际输出帧检查倒液、吸收和纸巾验证。
 
 ### L-20261118-material-format 素材响应格式错误会影响共享同一商品的任务

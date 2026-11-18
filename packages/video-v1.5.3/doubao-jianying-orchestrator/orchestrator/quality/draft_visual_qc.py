@@ -259,6 +259,7 @@ def _prompt(claims: list[dict[str, Any]], frame_count: int, *, force_ai: bool = 
     if force_ai or any(c.get("selection_mode") == "ai_editor" for c in claims):
         from orchestrator.quality import ai_editor_qc
         return ai_editor_qc.prompt(claims, frame_count)
+    from orchestrator.policy.playback import ABSORPTION_SPEED_GUIDANCE
     mapping = "\n".join(
         f"- S{local_index:02d}: claim={c['claim']}; expected_shot={c['shot_id']}; "
         f"selection={c['selection_mode']}; degraded={c['degraded']}; parts={c.get('slots', 1)}; "
@@ -268,6 +269,8 @@ def _prompt(claims: list[dict[str, Any]], frame_count: int, *, force_ai: bool = 
 
 每个脚本段的帧依次排列：parts=1 的段有 mid/end 两帧；parts>1 的段是一句话拆成几段连续动作画面，按顺序给每段中点 p1、p2…，再加最后一段的 end，要连起来当一个完整动作判断。共 {len(claims)} 段、{frame_count} 张图。S 编号只在本批次内使用，汇总时必须按批次映射回真实语义段编号。
 {mapping}
+
+{ABSORPTION_SPEED_GUIDANCE}
 
 对每个 S 判断画面与文案的匹配等级：
 1. DIRECT：画面直接出现文案要求的对象、动作或结果；

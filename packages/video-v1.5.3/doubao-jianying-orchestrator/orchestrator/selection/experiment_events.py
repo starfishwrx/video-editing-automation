@@ -6,42 +6,25 @@ from .experiment_retiming import validate_motion,windows,fit_group,boundary
 
 
 def allows_absorption_focus(text):
-    return bool(text) and not re.search(r'秒|瞬吸|瞬间|立刻|马上|一倒就|倒|整杯|毫升|ml', text, re.I)
+    """A visible pour tail suffices unless the narration also calls for the pour or its volume."""
+    return bool(text) and not re.search(r"倒|整[杯瓶]|毫升|ml|(?:全程|完整)计时", text.replace("一倒就", ""), re.I)
 
 
-def validate_focus(sentences,roles,observations,*,allow_phase_speedup=False,members=None):
-    """A partial pour supports qualitative absorption, never a complete/timed pour claim."""
-    if (not isinstance(observations,list) or len(observations)!=2 or not isinstance(observations[0],dict)
-            or not isinstance(observations[0].get('segments'),list)):
-        raise ValueError('EXPERIMENT_MOTION_MEMBER_COVERAGE')
-    role_map={r['sentence_id']:r['role'] for r in roles}
-    text=''.join(s.text for s in sentences if role_map[s.sentence_id]=='absorption')
-    focused=observations[0].get('coverage')=='absorption_focus'
-    timed_process_faster=any(s['kind'] in {'pour','absorb'} and s['can_speed'] for s in observations[0]['segments'])
-    if timed_process_faster and not allow_phase_speedup and re.search(r'秒|瞬吸|瞬间|立刻|马上|一倒就',text):
-        raise ValueError('EXPERIMENT_ABSORPTION_SPEED_INCOMPATIBLE_CLAIM')
-    if allow_phase_speedup:
-        # Compare a numeric elapsed-time promise to the observed source clock.
-        # The compressed duration on the edit timeline carries no such evidence.
-        from ..policy.demo_actions import _chinese_count_to_arabic
-        group_text = " ".join(sentence.text for sentence in sentences)
-        seconds = re.findall(r"(半|\d+(?:\.\d+)?|[零〇一二两三四五六七八九十百]+)\s*秒", group_text)
-        if seconds:
-            if not members or focused:
-                raise ValueError("EXPERIMENT_SOURCE_TIMING_REQUIRED")
-            observed = validate_motion(observations[0], members[0], allow_phase_speedup=True)
-            pour = next(s for s in observed["segments"] if s["kind"] == "pour")
-            absorb = [s for s in observed["segments"] if s["kind"] == "absorb"][-1]
-            frames = members[0]["samples"]["frames"]
-            # Flow can start between numbered samples. Use the previous sample
-            # as the earliest possible onset and the visibly completed state as the endpoint.
-            earliest = max(0, pour["first_frame"] - 1)
-            measured = frames[absorb["last_frame"]]["pts_us"] - frames[earliest]["pts_us"]
-            limits = [0.5 if token == "半" else float(_chinese_count_to_arabic(token)) for token in seconds]
-            if measured > min(limits) * 1_000_000:
-                raise ValueError("EXPERIMENT_SOURCE_TIMING_CLAIM_UNSUPPORTED")
-    if focused and not allows_absorption_focus(text):
-        raise ValueError('EXPERIMENT_ABSORPTION_FOCUS_INCOMPATIBLE_CLAIM')
+def validate_focus(sentences, roles, observations, *, allow_phase_speedup=False, members=None):
+    """Check that the observed pour coverage supports the absorption sentences."""
+    if (not isinstance(observations, list) or len(observations) != 2 or not isinstance(observations[0], dict)
+            or not isinstance(observations[0].get("segments"), list)):
+        raise ValueError("EXPERIMENT_MOTION_MEMBER_COVERAGE")
+    absorption = observations[0]
+    if members is not None:
+        if not members:
+            raise ValueError("EXPERIMENT_MOTION_MEMBER_COVERAGE")
+        validate_motion(absorption, members[0], allow_phase_speedup=allow_phase_speedup)
+    if absorption.get("coverage") == "absorption_focus":
+        role_map = {r["sentence_id"]: r["role"] for r in roles}
+        text = " ".join(s.text for s in sentences if role_map[s.sentence_id] == "absorption")
+        if not allows_absorption_focus(text):
+            raise ValueError("EXPERIMENT_ABSORPTION_FOCUS_INCOMPATIBLE_CLAIM")
 
 
 def compile_events(row,member):

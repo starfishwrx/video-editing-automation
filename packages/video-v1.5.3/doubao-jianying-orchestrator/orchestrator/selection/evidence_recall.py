@@ -30,13 +30,35 @@ def _equivalent_claim(text):
     return phrase
 
 
+def _needs_duration_evidence(text):
+    unit = r"(?:秒|分钟)"
+    absorption = r"(?<!呼)吸(?!引|气|烟)|下渗|渗进"
+    if not re.search(unit, text):
+        return False
+    if not re.search(absorption, text):
+        return True
+    # A separate timed action still needs evidence when the same sentence also describes absorption.
+    action = r"(?:按压|按住|揉搓|擦拭|提起|静置)"
+    for clause in re.split(r"[，,。；;！？!?、]|然后|接着|随后", text):
+        if re.search(unit, clause) and re.search(action, clause):
+            if not re.search(absorption, clause) or re.search(rf"{action}[^吸秒分后再]*{unit}", clause):
+                return True
+    return False
+
+
 def _gap(text, facts):
     # Conditions which commonly change the meaning of a demonstration.
     conditions = (("湿水", r"湿水|沾水|浸湿|打湿|遇水|浸水|湿润"),
                   ("揉搓", r"揉搓|揉过|揉完|揉捏"), ("展开", r"展开|摊开"),
-                  ("擦脸", r"擦脸|擦拭脸部"), ("计时", r"秒|分钟"))
-    return [name for name, pattern in conditions if re.search(pattern, text)
-            and not re.search(pattern, facts)]
+                  ("擦脸", r"擦脸|擦拭脸部"))
+    missing = [name for name, pattern in conditions if re.search(pattern, text)
+               and not re.search(pattern, facts)]
+    clock_request = re.sub(r"(?:不(?:需要|必|用)|无需)(?:看|用)?(?:秒表(?:计时)?|计时器?)", "", text)
+    if re.search(r"秒表|计时", clock_request) and not re.search(r"秒表|计时", facts):
+        missing.append("计时")
+    elif not re.search(r"秒|分钟", facts) and _needs_duration_evidence(clock_request):
+        missing.append("计时")
+    return missing
 
 
 def _paper_equivalent(text, observed):

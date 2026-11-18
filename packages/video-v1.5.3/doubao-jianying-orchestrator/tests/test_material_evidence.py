@@ -116,6 +116,24 @@ class EvidenceTest(unittest.TestCase):
         renamed.write_bytes(b"different-content")
         self.assertEqual(store.windows(self.manifest,shot),[])
 
+    def test_absorption_speed_copy_reuses_visible_change_without_a_clock(self):
+        text = "三秒就吸完"
+        observed = "蓝水流入巾体，积液减少并被吸收，表面没有游离液体。"
+        self.facts.update(claim_context=text, observation=observed, claims=[{"id": "old", "text": text}])
+        self.add()
+        hit, gap = evidence_recall.inspect(self.manifest, self.sentence(text), self.shot)
+        self.assertEqual(hit["supported_point_ids"], ["current"])
+        self.assertIsNone(gap)
+        for wording in ("几秒钟就能完全吸收", "吸收只用了几秒", "几秒后水就全被吸掉了",
+                        "只要几秒，水就全吸完了", "不用秒表计时也能看见它几秒吸完", "几秒就吸没了", "几秒就能吸透",
+                        "吸水几秒后纸巾按压", "吸收只用了几秒后再提起纸巾", "不到一分钟就吸完了"):
+            with self.subTest(wording=wording):
+                self.assertEqual(evidence_recall._gap(wording, observed), [])
+        for wording in ("三秒吸完后按压五秒", "按压五秒后提起", "用秒表计时三秒吸收",
+                        "吸水后，三秒钟按压", "三秒吸完，五秒后再按压"):
+            with self.subTest(wording=wording):
+                self.assertIn("计时", evidence_recall._gap(wording, observed))
+
     def test_failed_draft_scope_rule_and_damaged_proof(self):
         self.add()
         self.assertIsNone(evidence_recall.inspect(self.manifest,
