@@ -40,6 +40,19 @@ def groups(sentences, *, require_rewet=False):
             current.append(row)
 
 
+def validate_holds(manifest, sentences):
+    if "experiment_phase_hold_frames" not in manifest:
+        return
+    choices = manifest["experiment_phase_hold_frames"]
+    available = {str(group[0]["index"]) for group in groups(sentences)}
+    phases = {"pour", "absorb", "press", "lift", "result"}
+    if (not isinstance(choices, dict) or not set(choices) <= available
+            or any(not isinstance(holds, dict) or not holds or not set(holds) <= phases
+                   or any(type(value) is not int or value <= 0 for value in holds.values())
+                   for holds in choices.values())):
+        raise ValueError("EXPERIMENT_PHASE_HOLD_INVALID")
+
+
 def require_complete(sentences, segments):
     for members in groups(sentences):
         indices = [m["index"] for m in members]
@@ -248,9 +261,13 @@ def _context(manifest, analysis, members, narration_timing, pair, motion, shot_i
     fps = float(manifest.get("fps", 30))
     task_cap = None if allow_speedup else identity.playback.task_absorb_speed_cap(manifest)
     max_speed = None if allow_speedup else min(identity.playback.PROCESS_MAX, task_cap or identity.playback.PROCESS_MAX)
+    holds_by_group = manifest.get("experiment_phase_hold_frames", {})
+    if not isinstance(holds_by_group, dict):
+        raise ValueError("EXPERIMENT_PHASE_HOLD_INVALID")
+    holds = holds_by_group.get(str(members[0]["index"]))
     planned = experiment_events.fit_phase_windows(pair["members"], observations,
         rules["minimum_result_frames"], total, boundary,
-        fps=fps, max_speed=max_speed, allow_phase_speedup=allow_speedup)
+        fps=fps, max_speed=max_speed, allow_phase_speedup=allow_speedup, phase_hold_frames=holds)
     if allow_speedup:
         _align_short_phase_fragments(planned, [s['target_us'] for s in allocated], fps)
     sources = {}
@@ -294,6 +311,8 @@ def _context(manifest, analysis, members, narration_timing, pair, motion, shot_i
         "rules": identity.rules_identity(manifest), "pair_shot_ids": list(shot_ids), "sources": sources,
         "members": allocated, "fps": fps, "evidence_digest": identity.digest([pair, motion]),
         "source_selection": [p.get("source_selection") for p in planned]}
+    if holds:
+        context["phase_hold_frames"] = dict(holds)
     if task_cap is not None:
         context["task_absorb_speed_cap"] = task_cap
     if allow_speedup:

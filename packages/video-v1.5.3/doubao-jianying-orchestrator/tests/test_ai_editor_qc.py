@@ -37,6 +37,76 @@ class AIEditorQCIntegrationTests(unittest.TestCase):
         self.assertIn(1, visual_qc_contract.presentation_selection_errors([item], [row]))
         self.assertFalse(contract.presentation.promotion_motion("这是完整的材质标签。"))
 
+    def test_part_sheet_cites_only_actual_target_frames(self):
+        from orchestrator.quality import draft_visual_qc as final_qc
+        vision = mock.Mock()
+        def write_sheet(items, path, **kwargs):
+            self.assertEqual([i["label"] for i in items], ["BEFORE 1", "F01", "F02", "AFTER 1"])
+            path.write_bytes(b"sheet pixels")
+            return True
+        vision._write_sheet.side_effect = write_sheet
+        good = {"observed": "纸面被举起后清楚可辨", "frame_events": {"F01": "lift", "F02": "result"}}
+        def model(sheet, prompt, path, *, validator, **kwargs):
+            with self.assertRaisesRegex(ValueError, "FRAME_LABELS_REQUIRED"):
+                validator({**good, "frame_events": {"BEFORE 1": "press", "F02": "result"}})
+            validator(good)
+            return True, json.dumps(good, ensure_ascii=False)
+        vision._run_vision_with_retry.side_effect = model
+        with mock.patch.object(final_qc, "_remaining_request_timeout", return_value=2):
+            row = final_qc._inspect_experiment_part(vision, [{}, {}], [{}], [{}], self.root, 8, 2, "ffmpeg")
+        self.assertEqual(row["visible_experiment_events"], [
+            {"event": "lift", "frames": [1]}, {"event": "result", "frames": [2]}])
+
+    def test_part_review_only_resolves_citations_on_a_positive_complete_group(self):
+        phases = {7: ["pour", "absorb"], 8: ["press", "lift", "result"]}
+        group = {"input": {"members": [{"index": i, "parts": [{"experiment_phase": p} for p in names]}
+                                        for i, names in phases.items()]}}
+        items, rows = {}, {}
+        for i, names in phases.items():
+            items[i] = [{"suffix": f"p{part}_output{20 * part + offset}"} for part in range(1, len(names) + 1)
+                        for offset in (0, 18)]
+            rows[i] = {"visual_ok": True, "match_level": "DIRECT", "observed": "整组可见",
+                       "experiment_output_frames": ai_editor_qc.experiment_output_frames(items[i]),
+                       "visible_experiment_events": [{"event": name, "frames": [1]} for name in names]}
+        def inspect(i, part, images, before, after):
+            self.assertEqual(len(images), 2)
+            if i == 8 and part == 1:
+                self.assertEqual(before[-1], items[7][-1])
+                self.assertEqual(after[0], items[8][2])
+            return {"observed": "看见纸巾按压巾体、提起纸巾后展示纸面",
+                    "visible_experiment_events": [{"event": phases[i][part - 1], "frames": [1, 2]}]}
+        revised = ai_editor_qc.review_experiment_parts(group, rows, items, inspect)
+        self.assertEqual(revised[8]["group_sheet_events"], rows[8]["visible_experiment_events"])
+        self.assertEqual(revised[8]["visible_experiment_events"][-1]["frames"], [5, 6])
+        self.assertTrue(visual_qc_contract.group_events_visible(group, revised))
+        wrong = lambda *_: {"observed": "仅见静置", "visible_experiment_events": []}
+        self.assertFalse(visual_qc_contract.group_events_visible(group, ai_editor_qc.review_experiment_parts(
+            group, rows, items, wrong)))
+        rows[8]["match_level"] = "INSUFFICIENT_EVIDENCE"
+        self.assertEqual(ai_editor_qc.review_experiment_parts(group, rows, items, lambda *_: self.fail()), {})
+
+    def test_blind_experiment_frames_are_numbered_within_each_sentence(self):
+        group = {"schema": contract.continuity.EXPERIMENT_SCHEMA}
+        claims = [{"index": i, "ai_segment": {"continuity_group": group}} for i in (7, 8)]
+        frames = {7: [{"suffix": "p1_output11"}, {"suffix": "p2_output12"}],
+                  8: [{"suffix": "p1_output13"}, {"suffix": "p1_output14"}]}
+        legend = ai_editor_qc.experiment_sheet_legend(claims, frames)
+        self.assertIn("S01 P1 F01–F01，P2 F02–F02", legend)
+        self.assertIn("S02 P1 F01–F02", legend)
+        self.assertNotIn("pour", legend)
+        response = {"response_version": ai_editor_qc.RESPONSE_VERSION, "overall": "PASS", "segments": [
+            {"index": i, "match_level": "DIRECT", "visual_ok": True, "observed": "实际图片",
+             "reason": "与该句相符", "confidence": .9, "visible_experiment_events": [
+                 {"event": "press", "frames": [2 if i == 1 else 3]}]} for i in (1, 2)]}
+        errors = visual_qc_contract.response_errors(response, 2, expected_version=ai_editor_qc.RESPONSE_VERSION,
+                                                   experiment_indices={1: 2, 2: 2})
+        self.assertEqual(errors, ["S2:EXPERIMENT_EVENT_FRAME_OUTSIDE_SENTENCE"])
+        response["segments"][1]["visible_experiment_events"] = [
+            {"event": "lift", "frames": [1, 2]}, {"event": "result", "frames": [2]}]
+        errors = visual_qc_contract.response_errors(response, 2, expected_version=ai_editor_qc.RESPONSE_VERSION,
+                                                   experiment_indices={1: 2, 2: 2})
+        self.assertEqual(errors, ["S2:EXPERIMENT_EVENT_FRAME_ASSIGNED_TWICE"])
+
     def test_promotion_group_cannot_borrow_change_from_another_member(self):
         item = {"selection_mode": "ai_editor", "text": "今天直播间大促",
                 "continuity_group": {"input": {"members": [{"index": 1}, {"index": 2}]}}}

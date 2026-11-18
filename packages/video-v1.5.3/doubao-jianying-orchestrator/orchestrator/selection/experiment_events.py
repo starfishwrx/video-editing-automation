@@ -100,14 +100,20 @@ def compile_events(row,member):
     return validate_motion(observation,member)
 
 
-def fit_phase_windows(members,observations,result_frames,target_us,phase_boundary_us,*,fps=30,max_speed=3.0,allow_phase_speedup=False):
+def fit_phase_windows(members,observations,result_frames,target_us,phase_boundary_us,*,fps=30,max_speed=3.0,allow_phase_speedup=False,phase_hold_frames=None):
     """Select a continuous absorption-focused tail, then solve each clause's budget.
 
     This never omits an internal interval or claims to show the full pour.
     Actual observed phase boundaries remain unchanged; only the source in-point
     may advance inside the already observed pour, retaining >=400 ms of flow.
     """
-    windows(members,observations,result_frames,fps=fps,allow_phase_speedup=allow_phase_speedup)
+    if phase_hold_frames is not None and (
+            not allow_phase_speedup or not isinstance(phase_hold_frames, dict)
+            or any(key not in {"pour", "absorb", "press", "lift", "result"}
+                   or type(count) is not int or count < 1 for key, count in phase_hold_frames.items())):
+        raise ValueError("EXPERIMENT_PHASE_HOLD_INVALID")
+    window_options = dict(fps=fps, allow_phase_speedup=allow_phase_speedup, phase_hold_frames=phase_hold_frames)
+    windows(members,observations,result_frames,**window_options)
     observed=deepcopy(observations)
     b_selection=None
     if phase_boundary_us is not None and observed[1]['segments'][0]['kind']=='context':
@@ -117,7 +123,7 @@ def fit_phase_windows(members,observations,result_frames,target_us,phase_boundar
         b_row['effective_window_frame_ids'][0]=start
         b_selection={'coverage':'complete_verification','omitted_preparation_frame_ids':[initial,start-1],
             'selected_window_frame_ids':b_row['effective_window_frame_ids'],'internal_omissions':False}
-    clips=windows(members,observed,result_frames,fps=fps,allow_phase_speedup=allow_phase_speedup)
+    clips=windows(members,observed,result_frames,**window_options)
     if phase_boundary_us is None or observations[0].get('coverage')!='absorption_focus':
         plans=fit_group(clips,target_us,fps=fps,phase_boundary_us=phase_boundary_us,max_speed=max_speed,allow_phase_speedup=allow_phase_speedup)
         if b_selection:plans[1]['source_selection']=b_selection
@@ -138,7 +144,7 @@ def fit_phase_windows(members,observations,result_frames,target_us,phase_boundar
                 if head['last_frame']>start:
                     cropped['segments'].insert(1,{**head,'first_frame':start+1})
                 head.update(last_frame=start,can_speed=False)
-            clip=windows(members,[cropped,observed[1]],result_frames,fps=fps,allow_phase_speedup=allow_phase_speedup)[0]
+            clip=windows(members,[cropped,observed[1]],result_frames,**window_options)[0]
             try:a=fit_group([clip],phase_boundary_us,fps=fps,max_speed=cap,allow_phase_speedup=allow_phase_speedup)
             except ValueError:continue
             if cap is not None and max(p['speed'] for p in a[0]['retiming']['parts'])>cap:continue

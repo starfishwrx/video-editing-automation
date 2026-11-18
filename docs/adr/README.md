@@ -30,3 +30,5 @@
 首看定位、按口播核对动作结果及同源重切见 [ADR 0002](0002-ai-selection.md)。
 
 - [0014 跨批次保存素材观察](0014-material-evidence.md)
+
+- [0013 整单剪辑由编排 Skill 选择已有能力](0013-agent-editing-pilot.md)（实验分支试行）

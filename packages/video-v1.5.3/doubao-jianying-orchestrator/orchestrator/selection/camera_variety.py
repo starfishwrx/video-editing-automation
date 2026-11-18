@@ -440,6 +440,41 @@ def replacement(manifest, analysis, plan, timing, group, candidate, shot, direct
     return rows, trial["segments"], join
 
 
+def cut_window(segment):
+    return {"shot_id": segment.get("shot_id") or segment.get("temporary_shot_id"), "video": segment["video"],
+            "start_us": round(segment["source_start"] * 1e6),
+            "end_us": round(segment["source_end"] * 1e6)}
+
+
+def layout_identity(segments):
+    return contract.digest([[cut_window(cut) for cut in (s.get("span_parts") or [s])] for s in segments])
+
+
+def accept_suggestion(manifest, analysis, plan, timing, number, *, inventory_dir):
+    """Apply all members of a suggested cut to a copy of its reviewed layout."""
+    from copy import deepcopy
+    from . import directed_display
+
+    suggestions = plan.get("camera_variety", {}).get("suggestions", [])
+    if type(number) is not int or not 0 <= number < len(suggestions):
+        raise ValueError("CAMERA_SUGGESTION_UNAVAILABLE")
+    proposal = suggestions[number]
+    before = directed_display.match_reviewed(manifest, analysis, plan, timing, inventory_dir=inventory_dir)
+    if layout_identity(before["segments"]) != proposal["layout"]:
+        raise ValueError("CAMERA_SUGGESTION_LAYOUT_CHANGED")
+    changed = {row["index"]: row for row in proposal["reviewed_rows"]}
+    if list(changed) != proposal["lines"]:
+        raise ValueError("CAMERA_SUGGESTION_GROUP_CHANGED")
+    trial = deepcopy(plan)
+    trial["rows"] = [deepcopy(changed.get(row["index"], row)) for row in trial["rows"]]
+    if proposal["join"]:
+        trial.setdefault("camera_continuous_groups", []).append(deepcopy(proposal["join"]))
+    matched = directed_display.match_reviewed(manifest, analysis, trial, timing, inventory_dir=inventory_dir)
+    if [cut_window(matched["segments"][i - 1]) for i in changed] != proposal["candidate"]:
+        raise ValueError("CAMERA_SUGGESTION_WINDOW_CHANGED")
+    return trial, matched
+
+
 def refine(manifest, analysis, plan, timing, inventory, directory):
     """Optional last selection pass. Commit only a whole, verified camera change."""
     from . import ai_editor as editor
@@ -453,7 +488,10 @@ def refine(manifest, analysis, plan, timing, inventory, directory):
         for s in plan["sentences"]
     ):
         return
+    suggestions_only = manifest.get("camera_variety_mode") == "suggest"
     audit = {"changes": [], "retained": []}
+    if suggestions_only:
+        audit["suggestions"] = []
     media_cache = {}
 
     def media(shot, dest):
@@ -583,6 +621,16 @@ def refine(manifest, analysis, plan, timing, inventory, directory):
                         audit["retained"].append({"lines": indices, "reason": str(exc)})
                         continue
                     if result is not None:
+                        if suggestions_only:
+                            suggested = result[1]
+                            audit["suggestions"].append({
+                                "lines": indices, "kind": kind, "layout": layout_identity(segments),
+                                "reviewed_rows": [r for r in result[0] if r["index"] in indices],
+                                "join": result[2],
+                                "original": [cut_window(segments[i - 1]) for i in indices],
+                                "candidate": [cut_window(suggested[i - 1]) for i in indices],
+                            })
+                            break
                         plan["rows"], segments, join = result
                         if join:
                             plan.setdefault("camera_continuous_groups", []).append(join)

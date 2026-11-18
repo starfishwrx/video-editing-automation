@@ -350,6 +350,12 @@ def response_errors(model: dict[str, Any], expected_count: int, *, expected_vers
                 events = row.get("visible_experiment_events")
                 if not valid_experiment_observations(events):
                     errors.append(f"S{row['index']}:EXPERIMENT_EVENT_OBSERVATIONS_REQUIRED")
+                else:
+                    frames = [number for event in events for number in event["frames"]]
+                    if len(set(frames)) != len(frames):
+                        errors.append(f"S{row['index']}:EXPERIMENT_EVENT_FRAME_ASSIGNED_TWICE")
+                    if isinstance(experiment_indices, dict) and any(n > experiment_indices[row["index"]] for n in frames):
+                        errors.append(f"S{row['index']}:EXPERIMENT_EVENT_FRAME_OUTSIDE_SENTENCE")
     if sorted(indices) != list(range(1, expected_count + 1)):
         errors.append("BATCH_INDEX_COVERAGE_INVALID")
     return sorted(set(errors))

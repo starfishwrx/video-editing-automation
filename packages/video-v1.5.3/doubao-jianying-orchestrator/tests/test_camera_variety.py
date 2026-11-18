@@ -11,6 +11,24 @@ from orchestrator.selection import ai_editor, camera_variety as camera
 
 
 class CameraVarietyTests(unittest.TestCase):
+    def test_suggestions_bind_the_original_layout_and_apply_members_together(self):
+        from orchestrator.selection import directed_display
+        old = [{"shot_id": "a", "video": "same", "source_start": x, "source_end": x + 1} for x in (0, 1)]
+        new = [dict(cut, video="candidate", shot_id="b") for cut in old]
+        rows = [{"index": i, "parts": ["a"]} for i in (1, 2)]
+        proposal = {"layout": camera.layout_identity(old), "candidate": [camera.cut_window(cut) for cut in new],
+                    "lines": [1, 2], "reviewed_rows": [dict(row, parts=["b"]) for row in rows],
+                    "join": {"indices": [1, 2]}}
+        plan = {"rows": rows, "camera_variety": {"suggestions": [proposal]}}
+        with patch.object(directed_display, "match_reviewed", side_effect=[{"segments": old}, {"segments": new}]):
+            accepted, _ = camera.accept_suggestion({}, {}, plan, {}, 0, inventory_dir=Path("."))
+        self.assertEqual([row["parts"] for row in accepted["rows"]], [["b"], ["b"]])
+        self.assertEqual(accepted["camera_continuous_groups"], [{"indices": [1, 2]}])
+        self.assertEqual([row["parts"] for row in plan["rows"]], [["a"], ["a"]])
+        with patch.object(directed_display, "match_reviewed", return_value={"segments": new}), self.assertRaisesRegex(
+                ValueError, "CAMERA_SUGGESTION_LAYOUT_CHANGED"):
+            camera.accept_suggestion({}, {}, plan, {}, 0, inventory_dir=Path("."))
+
     def test_same_take_and_new_fact(self):
         def segment(video, start, end):
             return dict(video=video, source_start=start, source_end=end)

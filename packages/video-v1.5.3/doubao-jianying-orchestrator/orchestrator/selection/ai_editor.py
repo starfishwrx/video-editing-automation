@@ -683,7 +683,7 @@ shot_value_request非空时，可额外返回shot_value_observation，逐项评�
 例如揉搓不掉絮要先捏揉再重新展开检查表面；仅湿水拉伸或揉成团均不支持。声称擦脸须看到脸部接触。
 对每项支持的卖点附上 claim_checks=[{"id":"p1","object_matches":true,"action_seen":true,"result_seen":true,
 "action_us":1000000,"result_us":1200000,"result_observed":"直接可见的结果或特征"}]。
-时间使用画面上的原片微秒，填写能看清这次关键动作和结果的两个时刻。静态规格/标称填 kind="readable_label"，只需实际读到对应文字并记录展示时间；无需动作。静态可填同一时刻。
+时间使用附图上能看清关键动作、结果的实际原片帧时刻。scene_us 的右端是排他边界，不能充当结果帧时间。静态规格/标称只在切片中确实读到对应原字时采用。顶层 basis 和该条 claim_checks 的 kind 均填 "readable_label"，result_observed 逐字记下所见标识及其在包身或外箱的位置，action_seen 可为 false，两锚点可用同一清晰时刻。
 动作或结果缺失的卖点从 supported_point_ids 删去。没有支持项时返回 mismatch 或 uncertain。"""
     from . import evidence_recall
     requirement = evidence_recall.appearance_requirement(manifest, sentence, shot)
@@ -754,6 +754,10 @@ shot_value_request非空时，可额外返回shot_value_observation，逐项评�
                     continue
                 a, b = fact.get("action_us"), fact.get("result_us")
                 static = fact.get("kind") == "readable_label" and result.get("basis") == "readable_label"
+                if static and a is None and type(b) is int:
+                    # NOTE: A static label has one observed reading time and no action onset.
+                    a = b
+                    fact = {**fact, "action_us": b}
                 if (fact.get("object_matches") is True and (static or fact.get("action_seen") is True)
                         and fact.get("result_seen") is True
                         and isinstance(fact.get("result_observed"), str) and fact["result_observed"].strip()
@@ -1873,7 +1877,8 @@ suitable=裁切内是一段完整、未拦腰切断关键动作/结果的可用�
     }
 
 
-def _review_proposed_window(manifest, plan, directory, sentence, shot, window, *, attempt_metadata=None):
+def _review_proposed_window(manifest, plan, directory, sentence, shot, window, *,
+                            attempt_metadata=None, require_current_sentence=False):
     """Spend the persistent sentence budget only on new, actual window pixels."""
     index = sentence["index"]
     limit = shot.get("material_duration_us")
@@ -1889,7 +1894,8 @@ def _review_proposed_window(manifest, plan, directory, sentence, shot, window, *
                   and reviewed_bounds['start'] <= window[0] < window[1] <= reviewed_bounds['end'])
     parent = None if sentence.get('action_continuation') else (matched_parent if sentence.get('kind') == 'selling_point'
         or (matched_parent or {}).get('presentation_observation') or generic_crop else None)
-    if parent and sentence.get('kind') in {'hook','product_intro'} and not parent.get('presentation_observation'):
+    if parent and sentence.get('kind') in {'hook','product_intro'} and (
+            not parent.get('presentation_observation') or (require_current_sentence and parent.get('sentence_index') != index)):
         sentence={**sentence,'require_sentence_fit':True}
     identity = [
         "placement" if parent else "semantic", sentence, shot["shot_id"], source, window,
@@ -3960,10 +3966,11 @@ technical_option是按本句完整配音求出的实际可行窗口；分配多�
             sentence_continuity.clear_conflicting_presentations(manifest, plan)
             _prefer_presentation_groups(manifest, analysis, plan, directory, narration_timing)
             _repair_reviewed_rows(manifest, analysis, plan, directory, narration_timing, duplicate_expanded)
-            _mix_repeated_displays(manifest, analysis, plan, narration_timing, current_inventory)
-            _place_hook_neighbors(manifest, analysis, plan, directory, narration_timing)
-            _vary_repeated_actions(manifest, analysis, plan, narration_timing, current_inventory,directory=directory)
-            _vary_shared_comfort(manifest, analysis, plan, narration_timing, current_inventory)
+            if manifest.get("camera_variety_mode") != "suggest":
+                _mix_repeated_displays(manifest, analysis, plan, narration_timing, current_inventory)
+                _place_hook_neighbors(manifest, analysis, plan, directory, narration_timing)
+                _vary_repeated_actions(manifest, analysis, plan, narration_timing, current_inventory,directory=directory)
+                _vary_shared_comfort(manifest, analysis, plan, narration_timing, current_inventory)
             from . import camera_variety
             camera_variety.refine(manifest, analysis, plan, narration_timing, current_inventory, directory)
             plan["ok"] = True
@@ -4115,15 +4122,26 @@ def _display_candidate_ids(sentences):
     return list(dict.fromkeys(first + [sid for s in sentences for sid in s.get('candidate_ids', [])[ROUND_SIZE:]]))
 
 
+def empty_plan():
+    return {"schema": contract.PLAN_SCHEMA, "policy_version": contract.POLICY_VERSION,
+            "presentation_policy_version": contract.presentation.VERSION,
+            "playback_policy_version": contract.playback.VERSION,
+            "reviews": {}, "display_reviews": [], "coverage": {}, "issues": []}
+
+
+def plan_identity(manifest, analysis, narration_timing):
+    return {"model": _editor_model(), "manifest_sha256": contract.digest(manifest),
+            "timing_sha256": contract.digest(narration_timing), "analysis_sha256": _analysis_digest(analysis),
+            "presentation_policy_version": contract.presentation.VERSION, "policy_version": contract.POLICY_VERSION,
+            "editorial_rules": contract.rules_identity(manifest)}
+
+
 def prepare(manifest: dict, analysis: dict, report_dir: Path, *, narration_timing: dict | None = None) -> dict:
     contract.playback.task_absorb_speed_cap(manifest)
     contract.max_source_reuse(manifest)
     directory = report_dir / "ai_editor"
     directory.mkdir(parents=True, exist_ok=True)
-    plan: dict = {"schema": contract.PLAN_SCHEMA, "policy_version": contract.POLICY_VERSION,
-                  "presentation_policy_version": contract.presentation.VERSION,
-                  "playback_policy_version": contract.playback.VERSION,
-                  "reviews": {}, "display_reviews": [], "coverage": {}, "issues": []}
+    plan = empty_plan()
     try:
         from ..vision.vision_analyzer import needs_vision
         shots = [s for s in analysis.get("shots", []) if isinstance(s, dict)
@@ -4131,13 +4149,7 @@ def prepare(manifest: dict, analysis: dict, report_dir: Path, *, narration_timin
         if not shots or len({s["shot_id"] for s in shots}) != len(shots):
             raise ValueError("AI_EDITOR_NO_UNIQUE_CANDIDATES")
         by_id = {str(s["shot_id"]): s for s in shots}
-        editor_model = _editor_model()
-        plan["identity"] = {"model": editor_model,
-            "manifest_sha256": contract.digest(manifest), "timing_sha256": contract.digest(narration_timing),
-            "analysis_sha256": _analysis_digest(analysis),
-            "presentation_policy_version": contract.presentation.VERSION,
-            "policy_version": contract.POLICY_VERSION,
-            "editorial_rules": contract.rules_identity(manifest)}
+        plan["identity"] = plan_identity(manifest, analysis, narration_timing)
         # Output naming and recovery controls do not alter observed pixels.
         logical_input = {k: v for k, v in manifest.items() if k not in {
             "draft_name", "force_overwrite", "parent_run_id", "recovery_stage", "shot_analysis_file", "_selection_attempt",
@@ -4204,6 +4216,10 @@ def prepare(manifest: dict, analysis: dict, report_dir: Path, *, narration_timin
         _save(directory / "plan.json", plan)
         if not plan.get("sentences"):
             plan["sentences"] = _inventory(manifest, shots, directory)
+        experiment_groups.validate_holds(manifest, plan["sentences"])
+        if manifest.get("camera_variety_mode") == "suggest":
+            from . import directed_display
+            directed_display._freeze_intake(manifest, analysis, narration_timing, directory, classified=plan["sentences"])
         original = timing_contract.split_sentences(manifest)
         rejected = qc_rejected_shots(manifest)
         for sentence in plan["sentences"]:

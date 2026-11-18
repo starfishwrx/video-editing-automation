@@ -6,7 +6,7 @@
     "machine-specific paths",
     "knowledge-base bodies"
   ],
-  "file_count": 487,
+  "file_count": 489,
   "files": [
     {
       "path": ".gitignore"
@@ -663,6 +663,9 @@
       "path": "doubao-jianying-orchestrator/prompts/semantic_analysis.md"
     },
     {
+      "path": "doubao-jianying-orchestrator/references/agent_cut.md"
+    },
+    {
       "path": "doubao-jianying-orchestrator/references/draft_delivery_and_recovery.md"
     },
     {
@@ -679,6 +682,9 @@
     },
     {
       "path": "doubao-jianying-orchestrator/references/validated_fix_to_release.md"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/references/windows_pipeline.md"
     },
     {
       "path": "doubao-jianying-orchestrator/run.py"

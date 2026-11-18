@@ -27,6 +27,73 @@ def experiment_output_frames(items):
     return frames
 
 
+def experiment_sheet_legend(claims, claim_frames):
+    lines = []
+    for local, claim in enumerate(claims, 1):
+        if not contract.continuity.is_experiment((claim.get("ai_segment") or {}).get("continuity_group")):
+            continue
+        parts = {}
+        for number, frame in enumerate(experiment_output_frames(claim_frames[claim["index"]]), 1):
+            if frame is not None:
+                parts.setdefault(frame[0], []).append(number)
+        ranges = [f"P{part} F{numbers[0]:02d}–F{numbers[-1]:02d}" for part, numbers in parts.items()]
+        lines.append(f"S{local:02d} " + "，".join(ranges))
+    if not lines:
+        return ""
+    return "\n附图索引。每句从 F01 重新编号，P 是时间线上的物理片段。\n" + "\n".join(lines)
+
+
+def review_experiment_parts(group, rows, frame_items, inspect_part):
+    """Resolve inconsistent citations after a positive whole-group observation."""
+    members = [m["index"] for m in group["input"]["members"]]
+    expected = ["pour", "absorb", "press", "lift", "result"]
+    events = []
+    for i in members:
+        row = rows.get(i) or {}
+        entries = row.get("visible_experiment_events")
+        if (row.get("visual_ok") is not True or row.get("match_level") != "DIRECT"
+                or not visual_qc_contract.valid_experiment_observations(entries)):
+            return {}
+        for entry in entries:
+            if not events or events[-1] != entry["event"]:
+                events.append(entry["event"])
+    if events != expected or visual_qc_contract.group_events_visible(group, rows):
+        return {}
+    timeline = [item for i in members for item in frame_items[i]]
+    offset = 0
+    updated = {}
+    for i in members:
+        samples = frame_items[i]
+        by_part = {}
+        for number, frame in enumerate(experiment_output_frames(samples), 1):
+            if frame is None:
+                return {}
+            by_part.setdefault(frame[0], []).append((number, samples[number - 1]))
+        records, observed, citations = [], [], []
+        for part, items in by_part.items():
+            # NOTE: The reviewer receives only ordered images, with no proposed phase or claim.
+            start = offset + items[0][0] - 1
+            end = offset + items[-1][0]
+            review = inspect_part(i, part, [item for _, item in items],
+                                  timeline[max(0, start - 3):start], timeline[end:end + 3])
+            if not review:
+                return {}
+            records.append(review)
+            observed.append(review["observed"])
+            for event in review["visible_experiment_events"]:
+                numbers = [items[n - 1][0] for n in event["frames"]]
+                if citations and citations[-1]["event"] == event["event"]:
+                    citations[-1]["frames"].extend(numbers)
+                else:
+                    citations.append({"event": event["event"], "frames": numbers})
+        offset += len(samples)
+        updated[i] = {**rows[i], "group_sheet_observed": rows[i]["observed"],
+                      "group_sheet_events": rows[i]["visible_experiment_events"],
+                      "part_observations": records, "visible_experiment_events": citations,
+                      "observed": " ".join(observed)}
+    return updated
+
+
 def _action_phases(claim):
     item=claim.get('ai_segment') or {}
     parts=item.get('span_parts') if item.get('multi_shot') else [item]
@@ -116,8 +183,8 @@ def prompt(claims: list[dict], frame_count: int) -> str:
                     "pour（液体倒下）、absorb（液体吸收）、press（纸巾接触或擦拭）、lift（提起纸巾）、"
                     "result（看清提起后的纸面是否沾液）。每个事件写成对象，例如"
                     '{"event":"pour","frames":[2,3]}，frames 填本句附图上实际支持该事件的 F 编号。'
-                    "倒液要有两帧清楚看到液体正在倒下，吸收要有不同帧看到液体状态发生变化。"
-                    "纸巾提起后，标出纸面结果仍清晰的最早与最晚 F 编号。"
+                    "每项选两三张能明确区分该事件的本句帧。每个 F 只归一个阶段，动作交界处看不清的图可跳过；没有证据填空。不要把整行图片的顺序号当作 F 编号。倒液要有两帧清楚看到液体正在倒下，吸收要有不同帧看到液体状态发生变化。"
+                    "纸巾离开巾体是提起。等纸面朝镜头清晰展示后，标出结果仍清晰的最早与最晚 F 编号。"
                     "单张倒液图、举杯准备、已湿的静止巾面不能证明倒液过程。没看到写空数组，observed写具体所见。")
     event_field = '"visible_experiment_events":[],' if approved else ""
     return policy + f"""
