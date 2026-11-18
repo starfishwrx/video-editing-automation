@@ -1,9 +1,21 @@
 ---
 name: doubao-jianying-orchestrator
-description: Build and recover editable Jianying drafts from task manifests through the Windows video pipeline, with evidence-based shot matching, narration timing, independent visual QC and delivery checks. Use with the sibling jianying-editor skill for video automation.
+description: 接收正常剪辑单、对已有剪映稿的定向返工及中断恢复。按业务反馈选用现有 Windows 工具，从实际落稿画面核验结果。
 ---
 
 # Doubao/Jianying orchestrator v1.6.0
+
+## 接单与返工试验
+
+先确认运营指的是哪份稿、哪句原文，希望观众在画面里看见什么。实验只在另存的草稿和独立工作目录中运行，原始素材与已有音轨作为输入。
+
+- **正常建稿。** 有确认过的商品、文案、素材清单和制作要求时，委托现有 Windows 流水线建稿，使用流水线的时间计算、写稿和独立成稿质检。
+- **改已有稿。** 从指定的父稿、成功匹配报告和真实音轨定位目标句。先看当前实际切片，再查本单允许的原片及有来源的观察。根据反馈选择同源重切、换源或指出缺失的画面。提交候选编号、原片起止秒、能支持的画面和还缺什么。若一句与邻句构成连续动作，按关联组复核。由选镜工具重验提议并生成新的匹配凭据，用已核验的配音恢复写稿。在实际新稿中检查目标与组外镜头、音轨、字幕和音乐，并送独立质检。相关入口见[局部补选和写稿恢复](references/runtime_contract.md)与[单句展示预览](../../../docs/shot-selling-point-value.md)。
+- **继续中断单。** 读取当前任务最后一次有效的阶段记录。已有合法匹配和冻结音频时从写稿恢复，已有草稿时复核该稿或续做尚未完成的验收。保留原尝试的付费请求和重试记录。
+
+交回可编辑新稿时，列出实际改了哪句、哪几秒、独立质检结果以及需要人看的地方。遇到无解的句子，给出已查素材、缺少的动作或结果，以及原音轨允许的时长。试单质量与人工修剪时间分别记录。
+
+收到“动作重复、卖点没对上”这类意见时，先连看目标句和前后两镜，记下观众已看过的动作。找能在原句时长内看清的一项具体表现，说明原片哪一刻能看到结果，再把新镜头接回原片试听。普通展示句可以通过[实验单句适配器](orchestrator/selection/directed_display.py)提交。相连动作和具体卖点句沿用各自的选镜与复核流程。
 
 规范性关键词见[要求用语与适用范围](references/requirement_levels.md)。MUST/MUST NOT用于既有硬约束，SHOULD用于方法偏好，MAY用于可选行为；默认参数及legacy历史规则保持各自范围。
 
