@@ -43,6 +43,23 @@ class ExperimentRetimingTests(unittest.TestCase):
 
     def clips(self):return windows(self.evidence['members'],self.motion['observations'],15)
 
+    def test_editor_can_hold_a_phase_without_losing_other_phases(self):
+        from orchestrator.selection import experiment_events, experiment_groups
+        members = self.evidence["members"]
+        observations = self.motion["observations"]
+        fits = experiment_events.fit_phase_windows(members, observations, 15, 4_000_000, 2_000_000,
+            fps=30, max_speed=None, allow_phase_speedup=True, phase_hold_frames={"result": 18})
+        parts = [p for fit in fits for p in fit["retiming"]["parts"]]
+        self.assertEqual([p["phase"] for p in parts], ["pour", "absorb", "press", "lift", "result"])
+        self.assertGreaterEqual(parts[-1]["segment_us"], 600_000)
+        self.assertEqual(sum(p["segment_us"] for p in parts), 4_000_000)
+        with self.assertRaisesRegex(ValueError, "TOO_SHORT|CONFLICT"):
+            experiment_events.fit_phase_windows(members, observations, 15, 4_000_000, 2_000_000,
+                fps=30, max_speed=None, allow_phase_speedup=True, phase_hold_frames={"result": 900})
+        with self.assertRaisesRegex(ValueError, "PHASE_HOLD_INVALID"):
+            experiment_groups.validate_holds({"experiment_phase_hold_frames": {"8": {"pour": 12}}},
+                                             [{"index": 7, "text": "吸收能力强", "experiment_role": "absorption"}])
+
     def test_shared_budget_prefers_two_and_uses_three_only_when_needed(self):
         for target,maximum in [(6_000_000,2),(4_000_000,3)]:
             plans=fit_group(self.clips(),target)

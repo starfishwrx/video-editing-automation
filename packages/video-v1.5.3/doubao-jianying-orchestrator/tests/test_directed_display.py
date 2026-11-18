@@ -85,3 +85,77 @@ class DirectedDisplayTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "SOURCE_NOT_CONFIRMED"):
             self.apply()
         self.review_cut.assert_not_called()
+
+
+class WholeOrderDecisionTests(unittest.TestCase):
+    def setUp(self):
+        import wave
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.directory = Path(tmp.name)
+        self.audio = self.directory / "line.wav"
+        with wave.open(str(self.audio), "wb") as stream:
+            stream.setparams((1, 2, 8000, 8000, "NONE", "NONE"))
+            stream.writeframes(bytes(16000))
+        self.source = str(self.directory / "subject.mp4")
+        text = "包装标有四片"
+        self.manifest = {"category": "weipin", "material_sources": [self.source], "segments": [{"text": text}]}
+        self.analysis = {"shots": [{"shot_id": "new", "video": self.source, "status": "ready_for_matching",
+                                   "source_start": 0, "source_end": 4}]}
+        self.timing = {"rows": [{"tts_path": str(self.audio), "audio_duration_us": 1_000_000,
+                                "timing_certainty": "audio", "text": text,
+                                "key": ai_editor.timing_contract.sentence_key(self.manifest["segments"][0], 1)}]}
+        self.sentence = {"text": text, "index": 1, "kind": "selling_point", "selling_points": [{"id": "p1", "text": "四片"}]}
+        self.inventory = self.enterContext(patch.object(ai_editor, "_inventory", return_value=[self.sentence]))
+        self.enterContext(patch("orchestrator.audio.narration_probe.probe_audio", return_value={"duration_us": 1_000_000}))
+        self.enterContext(patch("orchestrator.runtime.platform_env.find_ffmpeg", return_value=("ffmpeg", "ffprobe")))
+        directed_display.freeze_intake(self.manifest, self.analysis, self.timing, self.directory)
+        self.plan = {"schema": ai_editor.contract.PLAN_SCHEMA, "identity": ai_editor.plan_identity(
+            self.manifest, self.analysis, self.timing), "sentences": [deepcopy(self.sentence)],
+            "rows": [{"index": 1}], "reviews": {}, "display_reviews": []}
+
+    def window(self):
+        return directed_display.review_window(self.manifest, self.analysis, self.plan, self.timing,
+            index=1, shot_id="new", start_us=0, directory=self.directory, inventory_dir=self.directory)
+
+    def match(self):
+        return directed_display.match_reviewed(self.manifest, self.analysis, self.plan, self.timing,
+                                              inventory_dir=self.directory)
+
+    def test_fresh_candidate_registers_observation_and_preserves_exact_window(self):
+        def observe(manifest, plan, *args, require_current_sentence):
+            self.assertTrue(require_current_sentence)
+            plan["window_reviews"] = {"verified": {"verdict": "matched", "shot_id": "new"}}
+            return "verified"
+        with patch.object(ai_editor, "_review_proposed_window", side_effect=observe):
+            self.plan["rows"] = [self.window()]
+        self.assertEqual(self.plan["reviews"]["1"], [self.plan["window_reviews"]["verified"]])
+        actual = {"video": self.source, "shot_id": "new", "ai_selection": {"window_us": {"start": 0, "end": 1_000_000}}}
+        with patch.object(ai_editor, "_assemble", return_value={"ok": True, "segments": [actual]}):
+            self.assertTrue(self.match()["ok"])
+            actual["ai_selection"]["window_us"]["start"] = 1
+            with self.assertRaisesRegex(ValueError, "DIRECTED_WINDOW_CHANGED"):
+                self.match()
+        self.inventory.assert_called_once()
+
+    def test_multi_claim_ids_cannot_be_reassigned(self):
+        points = [{"id": "p1", "text": "五层"}, {"id": "p2", "text": "柔软"}]
+        first = [{**self.sentence, "selling_points": points}]
+        swapped = [{**self.sentence, "selling_points": [
+            {"id": "p2", "text": "五层"}, {"id": "p1", "text": "柔软"}]}]
+        self.assertNotEqual(directed_display._sentence_contract(first), directed_display._sentence_contract(swapped))
+        self.assertEqual(directed_display.start_plan(self.manifest, self.analysis, self.timing, self.directory)["rows"],
+                         [{"index": 1, "parts": []}])
+
+    def test_same_duration_audio_swap_and_semantic_downgrade_fail_before_review(self):
+        self.plan["sentences"][0].update(kind="product_intro", selling_points=[])
+        with self.assertRaisesRegex(ValueError, "SENTENCE_CONTRACT_CHANGED"):
+            self.match()
+        self.plan["sentences"] = [self.sentence]
+        with self.audio.open("r+b") as stream:
+            stream.seek(-1, 2)
+            stream.write(bytes([1]))
+        with patch.object(ai_editor, "_review_proposed_window") as pixels:
+            with self.assertRaisesRegex(ValueError, "DIRECTED_INTAKE_CHANGED"):
+                self.window()
+            pixels.assert_not_called()

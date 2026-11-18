@@ -27,6 +27,22 @@ def experiment_output_frames(items):
     return frames
 
 
+def experiment_sheet_legend(claims, claim_frames):
+    lines = []
+    for local, claim in enumerate(claims, 1):
+        if not contract.continuity.is_experiment((claim.get("ai_segment") or {}).get("continuity_group")):
+            continue
+        parts = {}
+        for number, frame in enumerate(experiment_output_frames(claim_frames[claim["index"]]), 1):
+            if frame is not None:
+                parts.setdefault(frame[0], []).append(number)
+        ranges = [f"P{part} F{numbers[0]:02d}–F{numbers[-1]:02d}" for part, numbers in parts.items()]
+        lines.append(f"S{local:02d} " + "，".join(ranges))
+    if not lines:
+        return ""
+    return "\n附图索引。每句从 F01 重新编号，P 是时间线上的物理片段。\n" + "\n".join(lines)
+
+
 def _action_phases(claim):
     item=claim.get('ai_segment') or {}
     parts=item.get('span_parts') if item.get('multi_shot') else [item]
@@ -116,8 +132,8 @@ def prompt(claims: list[dict], frame_count: int) -> str:
                     "pour（液体倒下）、absorb（液体吸收）、press（纸巾接触或擦拭）、lift（提起纸巾）、"
                     "result（看清提起后的纸面是否沾液）。每个事件写成对象，例如"
                     '{"event":"pour","frames":[2,3]}，frames 填本句附图上实际支持该事件的 F 编号。'
-                    "倒液要有两帧清楚看到液体正在倒下，吸收要有不同帧看到液体状态发生变化。"
-                    "纸巾提起后，标出纸面结果仍清晰的最早与最晚 F 编号。"
+                    "每项选两三张能明确区分该事件的本句帧。每个 F 只归一个阶段，动作交界处看不清的图可跳过；没有证据填空。不要把整行图片的顺序号当作 F 编号。倒液要有两帧清楚看到液体正在倒下，吸收要有不同帧看到液体状态发生变化。"
+                    "纸巾离开巾体是提起。等纸面朝镜头清晰展示后，标出结果仍清晰的最早与最晚 F 编号。"
                     "单张倒液图、举杯准备、已湿的静止巾面不能证明倒液过程。没看到写空数组，observed写具体所见。")
     event_field = '"visible_experiment_events":[],' if approved else ""
     return policy + f"""

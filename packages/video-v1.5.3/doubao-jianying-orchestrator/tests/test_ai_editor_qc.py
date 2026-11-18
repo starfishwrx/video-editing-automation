@@ -37,6 +37,28 @@ class AIEditorQCIntegrationTests(unittest.TestCase):
         self.assertIn(1, visual_qc_contract.presentation_selection_errors([item], [row]))
         self.assertFalse(contract.presentation.promotion_motion("这是完整的材质标签。"))
 
+    def test_blind_experiment_frames_are_numbered_within_each_sentence(self):
+        group = {"schema": contract.continuity.EXPERIMENT_SCHEMA}
+        claims = [{"index": i, "ai_segment": {"continuity_group": group}} for i in (7, 8)]
+        frames = {7: [{"suffix": "p1_output11"}, {"suffix": "p2_output12"}],
+                  8: [{"suffix": "p1_output13"}, {"suffix": "p1_output14"}]}
+        legend = ai_editor_qc.experiment_sheet_legend(claims, frames)
+        self.assertIn("S01 P1 F01–F01，P2 F02–F02", legend)
+        self.assertIn("S02 P1 F01–F02", legend)
+        self.assertNotIn("pour", legend)
+        response = {"response_version": ai_editor_qc.RESPONSE_VERSION, "overall": "PASS", "segments": [
+            {"index": i, "match_level": "DIRECT", "visual_ok": True, "observed": "实际图片",
+             "reason": "与该句相符", "confidence": .9, "visible_experiment_events": [
+                 {"event": "press", "frames": [2 if i == 1 else 3]}]} for i in (1, 2)]}
+        errors = visual_qc_contract.response_errors(response, 2, expected_version=ai_editor_qc.RESPONSE_VERSION,
+                                                   experiment_indices={1: 2, 2: 2})
+        self.assertEqual(errors, ["S2:EXPERIMENT_EVENT_FRAME_OUTSIDE_SENTENCE"])
+        response["segments"][1]["visible_experiment_events"] = [
+            {"event": "lift", "frames": [1, 2]}, {"event": "result", "frames": [2]}]
+        errors = visual_qc_contract.response_errors(response, 2, expected_version=ai_editor_qc.RESPONSE_VERSION,
+                                                   experiment_indices={1: 2, 2: 2})
+        self.assertEqual(errors, ["S2:EXPERIMENT_EVENT_FRAME_ASSIGNED_TWICE"])
+
     def test_promotion_group_cannot_borrow_change_from_another_member(self):
         item = {"selection_mode": "ai_editor", "text": "今天直播间大促",
                 "continuity_group": {"input": {"members": [{"index": 1}, {"index": 2}]}}}

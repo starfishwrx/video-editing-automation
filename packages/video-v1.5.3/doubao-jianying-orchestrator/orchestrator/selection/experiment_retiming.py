@@ -49,7 +49,7 @@ def validate_motion(row,member,*,allow_phase_speedup=False):
     return row
 
 
-def windows(members,observations,result_frames,*,fps=30,allow_phase_speedup=False):
+def windows(members,observations,result_frames,*,fps=30,allow_phase_speedup=False,phase_hold_frames=None):
     result=[]
     if not isinstance(observations,list)or len(observations)!=len(members):
         raise ValueError('EXPERIMENT_MOTION_MEMBER_COVERAGE')
@@ -85,6 +85,8 @@ def windows(members,observations,result_frames,*,fps=30,allow_phase_speedup=Fals
                     phases.append({'kind':kind,'start':start,'end':end})
             for phase in phases:
                 frames=experiment_minimum_frames(phase['kind'],fps,result_frames)
+                if phase_hold_frames:
+                    frames = max(frames, phase_hold_frames.get(phase['kind'], 0))
                 phase['minimum_us']=math.ceil(frames*1_000_000/fps)
                 if phase['kind']=='absorb' and state_min:
                     phase['minimum_us']=max(phase['minimum_us'],state_min)

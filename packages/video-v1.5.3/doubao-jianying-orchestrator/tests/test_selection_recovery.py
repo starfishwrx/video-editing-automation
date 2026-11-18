@@ -840,6 +840,18 @@ class SelectionRecoveryTests(unittest.TestCase):
         review.assert_not_called()
         placement.assert_not_called()
 
+    def test_other_sentence_presentation_needs_current_sentence_fit(self):
+        plan = self.plan()
+        shot = self.analysis["shots"][0]
+        sentence = dict(self.sentences[0], kind="product_intro", selling_points=[], text="打开包装")
+        parent = {"shot_id": shot["shot_id"], "verdict": "matched", "same_product": True,
+                  "supported_point_ids": [], "sentence_index": 2, "presentation_observation": {"action": "摆放"}}
+        plan["display_reviews"] = [parent]
+        with patch.object(editor, "_review_placement_window", return_value={}) as review:
+            self.assertIsNone(editor._review_proposed_window(self.manifest, plan, self.root, sentence, shot,
+                                                            (300_000, 1_823_166), require_current_sentence=True))
+        self.assertTrue(review.call_args.args[1]["require_sentence_fit"])
+
     def test_placement_window_inherits_selling_point_and_only_judges_cut(self):
         plan = self.plan()
         parent = plan["reviews"]["1"][0]

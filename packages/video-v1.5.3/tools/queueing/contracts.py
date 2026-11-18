@@ -26,7 +26,8 @@ def task_runtime_overrides(task: dict) -> dict:
     if not isinstance(nested, dict):
         raise ValueError("INVALID_TASK_MANIFEST")
     result = {}
-    for key in ("selection_mode", "draft_backend", "subtitle_font_path", "max_absorb_demo_speed", "max_source_reuse"):
+    for key in ("selection_mode", "draft_backend", "subtitle_font_path", "max_absorb_demo_speed", "max_source_reuse",
+                "camera_variety_mode", "experiment_phase_hold_frames"):
         value = task.get(key)
         if value is None or (isinstance(value, str) and not value.strip()):
             value = nested.get(key)

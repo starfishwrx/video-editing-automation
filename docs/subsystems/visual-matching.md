@@ -93,3 +93,5 @@
 主流程将任意位置的无具体卖点钩子、商品介绍和具体卖点分别复核。通用展示复用时绑定商品、像素和模型。显式台账路径优先，其次使用 JY_USAGE_LEDGER_DIR，再使用 JY_WORK_ROOT/.cache。同品类动作描述只作编辑参考。裤腰位置、撑拉形变和松手回弹分别取证。
 
 生产查找跨批次素材证据的身份、等级及失效条件见 [ADR 0014](../adr/0014-material-evidence.md)。
+
+整单试验支持按原片窗口提出镜头、成组采用机位建议，以及按单提高某个实验相位的可见帧数。调用与证据见[整单编排接口](../../packages/video-v1.5.3/doubao-jianying-orchestrator/references/agent_cut.md)。

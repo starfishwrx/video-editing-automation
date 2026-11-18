@@ -817,6 +817,8 @@ def main() -> int:
                         "prompt_version": response_version,
                     }, ensure_ascii=False, indent=2), encoding="utf-8")
                     prompt = _prompt(claims, len(items), force_ai=ai_mode)
+                    if ai_mode:
+                        prompt += ai_editor_qc.experiment_sheet_legend(claims, claim_frames)
                     indices = {claim["index"] for claim in claims}
                     windows = [row for claim, cut_rows in claim_rows
                                if claim["index"] in indices for row in cut_rows]
@@ -836,8 +838,8 @@ def main() -> int:
                         jobs.append((batch_no, prepared[batch_no]))
 
                 def experiment_indices(claims):
-                    return [n for n, claim in enumerate(claims, 1) if ai_editor_qc.contract.continuity.is_experiment(
-                        (claim.get("ai_segment") or {}).get("continuity_group"))]
+                    return {n: len(claim_frames[claim["index"]]) for n, claim in enumerate(claims, 1)
+                            if ai_editor_qc.contract.continuity.is_experiment((claim.get("ai_segment") or {}).get("continuity_group"))}
 
                 def call_batch(job):
                     batch_no, (claims, chunk_sheet, prompt, response) = job
