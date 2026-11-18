@@ -99,6 +99,21 @@ def make_plan(engine, clips, bgm_path, overrides, cues, name, font_path, *, vide
         video = {'source': source, 'start_us': c.start_us, 'duration_us': span,
                  'source_start_us': _us(c.source_start), 'source_duration_us': round(span * speed),
                  'speed': speed, 'volume': 1 if c.audio_mode == 'native' else 0, 'brightness': brightness}
+        if speed > 8:
+            from .. import ai_editor_contract as contract
+            group = getattr(c, 'continuity_group', None)
+            observation = getattr(c, 'playback_observation', None)
+            if not contract.reviewed_experiment_phase(engine.m, group, observation):
+                raise ValueError('HEADLESS_EXPERIMENT_SPEED_AUTHORIZATION_MISSING')
+            contract.continuity.validate(group)
+            if (observation['start_us'] != video['source_start_us']
+                    or observation['end_us'] != video['source_start_us'] + video['source_duration_us']
+                    or not any(p['source_identity']['path'] == str(Path(c.video).resolve())
+                               and p['start_us'] == observation['start_us'] and p['end_us'] == observation['end_us']
+                               and p['target_us'] == span and p['experiment_phase'] == observation['phase']
+                               for member in group['input']['members'] for p in member['parts'])):
+                raise ValueError('HEADLESS_EXPERIMENT_CUT_CHANGED')
+            video['authorized_experiment_phase_speedup'] = True
         # Preserve requested transitions; unsupported effects fail explicitly in
         # the backend instead of silently dropping a production rule.
         if c.transition:

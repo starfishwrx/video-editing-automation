@@ -27,7 +27,7 @@ _REWET_CLAIM = re.compile(r"反渗|回流|不黏|不粘|干爽|黏腻|粘腻")
 # These are observed actions, not a mention of a prop or a proposed test.
 # Keep the affirmative sequence in one observation; never assemble it from reasons.
 _TISSUE_SEQUENCE = re.compile(
-    r"纸巾(?:由手拿着)?[^，,。！？;；手\n]{0,40}?(?:按压|压住|压在|接触)"
+    r"纸巾(?:由手拿着)?[^，,。！？;；手\n]{0,40}?(?:按压|压住|压在|接触|擦拭)"
     r"[^。！？;；手\n]{0,60}?(?:提起|举起|抬起|拿起|揭起|移开)")
 _TISSUE_UNCERTAIN = re.compile(
     r"未|没|并非|不是|不可见|看不到|缺少|缺失|看不清|无法|不能确认|不确定|不清楚|疑似|似乎|可能|或许|"
@@ -38,21 +38,37 @@ _TISSUE_UNCERTAIN = re.compile(
 # Negative wetness findings are positive results, not missing action evidence.
 _DRY_RESULT = re.compile(r"未被染湿|没有变湿|(?:未见|没有|没见到|未发现)(?:明显(?:的)?)?(?:湿痕|水渍|湿印|蓝色液体|液体回渗|反渗)")
 _HAND_LIFT = re.compile(r"(?:提起|举起|抬起|拿起|移开)(?:了)?(?:手掌|手指|手)(?!中)"
-                        r"|(?:手掌|手指)(?:随后|然后|再)?(?:提起|举起|抬起|移开)")
+                        r"|(?:手掌|手指)(?:随后|然后|再)?(?:提起|举起|抬起|移开)(?!(?:了|这张|一张|白色的?)*(?:纸巾|纸面))")
 
 
-def tissue_press_missing(texts, observations) -> bool:
+def tissue_press_missing(texts, observations, *, required=False) -> bool:
     """Require affirmative observed tissue contact followed by lifting, fail closed.
 
     Callers supply only visual observation fields. Explanations and claims cannot
     substitute for observed evidence; result/completeness gates still apply.
     """
-    if not any(_REWET_CLAIM.search(str(text or "")) for text in texts):
+    if not required and not any(_REWET_CLAIM.search(str(text or "")) for text in texts):
         return False
     return not any(isinstance(item, str) and _TISSUE_SEQUENCE.search(item)
                    and not _TISSUE_UNCERTAIN.search(_DRY_RESULT.sub("干燥", item))
                    and not _HAND_LIFT.search(item)
                    for item in observations)
+
+
+def tissue_event_observed(fact, event):
+    if not isinstance(fact, str):
+        return False
+    tissue = r"(?:纸巾|纸面)"
+    if event == "press":
+        action = r"(?:按压|压住|压在|接触|擦拭)"
+        held = rf"{tissue}(?:被(?:手指|手掌|手)?|由手拿着|贴着|直接|轻轻|反复|放在巾体上|在巾面上|并|后|向下){{0,4}}{action}"
+        laid = rf"{tissue}(?:放|铺|贴)在(?:样品|巾面|巾体|面层)上[，,]?\s*(?:手指|手掌|手)(?:轻轻|向下)?{action}"
+        pattern = rf"{held}|{laid}|{action}(?:着|在巾体上的|表面的|这张|白色的?){{0,3}}{tissue}"
+    else:
+        action = r"(?:提起|举起|抬起|拿起|揭起|移开|掀起)"
+        pattern = rf"{tissue}(?:被|随后|然后|再|向上|慢慢|轻轻|后|并){{0,4}}{action}|{action}(?:了|这张|一张|白色的?){{0,3}}{tissue}"
+    return any(re.search(pattern, clause) and not _TISSUE_UNCERTAIN.search(_DRY_RESULT.sub("干燥", clause))
+               and not _HAND_LIFT.search(clause) for clause in re.split(r"[。！？；;\n]", fact))
 
 
 def adjacent(indices):
@@ -200,7 +216,7 @@ def member_errors(item, index):
 def _validate_experiment(group):
     context, review = group["input"], group["review"]
     members, observed = context["members"], review["members"]
-    _require(isinstance(members, list) and len(members) >= 2 and adjacent([m["index"] for m in members]),
+    _require(isinstance(members, list) and members and adjacent([m["index"] for m in members]),
              "NOT_ADJACENT")
     _require(isinstance(observed, list) and len(observed) == len(members), "MEMBERS_INVALID")
     _require(review.get("verdict") == "matched" and all(review.get(k) is True for k in (
@@ -212,9 +228,11 @@ def _validate_experiment(group):
              and .6 <= review["confidence"] <= 1, "CONFIDENCE_INVALID")
     roles = [m.get("experiment_role") for m in members]
     _require(set(roles) <= {"absorption", "rewet", "followup", "bridge"}
-             and "absorption" in roles and "rewet" in roles
-             and roles.index("absorption") < roles.index("rewet"), "EXPERIMENT_TOPIC_CHANGED")
+             and bool({"absorption", "rewet"}.intersection(roles))
+             and ("rewet" not in roles or "absorption" not in roles or roles.index("absorption") < roles.index("rewet")), "EXPERIMENT_TOPIC_CHANGED")
     sources = context["sources"]
+    allowed_speedup = context.get("allow_experiment_phase_speedup") is True
+    _require("allow_experiment_phase_speedup" not in context or allowed_speedup, "EXPERIMENT_SPEED_AUTHORIZATION_INVALID")
     pair = group["evidence"]["pair"]
     _require(pair.get("observation", {}).get("verdict") == "matched", "EXPERIMENT_PAIR_UNCERTAIN")
     checks = pair["observation"].get("comparisons", {})
@@ -224,6 +242,7 @@ def _validate_experiment(group):
     paired = tuple(m["samples"]["original"]["path"] for m in pair["members"])
     _require(len(paired) == 2, "EXPERIMENT_PAIR_UNCERTAIN")
     chain = []
+    phase_cuts = []
     for member, row in zip(members, observed):
         _require(type(member["audio_duration_us"]) is int and member["audio_duration_us"] > 0
                  and type(member["target_us"]) is int and member["target_us"] >= member["audio_duration_us"],
@@ -251,21 +270,74 @@ def _validate_experiment(group):
             _require(source["identity"] == part["source_identity"] and source["identity"]["path"] in paired,
                      "SOURCE_CHANGED")
             speed = (end - start) / target
-            _require(1 - 2 / target <= speed <= 3 + 2 / target
-                     and (part["process"] is True or abs(end - start - target) <= 2)
-                     and (not row["time_sensitive"] or abs(end - start - target) <= 2), "ALLOCATION_CHANGED")
+            _require(1 - 2 / target <= speed and (allowed_speedup or speed <= 3 + 2 / target)
+                     and (allowed_speedup or part["process"] is True or abs(end - start - target) <= 2)
+                     and (allowed_speedup or not row["time_sensitive"] or abs(end - start - target) <= 2), "ALLOCATION_CHANGED")
+            if allowed_speedup:
+                _require(part.get("experiment_phase") in {"context", "pour", "absorb", "press", "lift", "result"},
+                         "EXPERIMENT_PHASE_INVALID")
+                phase_cuts.append(part)
             _require(isinstance(fact.get("observation"), str) and bool(fact["observation"].strip()),
                      "MEMBER_OBSERVATION_MISSING")
             _intervals(fact.get("evidence_intervals_us"), start, end)
             chain.append((source["identity"]["path"], start, end))
     source_chain(chain, (paired,))
-    if context.get("category") == "weipin" and tissue_press_missing(
+    if allowed_speedup:
+        _validate_visible_phases(group, phase_cuts)
+    if (allowed_speedup or context.get("category") == "weipin") and tissue_press_missing(
             [member.get("text") for member in members],
             [review.get(key) for key in ("demonstration_observation", "observation")]
             + [row.get("observation") for row in observed]
-            + [part.get("observation") for row in observed for part in row["parts"]]):
-        _require(False, "TISSUE_PRESS_REQUIRED")
+            + [part.get("observation") for row in observed for part in row["parts"]], required=allowed_speedup):
+        by_event = {event: any(tissue_event_observed(fact["observation"], event)
+                              for member, row in zip(members, observed)
+                              for part, fact in zip(member["parts"], row["parts"])
+                              if part.get("experiment_phase") == event) for event in ("press", "lift")}
+        _require(allowed_speedup and all(by_event.values()), "TISSUE_PRESS_REQUIRED")
     return group
+
+
+def experiment_minimum_frames(phase, fps, result_frames=15):
+    if phase == "result":
+        return result_frames
+    if phase == "absorb":
+        return max(2, math.ceil(0.3 * fps))
+    return 1 if phase == "context" else 2
+
+
+def _validate_visible_phases(group, cuts):
+    from itertools import groupby
+    context = group["input"]
+    _require(context["rules"]["category"] == "weipin", "EXPERIMENT_SPEED_AUTHORIZATION_INVALID")
+    fps = context["fps"]
+    _require(type(fps) in (float, int) and math.isfinite(fps) and fps > 0, "EXPERIMENT_FPS_INVALID")
+    required = ("pour", "absorb", "press", "lift", "result")
+    stage_cuts = [(name, list(parts)) for name, parts in groupby(cuts, key=lambda p: p["experiment_phase"])
+                  if name != "context"]
+    _require(tuple(name for name, _ in stage_cuts) == required, "EXPERIMENT_COMPLETE_CHAIN_REQUIRED")
+    members = group["evidence"]["pair"]["members"]
+    observations = group["evidence"]["motion"]["observations"]
+    for name, parts in stage_cuts:
+        side = 0 if name in ("pour", "absorb") else 1
+        source, observation = members[side]["samples"], observations[side]
+        events = [s for s in observation["segments"] if s["kind"] == name]
+        _require(bool(events), "EXPERIMENT_COMPLETE_CHAIN_REQUIRED")
+        first = events[0]["first_frame"]
+        after = events[-1]["last_frame"] + 1
+        frames = source["frames"]
+        end = (frames[after]["pts_us"] if after <= observation["effective_window_frame_ids"][1]
+               else min(source["source_end_us"], frames[after - 1]["pts_us"] + 16_667))
+        _require(all(p["source_identity"] == source["original"] and
+                     frames[first]["pts_us"] <= p["start_us"] < p["end_us"] <= end for p in parts),
+                 "EXPERIMENT_PHASE_WINDOW_CHANGED")
+        cropping = (context.get("source_selection") or [None])[0] or {}
+        focused_pour = name == "pour" and cropping.get("coverage") == "absorption_focus"
+        _require((focused_pour or parts[0]["start_us"] == frames[first]["pts_us"])
+                 and parts[-1]["end_us"] == end
+                 and all(a["end_us"] == b["start_us"] for a, b in zip(parts, parts[1:])),
+                 "EXPERIMENT_PHASE_WINDOW_CHANGED")
+        minimum = math.ceil(experiment_minimum_frames(name, fps) * 1_000_000 / fps)
+        _require(sum(p["target_us"] for p in parts) >= minimum, "EXPERIMENT_PHASE_VISIBILITY_TOO_SHORT")
 
 
 def _experiment_member_errors(item, index):

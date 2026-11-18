@@ -354,12 +354,12 @@ def _parse_model(text: str) -> dict[str, Any]:
 def _call_qc_model(vision_analyzer: Any, sheet: pathlib.Path, prompt: str,
                    response: pathlib.Path, *, timeout: int,
                    expected_count: int | None = None,
-                   expected_version: str = RESPONSE_VERSION) -> tuple[bool, str]:
+                   expected_version: str = RESPONSE_VERSION, experiment_indices=()) -> tuple[bool, str]:
     """The transport owns the complete two-attempt logical request budget."""
     def validate(data):
         model = data if isinstance(data, dict) else _parse_model(data)
         if expected_count is not None:
-            errors = response_errors(model, expected_count, expected_version=expected_version)
+            errors = response_errors(model, expected_count, expected_version=expected_version, experiment_indices=experiment_indices)
             if errors:
                 raise ValueError("QC_RESPONSE_CONTRACT: " + ";".join(errors))
         return model
@@ -370,21 +370,22 @@ def _call_qc_model(vision_analyzer: Any, sheet: pathlib.Path, prompt: str,
     )
 
 
-def _terminal_frame(ffmpeg, cut, fps, path):
+def _terminal_frame(ffmpeg, cut, fps, path, *, output_tick=None):
     """Sample the source at the last timeline frame within this physical cut."""
     start, duration = cut["target_start"], cut["target_duration"]
     if not math.isfinite(fps) or fps <= 0 or duration <= 0:
         return None
     if any(ref.get("curve_speed") for ref in cut.get("speed_materials") or []):
         return None
-    last_tick = (math.ceil((start + duration) * fps - 1e-8) - 1) / fps
-    if last_tick < start - 1e-8:
+    tick = math.ceil((start + duration) * fps - 1e-8) - 1 if output_tick is None else output_tick
+    last_tick = tick / fps
+    if last_tick < start - 1e-8 or last_tick >= start + duration:
         return None
     source_start = cut["source_start"]
     instant = source_start + max(0., last_tick - start) * cut["source_duration"] / duration
     # Keep input presentation timestamps relative to media start, including
     # after seeking. showinfo reports the PTS of the exact JPEG we retain.
-    seek = max(0., source_start - 1.)
+    seek = max(0., instant - 1.)
     filters = (f"trim=end={instant + 1:.9f},"
                f"select='between(t,{source_start - 1e-7:.9f},{instant + 1e-7:.9f})',showinfo")
     command = [ffmpeg, "-y", "-hide_banner", "-loglevel", "info", "-copyts", "-start_at_zero",
@@ -482,13 +483,13 @@ def _checkpoint_binding(draft_identity: str, prompt: str, claims: list,
 
 
 def _load_batch_checkpoint(path: pathlib.Path, binding: dict, count: int,
-                           version: str) -> str | None:
+                           version: str, experiment_indices=()) -> str | None:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
         if payload.get("input") != binding:
             return None
         text = payload["text"]
-        if response_errors(_parse_model(text), count, expected_version=version):
+        if response_errors(_parse_model(text), count, expected_version=version, experiment_indices=experiment_indices):
             return None
         return text
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
@@ -496,9 +497,9 @@ def _load_batch_checkpoint(path: pathlib.Path, binding: dict, count: int,
 
 
 def _save_batch_checkpoint(path: pathlib.Path, binding: dict, text: str,
-                           count: int, version: str) -> None:
+                           count: int, version: str, experiment_indices=()) -> None:
     try:
-        valid = not response_errors(_parse_model(text), count, expected_version=version)
+        valid = not response_errors(_parse_model(text), count, expected_version=version, experiment_indices=experiment_indices)
     except (ValueError, TypeError, AttributeError):
         valid = False
     if not valid:
@@ -597,9 +598,15 @@ def main() -> int:
         ai_mode = any(c.get("selection_mode") == "ai_editor" for c in claims)
         response_version = RESPONSE_VERSION
         from orchestrator.quality import ai_editor_qc
+        from orchestrator import ai_editor_contract
+        match_path = report_dir / "shot_match_report.json"
+        match_data = json.loads(match_path.read_text(encoding="utf-8-sig")) if match_path.is_file() else {}
+        manifest = match_data.get("manifest") or {}
+        result["category"] = ai_editor_contract.rules_identity(manifest)["category"]
+        missing = ai_editor_contract.unverified_absorption_indices(manifest, match_data.get("segments", []), allow_reviewed=ai_mode)
+        if missing:
+            raise ValueError(f"EXPERIMENT_THREE_STAGES_UNVERIFIED:{missing}")
         if ai_mode:
-            from orchestrator import ai_editor_contract
-            match_data = json.loads((report_dir / "shot_match_report.json").read_text(encoding="utf-8-sig"))
             selection_mode = str(match_data.get("selection_mode") or "ai_editor")
             mixed = any(c.get("selection_mode") != "ai_editor" for c in claims)
             if mixed and selection_mode != "rule_then_ai":
@@ -717,7 +724,7 @@ def main() -> int:
         expected_frames = 0
         for claim, rows in claim_rows:
             if ai_mode and claim.get("selection_mode") == "ai_editor":
-                plan = ai_editor_qc.frame_plan(claim, rows)
+                plan = ai_editor_qc.frame_plan(claim, rows, fps=float(info.get("fps") or 30))
             elif ai_mode:
                 plan = [(row, f"p{n}_{label}", fraction) for n, row in enumerate(rows, 1)
                         for label, fraction in (("start", 0.05), ("mid", 0.5), ("end", 0.95))]
@@ -733,9 +740,17 @@ def main() -> int:
                     continue
                 seconds = row["source_start"] + row["source_duration"] * fraction
                 frame = frame_dir / f"segment_{row['index']:03d}_{suffix}.jpg"
-                ok, error, seconds = _prepare_media(
-                    _resume_sample_frame, ffmpeg, pathlib.Path(row["source"]), seconds, frame,
-                    source_start=row["source_start"], suffix=suffix)
+                if "_output" in suffix:
+                    tick = int(suffix.rsplit("_output", 1)[1])
+                    located = _prepare_media(_terminal_frame, ffmpeg, row, float(info.get("fps") or 30),
+                                             frame, output_tick=tick)
+                    ok, error = bool(located), "OUTPUT_FRAME_MISSING"
+                    if located:
+                        seconds = located["timestamp"]
+                else:
+                    ok, error, seconds = _prepare_media(
+                        _resume_sample_frame, ffmpeg, pathlib.Path(row["source"]), seconds, frame,
+                        source_start=row["source_start"], suffix=suffix)
                 if not ok:
                     frame_issues.append(f"FRAME_EXTRACT_FAILED:S{row['index']:02d}:{suffix}:{error}")
                     continue
@@ -820,10 +835,14 @@ def main() -> int:
                     else:
                         jobs.append((batch_no, prepared[batch_no]))
 
+                def experiment_indices(claims):
+                    return [n for n, claim in enumerate(claims, 1) if ai_editor_qc.contract.continuity.is_experiment(
+                        (claim.get("ai_segment") or {}).get("continuity_group"))]
+
                 def call_batch(job):
                     batch_no, (claims, chunk_sheet, prompt, response) = job
                     cached = _load_batch_checkpoint(checkpoints[batch_no],
-                        bindings[batch_no], len(claims), response_version)
+                        bindings[batch_no], len(claims), response_version, experiment_indices(claims))
                     if cached is not None:
                         return batch_no, (True, cached)
                     timeout = _remaining_request_timeout()
@@ -832,10 +851,10 @@ def main() -> int:
                         return batch_no, (False, "QC_STAGE_DEADLINE_EXCEEDED")
                     answer = _call_qc_model(vision_analyzer, chunk_sheet,
                         prompt, response, timeout=timeout, expected_count=len(claims),
-                        expected_version=response_version)
+                        expected_version=response_version, **({"experiment_indices": experiment_indices(claims)} if experiment_indices(claims) else {}))
                     if answer[0]:
                         _save_batch_checkpoint(checkpoints[batch_no], bindings[batch_no],
-                                               answer[1], len(claims), response_version)
+                                               answer[1], len(claims), response_version, experiment_indices(claims))
                     else:
                         try:
                             ledger = json.loads(response.with_suffix(".call.json").read_text(encoding="utf-8"))
@@ -864,7 +883,7 @@ def main() -> int:
                         continue
                     try:
                         model = _parse_model(text)
-                        contract_errors = response_errors(model, len(claims), expected_version=response_version)
+                        contract_errors = response_errors(model, len(claims), expected_version=response_version, experiment_indices=experiment_indices(claims))
                         if contract_errors:
                             result["response_contract"]["errors"].extend(
                                 f"B{batch_no:02d}:{error}" for error in contract_errors)
@@ -888,7 +907,11 @@ def main() -> int:
                                 continue
                             local_index = int(raw_row.get("index")) if str(raw_row.get("index") or "").isdigit() else 0
                             if 1 <= local_index <= len(claim_indices):
-                                model_rows[claim_indices[local_index - 1]] = raw_row
+                                index = claim_indices[local_index - 1]
+                                if local_index in experiment_indices(claims):
+                                    raw_row = {**raw_row, "experiment_output_frames":
+                                               ai_editor_qc.experiment_output_frames(claim_frames[index])}
+                                model_rows[index] = raw_row
                         result["batch_results"].append({
                             "batch_no": batch_no,
                             "claim_indices": claim_indices,
@@ -944,8 +967,14 @@ def main() -> int:
                                     row['action_repair'] = 'replace'
                                 else:
                                     row['action_repair'] = 'recut'
-                            row = ai_editor_qc.apply_tissue_press_gate(
-                                row, category=str(claim.get("category") or ""))
+                            experiment = (claim.get("ai_segment") or {}).get("continuity_group")
+                            if ai_editor_qc.contract.continuity.is_experiment(experiment):
+                                if (not ai_editor_qc.visual_qc_contract.group_events_visible(experiment, model_rows)
+                                        and row["match_level"] in {"DIRECT", "ACCEPTABLE_DEGRADED"}):
+                                    row.update(match_level="INSUFFICIENT_EVIDENCE",
+                                               reason="整组实际输出帧未确认完整倒液、吸收和纸巾验证结果。")
+                            else:
+                                row = ai_editor_qc.apply_tissue_press_gate(row, category=str(claim.get("category") or ""))
                             row["visual_ok"] = row["match_level"] in {"DIRECT", "ACCEPTABLE_DEGRADED"}
                             visual_rows.append(row)
                             if row["match_level"] == "ACCEPTABLE_DEGRADED":

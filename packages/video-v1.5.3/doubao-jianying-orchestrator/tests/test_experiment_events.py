@@ -100,6 +100,26 @@ class ExperimentEventsTests(unittest.TestCase):
                     [{'sentence_id':'s','role':'absorption'}],rows)
             rows=[compile_events(facts('A'),self.pair['members'][0]),{}]
 
+    def test_three_stage_speedup_uses_source_time_and_the_start_sample_uncertainty(self):
+        members = self.pair["members"]
+        source = facts("A")
+        source["effective_window_frame_ids"][0] = source["events"][0]["first_frame"] = 1
+        observations = [compile_events(source, members[0]), compile_events(facts("B"), members[1])]
+        roles = [{"sentence_id": "s", "role": "absorption"}]
+
+        def check(text):
+            validate_focus([SimpleNamespace(sentence_id="s", text=text)], roles, observations,
+                           allow_phase_speedup=True, members=members)
+
+        check("四秒内吸收")
+        check("吸收后锁在中央")
+        for text in ("只用两秒吸完", "3.95秒吸完"):
+            with self.assertRaisesRegex(ValueError, "SOURCE_TIMING_CLAIM_UNSUPPORTED"):
+                check(text)
+        observations[0]["segments"] = [s for s in observations[0]["segments"] if s["kind"] == "pour"]
+        with self.assertRaisesRegex(ValueError, "COMPLETE_CHAIN_REQUIRED"):
+            check("四秒内吸收")
+
     def test_focused_solver_preserves_absorption_and_declares_omitted_pour_prefix(self):
         observations=[compile_events(facts(m['part']),m) for m in self.pair['members']]
         observations[0]['coverage']='absorption_focus'

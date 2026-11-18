@@ -293,45 +293,36 @@ class SplitSpeedTests(unittest.TestCase):
             material = p["source_end_us"] - p["source_start_us"]
             self.assertLessEqual(abs(material / p["speed"] - p["segment_us"]), 33_334)
         absorb = next(p for p in parts if p["phase"] == "absorb")
-        self.assertLessEqual(absorb["segment_us"], 3 * US + 33_334)
+        self.assertGreaterEqual(absorb["segment_us"], 300_000)
         return parts
 
     def test_fits_with_absorb_fast_forward(self):
         parts = self._check(scene_rules.plan_split(SHOT, PHASES, self.SCENE, audio_us=8_920_000,
                                                    manifest=MANIFEST), 8_920_000)
-        self.assertAlmostEqual(parts[0]["speed"], 1.0, places=3)
-        self.assertAlmostEqual(parts[2]["speed"], 1.0, places=3)
+        self.assertTrue(all(p["speed"] > 1 for p in parts))
         self.assertEqual(parts[0]["source_start_us"], 11 * US)
 
     def test_short_sentence_speeds_up(self):
         parts = self._check(scene_rules.plan_split(SHOT, PHASES, self.SCENE, audio_us=5_000_000,
                                                    manifest=MANIFEST), 5_000_000)
         self.assertGreater(parts[0]["speed"], 1.0)
-        self.assertLessEqual(parts[0]["speed"], 1.6 + 1e-6)
+        self.assertEqual([p["phase"] for p in parts], ["pour", "absorb", "wipe"])
 
-    def test_optional_demo_speed_limit_does_not_accelerate_long_absorption_to_fit(self):
-        shot = {**SHOT, "source_start": 0.0, "source_end": 40.0, "material_duration_us": 40 * US}
-        phases = {"pour": [3.141, 7.249], "absorb": [7.251, 39.203]}
-        before = scene_rules.plan_split(shot, phases, self.SCENE, audio_us=4_570_000, manifest=MANIFEST)
-        limited = scene_rules.plan_split(shot, phases, self.SCENE, audio_us=4_570_000,
-                                         manifest={**MANIFEST, "max_absorb_demo_speed": 2.0})
-        self.assertTrue(before["ok"], before)
-        self.assertGreater(max(p["speed"] for p in before["parts"]), 2.0)
-        self.assertFalse(limited["ok"])
-        self.assertEqual(limited["reason"], scene_rules.SCENE_ACTION_TOO_LONG)
-        invalid = scene_rules.plan_split(shot, phases, self.SCENE, audio_us=4_570_000,
-                                         manifest={**MANIFEST, "max_absorb_demo_speed": "nan"})
-        self.assertEqual(invalid["reason"], "SCENE_SPEED_LIMIT_INVALID")
-
-    def test_short_sentence_uses_pour_burst_instead_of_failing(self):
-        # 约 4.7s 口播 + 只有倒水/吸收（无擦拭）：常规倒水 1.6× 不够，提到 burst 4× 仍用真实验。
-        shot = {**SHOT, "source_start": 0.0, "source_end": 70.0, "material_duration_us": 70 * US}
-        phases = {"pour": [1.0, 8.0], "absorb": [8.0, 65.0]}
-        plan = scene_rules.plan_split(shot, phases, self.SCENE, audio_us=4_670_000, manifest=MANIFEST)
+    def test_all_phases_accelerate_beyond_old_caps(self):
+        shot = {**SHOT, "source_start": 0, "source_end": 200, "material_duration_us": 200 * US}
+        phases = {"pour": [0, 60], "absorb": [60, 120], "wipe": [120, 180]}
+        plan = scene_rules.plan_split(shot, phases, self.SCENE, audio_us=3 * US,
+                                      manifest={**MANIFEST, "max_absorb_demo_speed": 2})
         self.assertTrue(plan["ok"], plan)
-        pour = next(p for p in plan["parts"] if p["phase"] == "pour")
-        self.assertGreater(pour["speed"], 1.6)
-        self.assertLessEqual(pour["speed"], 4.0 + 1e-6)
+        self.assertTrue(all(p["speed"] > 20 for p in plan["parts"]))
+        self.assertEqual(sum(p["segment_us"] for p in plan["parts"]), 3 * US + 80_000)
+
+    def test_every_stage_is_required_even_with_unlimited_speed(self):
+        for missing in PHASES:
+            phases = {k: v for k, v in PHASES.items() if k != missing}
+            plan = scene_rules.plan_split(SHOT, phases, self.SCENE, audio_us=4 * US, manifest=MANIFEST)
+            self.assertEqual(plan["reason"], scene_rules.SCENE_ACTION_INCOMPLETE)
+            self.assertEqual(plan["missing_phases"], [missing])
 
     def test_too_short_sentence_fails(self):
         plan = scene_rules.plan_split(SHOT, PHASES, self.SCENE, audio_us=int(0.5 * US), manifest=MANIFEST)
@@ -1134,7 +1125,7 @@ class ExperimentGroupChainTests(unittest.TestCase):
         self.assertEqual(report["rows"][0]["status"], "unmet")
         self.assertFalse(any(s.get("visual_missing") for s in matched["manifest"]["segments"]))
 
-    def test_experiment_without_wipe_plays_pour_and_absorb(self):
+    def test_experiment_without_wipe_is_rejected_and_complete_alternative_is_selected(self):
         pour_absorb = {**SHOT, "shot_id": "pa", "video": "D:/m/pa.mp4", "source_start": 0.0,
                        "source_end": 48.5, "material_duration_us": int(48.5 * US),
                        "description": "木托盘上卫生巾平铺并倒入蓝色液体显示吸收"}
@@ -1156,34 +1147,22 @@ class ExperimentGroupChainTests(unittest.TestCase):
             return report["rows"][0], matched["manifest"]["segments"]
 
         row, segments = run([pour_absorb], False)
-        self.assertEqual((row["status"], row["shot_id"]), ("partial", "pa"))
-        self.assertEqual(row["reason"], "SCENE_PHASE_MISSING:wipe")
-        self.assertIn("纸巾擦拭", row["operator_note"])
-        phases = []
-        for seg in segments[1:3]:
-            self.assertEqual(seg["scene_rule"]["status"], "partial")
-            phases += ([p["detail"]["scene_phase"] for p in seg["span_parts"]] if seg.get("multi_shot")
-                       else [seg["evidence_intervals"][0]["scene_phase"]])
-        self.assertEqual(phases[0], "pour")
-        self.assertIn("absorb", phases)
-        self.assertNotIn("wipe", phases)
+        self.assertEqual(row["status"], "visual_missing")
+        self.assertEqual(row["reason"], scene_rules.SCENE_ACTION_INCOMPLETE)
         row, _segments = run([pour_absorb, full], True)
         self.assertEqual((row["status"], row["shot_id"]), ("applied", "full"))
 
-    def test_long_absorb_fast_forwards_up_to_twenty_times(self):
-        shot = {**SHOT, "source_start": 0.0, "source_end": 48.5, "material_duration_us": int(48.5 * US)}
-        plan = scene_rules.plan_split(shot, {"pour": [1.2, 5.8], "absorb": [5.8, 43.5]},
-                                      SplitSpeedTests.SCENE, audio_us=7 * US, manifest=MANIFEST)
+    def test_long_absorption_respects_only_output_visibility(self):
+        shot = {**SHOT, "source_start": 0, "source_end": 200, "material_duration_us": 200 * US}
+        phases = {"pour": [0, 10], "absorb": [10, 180], "wipe": [180, 200]}
+        plan = scene_rules.plan_split(shot, phases, SplitSpeedTests.SCENE, audio_us=5 * US, manifest=MANIFEST)
         self.assertTrue(plan["ok"], plan)
-        self.assertEqual(plan["missing_phases"], ["wipe"])
-        absorb = next(p for p in plan["parts"] if p["phase"] == "absorb")
-        self.assertGreater(absorb["speed"], 6.0)
-        self.assertLessEqual(absorb["segment_us"], 3 * US + 33_334)
-        self.assertEqual(sum(p["segment_us"] for p in plan["parts"]), 7 * US + 80_000)
+        self.assertGreater(plan["parts"][1]["speed"], 20)
+        self.assertGreaterEqual(plan["parts"][1]["segment_us"], 300_000)
 
     def test_absorb_ending_at_material_end_never_overruns(self):
         shot = {**SHOT, "source_start": 0.0, "source_end": 43.537, "material_duration_us": 43_537_000}
-        phases = {"pour": [1.197, 5.763], "absorb": [5.767, 43.537]}
+        phases = {"pour": [1.197, 5.763], "absorb": [5.763, 40], "wipe": [40, 43.537]}
         for audio_us in range(5_000_000, 8_000_000, 37_000):
             plan = scene_rules.plan_split(shot, phases, SplitSpeedTests.SCENE, audio_us=audio_us,
                                           manifest=MANIFEST)
@@ -1294,7 +1273,7 @@ class ExperimentGroupChainTests(unittest.TestCase):
     def test_over_cap_group_cannot_be_rescued_by_short_neighbour(self):
         row, segments = self._borrow(3.6, 1.0)
         self.assertEqual((row["indices"], row.get("borrowed"), row["status"]),
-                         ([1], None, "unmet"))
+                         ([1], None, "visual_missing"))
         self.assertEqual(segments[1]["video"], "D:/m/other.mp4")
 
     def test_borrowing_that_still_fails_keeps_the_neighbour(self):

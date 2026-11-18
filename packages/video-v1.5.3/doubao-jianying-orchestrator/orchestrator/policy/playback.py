@@ -13,7 +13,7 @@ PROCESS_MAX = 3.0
 OBSERVATION_SCHEMA = "reviewed-playback-window-v1"
 PROMPT = """生产画面速度规则：计时证明保持原速；普通完整短窗与实验分相使用各自许可。
 已复核完整的放置短窗允许在该窗口内最高2倍速；这是普通短窗的独立许可，不要求先标纯过程。
-需要2到3倍时仅限本次看图确认的纯过程，硬上限3倍。实验分相时关键接触、完成、提起和结果原速；
+普通已复看的纯过程硬上限3倍。卫品吸水组以完整三阶段联合复核为准，倒液、吸收和纸巾验证均可加速，无固定倍速上限。
 没有过程或完整短窗许可时按原速求解。不自动慢放，不截掉动作或结果，不改写原始证据区间。
 放不下先找另一段更短且动作完整的已复核窗口；再对同商品同一演示同卖点的相邻句联合复核连续承接，仍无解如实报告时长冲突。
 不能用后台支持的更高倍率、旧缓存或preview绕过规则。"""
@@ -69,11 +69,28 @@ def placement_fit_window(value) -> tuple[int, int] | None:
     return a, b
 
 
+def experiment_phase_window(value) -> tuple[int, int] | None:
+    if (not isinstance(value, dict) or value.get("schema") != OBSERVATION_SCHEMA
+            or value.get("kind") != "experiment_phase" or value.get("group_policy") != "visible_three_stages"
+            or value.get("phase") not in {"context", "pour", "absorb", "press", "lift", "result"}
+            or not str(value.get("observed") or "").strip()):
+        return None
+    a, b = value.get("start_us"), value.get("end_us")
+    if type(a) is not int or type(b) is not int or not 0 <= a < b:
+        return None
+    return a, b
+
+
 def speed_range(*, time_sensitive=False, observation=None, override=None) -> tuple[float, float]:
     """Overrides may narrow reviewed permissions; never grant new permissions."""
-    if time_sensitive:
+    if time_sensitive and not experiment_phase_window(observation):
         return 1.0, 1.0
-    if placement_fit_window(observation):
+    if experiment_phase_window(observation):
+        # A positive integer-microsecond target is the only mathematical
+        # bound here; task and group authorization are checked by the caller.
+        a, b = experiment_phase_window(observation)
+        lo, hi = 1.0, float(b - a)
+    elif placement_fit_window(observation):
         lo, hi = 1.0, PROCESS_PREFERRED_MAX
     elif process_window(observation) is None:
         return 1.0, 1.0
@@ -101,7 +118,7 @@ def conflicts(*, start_us, end_us, target_us, speed, time_sensitive=False,
     actual = (end_us - start_us) / target_us
     lo, hi = speed_range(time_sensitive=time_sensitive, observation=observation)
     lo, hi = capped_range((lo, hi), task_speed_cap)
-    window = process_window(observation) or placement_fit_window(observation)
+    window = process_window(observation) or placement_fit_window(observation) or experiment_phase_window(observation)
     if window and not window[0] <= start_us < end_us <= window[1]:
         hi = lo = 1.0
     # Integer-microsecond rounding only. A whole frame must not authorize excess speed.

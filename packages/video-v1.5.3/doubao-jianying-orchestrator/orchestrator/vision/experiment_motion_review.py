@@ -66,19 +66,14 @@ def review(manifest,pair,output,*,ffmpeg='ffmpeg',ffprobe='ffprobe'):
         # frame IDs. Long unrelated tails obscure these short action boundaries.
         window=window_video(member,target,ffmpeg=ffmpeg,ffprobe=ffprobe)
         prompt=policy(manifest)+'''请完整观察带frame N编号的真实视频，只分析指定源窗口中的这一轮实验，不接收剪辑目标时长。
-A是倒液吸收，B是对应的纸巾按压验证。本次允许过程局部加速，优先不超过2倍、最多3倍。
+A是倒液吸收，B是对应的纸巾按压验证。请标记各事件的源帧事实；成片由三阶段变速规则独立分配时长。
 先找能完整表达该文件阶段的一次紧凑有效窗口：保留动作开始、完成与可读结果，去掉多余等待或重复。
 不得为了凑时长裁必要动作；不要把已有液体推断成新倒液。仅根据实际看到的frame编号定位。
 把有效窗口无缝分段，first_frame/last_frame均为包含的整数编号，下段从上段last_frame+1开始。
 kind只用pour/absorb/press/lift/result/context。pour或press可分开始接触、重复中间过程、完成几个段；
-开始接触与完成段can_speed=false，明确可压缩的中间过程才true；lift、result始终false。
-特别注意：pour、press各自首段和末段都必须false，不能把整个press一段标成true。
-若中间可压缩，则同一kind至少分开始false/中间true/结束false；不能确定分界则全部false。
-有效窗口不必等于输入窗口：清楚结果展示后无变化的长尾应去掉；B结果通常保留0.5–0.8秒，
-须从纸巾完成翻转后清楚可读时开始，不把准备翻转当结果。A的吸收结果保留看清状态所需区间。
-吸收过程也允许局部加速：保留开始可见状态与最终可读状态原速，变化的中间过程可压缩。
-absorb也应分首段false/中间true/末段false；不改变真实计时或用加速冒充瞬吸。
-含计时或瞬吸主张时由文案校验阻止倒液和吸收加速，不把所有定性吸收画面一概锁原速。
+can_speed标识单调重复过程。观察记录各事件的起止、事实和疑点，原片发生的动作要完整覆盖。
+成片可对三个阶段分别加速。报告纸巾接触、提起、结果首次可辨处；最终吸收状态与纸巾结果须有足够实际帧。
+加速后的画面只能说明发生了什么。报告原片计时需要可读计时依据。
 A必须有pour和absorb；B必须有press、lift和result。纸巾结果只描述是否有明显湿痕，不外推绝对无水。
 只输出JSON {"verdict":"observed|uncertain","effective_window_frame_ids":[0,1],
 "segments":[{"first_frame":0,"last_frame":1,"kind":"pour","can_speed":false,"observed":"实际动作及为何可压缩或须原速"}],
@@ -87,7 +82,7 @@ A必须有pour和absorb；B必须有press、lift和result。纸巾结果只描�
             'input_binding_sha256':identity.digest(binding)},ensure_ascii=False)
         def validate_row(row):
             save(target.with_suffix('.candidate.json'),row)
-            return bool(validate_motion(row,member))
+            return bool(validate_motion(row,member,allow_phase_speedup=True))
         row=temporal_video.review(window,prompt,target,fps=10,validator=validate_row)
         validate_samples(samples);observations.append(row)
     artifact={'protocol':PROTOCOL,'task_id':manifest['task_id'],'rules':identity.rules_identity(manifest),

@@ -300,6 +300,27 @@ def scene_for(rules: dict[str, Any], text: str, shot: Optional[dict[str, Any]] =
     return None
 
 
+@lru_cache(maxsize=1)
+def _absorb_scene():
+    return next(s for s in load("weipin")["scenes"] if s["id"] == "absorb_test")
+
+
+def absorption_experiment_role(row):
+    role = row.get("experiment_role")
+    if role in {"absorption", "rewet", "frozen"}:
+        return role
+    text = str(row.get("text") or "")
+    if re.search(r"反渗|回渗|纸巾.{0,8}(?:按压|擦拭)", text):
+        return "rewet"
+    claim = _scene_sentence(_absorb_scene(), text) if text else ""
+    explicit = re.search(r"倒(?:入|上|了)?(?:蓝水|水|液体)|倒液|瞬吸|秒吸|吸(?:收完|完|干|得快)", claim)
+    if "absorb" in (row.get("scene_ids") or []) or explicit:
+        return "absorption"
+    if role in (None, "other", "uncertain") and claim and text_hits_scene(_absorb_scene(), claim):
+        return "absorption"
+    return role or "other"
+
+
 def text_hits_scene(scene: dict[str, Any], text: str) -> bool:
     return _hits(_scene_sentence(scene, text), scene.get("text_keywords") or [])
 

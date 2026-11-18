@@ -3,7 +3,7 @@
 选镜（``match_manifest``）完成后，对命中场景规则的句子重新定窗：
 
 * ``split_speed``（吸水实验）：同一条素材拆成「倒水 / 吸收 / 擦拭」三段，各段不同倍速，
-  吸收段快进到 3 秒内，倒水与擦拭最高 1.6 倍，三段加起来正好等于这句配音；连续几句都在讲
+  三段均可按需加速且必须可辨，整组时长对齐配音；连续几句都在讲
   吸水时，这几句合起来演一遍实验，按句子边界切给各句；
 * ``full_window``（撕包装、透灯光、荧光测试、正面指产品）：窗口必须盖住完整动作，
   允许在规则给出的范围内倍速；``text_forces_visual``（拆包）文案命中就要动作画面，
@@ -14,8 +14,7 @@
 
 选中的镜头满足不了，就按推荐顺序换候选；都不行时，动作确实放不进这句话的在预览稿留黑屏
 （SCENE_ACTION_TOO_LONG），素材池里根本没有该场景画面的（SCENE_NO_FOOTAGE）同样留黑；正式稿保留
-原镜头并记录；相位标不出来的保留原镜头并记录。吸水实验只缺纸巾擦拭时演「倒水 → 吸收」，
-状态记 ``partial``（SCENE_PHASE_MISSING），提示补拍。
+原镜头并记录。吸水实验缺任一阶段记未满足，正式稿须通过三阶段联合复核。
 所有处理结果写进 ``scene_rules_report.json``。
 """
 from __future__ import annotations
@@ -105,151 +104,51 @@ def solve_single(shot: dict[str, Any], *, audio_us: int, manifest: dict[str, Any
 # ── 吸水实验：同源三段不同倍速 ─────────────────────────────────────────
 def plan_split(shot: dict[str, Any], phases: dict[str, list[float]], scene: dict[str, Any], *,
                audio_us: int, manifest: dict[str, Any]) -> dict[str, Any]:
-    """把「倒水 → 吸收 → 擦拭」三段分到这句配音上。
-
-    时间线总长 = 配音 + 尾留白。默认倒水、擦拭 1.0 倍，吸收段快进到不超过
-    ``absorb_max_output_s``；总长超了先提吸收段倍速，再把倒水、擦拭一起提速（默认 ≤1.6）；
-    口播太短、常规倒水倍速仍装不下时，再按 ``pour_burst_max`` / ``wipe_burst_max`` 提速
-    （默认 4.0），宁可快一点也要用真倒液实验，不要留黑或换透光镜头凑数。
-    总长不够先放慢吸收段（不低于 1.0 倍、输出不超过上限），再向擦拭之后、倒水之前延伸素材。
-
-    擦拭在 ``optional_phases`` 里且素材没拍到时，只演「倒水 → 吸收」；时长不够就接吸收完的
-    结果画面（``result`` 段），返回 ``missing_phases`` 供报告提示补拍。
-    """
-    speed = scene.get("speed") or {}
-    pour_rng = _range(speed.get("pour"), (1.0, 1.6))
-    wipe_rng = _range(speed.get("wipe"), (1.0, 1.6))
-    pour_burst = max(pour_rng[1], _number(speed.get("pour_burst_max"), 4.0))
-    wipe_burst = max(wipe_rng[1], _number(speed.get("wipe_burst_max"), pour_burst))
-    absorb_cap_us = _us(speed.get("absorb_max_output_s", 3.0))
-    absorb_hi = max(1.0, _number(speed.get("absorb_max_speed"), 6.0))
-    # Optional editorial limit for the entire physical demonstration. If the
-    # evidenced interval no longer fits, let the caller try another source or
-    # report it unresolved; never speed it up past the requested limit.
-    raw_cap = manifest.get("max_absorb_demo_speed")
-    if raw_cap is not None:
-        try:
-            cap = float(raw_cap)
-        except (TypeError, ValueError):
-            return {"ok": False, "reason": "SCENE_SPEED_LIMIT_INVALID"}
-        if not math.isfinite(cap) or not 1.0 <= cap <= 20.0:
-            return {"ok": False, "reason": "SCENE_SPEED_LIMIT_INVALID"}
-        pour_rng = (pour_rng[0], min(pour_rng[1], cap))
-        wipe_rng = (wipe_rng[0], min(wipe_rng[1], cap))
-        if cap < max(pour_rng[0], wipe_rng[0]):
-            return {"ok": False, "reason": "SCENE_SPEED_LIMIT_INVALID"}
-        pour_burst = min(pour_burst, cap)
-        wipe_burst = min(wipe_burst, cap)
-        absorb_hi = min(absorb_hi, cap)
-    fps = _fps(manifest)
-    frame = timing_contract.frame_us(fps)
-    names = [p["name"] for p in scene.get("phases") or []]
-    optional = set(scene.get("optional_phases") or [])
-    if len(names) != 3 or any(n not in phases for n in names if n not in optional):
-        return {"ok": False, "reason": SCENE_ACTION_INCOMPLETE}
-    missing = [n for n in names if n not in phases]
-    has_wipe = names[2] in phases
-    tail_name = names[2] if has_wipe else "result"
-    scene_in, scene_out = _us(shot.get("source_start")), _us(shot.get("source_end"))
-    scene_out = min(scene_out, _material_us(shot))
-    b0 = max(scene_in, _us(phases[names[0]][0]))
-    b1 = max(b0, _us(phases[names[0]][1]))
-    if has_wipe:
-        b2 = max(b1, _us(phases[names[2]][0]))
-        b3 = min(scene_out, max(b2, _us(phases[names[2]][1])))
-    else:
-        b2 = b3 = min(scene_out, max(b1, _us(phases[names[1]][1])))
-    pour_m, absorb_m, wipe_m = b1 - b0, b2 - b1, b3 - b2
-    if pour_m < MIN_PART_US or (has_wipe and wipe_m < MIN_PART_US):
+    """Fit the three observed stages to narration. Joint event review certifies the final cuts."""
+    from ..selection.experiment_retiming import fit_group
+    names = [p["name"] for p in scene["phases"]]
+    if names != ["pour", "absorb", "wipe"] or any(name not in phases for name in names):
         return {"ok": False, "reason": SCENE_ACTION_INCOMPLETE,
-                "detail": {"pour_us": pour_m, "wipe_us": wipe_m}}
-    timeline = int(audio_us) + _tail_pad_us(manifest)
-    absorb_lo = max(1.0, absorb_m / float(absorb_cap_us)) if absorb_m > 0 else 1.0
-    if absorb_lo > absorb_hi + 1e-9:
-        return {"ok": False, "reason": SCENE_ACTION_TOO_LONG, "detail": {"absorb_us": absorb_m}}
-    s_pour, s_absorb, s_wipe = 1.0, absorb_lo, 1.0
-
-    def total() -> float:
-        return pour_m / s_pour + (absorb_m / s_absorb if absorb_m else 0) + wipe_m / s_wipe
-
-    if total() > timeline:
-        if absorb_m:
-            room = timeline - pour_m - wipe_m
-            s_absorb = absorb_hi if room <= absorb_m / absorb_hi else max(absorb_lo, absorb_m / room)
-        if total() > timeline + 1:
-            rest = timeline - (absorb_m / s_absorb if absorb_m else 0)
-            common = (pour_m + wipe_m) / rest if rest > 0 else float("inf")
-            pour_hi = pour_rng[1]
-            wipe_hi = wipe_rng[1]
-            if common > min(pour_hi, wipe_hi) + 1e-9:
-                # 常规 1.6× 放不下：短句仍优先真实验，放开到 burst 上限。
-                pour_hi, wipe_hi = pour_burst, wipe_burst
-                pour_rng = (pour_rng[0], pour_hi)
-                wipe_rng = (wipe_rng[0], wipe_hi)
-            if common > min(pour_hi, wipe_hi) + 1e-9:
-                return {"ok": False, "reason": SCENE_ACTION_TOO_LONG,
-                        "detail": {"timeline_us": timeline, "action_us": b3 - b0,
-                                   "needed_speed": round(common, 3)}}
-            s_pour = s_wipe = max(1.0, common)
-    elif total() < timeline:
-        if absorb_m:
-            s_absorb = max(1.0, absorb_m / float(absorb_cap_us))
-        short = timeline - total()
-        if short > 0:
-            after = max(0, scene_out - _tail_guard_us(manifest) - b3)
-            grow = min(after, int(short))
-            b3 += grow
-            wipe_m += grow
-            short -= grow
-        if short > 0:
-            before = max(0, b0 - scene_in - _head_guard_us(manifest))
-            grow = min(before, int(short))
-            b0 -= grow
-            pour_m += grow
-            short -= grow
-        if short > frame:
-            return {"ok": False, "reason": SCENE_SENTENCE_TOO_LONG,
-                    "detail": {"timeline_us": timeline, "action_us": b3 - b0}}
-    parts_spec = [(names[0], pour_m, s_pour, pour_rng)]
-    if absorb_m:
-        parts_spec.append((names[1], absorb_m, s_absorb, (1.0, absorb_hi)))
-    if wipe_m > 0:
-        parts_spec.append((tail_name, wipe_m, s_wipe, wipe_rng))
-    snapped = [timing_contract.frame_speed(s, rng[0], rng[1], fps=fps)
-               for _n, _m, s, rng in parts_spec]
-    outs = [int(round(m / s)) for (_n, m, _s, _r), s in zip(parts_spec, snapped)]
-    outs[-1] = timeline - sum(outs[:-1])
-    parts = []
-    cursor = b0
-    for (name, _m, _s, rng), s, out in zip(parts_spec, snapped, outs):
-        material = int(round(s * out))
-        start, end = cursor, cursor + material
-        if out <= 0 or material <= 0:
-            return {"ok": False, "reason": SCENE_ACTION_TOO_LONG, "detail": {"part": name}}
-        parts.append({"phase": name, "speed": s, "speed_range": [rng[0], rng[1]],
-                      "source_start_us": start, "source_end_us": end, "segment_us": out})
-        cursor = end
-    # 倍速吸附到整帧后素材用量会有出入（20 倍时最多差半帧 × 20），动作收在素材末尾时会越界：
-    # 先整体前移（倒水前还有余量），不够再把最后一段收短、按原输出时长重算倍速。
-    over = cursor - min(scene_out, _material_us(shot))
-    if over > 0:
-        shift = min(over, max(0, parts[0]["source_start_us"] - scene_in))
-        for part in parts:
-            part["source_start_us"] -= shift
-            part["source_end_us"] -= shift
-        cursor, over = cursor - shift, over - shift
-    if over > 0:
-        last = parts[-1]
-        span = last["source_end_us"] - over - last["source_start_us"]
-        if span > 0 and span / last["segment_us"] >= last["speed_range"][0] - 1e-9:
-            last["source_end_us"] -= over
-            last["speed"] = span / last["segment_us"]
-            cursor -= over
-    if cursor > scene_out + frame or cursor > _material_us(shot):
-        return {"ok": False, "reason": SCENE_ACTION_TOO_LONG,
-                "detail": {"end_us": cursor, "scene_out_us": scene_out}}
-    return {"ok": True, "parts": parts, "timeline_us": timeline,
-            "action_us": b3 - b0, "missing_phases": missing}
+                "missing_phases": [name for name in names if name not in phases]}
+    source_in = _us(shot.get("source_start"))
+    source_out = min(_us(shot.get("source_end")), _material_us(shot))
+    fps = _fps(manifest)
+    ranges = []
+    for name in names:
+        span = phases[name]
+        if (not isinstance(span, (list, tuple)) or len(span) != 2
+                or any(type(v) not in (float, int) or not math.isfinite(v) for v in span)):
+            return {"ok": False, "reason": SCENE_ACTION_INCOMPLETE}
+        start, end = max(source_in, _us(span[0])), min(source_out, _us(span[1]))
+        if ranges:
+            if start < ranges[-1]["start"]:
+                return {"ok": False, "reason": SCENE_ACTION_INCOMPLETE}
+            # Sparse source observations may share one boundary sample.
+            start = max(start, ranges[-1]["end"])
+        frames = 19 if name == "wipe" else 2
+        minimum = math.ceil(frames * US / fps)
+        if name == "absorb":
+            minimum = max(300_000, minimum)
+        if end - start < minimum:
+            return {"ok": False, "reason": SCENE_ACTION_INCOMPLETE, "detail": {"phase": name}}
+        ranges.append({"kind": name, "start": start, "end": end, "minimum_us": minimum})
+    target = int(audio_us) + _tail_pad_us(manifest)
+    material = sum(p["end"] - p["start"] for p in ranges)
+    if target > material:
+        extra = target - material
+        after = min(extra, max(0, source_out - _tail_guard_us(manifest) - ranges[-1]["end"]))
+        before = extra - after
+        if before and ranges[0]["start"] - before < source_in + _head_guard_us(manifest):
+            return {"ok": False, "reason": SCENE_SENTENCE_TOO_LONG}
+        ranges[0]["start"] -= before
+        ranges[-1]["end"] += after
+    try:
+        result = fit_group([{"phase_intervals": ranges}], target, fps=fps,
+                           allow_phase_speedup=True, max_speed=None)[0]
+    except ValueError:
+        return {"ok": False, "reason": SCENE_ACTION_TOO_LONG}
+    parts = [{**p, "speed_range": [p["speed"], p["speed"]]} for p in result["retiming"]["parts"]]
+    return {"ok": True, "parts": parts, "timeline_us": target, "action_us": material, "missing_phases": []}
 
 
 def slice_plan(plan: dict[str, Any], member_us: list[int], *, fps: float,
@@ -275,12 +174,13 @@ def slice_plan(plan: dict[str, Any], member_us: list[int], *, fps: float,
     edges.append(bounds[-1])
     if any(b <= a for a, b in zip(edges, edges[1:])):
         return None
-    pieces, cursor = [], int(parts[0]["source_start_us"])
+    pieces = []
     for part, a, b in zip(parts, edges, edges[1:]):
-        pieces.append((a, b, cursor, part))
-        cursor += int(round(float(part["speed"]) * (b - a)))
-    if limit_us is not None and cursor > int(limit_us) + frame:
-        return None
+        src, end = part["source_start_us"], part["source_end_us"]
+        if limit_us is not None and end > limit_us:
+            return None
+        speed = (end - src) / (b - a)
+        pieces.append((a, b, src, {**part, "speed": speed, "speed_range": [speed, speed]}))
     members, lo = [], 0
     for hi in bounds:
         chunks = []
@@ -1035,7 +935,7 @@ def _plan_group(scene: dict[str, Any], members: list[dict[str, Any]], shot: dict
     phases = located.get("phases") or {}
     optional = set(scene.get("optional_phases") or [])
     required = [p.get("name") for p in scene.get("phases") or [] if p.get("name") not in optional]
-    if not located.get("complete") and any(name not in phases for name in required):
+    if not located.get("complete") or any(name not in phases for name in required):
         return {"ok": False, "reason": SCENE_ACTION_INCOMPLETE, "phases": phases}
     pad = _tail_pad_us(manifest)
     plan = plan_split(shot, phases, scene, audio_us=sum(audio) + pad * (len(audio) - 1),
@@ -1050,20 +950,12 @@ def _plan_group(scene: dict[str, Any], members: list[dict[str, Any]], shot: dict
     updates = []
     for member, audio_us, chunks in zip(members, audio, sliced):
         swapped = str(member.get("temporary_shot_id") or "") != str(shot.get("shot_id"))
-        if len(chunks) >= 2:
-            updates.append(_split_update(member, shot, chunks, plan, swapped=swapped))
-            continue
-        chunk = chunks[0]
-        speed = float(chunk["speed"])
-        evidence = (chunk["source_start_us"] / US + 0.001, chunk["source_end_us"] / US - 0.001)
-        solution, guards = solve_single(shot, audio_us=audio_us, manifest=manifest,
-                                        speed_range=(speed, speed), evidence=evidence)
-        if not solution.ok:
-            return {"ok": False, "reason": solution.reason, "detail": solution.detail,
-                    "phases": phases}
-        update = _single_update(member, shot, solution, guards, speed_range=(speed, speed),
-                                evidence=evidence, swapped=swapped)
-        update["evidence_intervals"][0]["scene_phase"] = chunk["phase"]
+        update = _split_update(member, shot, chunks, plan, swapped=swapped)
+        if len(chunks) == 1:
+            part = update["span_parts"][0]
+            update.update(source_start=part["source_start"], source_end=part["source_end"],
+                          speed_range_override=part["speed_range_override"], guard_override=[0, 0],
+                          multi_shot=False, span_parts=None)
         updates.append(update)
     return {"ok": True, "updates": updates, "phases": phases,
             "missing_phases": plan.get("missing_phases") or [],

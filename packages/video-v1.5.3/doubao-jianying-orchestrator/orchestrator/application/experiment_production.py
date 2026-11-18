@@ -4,6 +4,7 @@ from pathlib import Path
 from .. import ai_editor_contract as identity
 from ..domain.timeline import Asset
 from ..media.probe import probe_media
+from ..policy.continuity import experiment_minimum_frames
 from ..selection.experiment_contract import contract_for, validate_group, validate_observation
 from ..selection.temporal_groups import replace_group
 from ..vision.experiment_review import PROTOCOL
@@ -153,16 +154,14 @@ def apply_pair(manifest,timeline,sentence_ids,roles,evidence,*,group_id,prior_or
         from ..vision.experiment_motion_review import validate as validate_motion
         observed=validate_motion(manifest,evidence,motion)
         from ..selection.experiment_events import validate_focus,fit_phase_windows
-        validate_focus(selected,roles,observed)
+        validate_focus(selected,roles,observed,allow_phase_speedup=True,members=members)
         phase_boundary=None
         if align_phases:
             role_map={r['sentence_id']:r['role'] for r in roles}
             rewet=next((s for s in selected if role_map[s.sentence_id]=='rewet'),None)
-            if rewet is None:
-                raise ValueError('EXPERIMENT_PHASE_PRESS_ANCHOR_REQUIRED')
-            phase_boundary=rewet.start_us-lo
+            phase_boundary=rewet.start_us-lo if rewet and rewet.start_us>lo else None
         planned=fit_phase_windows(members,observed,rules['minimum_result_frames'],duration,phase_boundary,
-            fps=timeline.canvas.fps_num/timeline.canvas.fps_den)
+            fps=timeline.canvas.fps_num/timeline.canvas.fps_den, max_speed=None, allow_phase_speedup=True)
     else:
         if align_phases:raise ValueError('EXPERIMENT_PHASE_ALIGNMENT_REQUIRES_PAIR_MOTION')
         if duration<required:raise ValueError("EXPERIMENT_DURATION_CONFLICT_WITH_COMPATIBLE_SENTENCES")
@@ -184,11 +183,17 @@ def apply_pair(manifest,timeline,sentence_ids,roles,evidence,*,group_id,prior_or
             a,b=part['source_start_us'],part['source_end_us']
             protected=[{**p,'start':max(a,p['start']),'end':min(b,p['end'])}
                 for p in plan['protected_intervals']if max(a,p['start'])<min(b,p['end'])]
+            if motion is not None:
+                phase = next(p for p in plan['phase_intervals'] if p['start'] == a and p['end'] == b)
+                fps = timeline.canvas.fps_num / timeline.canvas.fps_den
+                minimum_frames = experiment_minimum_frames(phase['kind'], fps, rules['minimum_result_frames'])
+                protected = [{'start': a, 'end': b, 'kind': 'result' if phase['kind'] == 'result' else 'action',
+                              'min_output_frames': minimum_frames}]
             clips.append({'asset_id':asset.asset_id,'source_start_us':a,'source_end_us':b,
                 'target_duration_us':part['segment_us']if motion is not None else part['target_duration_us'],
                 'protected_intervals':protected,
                 "evidence":[{"protocol":PAIR_PROTOCOL,"original":samples["original"],"pair_observation":row,
                     "motion_observation":motion,"source_selection":plan.get('source_selection'),"status":"OUTPUT_REVIEW_PENDING"}]
-                    +([{'bounded_process_speed_cap':3}]if motion is not None and not part['locked']else [])})
+                     +([{'reviewed_experiment_phase':part['phase']}] if motion is not None else [])})
     transition=(members[0]["samples"]["original"]["path"],members[1]["samples"]["original"]["path"])
     return replace_group(timeline,sentence_ids,clips,group_id=group_id,assets=added,original_paths=origins,matched_pairs=(transition,))

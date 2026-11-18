@@ -13,6 +13,7 @@ from types import SimpleNamespace
 
 from .. import ai_editor_contract as identity
 from ..policy import continuity
+from ..rulepack import absorption_experiment_role as inferred_role
 from . import experiment_contract, experiment_events, timing_contract as timing
 
 ROLES = {"absorption", "rewet", "followup", "bridge", "breathability", "fluorescence",
@@ -21,19 +22,33 @@ PAIR_LIMIT = 6
 ADJACENT_EXTRA = 4
 
 
-def groups(sentences, *, require_rewet=True):
-    """Semantic roles retrieve groups; only joint source pixels authorize them."""
+def groups(sentences, *, require_rewet=False):
+    """Find adjacent experiment clauses, including one clause carrying the whole demonstration."""
     current = []
-    for row in list(sentences) + [{"experiment_role": "other"}]:
-        if row.get("experiment_role") in {"absorption", "rewet", "followup", "bridge"}:
-            current.append(row)
-            continue
+    for row in [*sentences, {}]:
+        role = inferred_role(row)
+        row = {**row, "experiment_role": role}
         roles = [s["experiment_role"] for s in current]
-        if (len(current) >= 2 and continuity.adjacent([s["index"] for s in current])
-                and "absorption" in roles and (not require_rewet or (
-                    "rewet" in roles and roles.index("absorption") < roles.index("rewet")))):
-            yield current
-        current = []
+        allowed = role in {"absorption", "rewet", "followup", "bridge"}
+        if not allowed or (role == "absorption" and "rewet" in roles):
+            if ({"absorption", "rewet"}.intersection(roles)
+                    and (not require_rewet or {"absorption", "rewet"} <= set(roles))
+                    and continuity.adjacent([s["index"] for s in current])):
+                yield current
+            current = []
+        if allowed:
+            current.append(row)
+
+
+def require_complete(sentences, segments):
+    for members in groups(sentences):
+        indices = [m["index"] for m in members]
+        selected = [segments[i - 1].get("continuity_group") for i in indices]
+        group = selected[0]
+        if (not continuity.is_experiment(group) or not group["input"].get("allow_experiment_phase_speedup")
+                or [m["index"] for m in group["input"]["members"]] != indices
+                or any(other != group for other in selected[1:])):
+            raise ValueError(f"AI_EDITOR_EXPERIMENT_GROUP_PENDING:{indices[0]}:three_visible_stages_required")
 
 
 def _scope(manifest, analysis):
@@ -167,6 +182,43 @@ def _observe_bound_pair(scoped, manifest, first, second, samples, windows, direc
     return pair, motion
 
 
+def _align_short_phase_fragments(planned, sentence_targets, fps):
+    """Keep tiny phase fragments on one side of a sentence boundary when possible."""
+    frame_sliver = round(2_000_000 / fps)
+    boundaries, total = [], 0
+    for duration in sentence_targets[:-1]:
+        total += duration
+        boundaries.append(total)
+    offset = 0
+    for fit in planned:
+        parts = fit['retiming']['parts']
+        phase_min = {(p['start'], p['end']): p['minimum_us'] for p in fit['phase_intervals']}
+        for boundary in boundaries:
+            cursor = offset
+            for i, part in enumerate(parts):
+                end = cursor + part['segment_us']
+                fragment = boundary - cursor
+                if 0 < fragment <= frame_sliver and boundary < end and i:
+                    # Preserve every source interval and phase. Shift output
+                    # time from this phase to an earlier phase that can take it
+                    # without slowing down or reducing result visibility.
+                    available = part['segment_us'] - phase_min[(part['source_start_us'], part['source_end_us'])]
+                    donor = next((p for p in reversed(parts[:i])
+                                  if p['source_end_us'] - p['source_start_us'] - p['segment_us'] >= fragment), None)
+                    if donor is not None and available >= fragment:
+                        donor['segment_us'] += fragment
+                        part['segment_us'] -= fragment
+                    break
+                cursor = end
+        cursor = 0
+        for part in parts:
+            part['target_start_us'] = cursor
+            part['speed'] = (part['source_end_us'] - part['source_start_us']) / part['segment_us']
+            cursor += part['segment_us']
+        fit['retiming']['maximum_speed'] = max(p['speed'] for p in parts)
+        offset += cursor
+
+
 def _context(manifest, analysis, members, narration_timing, pair, motion, shot_ids):
     from ..vision.experiment_motion_review import validate as validate_motion
     shots = {s["shot_id"]: s for s in analysis["shots"]}
@@ -181,21 +233,26 @@ def _context(manifest, analysis, members, narration_timing, pair, motion, shot_i
             segment=originals[sentence["index"] - 1])
         if certainty == "estimated" or duration <= 0:
             raise ValueError("EXPERIMENT_REAL_NARRATION_REQUIRED")
+        sentence = {**sentence, "experiment_role": inferred_role(sentence)}
         allocated.append({k: copy.deepcopy(sentence[k]) for k in (
             "index", "text", "kind", "selling_points", "scene_ids", "experiment_role")})
         allocated[-1].update(audio_duration_us=duration, target_us=duration + pad, parts=[])
     roles = [{"sentence_id": str(s["index"]), "role": s["experiment_role"]} for s in allocated]
     selected = [SimpleNamespace(sentence_id=str(s["index"]), text=s["text"]) for s in allocated]
-    experiment_events.validate_focus(selected, roles, observations)
-    boundary = sum(s["target_us"] for s in allocated[:next(i for i, s in enumerate(allocated)
-                                                        if s["experiment_role"] == "rewet")])
+    rules = experiment_contract.contract_for(scoped)
+    allow_speedup = rules.get("phase_speed_policy") == "visible_three_stages"
+    experiment_events.validate_focus(selected, roles, observations, allow_phase_speedup=allow_speedup, members=pair["members"])
+    rewet = next((i for i, s in enumerate(allocated) if s["experiment_role"] == "rewet"), None)
+    boundary = sum(s["target_us"] for s in allocated[:rewet]) if rewet else None
     total = sum(s["target_us"] for s in allocated)
     fps = float(manifest.get("fps", 30))
-    task_cap = identity.playback.task_absorb_speed_cap(manifest)
-    max_speed = min(identity.playback.PROCESS_MAX, task_cap if task_cap is not None else identity.playback.PROCESS_MAX)
+    task_cap = None if allow_speedup else identity.playback.task_absorb_speed_cap(manifest)
+    max_speed = None if allow_speedup else min(identity.playback.PROCESS_MAX, task_cap or identity.playback.PROCESS_MAX)
     planned = experiment_events.fit_phase_windows(pair["members"], observations,
-        experiment_contract.contract_for(scoped)["minimum_result_frames"], total, boundary,
-        fps=fps, max_speed=max_speed)
+        rules["minimum_result_frames"], total, boundary,
+        fps=fps, max_speed=max_speed, allow_phase_speedup=allow_speedup)
+    if allow_speedup:
+        _align_short_phase_fragments(planned, [s['target_us'] for s in allocated], fps)
     sources = {}
     for sid, member in zip(shot_ids, pair["members"]):
         shot = shots[sid]
@@ -217,9 +274,12 @@ def _context(manifest, analysis, members, narration_timing, pair, motion, shot_i
                 right = end if consumed + take == duration else start + round((end - start) * (consumed + take) / duration)
                 if take <= 0 or right <= cursor:
                     raise ValueError("EXPERIMENT_PHASE_DURATION_CONFLICT")
-                sentence["parts"].append({"shot_id": sid, "source_identity": sources[sid]["identity"],
+                part = {"shot_id": sid, "source_identity": sources[sid]["identity"],
                     "start_us": cursor, "end_us": right, "target_us": take,
-                    "process": not physical["locked"]})
+                    "process": not physical["locked"] if not allow_speedup else False}
+                if allow_speedup:
+                    part["experiment_phase"] = physical["phase"]
+                sentence["parts"].append(part)
                 consumed += take; used += take; cursor = right
                 if used == sentence["target_us"]:
                     sentence_index += 1; used = 0
@@ -236,6 +296,8 @@ def _context(manifest, analysis, members, narration_timing, pair, motion, shot_i
         "source_selection": [p.get("source_selection") for p in planned]}
     if task_cap is not None:
         context["task_absorb_speed_cap"] = task_cap
+    if allow_speedup:
+        context["allow_experiment_phase_speedup"] = True
     return context
 
 
@@ -269,7 +331,7 @@ def review_group(manifest, context, directory):
         context, ensure_ascii=False) + """
 图片按sentence/part顺序排列，每个part使用该源片段的实际时间戳。倒液、吸收、按压和提纸必须来自同一场景的同次实验，跨文件或换机位仍要核对布景、台面和巾体状态连续。换布景或无法确认同场时不能通过。
 逐句检查实际承担的阶段和口播是否相符，不把总长度可行当成逐句对应。
-反渗句开始应已有纸巾实际接触，不能仍是倒液或无关准备。关键动作、提起和结果要完整；
+有独立吸收和反渗句时，反渗句起点对上纸巾接触。单句承担整个实验时，依次看清倒液、吸收和纸巾验证。关键动作、提起和结果要完整；
 结果可在同主题后续句承接，但不能借透气/促销句，也不能把后句结果说成前句已经出现。
 每句至少一个具体卖点成立，其他只备注；同一组允许各part承担动作的不同阶段，无需每片重播完整实验。
 只按本次画面判断商品、同次实验、完整性与逐句支持，不接收旧选镜的通过结论。
@@ -284,6 +346,9 @@ def review_group(manifest, context, directory):
 members和parts必须与输入逐个同序；证据区间只填各part实际源窗内的可见阶段。
 不能确认同次实验或关键动作结果、阶段错位时拒绝，不因素材不足放行。
 """
+    if context.get("allow_experiment_phase_speedup") is True:
+        prompt += ("\n卫品吸水组必须完整呈现倒液、液体吸收和纸巾接触后提起展示结果，三个阶段均可按需加速且无固定倍速上限。"
+                   "仍须根据实际切片确认各阶段和结果清楚可辨，不将加速画面作为真实耗时证据。")
     return editor._call(prompt, path.with_suffix(".json"), path)
 
 
@@ -336,6 +401,10 @@ def assemble_member(manifest, plan, group, index, original):
         observation = {**observed, **fact, "confidence": group["review"]["confidence"]}
         playback = ({"schema": identity.playback.OBSERVATION_SCHEMA, "kind": "process",
             "observed": fact["observation"], "start_us": start, "end_us": end} if cut["process"] else None)
+        if group["input"].get("allow_experiment_phase_speedup") is True:
+            playback = {"schema": identity.playback.OBSERVATION_SCHEMA, "kind": "experiment_phase",
+                "observed": fact["observation"], "start_us": start, "end_us": end,
+                "phase": cut["experiment_phase"], "group_policy": "visible_three_stages"}
         observation["playback_observation"] = playback
         item = {"ok": True, "video": cut["source_identity"]["path"], "shot_id": cut["shot_id"],
             "temporary_shot_id": cut["shot_id"], "text": member["text"],
@@ -357,7 +426,7 @@ def assemble_member(manifest, plan, group, index, original):
                 for e in fact["evidence_intervals_us"]]}
         item["ai_selection"] = identity.make_receipt(item, index=index, sentence=member,
             observation=observation, source_identity=cut["source_identity"], identity=plan["identity"],
-            task_speed_cap=identity.playback.task_absorb_speed_cap(manifest))
+            task_speed_cap=group["input"].get("task_absorb_speed_cap"))
         parts.append(item)
     segment = {**original, **parts[0], "selection_mode": "ai_editor", "sentence_kind": member["kind"],
         "claim_text": member["text"], "audio_duration_us": member["audio_duration_us"], "timing_certainty": "audio",
@@ -370,7 +439,7 @@ def assemble_member(manifest, plan, group, index, original):
                        "playback_observation": parts[0]["playback_observation"]}
         segment["ai_selection"] = identity.make_receipt(segment, index=index, sentence=member,
             observation=observation, source_identity=member["parts"][0]["source_identity"], identity=plan["identity"],
-            task_speed_cap=identity.playback.task_absorb_speed_cap(manifest))
+            task_speed_cap=group["input"].get("task_absorb_speed_cap"))
     check = identity.validate_segment_receipt(segment, index=index, manifest=manifest, verify_source=True)
     if not check["ok"]:
         raise ValueError("CONTINUITY_" + ";".join(check["reasons"]))
@@ -389,7 +458,9 @@ def repair(manifest, analysis, plan, directory, narration_timing):
     changed = False
     for members in groups(plan["sentences"]):
         indices = [s["index"] for s in members]
-        if any(rows[i].get("continuity_key") for i in indices):
+        keys = {rows[i].get("continuity_key") for i in indices}
+        if len(keys) == 1 and continuity.is_experiment(
+                (plan.get("continuity_reviews") or {}).get(next(iter(keys)))):
             continue
         targets = set(manifest.get("ai_refill_indices") or [])
         if targets and not set(indices) <= targets:
@@ -407,15 +478,20 @@ def repair(manifest, analysis, plan, directory, narration_timing):
             return [sid for sid in dict.fromkeys(result) if sid in shots
                     and not any(sid in rejected.get(i, set()) for i in indices)][:editor.ROUND_SIZE]
         first_ids, second_ids = candidates("absorption"), candidates("rewet")
-        shared = set(first_ids).intersection(second_ids)
-        if shared and not plan.get("_locked_members"):
-            from . import sentence_continuity
-            from .ai_editor_recovery import WindowFailure
-            if sentence_continuity.repair(manifest, analysis, plan, directory,
-                    WindowFailure(indices[0], next(iter(shared)), "EXPERIMENT_GROUP_FIT"),
-                    narration_timing, member_indices=indices):
-                changed = True
-                continue
+        # A one-clause group may have no spoken cue for the other side. Retrieve
+        # verification and pour sources from the task pool, including non-neighbours.
+        def other_side(seed, hints):
+            def score(shot):
+                facts = " ".join(str(shot.get(key, "")) for key in ("description", "action", "result",
+                                  "evidence_tags", "action_segments"))
+                return -sum(word in facts for word in hints)
+            pool = [sid for sid in sorted(shots, key=lambda sid: score(shots[sid]))
+                    if not any(sid in rejected.get(i, set()) for i in indices)]
+            return list(dict.fromkeys(seed + pool))[:editor.ROUND_SIZE]
+        if not second_ids:
+            second_ids = other_side([], ("纸巾", "按压", "擦拭", "提起", "反渗")) + first_ids[:1]
+        if not first_ids:
+            first_ids = other_side([], ("倾倒", "倒液", "倒水", "吸收", "蓝水")) + second_ids[:1]
         # Consecutive files in one folder (IMG_218 -> IMG_219) are usually the
         # pour and its verification. Retrieve them even when the per-sentence
         # shortlist missed one side; the joint pixel review still decides.
@@ -438,7 +514,7 @@ def repair(manifest, analysis, plan, directory, narration_timing):
         from ..vision import experiment_evidence
         preferred = [pair for pair in experiment_evidence.preferred_pairs(_scope(manifest, analysis), shots)
                      if not any(sid in rejected.get(i, set()) for sid in pair for i in indices)]
-        pending_pairs = list(dict.fromkeys(preferred + [(a, b) for a in first_ids for b in second_ids if a != b]))
+        pending_pairs = list(dict.fromkeys(preferred + [(a, b) for a in first_ids for b in second_ids]))
         preferred_set = set(preferred)
         pairs, seen_a, seen_b = [], set(), set()
         while pending_pairs:
@@ -510,10 +586,73 @@ def repair(manifest, analysis, plan, directory, narration_timing):
                 editor._save(directory / "plan.json", plan)
                 if transient:
                     raise
-        if not any(r.get("continuity_key") for r in plan["rows"] if r["index"] in indices):
+        if not all(continuity.is_experiment((plan.get("continuity_reviews") or {}).get(
+                r.get("continuity_key"))) for r in plan["rows"] if r["index"] in indices):
             # Independently plausible shots cannot bypass a required same-experiment check.
             raise ValueError(f"AI_EDITOR_EXPERIMENT_GROUP_PENDING:{indices[0]}:pairing_or_phase_fit_unconfirmed")
     return changed
+
+
+def certify_rule_groups(manifest, analysis, matched, directory, narration_timing):
+    """Bind legacy and mixed-mode absorption groups to the same source and cut review."""
+    from . import ai_editor as editor
+    from .. import rulepack
+    from ..policy import scene_rules
+    if identity.rules_identity(manifest)["category"] != "weipin":
+        return
+    segments = matched.get("segments") or (matched.get("manifest") or {}).get("segments") or []
+    rules = rulepack.for_manifest(manifest)
+    shots = {s["shot_id"]: s for s in analysis.get("shots", [])}
+    detected = [g["positions"] for g in scene_rules._split_groups(segments, rules, shots, category="weipin")
+                if g["scene"]["id"] == "absorb_test"]
+    # A plain match or preview gap can lack scene_rule and a selected video.
+    # A clear narrated experiment still needs the same complete evidence.
+    identified = [{"index": i, "text": row.get("text"), "scene_ids": (row.get("ai_selection") or {}).get("sentence_scene_ids")}
+                  for i, row in enumerate(segments, 1)]
+    detected.extend([m["index"] - 1 for m in run] for run in groups(identified))
+    existing = {tuple(i - 1 for i in rule["group"]) for row in segments
+                if (rule := row.get("scene_rule") or {}).get("id") == "absorb_test" and rule.get("group")}
+    covered = set()
+    for positions in sorted(existing) + [tuple(p) for p in detected]:
+        if not positions or covered.intersection(positions):
+            continue
+        covered.update(positions)
+        first = positions[0]
+        old = segments[first].get("continuity_group")
+        if continuity.is_experiment(old) and all(segments[i].get("continuity_group") == old for i in positions):
+            if [m["index"] for m in old["input"]["members"]] == [i + 1 for i in positions] and all(
+                    identity.validate_segment_receipt(segments[i], index=i + 1, manifest=manifest,
+                                                      verify_source=True)["ok"] for i in positions):
+                continue
+        sentences, rows, reviews = [], [], {}
+        for pos, row in enumerate(segments):
+            index = pos + 1
+            sentence = editor._heuristic_sentence(index, row.get("text", ""))
+            sid = row.get("temporary_shot_id")
+            candidates = editor._rule_shortlist_ids(matched, analysis, index)
+            sentence.update(scene_ids=[], experiment_role="other",
+                            candidate_ids=list(dict.fromkeys(([sid] if sid else []) + candidates)))
+            if pos not in positions:
+                sentence["experiment_role"] = "frozen"
+            if pos in positions:
+                sentence["experiment_role"] = ("rewet" if
+                    editor._absorb_sentence_phase(sentence["text"]) == "wipe" else "absorption")
+            sentences.append(sentence)
+            rows.append({"index": index, "parts": [{"shot_id": sid}] if sid else []})
+            reviews[str(index)] = []
+        plan = {"sentences": sentences, "rows": rows, "reviews": reviews, "display_reviews": [], "coverage": {},
+                "identity": {"model": editor._editor_model(), "editorial_rules": identity.rules_identity(manifest)},
+                "_allow_frozen_rule_segments": True,
+                "_frozen_segments": {i + 1: s for i, s in enumerate(segments) if i not in positions}}
+        root = directory / ("absorb-group-" + str(first + 1))
+        repair(manifest, analysis, plan, root, narration_timing)
+        result = editor._assemble(manifest, analysis, plan, narration_timing=narration_timing, verify_sources=True)
+        require_complete(sentences, result["segments"])
+        for i in positions:
+            segments[i] = result["segments"][i]
+    if covered:
+        matched["selection_mode"] = matched["manifest"]["selection_mode"] = "rule_then_ai"
+        matched["segments"] = matched["manifest"]["segments"] = segments
 
 
 def refill_groups(manifest, analysis, by_index, wanted, directory, narration_timing):

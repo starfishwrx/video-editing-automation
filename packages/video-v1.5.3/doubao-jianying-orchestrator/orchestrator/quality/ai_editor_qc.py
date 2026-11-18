@@ -18,6 +18,15 @@ def blind_frame_label(local_index, frame_number, item):
     return f"S{local_index:02d}{part_label} F{frame_number:02d} @{item['timestamp']:.3f}s"
 
 
+def experiment_output_frames(items):
+    """Resolve the blind sheet's F numbers to physical part and actual timeline frame."""
+    frames = []
+    for item in items:
+        match = re.fullmatch(r"p(\d+)_output(\d+)", item["suffix"])
+        frames.append([int(match[1]), int(match[2])] if match else None)
+    return frames
+
+
 def _action_phases(claim):
     item=claim.get('ai_segment') or {}
     parts=item.get('span_parts') if item.get('multi_shot') else [item]
@@ -98,6 +107,19 @@ def prompt(claims: list[dict], frame_count: int) -> str:
                     "同次演示、同一展示目的或具体卖点、动作和结果完整且可读；仍逐句检查其口播与画面阶段、节奏是否吻合。"
                     "无需每句重播完整实验，但不能借无关句，也不能把后句结果说成前句已出现。"
                     "组内任一必要阶段缺失、不连贯或无法确认时，受影响各句标为INSUFFICIENT_EVIDENCE，不得整体放行。")
+    approved = [i for i, claim in enumerate(claims, 1)
+                if ((claim.get("ai_segment") or {}).get("continuity_group") or {}).get("input", {}).get("allow_experiment_phase_speedup") is True]
+    if approved:
+        mapping += ("\n这些卫品吸水组的倒液、液体吸收、纸巾验证都可按需加速，无固定倍速上限：" + str(approved)
+                    + "。请按实际成片检查各阶段仍可辨认、同次实验对应及结果完整，不得将加速画面当作实际耗时证据。"
+                    + "上述每句另填 visible_experiment_events，按画面顺序列出本句明确看见的事件代号："
+                    "pour（液体倒下）、absorb（液体吸收）、press（纸巾接触或擦拭）、lift（提起纸巾）、"
+                    "result（看清提起后的纸面是否沾液）。每个事件写成对象，例如"
+                    '{"event":"pour","frames":[2,3]}，frames 填本句附图上实际支持该事件的 F 编号。'
+                    "倒液要有两帧清楚看到液体正在倒下，吸收要有不同帧看到液体状态发生变化。"
+                    "纸巾提起后，标出纸面结果仍清晰的最早与最晚 F 编号。"
+                    "单张倒液图、举杯准备、已湿的静止巾面不能证明倒液过程。没看到写空数组，observed写具体所见。")
+    event_field = '"visible_experiment_events":[],' if approved else ""
     return policy + f"""
 你是独立成片审稿人，这是全新调用，不知道选镜器的结论。仅根据最终切片中新抽出的实际画面判断。
 每个物理片段依时间顺序提供开始、过程、结束帧，并补充关键动作/结果帧，总共{frame_count}张。
@@ -121,7 +143,7 @@ DIRECT表示本句按其用途正常匹配：贴切的轻薄/柔软展示和普�
 待核验动作意图仅说明这段剪辑要完成什么，不是观察证据；必须逐项在附图核实其变化和落点。若意图包含开盖露出内部商品，只有搬箱、闭箱正面或刚开始掀盖而商品仍被挡住，不得按普通包装展示放过，标INSUFFICIENT_EVIDENCE。其他动作同理，不能偷换成更弱的动作后通过。
 输出唯一JSON对象：{{"response_version":"{RESPONSE_VERSION}","segments":[{{"index":1,
 "match_level":"DIRECT|ACCEPTABLE_DEGRADED|MISMATCH|INSUFFICIENT_EVIDENCE","visual_ok":true,
-"observed":"可见事实","reason":"逐项支持或不支持原因","confidence":0.8}}],"overall":"PASS|PASS_WITH_DEGRADED|FAIL|UNCERTIFIED"}}。
+{event_field}"observed":"可见事实","reason":"逐项支持或不支持原因","confidence":0.8}}],"overall":"PASS|PASS_WITH_DEGRADED|FAIL|UNCERTIFIED"}}。
 每句恰好一条，index使用本批次从1开始编号。字段必填、描述非空、置信有限且0到1。
 正面判断置信至少0.6；DIRECT/ACCEPTABLE_DEGRADED的visual_ok为true，其余为false。
 凡有待核验动作意图的句子，另必填action_check={{"actor":"product|occluder|product_and_occluder|camera|hand_only|none|uncertain","change_visible":true,"result_visibility":"clear|partial|occluded|unseen|uncertain","observation":"仅描述实际看见的动作主体、变化和结果遮挡情况"}}。
@@ -218,10 +240,12 @@ def validate_cut(claim: dict, rows: list[dict], prepared_sources=None) -> list[s
         try:
             recorded_cap = contract.playback.task_absorb_speed_cap(
                 {"max_absorb_demo_speed": receipt.get("task_absorb_speed_cap")})
-            current_cap = contract.playback.task_absorb_speed_cap(context)
+            phase_allowed = contract.reviewed_experiment_phase(
+                context, receipt.get("continuity_group"), receipt.get("playback_observation"))
+            current_cap = None if phase_allowed else contract.playback.task_absorb_speed_cap(context)
             cap = min(recorded_cap, current_cap) if recorded_cap is not None and current_cap is not None else (
                 recorded_cap if recorded_cap is not None else current_cap)
-            if cap is not None:
+            if cap is not None or phase_allowed:
                 target_us = round(float(actual["target_duration"]) * 1e6)
                 segment = actual.get("segment") or {}
                 speed = segment.get("speed")
@@ -256,10 +280,20 @@ def validate_cut(claim: dict, rows: list[dict], prepared_sources=None) -> list[s
     return sorted(set(issues))
 
 
-def frame_plan(claim: dict, rows: list[dict]) -> list[tuple]:
+def frame_plan(claim: dict, rows: list[dict], *, fps=None) -> list[tuple]:
     plan = []
     expected = claim["ai_segment"].get("span_parts") if claim["ai_segment"].get("multi_shot") else [claim["ai_segment"]]
     for n, (row, part) in enumerate(zip(rows, expected), 1):
+        group = part.get("continuity_group") or {}
+        if fps is not None and contract.continuity.is_experiment(group):
+            start, duration = row["target_start"], row["target_duration"]
+            first = math.ceil(start * fps - 1e-8)
+            last = math.ceil((start + duration) * fps - 1e-8) - 1
+            if last >= first:
+                for tick in sorted({first + round((last - first) * j / 7) for j in range(8)}):
+                    fraction = max(0., (tick / fps - start) / duration)
+                    plan.append((row, f"p{n}_output{tick}", fraction))
+            continue
         for j, fraction in enumerate((0, .14, .28, .42, .56, .70, .84, .98)):
             plan.append((row, f"p{n}_t{j}", fraction))
         for k, ev in enumerate((part.get("ai_selection") or {}).get("evidence_intervals_us", [])):

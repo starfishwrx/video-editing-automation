@@ -1,7 +1,7 @@
 {
   "rulepack": "weipin",
   "label": "卫品",
-  "version": "1.5.3-14",
+  "version": "1.5.3-15",
   "experiment_contracts": {
     "absorb_rewet": {
       "same_experiment": true,
@@ -10,6 +10,7 @@
       "continuous_specimen": true,
       "phases": ["pour", "absorb", "press", "lift", "result"],
       "minimum_result_frames": 15,
+      "phase_speed_policy": "visible_three_stages",
       "allowed_roles": ["absorption", "rewet", "followup", "bridge"],
       "forbidden_roles": ["breathability", "fluorescence", "sku_change", "promotion", "other", "uncertain"],
       "evidence": "倒液吸收与纸巾按压验证须对应同一次实验，可跨素材文件；按压不能换成另一轮实验的验证。通常文件序号相邻，如31/32，先按相邻序号召回，再核对商品、实验布置、巾体液体状态与验证对应关系；相邻本身不自动通过。反渗、干爽、不黏的按压验证只认纸巾接触巾体并提起，手掌或手指按压、手离开、手掌干净都不是按压验证。透气或不闷热句不并入吸水实验组。"
@@ -22,6 +23,7 @@
     "max_gap_frames": 1
   },
   "match_prompt_rules": [
+    "吸水实验须依次看清同次倒液、液体吸收、纸巾按压或擦拭后提起的结果。三个阶段均可按配音时长加速，无固定倍速上限。缺一个阶段或成片看不清就换素材或报缺，快进画面不能证明实际吸收耗时。",
     "每个画面里没有静止不动的空镜；手完成动作后要马上离开画面。",
     "连续几句讲同一件事时，接对应的后续动作：开场囤货接价格、面层柔软接丝滑、倒液吸收接该次实验的纸巾按压；同一次实验允许跨文件。不要把另一次实验的按压结果接进来，不相干的卖点才换镜头。",
     "开场痛点或共鸣句（选不好、谁懂啊、生理期要到了、姐妹们）没有功能卖点词时，配手持产品入画或拆包取出，不要纯静置袋面，也不要当成素材缺口降级打「素材待补」。",
@@ -158,6 +160,7 @@
       "kind": "split_speed",
       "text_keywords": ["吸水", "瞬吸", "秒吸", "倒水", "吸收", "下渗", "渗透", "回渗", "吸得快", "反渗", "回流", "锁水", "吸完", "吸干", "吸进",
                         "量大", "量多", "一整晚", "不扩散", "锁中央", "锁在中央"],
+      "text_ignore": ["吸水因子", "吸收因子", "吸水芯体", "吸收芯体", "吸水层", "吸收层", "吸水芯", "吸收芯"],
       "follow_keywords": ["干爽", "干净", "清爽", "不黏", "不粘", "兜住", "肉眼可见"],
       "group_bridge": 1,
       "group_min_s": 3.5,
@@ -168,12 +171,10 @@
       "phases": [
         {"name": "pour", "label": "倒水", "describe": "液体从开始倒到倒完的整个过程"},
         {"name": "absorb", "label": "吸收", "describe": "倒完之后液体在产品表面被吸收的过程"},
-        {"name": "wipe", "label": "纸巾擦拭", "describe": "用纸巾按压或擦拭表面，直到看清纸巾上没有液体"}
+        {"name": "wipe", "label": "纸巾擦拭", "describe": "同次实验中纸巾实际接触巾体，按压或擦拭，再提起并展示纸巾上是否沾液；三步都看清才算完整"}
       ],
-      "optional_phases": ["wipe"],
-      "speed": {"pour": [1.0, 1.6], "pour_burst_max": 4.0, "wipe": [1.0, 1.6], "wipe_burst_max": 4.0,
-                "absorb_max_output_s": 3.0, "absorb_max_speed": 20.0},
-      "requirement": "完整倒水 → 吸收（快进到 3 秒内）→ 纸巾擦拭看到没有液体；素材没拍擦拭时只演前两段并提示补拍；口播太短时倒水可提到 4 倍，仍用真实验不留黑"
+      "speed": {"mode": "visible_three_stages"},
+      "requirement": "倒液、液体吸收、纸巾接触后提起并展示结果，三个阶段都须完整可辨，均允许按需加速，无固定倍速上限。任一阶段缺失、顺序错误或看不清，换同次实验素材或报告缺口。"
     },
     {
       "id": "tear_pack",

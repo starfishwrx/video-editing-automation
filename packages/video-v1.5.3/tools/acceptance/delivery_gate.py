@@ -35,7 +35,7 @@ def local_preview(task: dict, qc_result: dict) -> bool:
                         for row in qc_result["report"].get("model_review") or []))
 
 
-def qc_statuses(task_dir: Path, done: dict, draft_root: Path) -> list[str]:
+def qc_statuses(task_dir: Path, done: dict, draft_root: Path, *, task=None) -> list[str]:
     """Revalidate each actual report and its output identity, never its label alone."""
     drafts = done.get("drafts") or []
     refs = done.get("qc_reports") or []
@@ -59,7 +59,9 @@ def qc_statuses(task_dir: Path, done: dict, draft_root: Path) -> list[str]:
             task_dir / "report" / (draft.name if index == 1 else "report_%d" % index) / "draft_visual_qc.json")
         try:
             report = pe.read(path)
-            status = pe.visual_qc_contract.report_status(report)
+            task_path = task_dir / "task.json"
+            scope = task if task is not None else (pe.read(task_path) if task_path.is_file() else {})
+            status = pe.visual_qc_contract.report_status(report, report_dir=path.parent, manifest=scope)
             if not pe.visual_qc_contract.report_matches_draft(report, draft):
                 status = "UNCERTIFIED"
         except (OSError, ValueError, KeyError, TypeError, AttributeError):
@@ -71,7 +73,7 @@ def qc_statuses(task_dir: Path, done: dict, draft_root: Path) -> list[str]:
 def issues(task_dir: Path, task: dict, done: dict, draft_root: Path,
            *, evaluation: dict | None = None) -> list[str]:
     reasons = mode_issues(task, done)
-    statuses = qc_statuses(task_dir, done, draft_root)
+    statuses = qc_statuses(task_dir, done, draft_root, task=task)
     if not statuses or any(status != "PASS" for status in statuses):
         reasons.append("QC_NOT_FORMAL")
     if evaluation is not None:

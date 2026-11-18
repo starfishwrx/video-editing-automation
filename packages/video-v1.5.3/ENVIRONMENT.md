@@ -130,23 +130,12 @@ For `rule_then_ai`, the optional manifest field `ai_refill_max_sentences` limits
 automatic gap review (`0` or omitted means unlimited); explicit refill indices
 are not truncated. When capped, functional claims are reviewed before general
 display and promotion sentences. Unreviewed or partially supported claims remain preview-only.
-The optional `max_absorb_demo_speed` bounds the legacy scene planner's pour,
-absorption and wipe speeds (finite value from 1 to 20). If a full observed
-action does not fit, the scene must try another candidate or remain unresolved;
-the limit never authorizes inventing or silently clipping the missing action.
-The task MAY configure `max_absorb_demo_speed`. The default AI editor and AI
-refill MUST intersect this explicit cap with the shared playback policy, including
-experiment-phase solving, physical cuts and both draft writers. Since a general
-observation cannot prove a window is unrelated to absorption, the explicit cap
-MUST conservatively apply to all AI windows;
-this can make an otherwise usable non-absorption window infeasible. Without
-the field, the existing policy is unchanged: reviewed process windows are at
-most 3x, separately reviewed complete placement windows can reach 2x, and
-critical experiment phases stay at 1x. Windows without either permission stay
-at 1x. The cap MUST be bound to each new selection receipt and rechecked against
-the actual editable draft's source and target times, segment speed and speed
-material during independent QC; unverifiable or inconsistent results MUST NOT
-be certified. Configuring a task cap MUST NOT widen the shared permissions.
+The optional `max_absorb_demo_speed` still constrains ordinary AI-selected windows.
+A reviewed hygiene absorption experiment may accelerate every stage without a preset speed ceiling.
+It requires the same demonstration to show pouring, absorption, then tissue contact, lift and
+a readable result. Both writers bind this permission to the confirmed source and target windows.
+The native backend must support the per-cut `authorized_experiment_phase_speedup` plan field for
+rates above 8x. Independent QC checks the actual cut speed, output frames and stage sequence.
 
 New queue tasks MUST freeze `source_reuse_policy=strict-v1`: `max_source_reuse`
 limits uses of the same source in one output video, with a queue default of 2

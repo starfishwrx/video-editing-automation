@@ -109,9 +109,9 @@ class SceneEvidenceContractTests(unittest.TestCase):
 
         def locate(candidate, *_args):
             if candidate.get("shot_id") == "weak":
-                phases = {"pour": [0.4, 1.4], "absorb": [1.4, 4.2], "wipe": [4.2, 4.8]}
+                phases = {"pour": [0.4, 1.4], "absorb": [1.4, 4.2], "wipe": [4.2, 4.95]}
             else:
-                phases = {"pour": [0.4, 2.4], "absorb": [2.4, 5.4], "wipe": [5.4, 5.8]}
+                phases = {"pour": [0.4, 2.4], "absorb": [2.4, 5.4], "wipe": [5.4, 6.2]}
             return {"ok": True, "complete": True, "phases": phases}
 
         with tempfile.TemporaryDirectory() as tmp:
