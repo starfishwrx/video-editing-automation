@@ -738,10 +738,15 @@ def apply_cross_shot_text(shots: list[dict[str, Any]]) -> None:
     minimum = env_int("JY_VISION_TEXT_MIN_SHOTS", 2, minimum=1)
     counts: dict[str, int] = {}
     for row in shots:
+        if row.get("excluded_from_pool") or row.get("text_pass") in ("pending", "failed"):
+            continue
         for key in {_text_key(a) for a in row.get("text_agreed") or []}:
             counts[key] = counts.get(key, 0) + 1
     for row in shots:
         if "text_agreed" not in row:
+            continue
+        if row.get("excluded_from_pool") or row.get("text_pass") in ("pending", "failed"):
+            row.update(readable_claims=[], pointed_claims=[])
             continue
         keep = {_text_key(a) for a in row["text_agreed"] if counts.get(_text_key(a), 0) >= minimum}
         row["readable_claims"] = [a for a in row["text_agreed"] if _text_key(a) in keep]
@@ -801,6 +806,8 @@ def _reusable_visual_observation(row: dict[str, Any]) -> bool:
 
 UNAUDITABLE_ERROR = "vision response lacks auditable description/tags/confidence"
 UNAUDITABLE_WARNING = "shot_skipped_unauditable"
+FORMAT_WARNING = "shot_skipped_invalid_format"
+EXCLUSION_WARNINGS = (UNAUDITABLE_WARNING, FORMAT_WARNING)
 
 
 def _reask_limit() -> int:
@@ -824,11 +831,38 @@ def logged_pool_exclusions(analysis: dict[str, Any]) -> set[str]:
     the matching warning; neither alone relaxes readiness.
     """
     warned = {str(w.get("shot_id")) for w in analysis.get("warnings") or []
-              if isinstance(w, dict) and w.get("type") == UNAUDITABLE_WARNING}
+              if isinstance(w, dict) and w.get("type") in EXCLUSION_WARNINGS}
     return {str(row.get("shot_id")) for row in analysis.get("shots") or []
             if isinstance(row, dict) and row.get("excluded_from_pool") is True
             and row.get("status") != "ready_for_matching"
             and str(row.get("shot_id")) in warned}
+
+
+def usable_pool(shots, excluded):
+    if not excluded:
+        return bool(shots)
+    return (len(excluded) <= _reask_max_shots(len(shots))
+            and any(str(row.get("shot_id")) not in excluded and not needs_vision(row)
+                    for row in shots))
+
+
+def _retain_exclusion(shot, warning, cached, key):
+    if not key or not _reask_limit() or shot.get("exclusion_cache_key") != key:
+        return False
+    reusable = _reusable_visual_observation(cached or {})
+    if warning["type"] == UNAUDITABLE_WARNING:
+        return (not reusable and shot.get("exclusion_reason") == "VISION_UNAUDITABLE_AFTER_REASK"
+                and warning.get("reasks") in (1, 2))
+    from .vision_client import EXHAUSTED_FORMAT_ERRORS
+    from . import evidence_store
+    if (warning.get("error_code") not in EXHAUSTED_FORMAT_ERRORS.values()
+            or shot.get("exclusion_reason") != warning["error_code"] or warning.get("attempts") != 2
+            or warning.get("source_sha256") != evidence_store.identity(shot["video"])):
+        return False
+    if warning.get("phase") == "text":
+        return (warning.get("ocr_protocol") == _ocr_protocol() and _text_pass_enabled()
+                and (not reusable or _needs_text_backfill(cached)))
+    return warning.get("phase") == "vision" and not reusable
 
 
 def _apply_cached_visual(row: dict[str, Any], cached: dict[str, Any], key: str) -> None:
@@ -1049,7 +1083,8 @@ def _run_compatible_chat(cfg: dict[str, str], sheet: Path | None, prompt: str, o
         "temperature": 0,
         "stream": False,
     }
-    if sheet is None and validator is not None and 'json' in prompt.casefold():
+    if (validator is not None and 'json' in prompt.casefold()
+            and (sheet is None or getattr(validator, "expects_json_object", False))):
         body['response_format'] = {'type': 'json_object'}
     result = vision_client.post_chat(
         cfg["base_url"] + "/chat/completions", cfg["api_key"], body, output,
@@ -1384,6 +1419,23 @@ def enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repor
         _seed_legacy_vision_cache(manifest, analysis, report_dir, cache_path)
         result = _enrich_with_vision(manifest, analysis, report_dir,
                                     batch_size=batch_size, timeout=timeout, ffmpeg=ffmpeg)
+        from . import evidence_store
+        current_sources = {}
+        for row in result.get("shots", []):
+            expected = {row[k] for k in ("sampled_source_sha256", "source_sha256", "prepared_source_sha256") if row.get(k)}
+            if not expected:
+                continue
+            source = row["video"]
+            if source not in current_sources:
+                try:
+                    current_sources[source] = evidence_store.identity(source)
+                except OSError:
+                    current_sources[source] = None
+            if expected != {current_sources[source]}:
+                result["ok"] = False
+                row.update(status="pending_analysis", analysis_error="MATERIAL_SOURCE_CHANGED_DURING_PREPARATION")
+                result.setdefault("pending_items", []).append({"type": "MATERIAL_SOURCE_CHANGED_DURING_PREPARATION",
+                                                              "shot_id": row.get("shot_id")})
         result["vision_analysis"]["cache_wait_s"] = waited
         _persist(report_dir, result)
         return result
@@ -1393,6 +1445,7 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
                        *, batch_size: int = 12,
                        timeout: int | None = None, ffmpeg: str | None = None) -> dict[str, Any]:
     """Use the configured image backend to fill and validate temporary shots."""
+    from . import material_response, vision_client
     if timeout is None:
         timeout = runtime_policy.load_policy().request_timeout
     shots = [row for row in analysis.get("shots", []) if isinstance(row, dict)]
@@ -1401,10 +1454,10 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
     stage_seconds: dict[str, float] = {}
     prior_exclusions = logged_pool_exclusions(analysis)
     prior_exclusion_warnings = {str(w.get("shot_id")): w for w in analysis.get("warnings") or []
-        if isinstance(w, dict) and w.get("type") == UNAUDITABLE_WARNING}
+        if isinstance(w, dict) and w.get("type") in EXCLUSION_WARNINGS}
     if analysis.get("warnings"):
         analysis["warnings"] = [w for w in analysis["warnings"]
-                                if not (isinstance(w, dict) and w.get("type") == UNAUDITABLE_WARNING)]
+                                if not (isinstance(w, dict) and w.get("type") in EXCLUSION_WARNINGS)]
     cache_path = _vision_cache_path(report_dir)
     cache = _load_vision_cache(cache_path)
     changed_cache_keys: set[str] = set()
@@ -1429,26 +1482,24 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
     every_rule = _analysis_rules(manifest)
     for shot in shots:
         shot_id = str(shot.get("shot_id") or "")
+        shot.pop("sampled_source_sha256", None)
         key = _vision_cache_key(manifest, shot)
         if key:
             cache_keys[shot_id] = key
         # Reusing a product analysis within a batch must not re-ask an already
         # excluded shot for every task. This is a bound negative observation,
         # never a ready candidate or a positive shared-cache entry.
-        if (key and _reask_limit() > 0 and shot_id in prior_exclusions
-                and not _reusable_visual_observation(cache.get(key) or {})
-                and len(prior_exclusions) <= _reask_max_shots(len(shots))
-                and shot.get("exclusion_cache_key") == key
-                and shot.get("exclusion_reason") == "VISION_UNAUDITABLE_AFTER_REASK"
-                and prior_exclusion_warnings[shot_id].get("reasks") in (1, 2)):
-            analysis.setdefault("warnings", []).append(prior_exclusion_warnings[shot_id])
-            continue
         cached = cache.get(key) if key else None
         from . import evidence_store
-        if key and evidence_store.database():
-            if cached and cached.get("source_sha256") and cached["source_sha256"] != evidence_store.identity(shot["video"]):
+        recorded_sha = (prior_exclusion_warnings.get(shot_id) or {}).get("source_sha256")
+        prepared_sha = shot.get("prepared_source_sha256")
+        if key and (prepared_sha or recorded_sha or shot.get("source_sha256") or (cached or {}).get("source_sha256")):
+            current_sha = evidence_store.identity(shot["video"])
+            if cached and (prepared_sha or cached.get("source_sha256") or recorded_sha) and cached.get("source_sha256") != current_sha:
                 cached = None
+            if (prepared_sha or shot.get("source_sha256") or recorded_sha) and shot.get("source_sha256") != current_sha:
                 shot.pop("analysis_cache_key", None)
+        if key and evidence_store.database():
             if cached is None:
                 cached = evidence_store.portable_visual(manifest, shot)
             if cached and _needs_text_backfill(cached):
@@ -1456,9 +1507,17 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
                 if text:
                     cached = {**cached, **text, "readable_claims":text["text_agreed"],
                               "pointed_claims":text["pointed_agreed"]}
+                    if text["pointed_agreed"]:
+                        cached["pointing_to_text"] = True
                     cache[key] = cached
                     changed_cache_keys.add(key)
                     evidence_store.record(manifest, "evidence_hit", {"shot":shot_id,"basis":"readable_label"})
+        if (shot_id in prior_exclusions and len(prior_exclusions) <= _reask_max_shots(len(shots))
+                and _retain_exclusion(shot, prior_exclusion_warnings[shot_id], cached, key)):
+            analysis.setdefault("warnings", []).append(prior_exclusion_warnings[shot_id])
+            continue
+        for field in ("excluded_from_pool", "exclusion_reason", "exclusion_cache_key"):
+            shot.pop(field, None)
         prior_origin = None
         cached_key = key
         # An explicitly named prior backend may supply its original observation.
@@ -1470,6 +1529,8 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
             prior_key = _vision_cache_key(manifest, shot, transport_override=prior_transport,
                                           model_override=prior_model)
             prior = cache.get(prior_key) if prior_key else None
+            if prior and prepared_sha and prior.get("source_sha256") != prepared_sha:
+                prior = None
             checked, prior_recheck = _resolve_recheck(prior, checks)
             if (prior_recheck == "keep" and isinstance(checked, dict)
                     and _reusable_visual_observation(checked) and not _needs_text_backfill(checked)):
@@ -1480,6 +1541,7 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
             # 分析要求曾经整份进缓存键时，按全部要求看过的观察存在另一个键下。
             full = _vision_cache_key(manifest, shot, every_rule)
             if (full != key and isinstance(cache.get(full), dict)
+                    and (not prepared_sha or cache[full].get("source_sha256") == prepared_sha)
                     and cache[full].get("status") == "ready_for_matching"):
                 cached = cache[key] = {**cache[full], "rule_checks": sorted(checks)}
                 changed_cache_keys.add(key)
@@ -1563,11 +1625,10 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
             shot.update({"status": "pending_analysis", "readable_claims": [],
                          "pointed_claims": [],
                          "analysis_error": "旧观察与当前输入签名不一致或复核帧缺失，重新分析"})
-            shot.pop("text_pass", None)
+            for field in ("text_pass", "text_agreed", "pointed_agreed", "text_reads", "ocr_protocol",
+                          "text_request_frames", "text_frames", "vision_frames"):
+                shot.pop(field, None)
         shot["analysis_cache_hit"] = False
-        shot.pop("excluded_from_pool", None)
-        shot.pop("exclusion_reason", None)
-        shot.pop("exclusion_cache_key", None)
         if key:
             shot["analysis_cache_key"] = key
         cache_misses += 1
@@ -1616,8 +1677,7 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
         _set_cache_summary(_vision_summary([], [], [], partial=False))
         analysis["pending_items"] = list(analysis.get("pending_items", []))
         excluded = logged_pool_exclusions(analysis)
-        analysis["ok"] = (bool(shots) and len(excluded) < len(shots)
-                          and len(excluded) <= _reask_max_shots(len(shots)) and not analysis["pending_items"]
+        analysis["ok"] = (usable_pool(shots, excluded) and not analysis["pending_items"]
                           and not any(needs_vision(row) for row in shots
                                       if str(row.get("shot_id")) not in excluded))
         _persist(report_dir, analysis)
@@ -1660,6 +1720,27 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
     responses: list[dict[str, Any]] = []
     text_requests: dict[str, list[dict[str, Any]]] = dict(text_resume)
     text_errors: list[dict[str, Any]] = []
+    reasked_ids: set[str] = set()
+
+    def exclude_format_failure(shot_ids, phase, message):
+        code = vision_client.EXHAUSTED_FORMAT_ERRORS.get(message)
+        if not code or not _reask_limit() or not all(cache_keys.get(sid) for sid in shot_ids):
+            return False
+        excluded = logged_pool_exclusions(analysis) | shot_ids
+        if len(excluded) >= len(shots) or len(excluded | reasked_ids) > _reask_max_shots(len(shots)):
+            return False
+        for sid in sorted(shot_ids):
+            by_id[sid].update(status="pending_analysis", excluded_from_pool=True, exclusion_reason=code,
+                              exclusion_cache_key=cache_keys[sid], analysis_error=message,
+                              readable_claims=[], pointed_claims=[], text_agreed=[], pointed_agreed=[])
+            source_sha = (by_id[sid].get("sampled_source_sha256") or by_id[sid].get("source_sha256")
+                          or evidence_store.identity(by_id[sid]["video"]))
+            warning = {"type": FORMAT_WARNING, "shot_id": sid, "phase": phase, "error_code": code,
+                       "attempts": 2, "blocking": False, "source_sha256": source_sha}
+            if phase == "text":
+                warning["ocr_protocol"] = _ocr_protocol()
+            analysis.setdefault("warnings", []).append(warning)
+        return True
 
     def _remember(shot_id: str) -> None:
         cache_key = cache_keys.get(shot_id, "")
@@ -1682,6 +1763,7 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
                                 "message": str(text)[-1000:]})
             _remember(shot_id)
             _flush_cache()
+            exclude_format_failure({shot_id}, "text", text)
             return
         row["text_agreed"] = agreed_text(
             [_as_list(p.get("readable_claims")) for p in payloads])
@@ -1737,15 +1819,8 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
             return cache_path.parent / "calls" / f"{prefix}_{identity}.txt"
 
         def _batch_validator(batch: list[dict[str, Any]]):
-            def validate(data):
-                rows = data if isinstance(data, list) else data.get("shots") if isinstance(data, dict) else None
-                expected = {str(item["shot_id"]) for item in batch}
-                return (isinstance(rows, list) and len(rows) == len(expected)
-                    and all(isinstance(row, dict) and str(row.get("shot_id")) in expected
-                            and isinstance(row.get("description"), str) and bool(row["description"].strip())
-                            and type(row.get("action_complete")) is bool for row in rows)
-                    and {str(row.get("shot_id")) for row in rows} == expected)
-            return validate
+            return material_response.object_validator(material_response.validate_shots,
+                expected={str(item["shot_id"]) for item in batch})
 
         def _call_batch(job: tuple[int, list[dict[str, Any]], Path]) -> tuple[int, tuple[bool, str]]:
             batch_index, batch, response_file = job
@@ -1851,8 +1926,8 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
                     if f.get("replaced"):
                         entry["replaced"] = True
                     row["vision_frames"].append(entry)
-                if evidence_store.database():
-                    row["source_sha256"] = evidence_store.identity(row["video"])
+                if cache_keys.get(shot_id):
+                    row["source_sha256"] = row.get("sampled_source_sha256") or evidence_store.identity(row["video"])
                 row["action_segments"] = _action_segments(raw.get("action_segments"), row)
                 if isinstance(raw.get("evidence_time"), (int, float)):
                     frame = _nearest_frame(frames, float(raw["evidence_time"]))
@@ -1901,6 +1976,9 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
             _, batch, _ = prepared[batch_index]
             _progress(report_dir, requests_finished=done, vision_left=len(jobs) - done)
             if not ok:
+                if exclude_format_failure({str(item["shot_id"]) for item in batch}, "vision", text):
+                    _checkpoint()
+                    continue
                 vision_errors.append({"type": "VISION_CALL_FAILED", "batch": batch_index,
                                       "message": text[-4000:]})
                 _checkpoint()
@@ -1935,6 +2013,7 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
         limit = _reask_limit()
         stage_started = time.monotonic()
         for shot_id in (targets[:budget] if limit else []):
+            reasked_ids.add(shot_id)
             group = list(shot_frames[shot_id])
             entry: dict[str, Any] = {"shot_id": shot_id, "attempts": [], "outcome": "unauditable"}
             for attempt in range(1, limit + 1):
@@ -1960,6 +2039,8 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
                     entry["attempts"].append({"attempt": attempt, "result": "call_failed",
                                               "message": str(text)[-300:]})
                     entry["outcome"] = "call_failed"
+                    if exclude_format_failure({shot_id}, "vision", text):
+                        entry["outcome"] = "excluded_invalid_format"
                     break
                 try:
                     payload = _json_from_text(text)
@@ -2040,13 +2121,7 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
             text = "VISION_TEXT_SHEET_FAILED"
             payloads: list[dict[str, Any]] = []
             if sheet is not None:
-                def validate_text(data):
-                    if isinstance(data, list) and len(data) == 1:
-                        data = data[0]
-                    return (isinstance(data, dict) and data.get("shot_id") == shot_id
-                            and all(isinstance(data.get(key), list) and
-                                    all(isinstance(value, str) for value in data[key])
-                                    for key in ("readable_claims", "pointed_text")))
+                validate_text = material_response.object_validator(material_response.validate_text, shot_id=shot_id)
                 for read in range(2):
                     prompt = _text_prompt(shot_id, items)
                     output = _call_path(prompt, sheet, f"text_read_{read + 1}")
@@ -2105,8 +2180,7 @@ def _enrich_with_vision(manifest: dict[str, Any], analysis: dict[str, Any], repo
                                        vision_errors, partial=False), partial=False)
     analysis["pending_items"] = list(analysis.get("pending_items", [])) + vision_errors
     excluded = logged_pool_exclusions(analysis)
-    analysis["ok"] = (bool(shots) and len(excluded) < len(shots)
-                          and len(excluded) <= _reask_max_shots(len(shots)) and not analysis["pending_items"]
+    analysis["ok"] = (usable_pool(shots, excluded) and not analysis["pending_items"]
                       and not any(needs_vision(row) for row in shots
                                   if str(row.get("shot_id")) not in excluded))
     _persist(report_dir, analysis)
