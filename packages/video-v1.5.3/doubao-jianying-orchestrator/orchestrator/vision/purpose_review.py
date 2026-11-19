@@ -33,7 +33,7 @@ def policy(manifest):
 不要要求购买记录、多品牌对比、促销价格牌或证明一句修辞。具体体验表达需要有相应卖点信息的特点展示，
 不要求模拟高温穿戴、皮肤检测或人体实验，但普通抚摸/折拢不自动表达薄软、不闷热或不粘腻。
 不能把原句目标替换成另一个容易展示的特点；通用同商品配图与卖点表达分开记录。明确成分须可读标称，
-吸收/反渗等性能须真实演示和结果；明确持续时间、数值、比较不能由氛围、透光或短实验外推。
+吸收/反渗等性能须真实演示和结果。全天防护等持续时间、读数与比较须各有对应画面。
 """
     if contract.editorial_context(manifest)["category"] == "weipin":
         text += """卫品具体判据优先：不闷热/透气按本品类规则用对光透过、孔洞或网面；
@@ -47,7 +47,6 @@ def policy(manifest):
 定性吸水的可读结果是挤压时清水明显涌出，不必等巾体拧到全干或最后一滴水停止。
 首次关键接触、动作完成及可读结果须保护；持续重复揉搓、继续展开或挤压的中间过程可记process。
 关键瞬间和结果仍标key_action/result且can_speed=false；不可把整段重复过程一概锁成关键动作。
-涉及瞬吸、吸得快或具体时长的主张仍按time_sensitive保留相关过程原速。
 '''
     return text
 
@@ -211,7 +210,7 @@ def review(manifest, request, shot, media, directory):
 只定位一次紧凑完整的真实演示，去掉重复演示。动作开端、关键接触、完成与可见结果不能省略；
 关键动作、结果保持原速，只有明确无关紧要的过程允许加速。结果需有可看清的停留，不按目标句长裁证据。
 普通产品展示/标称句，只检查实际给出的源窗是否可读和贴切，不要求把拿起和放下也判作完整演示。
-涉及吸得快、干得快或明确时长的结论，time_sensitive必须为true，相关整个过程保留原速。
+画面承担计时验证时，time_sensitive填true，相关过程保留原速。形容吸收快的口播按可见吸收变化判断。
 输出JSON {"verdict":"matched|mismatch|uncertain","same_product":true,"supports_requirement":true,
 "confidence":0.8,"observation":"可见事实","reason":"对应理由与缺失项","time_sensitive":false,
 "checks":[{"id":"c1","status":"supported|unsupported|uncertain","observed":"逐项事实"}],
@@ -263,7 +262,7 @@ def review_output(manifest, request, shot, media, directory):
 "all_script_claims_checked":true,"uncovered_claims":["原文中检查清单遗漏的卖点或无法支持的其他断言"]}。
 清单不是完整性保证，必须独立读原文。发现清单漏掉卖点时写uncovered_claims，不能仅按给出的check打分。
 check_ids只提供编号，没有选镜器的解释或分类。按文案卖点出现顺序对应编号，独立判断需要何种画面。
-明确的持续时间与绝对效果须保留未核实范围，不能仅因为产品展示贴切就声称已验证整段时长或绝对功效。
+全天防护等持续效果与绝对功效须保留未核实范围，不能仅因为产品展示贴切就声称已验证整天。
 """ + json.dumps(context, ensure_ascii=False)
     key = contract.digest([PROTOCOL, "output", context, media["before"], media["start"], media["end"]])[:24]
     data = ai_editor._call(prompt, Path(directory) / "output_calls" / f"{key}.json", Path(media["sheet"]))

@@ -52,12 +52,22 @@ class ExperimentEventsTests(unittest.TestCase):
             row=facts('A');mutate(row)
             with self.assertRaisesRegex(ValueError,'EVENTS_'):compile_events(row,self.pair['members'][0])
 
-    def test_absorption_focus_is_explicit_and_only_for_qualitative_absorption(self):
-        rows=[{'coverage':'absorption_focus','segments':[]},{}];roles=[{'sentence_id':'s','role':'absorption'}]
-        validate_focus([SimpleNamespace(sentence_id='s',text='吸收真的贼牛')],roles,rows)
-        for text in ('两秒吸收','瞬间吸干','整杯吸收','倒入后快速吸收','吸收100ml'):
-            with self.assertRaisesRegex(ValueError,'INCOMPATIBLE_CLAIM'):
-                validate_focus([SimpleNamespace(sentence_id='s',text=text)],roles,rows)
+    def test_absorption_focus_supports_speed_wording_and_preserves_pour_requirements(self):
+        members = self.pair["members"]
+        rows = [compile_events(facts(m["part"]), m) for m in members]
+        rows[0]["coverage"] = "absorption_focus"
+        roles = [{"sentence_id": "s", "role": "absorption"}]
+
+        def check(text):
+            validate_focus([SimpleNamespace(sentence_id="s", text=text)], roles, rows, members=members)
+
+        for text in ("吸收真的贼牛", "几秒吸完", "两秒吸收", "瞬间吸干", "一倒就吸收", "不用秒表也能看见它几秒吸完"):
+            with self.subTest(text=text):
+                check(text)
+        for text in ("整杯吸收", "倒入后快速吸收", "吸收100ml", "整杯一倒就吸收",
+                     "一整瓶三秒吸完", "给吸收过程全程计时"):
+            with self.subTest(text=text), self.assertRaisesRegex(ValueError, "FOCUS_INCOMPATIBLE_CLAIM"):
+                check(text)
 
     def test_unknown_coverage_does_not_silently_become_a_complete_pour(self):
         row=facts('A');row['coverage']='made_up'
@@ -90,35 +100,27 @@ class ExperimentEventsTests(unittest.TestCase):
                     self.base.root/'facts.json',font_path='unused')
         encode.assert_not_called();call.assert_not_called()
 
-    def test_timed_absorption_cannot_be_sped_even_with_complete_pour(self):
-        rows=[compile_events(facts('A'),self.pair['members'][0]),{}]
-        for stage in ('pour','absorb'):
-            for s in rows[0]['segments']:
-                if s['kind']!=stage:s['can_speed']=False
-            with self.assertRaisesRegex(ValueError,'SPEED_INCOMPATIBLE_CLAIM'):
-                validate_focus([SimpleNamespace(sentence_id='s',text='3秒就吸收')],
-                    [{'sentence_id':'s','role':'absorption'}],rows)
-            rows=[compile_events(facts('A'),self.pair['members'][0]),{}]
-
-    def test_three_stage_speedup_uses_source_time_and_the_start_sample_uncertainty(self):
+    def test_absorption_wording_and_neighbouring_seconds_do_not_time_the_experiment(self):
         members = self.pair["members"]
-        source = facts("A")
-        source["effective_window_frame_ids"][0] = source["events"][0]["first_frame"] = 1
-        observations = [compile_events(source, members[0]), compile_events(facts("B"), members[1])]
-        roles = [{"sentence_id": "s", "role": "absorption"}]
+        observations = [compile_events(facts(m["part"]), m) for m in members]
+        frames = members[0]["samples"]["frames"]
+        self.assertEqual(frames[40]["pts_us"] - frames[0]["pts_us"], 4_000_000)
+        roles = [{"sentence_id": "a", "role": "absorption"}, {"sentence_id": "b", "role": "rewet"}]
+        for speedup in (False, True):
+            for text in ("几秒吸完", "三秒吸完", "两三秒吸完", "3秒就吸收", "瞬吸", "吸收后锁在中央"):
+                with self.subTest(speedup=speedup, text=text):
+                    sentences = [SimpleNamespace(sentence_id="a", text=text),
+                                 SimpleNamespace(sentence_id="b", text="纸巾按压一秒再提起")]
+                    validate_focus(sentences, roles, observations, allow_phase_speedup=speedup, members=members)
 
-        def check(text):
-            validate_focus([SimpleNamespace(sentence_id="s", text=text)], roles, observations,
-                           allow_phase_speedup=True, members=members)
-
-        check("四秒内吸收")
-        check("吸收后锁在中央")
-        for text in ("只用两秒吸完", "3.95秒吸完"):
-            with self.assertRaisesRegex(ValueError, "SOURCE_TIMING_CLAIM_UNSUPPORTED"):
-                check(text)
+    def test_pour_without_absorption_is_rejected_for_the_same_wording(self):
+        members = self.pair["members"]
+        observations = [compile_events(facts(m["part"]), m) for m in members]
         observations[0]["segments"] = [s for s in observations[0]["segments"] if s["kind"] == "pour"]
         with self.assertRaisesRegex(ValueError, "COMPLETE_CHAIN_REQUIRED"):
-            check("四秒内吸收")
+            validate_focus([SimpleNamespace(sentence_id="s", text="几秒吸完")],
+                           [{"sentence_id": "s", "role": "absorption"}], observations,
+                           allow_phase_speedup=True, members=members)
 
     def test_focused_solver_preserves_absorption_and_declares_omitted_pour_prefix(self):
         observations=[compile_events(facts(m['part']),m) for m in self.pair['members']]

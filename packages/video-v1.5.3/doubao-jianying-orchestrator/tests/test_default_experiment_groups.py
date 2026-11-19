@@ -235,7 +235,10 @@ class DefaultExperimentGroupTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "HEADLESS_EXPERIMENT_SPEED_AUTHORIZATION_MISSING"):
             headless_production.make_plan(engine, clips, None, {}, [], "fixture", None)
 
-    def test_output_stage_removal_or_crop_is_rejected(self):
+    def test_three_second_absorption_accepts_complete_group_and_rejects_missing_stages_or_crop(self):
+        text = "三秒吸完"
+        self.manifest["segments"][0]["text"] = text
+        self.plan["sentences"][0].update(text=text, selling_points=[{"id": "p1", "text": text}])
         original = self.repair()["segments"][0]["continuity_group"]
         for missing in ("pour", "absorb", "press", "lift", "result"):
             group = copy.deepcopy(original)
@@ -291,6 +294,9 @@ class DefaultExperimentGroupTests(unittest.TestCase):
             self.assertFalse(group_events_visible(group, rows))
         rows[1]["visible_experiment_events"][0]["frames"] = [1, 2]
         self.assertTrue(group_events_visible(group, rows))
+        pour_only = copy.deepcopy(rows)
+        pour_only[1].update(observed="只看到倒蓝水", visible_experiment_events=[event("pour", 1, 2)])
+        self.assertFalse(group_events_visible(group, pour_only))
         for description in ("纸巾被手指按压在巾面上", "纸巾放在巾面上，手指轻轻按压"):
             rows[2]["observed"] = description
             self.assertTrue(group_events_visible(group, rows))
