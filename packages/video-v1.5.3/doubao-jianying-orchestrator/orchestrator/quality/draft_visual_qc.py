@@ -905,7 +905,7 @@ def main() -> int:
                     # sheet dense so every visible tile is evidence.
                     chunk_columns = min(4, max(2, len(items)))
                     paper_detail = ai_mode and any(c.get("category") == "zhipin" and re.search(
-                        r"层|抽数|[零一二两三四五六七八九十百千\d]+\s*(?:包|抽)|毛絮|掉屑|湿水", c["claim"]) for c in claims)
+                        r"层|抽数|[零一二两三四五六七八九十百千\d]+\s*(?:包|抽)|[%％]|百分之|毛絮|掉屑|湿水", c["claim"]) for c in claims)
                     tile = ({"tile_width": 360, "tile_height": 674, "fit": True} if paper_detail else
                             {"tile_width": 420 if ai_mode else 260, "tile_height": 300 if ai_mode else 190})
                     if not vision_analyzer._write_sheet(items, chunk_sheet, columns=chunk_columns, **tile, ffmpeg=ffmpeg):

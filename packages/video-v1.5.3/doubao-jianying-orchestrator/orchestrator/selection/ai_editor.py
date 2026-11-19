@@ -689,12 +689,8 @@ shot_value_request非空时，可额外返回shot_value_observation，逐项评�
         prompt += "\n这是同一原片区间的补查。只补查缺少的条件，不重复拆解已记录的动作。"
         prompt += "完整卖点仍须有本窗口可见依据；缺少条件时返回 uncertain。"
         prompt += json.dumps(shot["_evidence_gap"], ensure_ascii=False)
-    paper_checks = {}
-    if contract.rules_identity(manifest)["category"] == "zhipin":
-        for point in sentence.get("selling_points") or []:
-            required = [fact for _, fact in paper_claims.requirements(point["text"])]
-            if required:
-                paper_checks[point["id"]] = required
+    paper_checks = (paper_claims.checks_by_id(sentence.get("selling_points") or [])
+                    if contract.rules_identity(manifest)["category"] == "zhipin" else {})
     claim_checks = bool(paper_checks or (sentence.get("first_look_ids") and sentence.get("selling_points")))
     if claim_checks:
         prompt += """
@@ -705,7 +701,8 @@ shot_value_request非空时，可额外返回shot_value_observation，逐项评�
 时间使用画面上的原片微秒，填写能看清这次关键动作和结果的两个时刻。静态规格/标称填 kind="readable_label"，只需实际读到对应文字并记录展示时间；无需动作。静态可填同一时刻。
 动作或结果缺失的卖点从 supported_point_ids 删去。没有支持项时返回 mismatch 或 uncertain。"""
     if paper_checks:
-        prompt += ("\n纸品每项引用附图时间。规格文字填kind=readable_label及label_text，逐字抄下实际看清的数字和单位；"
+        prompt += ("\n纸品每项引用附图时间。规格文字填kind=readable_label及label_text，逐字抄下看清的数字和单位；"
+                   "原料百分比抄录同一条标称的完整百分比与原料名称；"
                    "可直接数清则填kind=counted_items、count和unit，result_observed写如何数清。揉搓后展开检查填kind=rub_unfold；"
                    "湿纸提起/展开且完整填kind=wet_intact，分别记录较早的动作/湿水事实和较晚的结果时刻。"
                    "看不清的项从支持列表移除，可以保留同句其他已证实的卖点。待核对项：" + json.dumps(paper_checks, ensure_ascii=False))
@@ -786,7 +783,7 @@ shot_value_request非空时，可额外返回shot_value_observation，逐项评�
                 required = paper_checks.get(fact["id"])
                 static = fact.get("kind") == "readable_label" and result.get("basis") == "readable_label"
                 if required:
-                    fact, proofs = paper_claims.sampled_fact(required, fact, samples)
+                    fact, proofs = paper_claims.sampled_fact(required, fact, samples, basis=result.get("basis"))
                     if not proofs:
                         continue
                     static = fact["kind"] in {"readable_label", "counted_items"}

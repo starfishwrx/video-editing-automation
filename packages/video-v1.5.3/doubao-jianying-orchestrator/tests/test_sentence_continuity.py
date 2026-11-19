@@ -341,6 +341,31 @@ class SentenceContinuityTests(unittest.TestCase):
             'confidence': .9, 'complete_intervals_us': [copy.deepcopy(context['window_us'])],
             'members': observations}}
 
+    def test_new_paper_group_requires_the_claim_in_its_own_member_frames(self):
+        self.manifest["category"] = "zhipin"
+        self.plan["sentences"][1]["selling_points"] = [{"id": "p1", "text": "100%原生木浆"}]
+        group = self.group()
+        self.assertIs(group["input"]["paper_point_checks"], True)
+        member = group["input"]["members"][1]
+        before, inside = member["start_us"] - 50000, member["start_us"] + 50000
+        group["frame_times_us"] = [before, inside]
+        observed = group["review"]["members"][1]
+        observed["basis"] = "readable_label"
+        fact = {"id": "p1", "kind": "readable_label", "object_matches": True, "result_seen": True,
+                "result_observed": "包装清楚标出原料", "label_text": "100%原生木浆", "action_us": inside, "result_us": inside}
+        for candidate in ([], [{**fact, "label_text": "云感柔肤"}], [{**fact, "action_us": before, "result_us": before}]):
+            observed["claim_checks"] = candidate
+            with self.subTest(facts=candidate), self.assertRaisesRegex(ValueError, "MEMBER_PAPER_EVIDENCE_REQUIRED"):
+                continuity.validate(group)
+        observed["claim_checks"] = [fact]
+        self.assertIs(continuity.validate(group), group)
+        member["selling_points"][0]["text"] = "到手20包"
+        observed["basis"] = "visible_result"
+        observed["claim_checks"] = [{**fact, "kind": "counted_items", "count": 20, "unit": "包",
+                                     "result_observed": "只看到几包，其余被挡住，无法数清总数"}]
+        with self.assertRaisesRegex(ValueError, "MEMBER_PAPER_EVIDENCE_REQUIRED"):
+            continuity.validate(group)
+
     def install(self):
         group = self.group()
         sharing.install(self.plan, contract.digest(group['input'])[:24], group)

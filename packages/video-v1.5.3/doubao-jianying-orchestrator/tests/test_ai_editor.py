@@ -377,9 +377,53 @@ class AIEditorTests(unittest.TestCase):
         self.assertEqual(bound["result_us"], actual[1])
         self.assertEqual(covered, [0])
         self.assertFalse(paper_claims.sampled_fact(layer, {**fact, "label_text": "品牌标志"}, actual)[1])
+        legacy = {k: v for k, v in fact.items() if k not in ("kind", "label_text")}
+        legacy.update(result_seen=True, result_observed="包装右下角清晰可见“三层”字样，手指在旁边。")
+        bound, covered = paper_claims.sampled_fact(layer, legacy, actual, basis="readable_label")
+        self.assertEqual((bound["label_text"], covered), ("三层", [0]))
+        for words in ("包装上清晰显示“3层”字样", "手指指向并停留于包装上的“三层加厚”字样处，文字清晰可读"):
+            with self.subTest(words=words):
+                self.assertEqual(paper_claims.sampled_fact(layer, {**legacy, "result_observed": words}, actual,
+                                                           basis="readable_label")[1], [0])
+        for words in ("未能看清包装上的“三层”", "口播说包装写着“三层”", "包装上清晰可见“品牌标志”"):
+            self.assertFalse(paper_claims.sampled_fact(layer, {**legacy, "result_observed": words},
+                                                       actual, basis="readable_label")[1])
         targets = [f for _, f in paper_claims.requirements(source[0]["text"])]
         _, covered = paper_claims.sampled_fact(targets, {**fact, "kind": "counted_items", "count": 5, "unit": "包"}, actual)
         self.assertEqual(covered, [0])
+
+    def test_paper_ingredient_percentage_requires_the_same_readable_material(self):
+        from orchestrator.policy import paper_claims
+        _, needed = paper_claims.requirements("100% 原生木浆的纸")[0]
+        for label, expected in (("主要原料名称：100％原生木浆", True), ("原生木浆：100%", True),
+                                ("百分百原生木浆", True), ("100%天然原生木浆", True), ("100%天然木浆", False),
+                                ("100%再生木浆", False), ("云感柔肤", False), ("100%植物纤维", False), ("100% 木浆", False),
+                                ("含原生木浆，100% 可回收", False), ("非100%原生木浆", False),
+                                ("不是100%原生木浆", False), ("无100%原生木浆", False),
+                                ("并不是由100%原生木浆制成", False), ("本品不使用100%原生木浆", False)):
+            with self.subTest(label=label):
+                self.assertEqual(paper_claims.confirms(needed, {"kind": "readable_label", "label_text": label}), expected)
+
+        for words in ("包装写着100%原生木浆，但该标称属于旁边另一款纸巾。", "标的是纸箱原料而非纸张原料"):
+            with self.subTest(words=words):
+                self.assertFalse(paper_claims.confirms(needed, {"kind": "readable_label", "label_text": "100%原生木浆",
+                                                                "result_observed": words}))
+
+    def test_label_reading_cannot_override_an_obscured_or_unreadable_result(self):
+        from orchestrator.policy import paper_claims
+        needed = [f for _, f in paper_claims.requirements("3层")]
+        fact = {"action_us": 10, "result_us": 10, "result_seen": True, "label_text": "3层", "kind": "readable_label"}
+        for fields, expected in (({"result_observed": "标签被遮挡，文字看不清"}, []),
+                                 ({"kind": None, "label_text": None, "result_observed": "包装写着“三层”，字样被手指遮挡。"}, []),
+                                 ({"label_text": "不是3层", "result_observed": "确实可读"}, []),
+                                 ({"label_text": "本品不超过3层", "result_observed": "标示清楚"}, []),
+                                 ({"label_text": "不足3层", "result_observed": "标示清楚"}, []),
+                                 ({"label_text": "3层左右", "result_observed": "标示清楚"}, []),
+                                 ({"kind": None, "label_text": None, "result_observed": "包装清晰可见“三层”字样，其他小字模糊。"}, [0]),
+                                 ({"result_observed": "包装无遮挡，能读到3层"}, [0])):
+            with self.subTest(fields=fields):
+                _, matches = paper_claims.sampled_fact(needed, {**fact, **fields}, [10], basis="readable_label")
+                self.assertEqual(matches, expected)
 
     def test_paper_refill_preserves_separate_pack_and_sheet_claims(self):
         text = "你看我这5包400抽才多少啊"
