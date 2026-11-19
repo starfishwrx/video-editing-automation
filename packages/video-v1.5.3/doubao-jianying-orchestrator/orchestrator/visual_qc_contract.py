@@ -151,12 +151,48 @@ def bound_selection(report):
     return segments
 
 
+EXPERIMENT_OUTCOME_PROTOCOL = "cut-outcomes-v1"
+EXPERIMENT_OUTCOMES = {
+    "absorb": ("receding", "unchanged", "uncertain"),
+    "result": ("clean_tissue", "stained_tissue", "uncertain"),
+}
+
+
 def valid_experiment_observations(events):
     phases = ("pour", "absorb", "press", "lift", "result")
     return isinstance(events, list) and all(
         isinstance(entry, dict) and entry.get("event") in phases and isinstance(entry.get("frames"), list)
         and bool(entry["frames"]) and all(type(n) is int and n > 0 for n in entry["frames"])
-        and entry["frames"] == sorted(set(entry["frames"])) for entry in events)
+        and entry["frames"] == sorted(set(entry["frames"]))
+        and (entry["event"] not in EXPERIMENT_OUTCOMES
+             or entry.get("outcome") in EXPERIMENT_OUTCOMES[entry["event"]])
+        and (entry["event"] != "result" or entry.get("expected") in ("clean_tissue", "stained_tissue", "inspect"))
+        for entry in events)
+
+
+def _stained_result_supported(members):
+    """A visible stain needs support in the group's frozen narration, even for an inspect verdict."""
+    texts = [str(member.get("text") or "") for member in members]
+    neutral = re.compile(r"(?:会不会|是否|有没有|有无|看看.{0,6}有没有)(?:发生|出现|有)?(?:反渗|回渗|回流|湿痕|水渍|沾液|染色|变湿)")
+    explicit_stain = re.compile(r"(?:纸巾|纸面|白纸)(?:上|确实|明显|已经|有|出现|了|可见|残留|沾有)*(?:湿痕|水渍|蓝色液体|被染湿|变湿)")
+    dry = re.compile(r"(?:不|无|没)(?:会|容易|易|有|再|出|任何|一点儿)*(?:反渗|回渗|回流|沾液|粘腻|黏腻)|干干?爽爽?|干燥|干净|洁白")
+    return (any(neutral.search(text) or explicit_stain.search(text) for text in texts)
+            and not any(dry.search(neutral.sub("", text)) for text in texts))
+
+
+def _opposes_outcome(fact, outcome):
+    # Only an explicit observation about this object can contradict the typed result.
+    if outcome == "receding":
+        return bool(re.search(r"(?:液面|液体|水渍)(?:仍然|仍|始终|持续)?(?:保持原状|没有变化|未见变化)"
+                              r"|未见(?:液体)?明显(?:扩散或消失|减少|吸收)", fact))
+    if outcome == "clean_tissue":
+        return bool(re.search(r"(?:纸巾|纸面|白纸)(?:上|表面|本身|明显|清楚|可见|仍|有|着|呈现|出现|沾有|沾染|残留|留有|的|"
+                              r"少量|少许|一点点?|一小(?:片|块)|一片|几滴|些许|浅|淡)*"
+                              r"(?:蓝色液体|蓝色湿痕|蓝色水迹|水渍|湿痕|液渍)", fact))
+    if outcome == "stained_tissue":
+        return bool(re.search(r"(?:纸巾|纸面|白纸)(?:上|表面|本身|仍然|保持|看起来|仍|很|是|完全)*"
+                              r"(?:干燥|干净|未见湿痕|没有沾液)", fact))
+    return False
 
 
 def group_events_visible(group, model_rows):
@@ -165,7 +201,8 @@ def group_events_visible(group, model_rows):
     tissue = _ai_contract().continuity.tissue_event_observed
     contact = lift = False
     witnessed = {"pour": set(), "absorb": set(), "result": set()}
-    for member in group["input"]["members"]:
+    members = group["input"]["members"]
+    for member in members:
         row = model_rows.get(member["index"]) or {}
         entries = row.get("visible_experiment_events")
         supplied = row.get("experiment_output_frames")
@@ -175,11 +212,33 @@ def group_events_visible(group, model_rows):
         seen = [entry["event"] for entry in entries]
         for entry in entries:
             event = entry["event"]
+            if event == "absorb" and entry["outcome"] != "receding":
+                return False
+            if event == "result" and (entry["outcome"] == "uncertain"
+                    or entry["expected"] not in ("inspect", entry["outcome"])
+                    or (entry["outcome"] == "stained_tissue" and not _stained_result_supported(members))):
+                return False
+            if event in EXPERIMENT_OUTCOMES and _opposes_outcome(str(row.get("observed") or ""), entry["outcome"]):
+                return False
             for number in entry["frames"]:
                 sample = supplied[number - 1] if number <= len(supplied) else None
                 if (not isinstance(sample, list) or len(sample) != 2 or any(type(n) is not int for n in sample)
                         or not 1 <= sample[0] <= len(physical) or physical[sample[0] - 1] != event):
                     return False
+                if event in EXPERIMENT_OUTCOMES:
+                    facts = [fact for fact in row.get("physical_outcomes", []) if isinstance(fact, dict)
+                             and fact.get("part") == sample[0] and fact.get("event") == event]
+                    if (len(facts) != 1 or facts[0].get("outcome") != entry["outcome"]
+                            or not isinstance(facts[0].get("observation"), str) or not facts[0]["observation"].strip()
+                            or _opposes_outcome(facts[0]["observation"], entry["outcome"])):
+                        return False
+                    cited = facts[0].get("frames")
+                    if (not isinstance(cited, list) or not cited or any(type(n) is not int or not 1 <= n <= len(supplied)
+                            or not isinstance(supplied[n - 1], list) or len(supplied[n - 1]) != 2
+                            or supplied[n - 1][0] != sample[0] for n in cited)):
+                        return False
+                    if number not in cited:
+                        continue
                 if event in witnessed:
                     witnessed[event].add(sample[1])
             if not observed or event != observed[-1]:
@@ -202,8 +261,12 @@ def experiment_selection_errors(segments, rows):
         if group.get("schema") != "reviewed-experiment-sentence-group-v1":
             continue
         members = group["input"]["members"]
-        if index == members[0]["index"] and not group_events_visible(group, by_index):
-            return ["EXPERIMENT_OUTPUT_STAGES_UNVERIFIED"]
+        if index == members[0]["index"]:
+            if any(by_index.get(m["index"], {}).get("physical_outcome_protocol") != EXPERIMENT_OUTCOME_PROTOCOL
+                   for m in members):
+                return ["EXPERIMENT_OUTCOME_REVIEW_REQUIRED"]
+            if not group_events_visible(group, by_index):
+                return ["EXPERIMENT_OUTPUT_STAGES_UNVERIFIED"]
     return []
 
 

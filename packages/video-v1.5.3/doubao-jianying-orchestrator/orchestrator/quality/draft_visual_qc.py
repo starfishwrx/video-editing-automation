@@ -394,6 +394,7 @@ def _terminal_frame(ffmpeg, cut, fps, path, *, output_tick=None):
     command = [ffmpeg, "-y", "-hide_banner", "-loglevel", "info", "-copyts", "-start_at_zero",
                "-ss", f"{seek:.9f}", "-i", cut["source"], "-map", "0:v:0", "-an", "-vf", filters,
                "-fps_mode", "passthrough", "-q:v", "2", "-update", "1", str(path)]
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.unlink(missing_ok=True)
     proc = run_ffmpeg_decode(command, capture_output=True, timeout=60)
     if proc.returncode or not path.is_file() or not path.stat().st_size:
@@ -409,6 +410,22 @@ def _terminal_frame(ffmpeg, cut, fps, path, *, output_tick=None):
         return None
     return {"path": str(path), "timestamp": pts, "mapped_source_time": instant,
             "target_time": last_tick}
+
+
+def _locate_output_sample(ffmpeg, row, fps, frame_dir, suffix):
+    """A cut may start between input PTS. Only its first sample can move one timeline tick."""
+    part, requested = suffix.rsplit("_output", 1)
+    requested = int(requested)
+    first = math.ceil(row["target_start"] * fps - 1e-8)
+    last = math.ceil((row["target_start"] + row["target_duration"]) * fps - 1e-8) - 1
+    ticks = (requested, requested + 1) if requested == first < last else (requested,)
+    for tick in ticks:
+        actual = f"{part}_output{tick}"
+        path = frame_dir / f"segment_{row['index']:03d}_{actual}.jpg"
+        located = _terminal_frame(ffmpeg, row, fps, path, output_tick=tick)
+        if located:
+            return {**located, "suffix": actual, "requested_output_tick": requested, "output_tick": tick}
+    return None
 
 
 def _inspect_carton_landing(vision, frame, output, timeout):
@@ -435,6 +452,78 @@ def _inspect_carton_landing(vision, frame, output, timeout):
     result = validate(text)
     return {**result, "source_time": frame["timestamp"], "target_time": frame["target_time"],
             "mapped_source_time": frame["mapped_source_time"]}
+
+
+def _inspect_experiment_outcomes(vision, claims, rows, claim_frames, directory, batch_no, ffmpeg):
+    """Ask a second observation question using only the cited pixels, with no copy or verdict."""
+    from orchestrator import visual_qc_contract as qc
+    targets, images = {}, {}
+    for local, claim in enumerate(claims, 1):
+        index = claim["index"]
+        group = (claim.get("ai_segment") or {}).get("continuity_group") or {}
+        member = next((m for m in group.get("input", {}).get("members", []) if m["index"] == index), None)
+        row = rows.get(index, {})
+        events = row.get("visible_experiment_events")
+        if not member or row.get("visual_ok") is not True or not qc.valid_experiment_observations(events):
+            continue
+        mapping = row.get("experiment_output_frames") or []
+        for entry in events:
+            event = entry["event"]
+            if event not in qc.EXPERIMENT_OUTCOMES:
+                continue
+            for n in entry["frames"]:
+                sample = mapping[n - 1] if n <= len(mapping) else None
+                if not sample or not 1 <= sample[0] <= len(member["parts"]):
+                    continue
+                part = sample[0]
+                if member["parts"][part - 1].get("experiment_phase") != event:
+                    continue
+                targets.setdefault((local, part, event), set()).add(n)
+                images[local, n] = dict(claim_frames[index][n - 1], label=f"S{local:02d} P{part} F{n:02d}")
+    if not targets:
+        return {}
+    sheet = directory / f"physical_outcomes_{batch_no:02d}.jpg"
+    items = [images[k] for k in sorted(images)]
+    if not _prepare_media(vision._write_sheet, items, sheet, columns=min(4, len(items)),
+                          tile_width=360, tile_height=674, fit=True, ffmpeg=ffmpeg):
+        return None
+    prompt = ("只观察这些按时间顺序排列的原比例画面。每个S/P单独回答。只引用该组实际可见的F编号，"
+              "不要跨镜头推断。absorb观察巾体表面液体是否减少，填receding、unchanged或uncertain；"
+              "result只看提起离开后的纸巾本身，填clean_tissue、stained_tissue或uncertain。"
+              "巾体上的液体不能当作提起纸巾上的液体；不清楚填uncertain。列出直接证明所见的全部帧号，"
+              "描述对象、前后变化和遮挡。返回JSON对象，observations数组每项含sentence、part、event、"
+              "outcome、frames和observation。要看的组和各自提供的帧为：" + json.dumps([
+                  [s, p, e, sorted(numbers)] for (s, p, e), numbers in sorted(targets.items())]))
+    def validate(raw):
+        data = raw if isinstance(raw, dict) else next((v for v in iter_json_values(raw) if isinstance(v, dict)), {})
+        facts = data.get("observations")
+        if not isinstance(facts, list) or len(facts) != len(targets):
+            raise ValueError("EXPERIMENT_PHYSICAL_COVERAGE_INVALID")
+        seen = set()
+        for fact in facts:
+            if not isinstance(fact, dict):
+                raise ValueError("EXPERIMENT_PHYSICAL_FACT_INVALID")
+            key = fact.get("sentence"), fact.get("part"), fact.get("event")
+            numbers = fact.get("frames")
+            if (type(key[0]) is not int or type(key[1]) is not int or not isinstance(key[2], str)
+                    or key not in targets or key in seen or fact.get("outcome") not in qc.EXPERIMENT_OUTCOMES[key[2]]
+                    or not isinstance(fact.get("observation"), str) or not fact["observation"].strip()
+                    or not isinstance(numbers, list) or any(type(n) is not int or n not in targets[key] for n in numbers)
+                    or numbers != sorted(set(numbers)) or (not numbers and fact["outcome"] != "uncertain")):
+                raise ValueError("EXPERIMENT_PHYSICAL_FACT_INVALID")
+            seen.add(key)
+        return facts
+    timeout = _remaining_request_timeout()
+    if timeout <= 0:
+        return None
+    ok, raw = vision._run_vision_with_retry(sheet, prompt, sheet.with_suffix(".json"),
+                                            timeout=timeout, max_retries=1, validator=validate)
+    if not ok:
+        return None
+    by_index = {}
+    for fact in validate(raw):
+        by_index.setdefault(claims[fact["sentence"] - 1]["index"], []).append(fact)
+    return by_index
 
 
 def _inspect_member_stage(vision, frames, directory, index, ffmpeg):
@@ -475,7 +564,7 @@ def _checkpoint_binding(draft_identity: str, prompt: str, claims: list,
     binding = {"draft": draft_identity, "prompt": prompt,
         "claims": claims, "sources": sources,
         "frames": [{key: item.get(key) for key in
-                    ("label", "source_start", "source_end", "timestamp", "draft_segment")}
+                    ("label", "source_start", "source_end", "timestamp", "draft_segment", "suffix", "output_tick")}
                    for item in items]}
     from orchestrator.vision import vision_analyzer
     if vision_analyzer._vision_transport() == "qwen":
@@ -738,18 +827,26 @@ def main() -> int:
                 plan.append((rows[-1], "end", 0.9))
             expected_frames += len(plan)
             frames = claim_frames.setdefault(claim["index"], [])
+            sampled_outputs = set()
             for row, suffix, fraction in plan:
                 if not ffmpeg or not _is_file(pathlib.Path(row["source"])):
                     continue
                 seconds = row["source_start"] + row["source_duration"] * fraction
                 frame = frame_dir / f"segment_{row['index']:03d}_{suffix}.jpg"
+                output_evidence = {}
                 if "_output" in suffix:
-                    tick = int(suffix.rsplit("_output", 1)[1])
-                    located = _prepare_media(_terminal_frame, ffmpeg, row, float(info.get("fps") or 30),
-                                             frame, output_tick=tick)
+                    if (row["index"], suffix) in sampled_outputs:
+                        # A bounded first-tick recovery already supplied this exact display frame.
+                        expected_frames -= 1
+                        continue
+                    located = _prepare_media(_locate_output_sample, ffmpeg, row, float(info.get("fps") or 30),
+                                             frame_dir, suffix)
                     ok, error = bool(located), "OUTPUT_FRAME_MISSING"
                     if located:
-                        seconds = located["timestamp"]
+                        suffix, frame, seconds = located["suffix"], pathlib.Path(located["path"]), located["timestamp"]
+                        sampled_outputs.add((row["index"], suffix))
+                        output_evidence = {key: located[key] for key in (
+                            "requested_output_tick", "output_tick", "target_time", "mapped_source_time")}
                 else:
                     ok, error, seconds = _prepare_media(
                         _resume_sample_frame, ffmpeg, pathlib.Path(row["source"]), seconds, frame,
@@ -761,7 +858,7 @@ def main() -> int:
                     "path": str(frame), "label": f"S{claim['index']:02d} {suffix}",
                     "shot_id": claim["shot_id"], "source_start": row["source_start"],
                     "source_end": row["source_start"] + row["source_duration"],
-                    "suffix": suffix, "timestamp": seconds, "draft_segment": row["index"],
+                    "suffix": suffix, "timestamp": seconds, "draft_segment": row["index"], **output_evidence,
                 }
                 frames.append(item)
                 frame_items.append(item)
@@ -807,9 +904,11 @@ def main() -> int:
                     # those empty cells for a black end frame.  Keep the
                     # sheet dense so every visible tile is evidence.
                     chunk_columns = min(4, max(2, len(items)))
-                    if not vision_analyzer._write_sheet(items, chunk_sheet, columns=chunk_columns,
-                                                        tile_width=420 if ai_mode else 260, tile_height=300 if ai_mode else 190,
-                                                        ffmpeg=ffmpeg):
+                    paper_detail = ai_mode and any(c.get("category") == "zhipin" and re.search(
+                        r"层|抽数|[零一二两三四五六七八九十百千\d]+\s*(?:包|抽)|毛絮|掉屑|湿水", c["claim"]) for c in claims)
+                    tile = ({"tile_width": 360, "tile_height": 674, "fit": True} if paper_detail else
+                            {"tile_width": 420 if ai_mode else 260, "tile_height": 300 if ai_mode else 190})
+                    if not vision_analyzer._write_sheet(items, chunk_sheet, columns=chunk_columns, **tile, ffmpeg=ffmpeg):
                         return batch_no, None
                     response = report_dir / f"draft_visual_qc_vision_{batch_no:02d}.json"
                     batch_meta = report_dir / f"draft_visual_qc_batch_{batch_no:02d}.json"
@@ -817,6 +916,9 @@ def main() -> int:
                         "batch_no": batch_no,
                         "claim_indices": [claim["index"] for claim in claims],
                         "frame_labels": [item["label"] for item in items],
+                        "output_samples": [{key: item[key] for key in ("label", "draft_segment", "source_start",
+                            "source_end", "requested_output_tick", "output_tick", "target_time", "mapped_source_time",
+                            "timestamp")} for item in items if "output_tick" in item],
                         "prompt_version": response_version,
                     }, ensure_ascii=False, indent=2), encoding="utf-8")
                     prompt = _prompt(claims, len(items), force_ai=ai_mode)
@@ -825,6 +927,7 @@ def main() -> int:
                                if claim["index"] in indices for row in cut_rows]
                     bindings[batch_no] = _checkpoint_binding(
                         result["draft_metadata_sha256"], prompt, claims, items, windows)
+                    bindings[batch_no]["sheet_layout"] = {"columns": chunk_columns, **tile}
                     checkpoints[batch_no] = report_dir / f"draft_visual_qc_completed_{batch_no:02d}.json"
                     return batch_no, (claims, chunk_sheet, prompt, response)
 
@@ -915,6 +1018,17 @@ def main() -> int:
                                     raw_row = {**raw_row, "experiment_output_frames":
                                                ai_editor_qc.experiment_output_frames(claim_frames[index])}
                                 model_rows[index] = raw_row
+                        if experiment_indices(claims):
+                            physical = _inspect_experiment_outcomes(
+                                vision_analyzer, claims, model_rows, claim_frames, report_dir, batch_no, ffmpeg)
+                            if physical is None:
+                                result["response_contract"]["errors"].append(f"B{batch_no:02d}:EXPERIMENT_PHYSICAL_CALL_FAILED")
+                                result["uncertified"] = True
+                            for local in experiment_indices(claims):
+                                index = claim_indices[local - 1]
+                                if index in model_rows:
+                                    model_rows[index]["physical_outcome_protocol"] = ai_editor_qc.visual_qc_contract.EXPERIMENT_OUTCOME_PROTOCOL
+                                    model_rows[index]["physical_outcomes"] = (physical or {}).get(index, [])
                         result["batch_results"].append({
                             "batch_no": batch_no,
                             "claim_indices": claim_indices,
@@ -975,7 +1089,7 @@ def main() -> int:
                                 if (not ai_editor_qc.visual_qc_contract.group_events_visible(experiment, model_rows)
                                         and row["match_level"] in {"DIRECT", "ACCEPTABLE_DEGRADED"}):
                                     row.update(match_level="INSUFFICIENT_EVIDENCE",
-                                               reason="整组实际输出帧未确认完整倒液、吸收和纸巾验证结果。")
+                                               reason="成稿帧及独立观察未共同确认倒液、可见吸收、纸巾接触提起和口播所需的纸面结果。")
                             else:
                                 row = ai_editor_qc.apply_tissue_press_gate(row, category=str(claim.get("category") or ""))
                             row["visual_ok"] = row["match_level"] in {"DIRECT", "ACCEPTABLE_DEGRADED"}

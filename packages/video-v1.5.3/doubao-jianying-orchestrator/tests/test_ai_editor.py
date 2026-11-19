@@ -339,6 +339,61 @@ class AIEditorTests(unittest.TestCase):
             call.return_value = dict(self.review)
             self.assertNotEqual(prompt(self.manifest, self.sentence), prompt(changed, self.sentence))
 
+    def test_paper_claims_require_the_named_number_or_two_ordered_actions(self):
+        media = {"start": 0, "end": 6, "before": contract.source_identity(self.video),
+                 "times": [0, 2, 3, 5], "sheet": self.root / "sheet.jpg"}
+        manifest = {**self.manifest, "category": "zhipin"}
+        samples = [("三层加厚", "readable_label", 3, 2_000_000, True),
+                   ("三层加厚", "readable_label", 4, 2_000_000, False),
+                   ("三层加厚", "brand", 3, 2_000_000, False),
+                   ("不掉毛絮", "rub_unfold", None, 3_000_000, True),
+                   ("不掉毛絮", "rub_unfold", None, 2_000_000, False),
+                   ("湿水不易破", "wet_intact", None, 3_000_000, True),
+                   ("湿水不易破", "dry_stretch", None, 3_000_000, False)]
+        for text, kind, number, end, accepted in samples:
+            sentence = {**self.sentence, "text": text, "selling_points": [{"id": "p1", "text": text}]}
+            fact = {"id": "p1", "kind": kind, "label_text": f"100抽{number}层", "object_matches": True,
+                    "action_seen": True, "result_seen": True, "result_observed": "实际展示的结果",
+                    "action_us": 2_000_000, "result_us": end}
+            model = {**self.review, "scene_ids": [], "basis": "readable_label" if number else "visible_result",
+                     "claim_checks": [fact]}
+            with self.subTest(text=text, kind=kind, number=number, end=end), \
+                    mock.patch.object(editor, "_call", return_value=copy.deepcopy(model)):
+                result = editor._pixel_review(manifest, sentence, self.shot, self.root, prepared_media=media)
+                self.assertEqual(result["verdict"] == "matched", accepted)
+
+    def test_paper_combined_claims_keep_unobserved_dimensions_and_bind_to_displayed_time(self):
+        from orchestrator.policy import paper_claims
+        source = [{"id": "p1", "text": "五包400抽"}, {"id": "p2", "text": "三层加厚湿水不易破"}]
+        parts = paper_claims.split_points(source)
+        self.assertEqual([p["text"] for p in parts], ["五包", "400抽", "三层加厚", "湿水不易破"])
+        self.assertEqual(len({p["id"] for p in parts}), 4)
+        fact = {"action_us": 1_100_000, "result_us": 1_100_000, "kind": "readable_label", "label_text": "100抽3层"}
+        layer = [f for _, f in paper_claims.requirements(source[1]["text"])]
+        actual = [0, 2_000_149, 3_000_100, 5_000_000]
+        self.assertFalse(paper_claims.sampled_fact(layer, fact, actual)[1])
+        fact.update(action_us=2_000_000, result_us=2_000_000)
+        bound, covered = paper_claims.sampled_fact(layer, fact, actual)
+        self.assertEqual(bound["result_us"], actual[1])
+        self.assertEqual(covered, [0])
+        self.assertFalse(paper_claims.sampled_fact(layer, {**fact, "label_text": "品牌标志"}, actual)[1])
+        targets = [f for _, f in paper_claims.requirements(source[0]["text"])]
+        _, covered = paper_claims.sampled_fact(targets, {**fact, "kind": "counted_items", "count": 5, "unit": "包"}, actual)
+        self.assertEqual(covered, [0])
+
+    def test_paper_refill_preserves_separate_pack_and_sheet_claims(self):
+        text = "你看我这5包400抽才多少啊"
+        manifest = {**self.manifest, "category": "zhipin", "selection_mode": "rule_then_ai",
+                    "segments": [{"text": text, "audio_duration_us": 2_000_000}]}
+        prior = {"segments": [{"index": 1, "text": text}], "pending_items": []}
+        captured = []
+        def observe(_manifest, sentence, *_):
+            captured.append(sentence["selling_points"])
+            return [], {"feasible": False}
+        with mock.patch.object(editor, "_review_pool", side_effect=observe):
+            editor.refill_indices(manifest, {"shots": [self.shot]}, prior, [1], self.root)
+        self.assertEqual([p["text"] for p in captured[0]], ["你看我这5包", "400抽才多少啊"])
+
     def test_review_accepts_unambiguous_interval_pair(self):
         media = {"start": 0, "end": 6, "before": contract.source_identity(self.video),
                  "times": [0, 3, 5], "sheet": self.root / "sheet.jpg"}

@@ -40,7 +40,7 @@ POLICY = """先通读整稿，先安排具体卖点，再安排产品介绍和�
 全稿每一句按实际内容分类。开头、中段或结尾纯招呼、设问、吊胃口且没有本品具体卖点，标为hook；问句含本品具体卖点仍是selling_point。一句多个卖点至少实际呈现一个具体点，未覆盖项如实记录，不能声称全部已证实。
 轻薄、柔软、舒服允许能体现特点的真实展示，不强制实验或固定厚度对照。
 明确性能结果、数值或比较必须有对应可见画面，包装文字只支持该标称。
-口播里的层数或结构名称如果说的是瞬吸、吸收、下渗，看得见倒液之后的吸收过程或结果就是这句证据，不要求切开看到内部层数。没有吸收过程的包装和静态陈列仍然不能证明。
+卫品口播里的层数或结构名称如果说的是瞬吸、吸收、下渗，看得见倒液之后的吸收过程或结果就是这句证据，不要求切开看到内部层数。没有吸收过程的包装和静态陈列仍然不能证明。
 防侧漏看见立体护边、侧翼或侧边结构就是这句证据，不要求倒液防漏实验。只拉伸腰围、没有护边不算。
 干净卫生看见同商品外包装或未拆封包装就是正常匹配，不要求撕开实验。
 产品介绍和无具体卖点的钩子可用同商品包装、手持、拆包、取出和本体展示，属于正常匹配。
@@ -140,13 +140,21 @@ def policy_prompt(manifest: dict, *, include_presentation: bool = True) -> str:
     if include_presentation:
         policy += "\n" + presentation.PROMPT
         policy += "\n商品展示动作阶段策略：" + presentation.VERSION
-    if editorial_context(manifest)["category"] == "weipin":
+    context = editorial_context(manifest)
+    if context["category"] == "zhipin":
+        policy += ("\n纸品按本句具体意思核对最终裁切。把口播中可以分别核验的规格和性能列为独立卖点。"
+                   "层数、抽数看能读清的对应字样或可逐一数清的实物；"
+                   "分别记录看清的数字。多包陈列能支持囤货，看见五包只支持五包。"
+                   "单张大小、厚度和柔软看展开的巾体、纸边或实际抚触；整包厚度只能说明包装。"
+                   "湿水不易破要建立纸已湿，并看清提起或展开后纸仍完整；不掉毛絮要看揉搓及随后展开检查的结果。"
+                   "相邻镜头的湿纸、干纸或不同次揉搓各按实际证据记录。开箱展示从箱盖让开剪到商品可辨认。")
+    if context["category"] == "weipin":
         policy += ("\n裤型卫生巾按可见部位和动作分别判断：腰腹包覆或高腰看展开的腰头高度、前腹覆盖或试穿位置；"
                    "腰围弹力看两侧撑开腰头产生形变，宣称回弹还需看见松手回缩。"
                    "仅托举、折叠裤体、拉裆部或扯外袋不能证明腰围弹力。亲肤柔软可用清楚的巾体面层抚触、轻捏或贴肤展示，揉包装不能代替。")
-    if editorial_context(manifest)["category"] in {"zhipin", "weipin"}:
+    if context["category"] in {"zhipin", "weipin"}:
         policy += "\n本任务生效的品类制作与选镜合同（按口播含义适用，不能据此虚构画面）：\n" + json.dumps(
-            editorial_context(manifest), ensure_ascii=False, sort_keys=True)
+            context, ensure_ascii=False, sort_keys=True)
     feedback = str(manifest.get("revision_feedback") or "").strip()
     if feedback:
         policy += ("\n以下是旧稿的历史反馈，时间码属于旧稿；把它作为修订线索，"

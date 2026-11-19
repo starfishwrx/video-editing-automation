@@ -6,6 +6,8 @@
 
 规范性关键词见[要求用语与适用范围](../../packages/video-v1.5.3/doubao-jianying-orchestrator/references/requirement_levels.md)。本页不把新队列默认施加于旧冻结运行。
 
+纸品层数、包数和抽数按单位及数字逐项匹配，揉搓后展开、湿纸提起须在成片保留关键时刻。卫品实验对语义观察所引用的液面及提纸结果另作逐切片观察。正式回读复用同一项结果检查。[首轮剪辑修复与案例](../plans/20261119-first-pass-editing.md)
+
 ## 1. 两条路线的共同入口
 
 - `shot_analyzer.analyze_manifest`：只对当前任务素材场景切分、抽帧并生成候选 JSON，不替模型填写描述。

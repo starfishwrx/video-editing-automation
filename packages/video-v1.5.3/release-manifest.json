@@ -6,7 +6,7 @@
     "machine-specific paths",
     "knowledge-base bodies"
   ],
-  "file_count": 487,
+  "file_count": 488,
   "files": [
     {
       "path": ".gitignore"
@@ -316,6 +316,9 @@
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/policy/feedback_policy.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/policy/paper_claims.py"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/policy/playback.py"

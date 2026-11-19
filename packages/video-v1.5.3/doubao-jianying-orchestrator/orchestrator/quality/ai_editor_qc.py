@@ -107,16 +107,24 @@ def prompt(claims: list[dict], frame_count: int) -> str:
                     "同次演示、同一展示目的或具体卖点、动作和结果完整且可读；仍逐句检查其口播与画面阶段、节奏是否吻合。"
                     "无需每句重播完整实验，但不能借无关句，也不能把后句结果说成前句已出现。"
                     "组内任一必要阶段缺失、不连贯或无法确认时，受影响各句标为INSUFFICIENT_EVIDENCE，不得整体放行。")
-    approved = [i for i, claim in enumerate(claims, 1)
-                if ((claim.get("ai_segment") or {}).get("continuity_group") or {}).get("input", {}).get("allow_experiment_phase_speedup") is True]
+    approved = [i for i, claim in enumerate(claims, 1) if contract.continuity.is_experiment(
+        (claim.get("ai_segment") or {}).get("continuity_group"))]
+    accelerated = [i for i in approved if claims[i - 1]["ai_segment"]["continuity_group"]["input"].get(
+        "allow_experiment_phase_speedup") is True]
+    if accelerated:
+        mapping += "\n这些卫品吸水组的倒液、液体吸收、纸巾验证都可按需加速，无固定倍速上限：" + str(accelerated)
     if approved:
-        mapping += ("\n这些卫品吸水组的倒液、液体吸收、纸巾验证都可按需加速，无固定倍速上限：" + str(approved)
+        mapping += ("\n以下各句属于卫品吸水实验：" + str(approved)
                     + "。请按实际成片检查各阶段仍可辨认、同次实验对应及结果完整，不得将加速画面当作实际耗时证据。"
                     + "上述每句另填 visible_experiment_events，按画面顺序列出本句明确看见的事件代号："
                     "pour（液体倒下）、absorb（液体吸收）、press（纸巾接触或擦拭）、lift（提起纸巾）、"
                     "result（看清提起后的纸面是否沾液）。每个事件写成对象，例如"
                     '{"event":"pour","frames":[2,3]}，frames 填本句附图上实际支持该事件的 F 编号。'
                     "倒液要有两帧清楚看到液体正在倒下，吸收要有不同帧看到液体状态发生变化。"
+                    "absorb事件另填outcome=receding（看见液体减少）|unchanged|uncertain。"
+                    "result事件另填outcome=clean_tissue|stained_tissue|uncertain，按提起纸巾上的液体判断；"
+                    "并按本组口播所主张的纸面结果填expected=clean_tissue|stained_tissue|inspect，"
+                    "仅要求查看且不主张具体结论时才填inspect。每项都列出能确认的所有F编号。"
                     "纸巾提起后，标出纸面结果仍清晰的最早与最晚 F 编号。"
                     "单张倒液图、举杯准备、已湿的静止巾面不能证明倒液过程。没看到写空数组，observed写具体所见。")
     event_field = '"visible_experiment_events":[],' if approved else ""
@@ -131,7 +139,7 @@ DIRECT表示本句按其用途正常匹配：贴切的轻薄/柔软展示和普�
 卫品口播里的反渗、回流、干爽、不黏或黏腻，按压验证只认纸巾：必须看见纸巾接触巾体并提起。手掌、手指、空手离开、按完后手掌干净都不是按压验证。没看见纸巾时这句标INSUFFICIENT_EVIDENCE，不得标DIRECT或ACCEPTABLE_DEGRADED。
 价格/优惠/划算等普通促销口播，可用同商品包装或陈列承接；明确价格数值或价格比较仍须对应可读证据。
 包装标称只支持包装上的说法，不证明实际性能；EDI纯水等原料标称不要求另拍制水过程。
-口播里的层数或结构名称如果说的是瞬吸、吸收、下渗，看得见倒液之后的吸收过程或结果就是这句证据，不要求切开看到内部层数。没有吸收过程的包装和静态陈列仍然不能证明。
+卫品口播里的层数或结构名称如果说的是瞬吸、吸收、下渗，看得见倒液之后的吸收过程或结果就是这句证据，不要求切开看到内部层数。没有吸收过程的包装和静态陈列仍然不能证明。
 防侧漏看见立体护边、侧翼或侧边结构就是直接匹配，不要求倒液防漏实验。只拉伸腰围、没有护边不算。
 干净卫生看见同商品外包装或未拆封包装就是直接匹配，标DIRECT，不得标ACCEPTABLE_DEGRADED，不要求撕开实验。
 画面反证或对象错误为MISMATCH；动作/结果未拍到、遮挡或无法确认则INSUFFICIENT_EVIDENCE。

@@ -42,6 +42,7 @@ class PaperReviewMediaTests(unittest.TestCase):
         self.patch(platform_env, "find_ffmpeg", return_value=("unused-ffmpeg", None))
         self.patch(runtime_policy, "media_slot",
                    side_effect=lambda **kwargs: nullcontext(SimpleNamespace(acquired=True)))
+        self.real_frame_cache = material_cache.cached_frames
         self.frame_cache = self.patch(material_cache, "cached_frames", side_effect=self.prepared_frames)
 
     def patch(self, target, name, **kwargs):
@@ -91,6 +92,29 @@ class PaperReviewMediaTests(unittest.TestCase):
             self.assertGreater(green[1], green[0] + 100)
             self.assertGreater(blue[2], blue[0] + 100)
         self.assertAlmostEqual(self.marker_ratio(sheet), 1, delta=.03)
+
+    def test_cold_and_cached_pixels_keep_bound_analysis_and_detect_source_replacement(self):
+        from orchestrator.selection import shot_analyzer
+        from orchestrator.vision import evidence_store
+        source = Path(self.shot["video"])
+        self.shot["prepared_source_sha256"] = contract.file_sha256(source)
+        original = dict(self.shot)
+        def extract(_source, requests, **_kwargs):
+            for _, target in requests:
+                shutil.copyfile(self.frame, target)
+            return [True] * len(requests)
+        self.frame_cache.side_effect = self.real_frame_cache
+        with mock.patch.object(evidence_store, "database", return_value=None), \
+                mock.patch.object(shot_analyzer, "extract_frames_batch", side_effect=extract) as decode:
+            cold = ai_editor._review_media(self.shot, self.directory)
+            hot = ai_editor._review_media(self.shot, self.directory)
+            self.assertEqual(cold["sheet"], hot["sheet"])
+            self.assertEqual(decode.call_count, 1)
+            self.assertEqual(self.shot, original)
+            source.write_bytes(b"different content at the same path")
+            with self.assertRaisesRegex(ValueError, "SOURCE_CHANGED"):
+                ai_editor._review_media(self.shot, self.directory)
+            self.assertEqual(self.shot, original)
 
     def test_default_and_explicit_false_reuse_original_sheet_identity(self):
         for dense in (False, True):
