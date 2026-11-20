@@ -346,7 +346,8 @@ def output_coverage(spoken, evidence, cuts, *, observed_cut=None):
                              and not _reading_disputed(observation))
             else:
                 supported = (confirms(req, bound) and
-                             (req["kind"] != "wet_use" or wet_contact_observed(observed_cut) is not False))
+                             (req["kind"] != "wet_use" or (evidence.get("water_state", "contact") == "contact"
+                              and wet_contact_observed(observed_cut) is not False)))
             if req not in verified and supported:
                 verified.append(req)
     return verified, [r for r in required if r not in verified]

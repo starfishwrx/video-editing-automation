@@ -70,6 +70,30 @@ class AIEditorQCIntegrationTests(unittest.TestCase):
         tiles = vision._write_sheet.call_args.args[0]
         self.assertEqual([(t["timestamp"], t["label"]) for t in tiles], [(1., "F01"), (2., "F02")])
 
+    def test_paper_water_observation_requires_a_state_and_its_visible_frame(self):
+        frames = [{"draft_segment": 1, "timestamp": 1., "path": "frame.jpg"}]
+        label = {"kind": "readable_label", "object_matches": True, "label_text": "棉柔洁面巾",
+                 "action_frame": 1, "result_frame": 1}
+        wet = {**label, "kind": "wet_use", "result_observed": "水龙头下打湿棉柔巾"}
+        vision = mock.Mock()
+        vision._write_sheet.return_value = True
+        for state, facts, valid in [(None, [label], False), ("no_contact", [label], True),
+                                     ("unclear", [], True), ("contact", [label], False),
+                                     ("no_contact", [wet], False), ("contact", [label, wet], True)]:
+            answer = {"facts": facts, "water_state": state}
+            vision._run_vision_with_retry.return_value = (True, answer)
+            with self.subTest(state=state, facts=facts):
+                if valid:
+                    result = qc._inspect_paper_facts(vision, frames, self.root, 1, "ffmpeg", inspect_water=True)
+                    self.assertEqual(result["water_state"], state)
+                    self.assertEqual(result["facts"], facts)
+                else:
+                    with self.assertRaisesRegex(ValueError, "PAPER_WATER_OBSERVATION_INVALID"):
+                        qc._inspect_paper_facts(vision, frames, self.root, 1, "ffmpeg", inspect_water=True)
+        prompt = vision._run_vision_with_retry.call_args.args[1]
+        self.assertIn("no_contact", prompt)
+        self.assertNotIn("干湿两用", prompt)
+
     def test_reclassified_unboxing_still_requires_its_terminal_frame(self):
         item = {"selection_mode": "ai_editor", "text": "看看这一款",
                 "ai_selection": {"sentence_kind": "selling_point", "observation": "双手打开一个纸箱，箱盖向两侧翻开"}}
@@ -199,16 +223,32 @@ class AIEditorQCIntegrationTests(unittest.TestCase):
         self.assertFalse(paper_claims.confirms({"kind": "wet_intact"}, {"kind": "wet_intact", "action_us": 1,
                          "result_us": 2, "result_observed": "纸张遮挡，完整无法确认"}))
 
+    def test_wet_use_triggers_foreground_water_observation_in_formal_qc(self):
+        self.match["manifest"]["category"] = "zhipin"
+        self.segment["text"] = self.segment["claim_text"] = "干湿两用"
+        self.segment["ai_selection"]["text"] = self.segment["text"]
+        self.match["manifest"]["segments"][0]["text"] = self.segment["text"]
+        self.segment["ai_selection"]["identity"]["editorial_rules"] = contract.rules_identity(self.match["manifest"])
+        self.write_reports()
+        with mock.patch.object(qc, "_inspect_paper_facts", return_value={"frames": [], "facts": []}) as observer:
+            _, report = self.run_qc()
+        self.assertTrue(observer.call_args.kwargs["inspect_water"])
+        self.assertFalse(observer.call_args.kwargs["read_labels"])
+        self.assertNotEqual(visual_qc_contract.report_status(report), "PASS")
+
     def test_wet_use_is_visible_water_contact_in_the_output_cut(self):
         from orchestrator.policy import paper_claims
         requirement = {"kind": "wet_use"}
         fact = {"kind": "wet_use", "object_matches": True, "action_frame": 1, "result_frame": 1,
                 "result_observed": "在水龙头下打湿棉柔巾"}
-        def covered(row, instant=100, observed_cut=None):
-            evidence = {"frames": [[1, instant]], "facts": [row]}
+        def covered(row, instant=100, observed_cut=None, **capture):
+            evidence = {"frames": [[1, instant]], "facts": [row], **capture}
             return paper_claims.output_coverage("干湿两用", evidence, {1: (100, 110)}, observed_cut=observed_cut)[0]
         self.assertFalse(covered(fact, observed_cut="只看到密封包装，没有纸巾遇水"))
         self.assertFalse(covered(fact, observed_cut="仅拍到包装正面"))
+        self.assertFalse(covered(fact, water_state="no_contact"))
+        self.assertFalse(covered(fact, water_state="unclear"))
+        self.assertTrue(covered(fact, water_state="contact"))
         self.assertTrue(covered(fact, observed_cut="水龙头下打湿棉柔巾，背景中有包装"))
         for observed in (fact["result_observed"], "水流冲刷棉柔巾", "棉柔巾浸在水中", "棉柔巾泡在水里",
                          "用湿润的棉柔巾擦脸", "湿棉柔巾擦拭脸颊", "纸巾浸湿且没有破损", "水流冲刷棉柔巾后纸面未破"):

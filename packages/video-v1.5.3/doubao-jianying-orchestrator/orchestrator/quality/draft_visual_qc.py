@@ -572,7 +572,7 @@ def _inspect_approved_show(vision, frames, directory, index, approval, ffmpeg):
             round(ordered[n - 1]["timestamp"] * 1e6)] for n in data["frames"]]}
 
 
-def _inspect_paper_facts(vision, frames, directory, index, ffmpeg, *, read_labels=False):
+def _inspect_paper_facts(vision, frames, directory, index, ffmpeg, *, read_labels=False, inspect_water=False):
     """Observe only this sentence's final pixels without revealing expected quantities or copy."""
     unique = {(f["draft_segment"], round(f["timestamp"] * 1e6)): f for f in _ordered_cut_frames(frames)}
     ordered = list(unique)
@@ -600,6 +600,12 @@ def _inspect_paper_facts(vision, frames, directory, index, ffmpeg, *, read_label
               'contrary_visible（纸面可见碎絮或湿纸已破）。写 action_observed 及 result_observed 描述先后实际情况。'
               '动作跨切片还须填写 same_demonstration，说明是否确能认出同一张纸。'
               '只看到揉搓、未展示结果或看不清时如实描述，禁止推测。')
+    if inspect_water:
+        prompt += ('\n另独立记录前景巾体与水的关系。按图片实际情况在 JSON 顶层填写 water_state：'
+                   'contact（看见水或湿擦接触巾体）、no_contact（只有干态、包装或水流未接触主体）、'
+                   'unclear（无法看清或辨认）。注意背景里的水龙头和包装字样。'
+                   '只有 contact 才在 facts 里列同款巾体的 wet_use，写清实体、实际接触动作与帧号。'
+                   '在同一格看清接触即可。其余状态可留空 facts 或记录其他独立可见的事实。')
     def validate(raw):
         value = raw if isinstance(raw, dict) else next((v for v in iter_json_values(raw) if isinstance(v, dict)), {})
         if (not isinstance(value.get("facts"), list) or not all(
@@ -610,6 +616,13 @@ def _inspect_paper_facts(vision, frames, directory, index, ffmpeg, *, read_label
                      all(type(f.get(k)) is bool for k in ("action_complete", "result_clear", "contrary_visible")))
                 for f in value["facts"])):
             raise ValueError("PAPER_FACT_OBSERVATIONS_INVALID")
+        if inspect_water:
+            state = value.get("water_state")
+            wet = [f for f in value["facts"] if f["kind"] == "wet_use" and f["object_matches"]]
+            if (state not in ("contact", "no_contact", "unclear") or (state == "contact") != bool(wet)
+                    or any(f["action_frame"] > f["result_frame"] or not isinstance(f.get("result_observed"), str)
+                           or not f["result_observed"].strip() for f in wet)):
+                raise ValueError("PAPER_WATER_OBSERVATION_INVALID")
         return value
     validate.expects_json_object = True
     timeout = _remaining_request_timeout()
@@ -619,6 +632,8 @@ def _inspect_paper_facts(vision, frames, directory, index, ffmpeg, *, read_label
         if ok:
             answer = validate(raw)
             capture["facts"] = answer["facts"]
+            if inspect_water:
+                capture["water_state"] = answer["water_state"]
             number = answer.get("best_label_frame")
             if read_labels and type(number) is int and 1 <= number <= len(items):
                 # Read the original full-size frame. The observer sees neither the claim nor the expected value.
@@ -1078,12 +1093,14 @@ def main() -> int:
                                 vision_analyzer, claim_frames[i], report_dir, i, claim["approved_visual"], ffmpeg)
                     if result["category"] == "zhipin":
                         for claim in claims:
-                            if not claim.get("approved_visual") and ai_editor_contract.paper_claims.requirements(claim["claim"]):
+                            if claim.get("approved_visual"):
+                                continue
+                            kinds = {f["kind"] for _, f in ai_editor_contract.paper_claims.requirements(claim["claim"])}
+                            if kinds:
                                 i = claim["index"]
-                                read_labels = any(f["kind"] in {"quantity", "composition"}
-                                                  for _, f in ai_editor_contract.paper_claims.requirements(claim["claim"]))
                                 paper_observations[i] = _inspect_paper_facts(
-                                    vision_analyzer, claim_frames[i], report_dir, i, ffmpeg, read_labels=read_labels)
+                                    vision_analyzer, claim_frames[i], report_dir, i, ffmpeg,
+                                    read_labels=bool(kinds & {"quantity", "composition"}), inspect_water="wet_use" in kinds)
                     cached = _load_batch_checkpoint(checkpoints[batch_no],
                         bindings[batch_no], len(claims), response_version, experiment_indices(claims))
                     if cached is not None:
