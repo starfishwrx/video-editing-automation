@@ -705,7 +705,7 @@ shot_value_request非空时，可额外返回shot_value_observation，逐项评�
     paper_checks = (paper_claims.checks_by_id(sentence.get("selling_points") or [])
                     if contract.rules_identity(manifest)["category"] == "zhipin" else {})
     claim_checks = bool(paper_checks or (sentence.get("first_look_ids") and sentence.get("selling_points")))
-    if claim_checks:
+    if claim_checks and not paper_checks:
         prompt += """
 逐项检查口播对象、动作以及必要结果。如果一项要求先动作后检查结果，必须在同一次演示中都看见。
 例如揉搓不掉絮要先捏揉再重新展开检查表面；仅湿水拉伸或揉成团均不支持。声称擦脸须看到脸部接触。
@@ -714,7 +714,13 @@ shot_value_request非空时，可额外返回shot_value_observation，逐项评�
 时间使用画面上的原片微秒，填写能看清这次关键动作和结果的两个时刻。静态规格/标称填 kind="readable_label"，只需实际读到对应文字并记录展示时间；无需动作。静态可填同一时刻。
 动作或结果缺失的卖点从 supported_point_ids 删去。没有支持项时返回 mismatch 或 uncertain。"""
     if paper_checks:
-        prompt += ("\n纸品每项引用附图时间。规格文字填kind=readable_label及label_text，逐字抄下看清的数字和单位；"
+        prompt += ("\n纸品逐项填写 claim_checks。对明确支持的卖点，每条包含 id、kind、object_matches、action_seen、"
+                   "result_seen、action_frame、result_frame、action_observed、result_observed。"
+                   "三项可见性字段填布尔值，以画面为准。两帧字段填实际格号，附图按从左到右、从上到下从1数。"
+                   "静态标示允许两个格号相同，先动作后检查的演示必须看见两张有先后顺序的画面。"
+                   "逐格原片微秒如下，可与格内的 t 标签核对：" + json.dumps([round(t * 1e6) for t in times]) +
+                   "。填写格号即可。evidence_intervals_us 仍用原片微秒。无法确认的卖点从 supported_point_ids 移除。"
+                   "规格文字填kind=readable_label及label_text，逐字抄下看清的数字和单位；"
                    "原料百分比抄录同一条标称的完整百分比与原料名称；"
                    "可直接数清则填kind=counted_items、count、unit、group（所数商品的位置和分组），result_observed写该帧怎样数清。"
                    "揉搓后展开检查填kind=rub_unfold，action_observed描述揉搓，result_observed说明展开后有无毛絮。"
@@ -801,6 +807,10 @@ shot_value_request非空时，可额外返回shot_value_observation，逐项评�
                     if not proofs:
                         continue
                     static = fact["kind"] in {"readable_label", "counted_items"}
+                elif paper_checks and ("action_frame" in fact or "result_frame" in fact):
+                    fact = paper_claims.bind_sample_times(fact, samples)
+                    if fact is None:
+                        continue
                 a, b = fact.get("action_us"), fact.get("result_us")
                 if (fact.get("object_matches") is True and (static or fact.get("action_seen") is True)
                         and fact.get("result_seen") is True

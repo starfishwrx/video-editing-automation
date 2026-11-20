@@ -102,13 +102,10 @@ def extract(source: str | Path, metadata: dict, indices: list[int], directory: P
             or any(type(i) is not int or not 0 <= i < len(metadata["frames"]) for i in indices)
             or indices != sorted(set(indices))):
         raise ValueError("ACTION_FRAME_INDICES_INVALID")
-    root = Path(directory) / ("frames-" + _key([metadata["source_identity"], {"width": width, "protocol": "source-index-v1"}]))
+    clock = [metadata["timestamp_origin_us"] + frame["pts_us"] for frame in metadata["frames"]]
+    root = Path(directory) / ("frames-" + _key([metadata["source_identity"], width, "source-index-v2", clock]))
     root.mkdir(parents=True, exist_ok=True)
-    rows = []
-    for i in indices:
-        frame = metadata["frames"][i]
-        source_pts = frame["pts_us"] + metadata["timestamp_origin_us"]
-        rows.append(dict(frame, path=str(root / f"{i:06d}-{source_pts}.jpg")))
+    rows = [dict(metadata["frames"][i], path=str(root / f"{i:06d}.jpg")) for i in indices]
     missing = [row for row in rows if not Path(row["path"]).is_file() or not Path(row["path"]).stat().st_size]
     if missing:
         import tempfile

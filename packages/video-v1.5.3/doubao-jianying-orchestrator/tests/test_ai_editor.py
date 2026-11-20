@@ -403,6 +403,14 @@ class AIEditorTests(unittest.TestCase):
         bound, covered = paper_claims.sampled_fact(layer, fact, actual)
         self.assertEqual(bound["result_us"], actual[1])
         self.assertEqual(covered, [0])
+        indexed = {"action_frame": 2, "result_frame": 2, "kind": "readable_label", "label_text": "100抽3层"}
+        bound, covered = paper_claims.sampled_fact(layer, indexed, actual)
+        self.assertEqual((bound["action_us"], bound["result_us"], covered), (actual[1], actual[1], [0]))
+        self.assertNotIn("result_frame", bound)
+        for invalid in ({"result_frame": 0}, {"result_frame": True}, {"action_frame": 5},
+                        {"result_us": actual[2]}, {"action_us": None}, {"label_text": "产品正面"}):
+            with self.subTest(invalid=invalid):
+                self.assertFalse(paper_claims.sampled_fact(layer, {**indexed, **invalid}, actual)[1])
         self.assertFalse(paper_claims.sampled_fact(layer, {**fact, "label_text": "品牌标志"}, actual)[1])
         legacy = {k: v for k, v in fact.items() if k not in ("kind", "label_text")}
         legacy.update(result_seen=True, result_observed="包装右下角清晰可见“三层”字样，手指在旁边。")

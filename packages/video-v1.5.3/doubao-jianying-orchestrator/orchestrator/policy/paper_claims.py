@@ -138,17 +138,34 @@ def _observed_label(fact, basis):
     return fact
 
 
-def sampled_fact(requirements, fact, samples, *, basis=None):
+def bind_sample_times(fact, samples):
+    """Resolve a one-based sheet position or an observed microsecond label to that sample."""
+    if not samples:
+        return None
     anchors = {}
-    for clock in ("action_us", "result_us"):
+    for stage in ("action", "result"):
+        clock = stage + "_us"
+        ordinal = stage + "_frame"
         instant = fact.get(clock)
-        if type(instant) is not int or not samples:
-            return None, []
-        sample = min(samples, key=lambda t: abs(t - instant))
-        if abs(sample - instant) > 501:  # Sheet labels show milliseconds.
-            return None, []
+        if ordinal in fact:
+            index = fact[ordinal]
+            if type(index) is not int or not 1 <= index <= len(samples):
+                return None
+            sample = samples[index - 1]
+        elif type(instant) is int:
+            sample = min(samples, key=lambda t: abs(t - instant))
+        else:
+            return None
+        if clock in fact and (type(instant) is not int or abs(sample - instant) > 501):
+            return None
         anchors[clock] = sample
-    bound = {**_observed_label(fact, basis), **anchors}
+    return {**{k: v for k, v in fact.items() if k not in ("action_frame", "result_frame")}, **anchors}
+
+
+def sampled_fact(requirements, fact, samples, *, basis=None):
+    bound = bind_sample_times(_observed_label(fact, basis), samples)
+    if bound is None:
+        return None, []
     return bound, [i for i, requirement in enumerate(requirements) if confirms(requirement, bound)]
 
 
