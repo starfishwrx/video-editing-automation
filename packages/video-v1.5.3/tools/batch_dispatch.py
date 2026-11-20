@@ -279,6 +279,8 @@ def prepare_product(task: dict, product_dir: Path, env: dict) -> str:
 
 
 def run_task(task: dict, stage: str, env: dict, work: Path) -> dict:
+    env = dict(env, JY_FIRST_PASS_COHORT=str(task.get("_dispatch_first_pass_cohort") or ""),
+               JY_FIRST_PASS_RECORD=task["record_id"])
     task = {key: value for key, value in task.items() if not key.startswith("_dispatch_")}
     task_dir = work / task["record_id"]
     task_dir.mkdir(parents=True, exist_ok=True)
@@ -342,6 +344,18 @@ def dispatch(tasks: list[dict], *, work: Path, policy: RuntimePolicy | None = No
              preparer: Callable = prepare_product, runner: Callable = run_task,
              dry_run: bool = False, resume_stage: str | None = None,
              on_task_start: Callable | None = None) -> list[dict]:
+    from tools import first_pass
+    routes = {}
+    for task in tasks:
+        destination = first_pass.revision_work_root(task, work)
+        routes.setdefault(destination, []).append(task)
+    if any(destination != work for destination in routes):
+        results = []
+        for destination, group in routes.items():
+            results.extend(dispatch(group, work=destination, policy=policy, preparer=preparer, runner=runner,
+                                    dry_run=dry_run, resume_stage=resume_stage if destination == work else None,
+                                    on_task_start=on_task_start))
+        return results
     policy = policy or load_policy()
     started_at = time.time()
     started_clock = time.monotonic()
@@ -357,7 +371,7 @@ def dispatch(tasks: list[dict], *, work: Path, policy: RuntimePolicy | None = No
             task["_dispatch_admitted_clock"] = started_clock
             task["_dispatch_wait_origin"] = "supervisor_admission"
             unique.append(task)
-    pending = [(task, resume_stage if resume_stage in {"qc", "delivery"} else
+    pending = [(task, "build" if task.get("force_rebuild") else resume_stage if resume_stage in {"qc", "delivery"} else
                 "qc" if not resume_stage and _qc_pending(task, work) else "build") for task in unique]
     pending.sort(key=lambda job: 0 if job[1] == "qc" else 1)  # stable FIFO
     if dry_run:
@@ -386,6 +400,32 @@ def dispatch(tasks: list[dict], *, work: Path, policy: RuntimePolicy | None = No
         submitted_files = set()
         spool_blocked = False
         run_file = work / "dispatch_runs" / (str(time.time_ns()) + "-" + uuid.uuid4().hex[:8] + ".json")
+        cohort_path = work / "first_pass_cohorts" / run_file.name
+        enrolled = []
+        bindings_path = work / "first_pass_cohorts" / "active.json"
+        bindings = _read(bindings_path)
+        for task in unique:
+            previous = _read(work / task["record_id"] / "done.json")
+            rid = task["record_id"]
+            revision = first_pass.revision(str(task.get("script") or ""))
+            identity = {"record_id": rid, "task_id": task.get("task_id") or rid, "product": task.get("product"),
+                        "script_sha256": revision, "business_batch": task.get("batch_id") or task.get("batch_identity")}
+            saved = bindings.get(rid) or {}
+            retained_cohort = first_pass.recovered_cohort(task, previous)
+            if (not retained_cohort and saved.get("identity") == identity and not task.get("force_rebuild")
+                    and not (previous.get("first_pass_cohort_id") == saved.get("cohort") and previous.get("terminal_state") == "DELIVERED")):
+                retained_cohort = saved.get("cohort")
+            if (not retained_cohort and not task.get("force_rebuild") and not resume_stage
+                    and previous.get("terminal_state") == "DELIVERED" and formal_delivery_count(previous) >= max(1, int(task.get("count") or 1))):
+                continue
+            cohort = retained_cohort or run_file.stem
+            task["_dispatch_first_pass_cohort"] = cohort
+            bindings[rid] = {"identity": identity, "cohort": cohort}
+            if not retained_cohort:
+                enrolled.append({**identity, "category": task.get("category"), "first_pass_cohort_id": cohort})
+        if enrolled:
+            atomic_write_text(cohort_path, json.dumps({"tasks": enrolled}, ensure_ascii=False, indent=2))
+        atomic_write_text(bindings_path, json.dumps(bindings, ensure_ascii=False))
         atomic_write_text(run_file, json.dumps({"policy": policy.to_dict(),
             "started_at": started_at, "finished_at": None, "results": []}, indent=2))
 
@@ -466,7 +506,7 @@ def dispatch(tasks: list[dict], *, work: Path, policy: RuntimePolicy | None = No
                     requested_stage = task.get("_dispatch_resume_stage") or resume_stage
                     if not requested_stage:
                         previous = _read(task_work / task["record_id"] / "done.json")
-                        if formal_delivery_count(previous) >= max(1, int(task.get("count") or 1)):
+                        if not task.get("force_rebuild") and formal_delivery_count(previous) >= max(1, int(task.get("count") or 1)):
                             pending.remove((task, stage))
                             record({"record_id": task["record_id"], "status": "ALREADY_DELIVERED",
                                     "stage": "complete", "formal_deliveries": 0})

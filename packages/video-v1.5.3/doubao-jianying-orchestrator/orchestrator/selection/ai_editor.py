@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import ai_editor_contract as contract
+from ..policy import paper_claims, sentence_visuals
 from . import timing_contract
 from . import sentence_continuity
 from . import experiment_groups
@@ -294,7 +295,9 @@ def _inventory(manifest: dict, shots: list[dict], directory: Path) -> list[dict]
         "full_script_context": [{"index": i, "text": timing_contract.sentence_text(s)}
                                 for i, s in enumerate(rows, 1)],
         "sentences": [{"index": i, "text": timing_contract.sentence_text(s),
-                       "notes": shot_notes.note_for(manifest, i, s) or s.get("visual_requirements")}
+                       "notes": shot_notes.note_for(manifest, i, s) or s.get("visual_requirements"),
+                       "approved_visual": {k: v for k, v in (sentence_visuals.approved(
+                           manifest, i, timing_contract.sentence_text(s)) or {}).items() if k in {"mode", "show"}}}
                       for i, s in sentence_rows],
         "catalog": catalog}, ensure_ascii=False) + """
 输出JSON对象 {"sentences":[{"index":1,"kind":"selling_point|product_intro|hook",
@@ -369,6 +372,7 @@ start/end使用原素材秒数，选择与该素材action_segments重叠且包�
         if type(index) is not int or not 1 <= index <= len(rows) or index in by_index or row.get("kind") not in contract.KINDS:
             raise ValueError("AI_EDITOR_CLASSIFICATION_INVALID")
         points = row.get("selling_points")
+        row.pop("approved_visual", None)
         role = row.get("experiment_role", "other")
         if role not in experiment_groups.ROLES:
             raise ValueError("AI_EDITOR_EXPERIMENT_ROLE_INVALID")
@@ -387,6 +391,16 @@ start/end使用原素材秒数，选择与该素材action_segments重叠且包�
             raise ValueError("AI_EDITOR_POINTS_INVALID")
         if len({p["id"] for p in points}) != len(points) or (row["kind"] == "selling_point") != bool(points):
             raise ValueError("AI_EDITOR_POINTS_INVALID")
+        if contract.rules_identity(manifest)["category"] == "zhipin":
+            row["selling_points"] = paper_claims.split_points(points)
+        spoken = timing_contract.sentence_text(rows[index - 1])
+        approval = sentence_visuals.approved(manifest, index, spoken)
+        sentence_visuals.apply_to_sentence(row, approval)
+        if not approval and contract.rules_identity(manifest)["category"] == "zhipin":
+            row["selling_points"] = paper_claims.include_spoken_requirements(spoken, row["selling_points"])
+            if row["selling_points"]:
+                row["kind"] = "selling_point"
+                row.pop("hook_neighbor", None)
         ids = row.get("candidate_ids")
         if not isinstance(ids, list) or any(not isinstance(s, str) for s in ids):
             raise ValueError("AI_EDITOR_CANDIDATE_UNKNOWN")
@@ -493,8 +507,14 @@ def _review_media(shot: dict, directory: Path, *, dense: bool = False, fit: bool
         return frames
     if sha:
         protocol += ":content:" + sha
-    frames = material_cache.cached_frames(shot, directory, prepare_frames,
-        protocol=protocol)
+    # NOTE: Frame preparation stamps the sampled copy. The selector's bound
+    # material analysis must retain the identity recorded before pixel review.
+    sampled = dict(shot)
+    frames = material_cache.cached_frames(sampled, directory, prepare_frames, protocol=protocol)
+    expected_hashes = {shot[key] for key in ("source_sha256", "prepared_source_sha256", "sampled_source_sha256")
+                       if shot.get(key)}
+    if expected_hashes and expected_hashes != {sampled.get("sampled_source_sha256")}:
+        raise ValueError("AI_EDITOR_SOURCE_CHANGED_DURING_REVIEW")
     tiles = [{**frame, "label": f"t={frame['timestamp']:.3f}s"} for frame in frames]
     sheet_parameters = ({"columns": 4, "tile_width": 270, "tile_height": 514, "fit": True}
                         if fit else {"columns": 4, "tile_width": 420, "tile_height": 300})
@@ -588,7 +608,7 @@ def _review(manifest: dict, sentence: dict, shot: dict, directory: Path, *, dens
     from ..vision import evidence_store
     from ..runtime.file_safety import file_lock
     check_dense = dense and prepared_media and evidence_recall.appearance_requirement(manifest, sentence, shot)
-    if evidence_recall._eligible(manifest, sentence) and (not dense or check_dense):
+    if not sentence.get("approved_visual") and evidence_recall._eligible(manifest, sentence) and (not dense or check_dense):
         key = contract.digest([evidence_store.scope(manifest), evidence_store.identity(shot["video"]),
                                shot["source_start"], shot["source_end"], evidence_store.protocol(manifest)])
         with file_lock(evidence_store.database().parent / "pixel-locks" / key, timeout=7200):
@@ -599,7 +619,8 @@ def _review(manifest: dict, sentence: dict, shot: dict, directory: Path, *, dens
                     evidence_queries.record_hit(manifest, shot, found)
             else:
                 found, _ = evidence_queries.lookup(manifest, sentence, shot, directory, _call)
-            if found:
+            if found and (contract.rules_identity(manifest)["category"] != "zhipin"
+                          or paper_claims.reusable(sentence["selling_points"], found)):
                 return found
             return _pixel_review(manifest, sentence, shot, directory, dense=dense, prepared_media=prepared_media)
     return _pixel_review(manifest, sentence, shot, directory, dense=dense, prepared_media=prepared_media)
@@ -666,17 +687,24 @@ shot_value_request非空时，可额外返回shot_value_observation，逐项评�
 "clear_intervals_us":[{"start":1000000,"end":2000000,"observed":"这段为何看得清"}]}。
 区间只填实际看清主体的时间，只用附图和原素材时间；遮挡或不确定须如实说。主体清晰不意味着支持功能或本句卖点。
 """
+    if sentence.get("approved_visual"):
+        prompt += "\n" + sentence_visuals.goal(sentence["approved_visual"])
     if sentence.get("hook_neighbor_context"):
         prompt += """
 本次拟把无独立画面诉求的招呼或衔接语与邻句连播。hook_neighbor_context 给出方向、相邻口播及已裁镜头的观察。
 根据原文、备注和本次窗口的实际图片，判断是否确为纯衔接语，以及该段能否自然引出下一镜或延续上一镜的同一动作／展示。
 有独立痛点、价格数量、功能、指向对象或指定画面时，不能仅凭同商品通过。准备空镜、遮挡、跳切或无关动作也不通过。
 返回 hook_link_supported 布尔值；仅两项判断均有依据时填 true 并说明所见。"""
+    if sentence.get("require_sentence_fit"):
+        prompt += ("\n请判断这段实际裁切能否承接当前原句，另填 sentence_fit 布尔值和 "
+                   "sentence_observation，说明本窗怎样支持该句。画面不清或不对应时填 false。")
     if shot.get("_evidence_gap"):
         prompt += "\n这是同一原片区间的补查。只补查缺少的条件，不重复拆解已记录的动作。"
         prompt += "完整卖点仍须有本窗口可见依据；缺少条件时返回 uncertain。"
         prompt += json.dumps(shot["_evidence_gap"], ensure_ascii=False)
-    claim_checks = bool(sentence.get("first_look_ids") and sentence.get("selling_points"))
+    paper_checks = (paper_claims.checks_by_id(sentence.get("selling_points") or [])
+                    if contract.rules_identity(manifest)["category"] == "zhipin" else {})
+    claim_checks = bool(paper_checks or (sentence.get("first_look_ids") and sentence.get("selling_points")))
     if claim_checks:
         prompt += """
 逐项检查口播对象、动作以及必要结果。如果一项要求先动作后检查结果，必须在同一次演示中都看见。
@@ -685,6 +713,13 @@ shot_value_request非空时，可额外返回shot_value_observation，逐项评�
 "action_us":1000000,"result_us":1200000,"result_observed":"直接可见的结果或特征"}]。
 时间使用画面上的原片微秒，填写能看清这次关键动作和结果的两个时刻。静态规格/标称填 kind="readable_label"，只需实际读到对应文字并记录展示时间；无需动作。静态可填同一时刻。
 动作或结果缺失的卖点从 supported_point_ids 删去。没有支持项时返回 mismatch 或 uncertain。"""
+    if paper_checks:
+        prompt += ("\n纸品每项引用附图时间。规格文字填kind=readable_label及label_text，逐字抄下看清的数字和单位；"
+                   "原料百分比抄录同一条标称的完整百分比与原料名称；"
+                   "可直接数清则填kind=counted_items、count、unit、group（所数商品的位置和分组），result_observed写该帧怎样数清。"
+                   "揉搓后展开检查填kind=rub_unfold，action_observed描述揉搓，result_observed说明展开后有无毛絮。"
+                   "湿纸提起/展开且完整填kind=wet_intact，action_observed描述实际湿水，result_observed写展开或提起后纸张是否完整。"
+                   "看不清的项从支持列表移除，可以保留同句其他已证实的卖点。待核对项：" + json.dumps(paper_checks, ensure_ascii=False))
     from . import evidence_recall
     requirement = evidence_recall.appearance_requirement(manifest, sentence, shot)
     output = directory / "reviews" / f"{key}.json"
@@ -705,6 +740,11 @@ shot_value_request非空时，可额外返回shot_value_observation，逐项评�
         raise ValueError("AI_EDITOR_REVIEW_INVALID")
     if sentence.get("hook_neighbor_context") and result.get("hook_link_supported") is not True:
         result = {**result, "verdict": "uncertain"}
+    if sentence.get("require_sentence_fit"):
+        result = {**result, "sentence_fit_claim": sentence["text"]}
+        if (result.get("sentence_fit") is not True or not isinstance(result.get("sentence_observation"), str)
+                or not result["sentence_observation"].strip()):
+            result["verdict"] = "uncertain"
     confidence = result.get("confidence")
     if isinstance(confidence, bool) or not isinstance(confidence, (int, float)) or not math.isfinite(confidence) or not 0 <= confidence <= 1:
         raise ValueError("AI_EDITOR_REVIEW_CONFIDENCE_INVALID")
@@ -749,23 +789,34 @@ shot_value_request非空时，可额外返回shot_value_observation，逐项评�
             facts = result.get("claim_checks")
             verified = set()
             checked_facts = []
+            paper_proofs = {pid: set() for pid in paper_checks}
+            samples = [round(t * 1e6) for t in times]
             for fact in facts if isinstance(facts, list) else []:
                 if not isinstance(fact, dict) or fact.get("id") not in ids:
                     continue
-                a, b = fact.get("action_us"), fact.get("result_us")
+                required = paper_checks.get(fact["id"])
                 static = fact.get("kind") == "readable_label" and result.get("basis") == "readable_label"
+                if required:
+                    fact, proofs = paper_claims.sampled_fact(required, fact, samples, basis=result.get("basis"))
+                    if not proofs:
+                        continue
+                    static = fact["kind"] in {"readable_label", "counted_items"}
+                a, b = fact.get("action_us"), fact.get("result_us")
                 if (fact.get("object_matches") is True and (static or fact.get("action_seen") is True)
                         and fact.get("result_seen") is True
                         and isinstance(fact.get("result_observed"), str) and fact["result_observed"].strip()
                         and type(a) is int and type(b) is int and round(start * 1e6) <= a <= b <= round(end * 1e6)):
                     # Keep both visually confirmed anchors through assembly and speed fitting.
-                    checked_facts.append(fact)
-                    verified.add(fact["id"])
                     last_frame_end = b + (_source_frame_us(shot) or 1)
                     if last_frame_end <= round(end * 1e6):
                         intervals.append({"start": a, "end": last_frame_end})
-                    else:
-                        verified.discard(fact["id"])
+                        checked_facts.append(fact)
+                        verified.add(fact["id"])
+                        if required:
+                            paper_proofs[fact["id"]].update(proofs)
+            for pid, required in paper_checks.items():
+                if len(paper_proofs[pid]) != len(required):
+                    verified.discard(pid)
             if (any(scene.get("id") == "fluorescence_zero_test" for scene in scenes)
                     and re.search(r"(?:无|没有|不含|零|0)荧光", sentence["text"])
                     and "fluorescence_zero_test" not in result["scene_ids"]):
@@ -1388,9 +1439,15 @@ def _assemble_segments(manifest, analysis, plan, narration_timing, verify_source
                 raise ValueError("AI_REFILL_FROZEN_INVALID:NON_AI_SEGMENT")
             output.append(copy.deepcopy(frozen))
             continue
+        approval = sentence_visuals.approved(manifest, index, sentence["text"])
+        if approval != sentence.get("approved_visual"):
+            raise ValueError(f"SENTENCE_VISUAL_APPROVAL_CHANGED:{index}")
         group = continuity_groups.get(row.get("continuity_key"))
         if contract.continuity.is_experiment(group):
-            output.append(experiment_groups.assemble_member(manifest, plan, group, index, original[index - 1]))
+            item = experiment_groups.assemble_member(manifest, plan, group, index, original[index - 1])
+            if approval:
+                item["approved_visual"] = approval
+            output.append(item)
             continue
         parts = row.get("parts")
         if not isinstance(parts, list) or not parts:
@@ -1525,6 +1582,7 @@ def _assemble_segments(manifest, analysis, plan, narration_timing, verify_source
         segment = {**original[index - 1], **first, "selection_mode": "ai_editor",
             "claim_text": sentence["text"], "sentence_kind": sentence["kind"],
             "selling_points": sentence["selling_points"], "audio_duration_us": audio_us,
+            **({"approved_visual": sentence["approved_visual"]} if sentence.get("approved_visual") else {}),
             "timing_certainty": certainty, "window_solution": {k: v for k, v in first.items() if k in {"ok", "speed", "source_start", "source_end", "segment_s", "material_s", "handle_room_s", "reason", "detail"}},
             "action_complete": True, "has_subject": True, "persist_to_library": False,
             "visual_description": " / ".join(r["observation"] for r in used_reviews),
@@ -1774,6 +1832,8 @@ suitable=裁切内是一段完整、未拦腰切断关键动作/结果的可用�
                    '必须由这个实际裁切画面逐项支持；同商品、包装清楚或手在动不能作为具体事实证据。'
                    '另返回sentence_fit=true|false和sentence_observation=本窗可见的逐句支持依据。'
                    '不支持或无法确认时sentence_fit=false且不得suitable。原句：'+sentence['text'])
+    if sentence.get("approved_visual"):
+        prompt += "\n" + sentence_visuals.goal(sentence["approved_visual"])
     result = _call(prompt, directory / "reviews" / f"placement_{key}.json", sheet)
     verdict = result.get("verdict")
     if verdict not in {"suitable", "unsuitable", "uncertain"} or type(result.get("same_product")) is not bool:
@@ -2242,6 +2302,8 @@ def _repair_display_duplicate_window(manifest, analysis, plan, directory, narrat
     if sentence["kind"] not in {"hook", "product_intro"} or sentence.get("selling_points"):
         return False
     row = next(r for r in plan["rows"] if r["index"] == index)
+    reuse_limit = contract.source_reuse_limit(manifest)
+    overused = {detail[1] for detail in before if detail[0].startswith("AI_EDITOR_SOURCE_REUSE_LIMIT:")}
     def accept(candidate):
         trial = copy.deepcopy(plan)
         trial["rows"] = [candidate if r["index"] == index else r for r in trial["rows"]]
@@ -2250,7 +2312,7 @@ def _repair_display_duplicate_window(manifest, analysis, plan, directory, narrat
                                 verify_sources=True, validate_sequence=False)
             if any(p["video_speed"] != 1 for p in checked["segments"][index - 1].get("span_parts") or [checked["segments"][index - 1]]):
                 return False
-            if not set(contract.sequence_conflict_details(checked["segments"])) < before:
+            if not set(contract.sequence_conflict_details(checked["segments"], source_reuse_limit=reuse_limit)) < before:
                 return False
         except (ValueError, KeyError, OSError, TypeError):
             return False
@@ -2259,6 +2321,8 @@ def _repair_display_duplicate_window(manifest, analysis, plan, directory, narrat
         _save(directory / "plan.json", plan)
         return True
     for candidate in _short_complete_rows(manifest, analysis, plan, index, narration_timing):
+        if overused:
+            candidate["parts"][0]["sentence_fit_required"] = True
         if accept(candidate):
             return True
     attempts = plan.setdefault("window_repair_attempts", {})
@@ -2284,7 +2348,7 @@ def _repair_display_duplicate_window(manifest, analysis, plan, directory, narrat
         shot = shots[review["shot_id"]]
         source = contract.source_identity(shot["video"])
         source_key = os.path.normcase(source["path"])
-        if source_key in seen_sources or review.get("source_identity") != source:
+        if source_key in overused or source_key in seen_sources or review.get("source_identity") != source:
             continue
         lo = round(shot["source_start"] * 1e6) + timing_contract.us_of(
             manifest.get("head_trim_s"), round(shot_analyzer.DEFAULT_HEAD_TRIM_S * 1e6))
@@ -2305,7 +2369,8 @@ def _repair_display_duplicate_window(manifest, analysis, plan, directory, narrat
             if any(min(window[1], end) - max(window[0], begin) > 40_000 for begin, end in used.get(source_key, [])):
                 continue
             checked_before = len(attempts)
-            key = _review_proposed_window(manifest, plan, directory, sentence, shot, window)
+            current_sentence = {**sentence, "require_sentence_fit": True} if overused else sentence
+            key = _review_proposed_window(manifest, plan, directory, current_sentence, shot, window)
             if len(attempts) > checked_before:
                 seen_sources.add(source_key)
             if key is None:
@@ -2316,6 +2381,8 @@ def _repair_display_duplicate_window(manifest, analysis, plan, directory, narrat
                 "audio_duration_us": row["parts"][0]["audio_duration_us"],
                 "source_start_us": start, "window_review_key": key}],
                 "reason": "新原速展示短窗经真实像素复核后消除重复区间。"}
+            if overused:
+                candidate["parts"][0]["sentence_fit_required"] = True
             if accept(candidate):
                 return True
             break
@@ -2422,6 +2489,7 @@ def _repair_comfort_duplicate_window(manifest, analysis, plan, directory, narrat
         return False
     row = next(r for r in plan["rows"] if r["index"] == index)
     current = row["parts"][0].get("shot_id")
+    overused = {detail[1] for detail in before if detail[0].startswith("AI_EDITOR_SOURCE_REUSE_LIMIT:")}
     def accept(candidate):
         trial = copy.deepcopy(plan)
         trial["rows"] = [candidate if r["index"] == index else r for r in trial["rows"]]
@@ -2431,7 +2499,8 @@ def _repair_comfort_duplicate_window(manifest, analysis, plan, directory, narrat
             parts = checked["segments"][index - 1].get("span_parts") or [checked["segments"][index - 1]]
             if any(p["video_speed"] != 1 for p in parts):
                 return False
-            if not set(contract.sequence_conflict_details(checked["segments"])) < before:
+            if not set(contract.sequence_conflict_details(checked["segments"],
+                    source_reuse_limit=contract.source_reuse_limit(manifest))) < before:
                 return False
         except (ValueError, KeyError, OSError, TypeError):
             return False
@@ -2457,7 +2526,7 @@ def _repair_comfort_duplicate_window(manifest, analysis, plan, directory, narrat
     for review in reviews:
         shot = shots[review["shot_id"]]
         source = contract.source_identity(shot["video"])
-        if review.get("source_identity") != source:
+        if review.get("source_identity") != source or os.path.normcase(source["path"]) in overused:
             continue
         intervals = review.get("evidence_intervals_us") or []
         if not intervals:
@@ -2506,7 +2575,8 @@ def _repair_repeated_window(manifest: dict, analysis: dict, plan: dict, director
     """Try already pixel-reviewed single-shot alternatives; add at most one review round."""
     row = next((r for r in plan.get("rows", []) if isinstance(r, dict) and r.get("index") == index), None)
     sentence = next((s for s in plan.get("sentences", []) if s.get("index") == index), None)
-    if not row or row.get("continuity_key") or not sentence or len(row.get("parts") or []) != 1:
+    if (not row or row.get("continuity_key") or index in plan.get("_frozen_segments", {})
+            or not sentence or len(row.get("parts") or []) != 1):
         return False
     part = row["parts"][0]
     if not isinstance(part, dict) or type(part.get("audio_duration_us")) is not int:
@@ -2553,13 +2623,10 @@ def _repair_repeated_window(manifest: dict, analysis: dict, plan: dict, director
 
     if try_reviewed():
         return True
-    # A different window in the same file cannot repair a per-source limit.
-    reuse_failure = any(d[0].startswith("AI_EDITOR_SOURCE_REUSE_LIMIT:") and
-        index in contract.source_reuse_indices(baseline["segments"], d[1]) for d in before)
     if any(r.get("index") == index and r.get("reviewed_candidates") for r in plan.get("duplicate_repair_reviews", [])):
         expanded.add(index)
     if index in expanded:
-        return False if reuse_failure else _repair_distinct_window(manifest, analysis, plan, directory, narration_timing, index, baseline, before)
+        return _repair_distinct_window(manifest, analysis, plan, directory, narration_timing, index, baseline, before)
     expanded.add(index)
     display = sentence["kind"] != "selling_point"
     reviews = plan.get("display_reviews", []) if display else plan.get("reviews", {}).get(str(index), [])
@@ -2567,7 +2634,7 @@ def _repair_repeated_window(manifest: dict, analysis: dict, plan: dict, director
     all_ids = list(dict.fromkeys(sentence.get("candidate_ids") or []))
     new_ids = [sid for sid in all_ids if sid not in seen][:ROUND_SIZE]
     if not new_ids:
-        return False if reuse_failure else _repair_distinct_window(manifest, analysis, plan, directory, narration_timing, index, baseline, before)
+        return _repair_distinct_window(manifest, analysis, plan, directory, narration_timing, index, baseline, before)
     # Keep all previous observations, and cap newly reviewed candidates to one round.
     retained = [r for r in reviews if isinstance(r, dict)
                 and not failure_fields(str(r.get("error", ""))).get("retryable")]
@@ -2589,8 +2656,8 @@ def _repair_repeated_window(manifest: dict, analysis: dict, plan: dict, director
     plan.setdefault("duplicate_repair_reviews", []).append({"index": index, "new_candidates": new_ids,
         "reviewed_candidates": [r["shot_id"] for r in fresh]})
     _save(directory / "plan.json", plan)
-    return try_reviewed() or (not reuse_failure and _repair_distinct_window(
-        manifest, analysis, plan, directory, narration_timing, index, baseline, before))
+    return try_reviewed() or _repair_distinct_window(
+        manifest, analysis, plan, directory, narration_timing, index, baseline, before)
 
 
 def _short_complete_rows(manifest, analysis, plan, index, narration_timing):
@@ -2715,12 +2782,15 @@ def _compose_reviewed_short_displays(manifest, analysis, plan, directory, index,
             if not allocations:continue
             parts=[dict(shot_id=r['shot_id'],audio_duration_us=d) for r,d in zip(pair,allocations)]
             mini_manifest={**manifest,'full_script':sentence['text'],'segments':[copy.deepcopy(original)]}
+            local_approval = sentence_visuals.project_single(manifest, index, sentence["text"], mini_manifest)
             mini_timing={**(narration_timing or {}),'rows':[dict(key='s1',text=sentence['text'],audio_duration_us=duration)]}
             trial={'schema':contract.PLAN_SCHEMA,'policy_version':contract.POLICY_VERSION,
                 'identity':{'editorial_rules':contract.rules_identity(manifest),
                             'model':(plan.get('identity') or {}).get('model') or _editor_model()},
                 'sentences':[{**sentence,'index':1}],'reviews':{},'display_reviews':list(pair),
                 'rows':[dict(index=1,parts=parts)],'ok':False}
+            if local_approval:
+                trial["sentences"][0]["approved_visual"] = local_approval
             _assemble(mini_manifest,analysis,trial,narration_timing=mini_timing,verify_sources=True)
         except (ValueError,KeyError,TypeError,OSError):
             continue
@@ -4162,7 +4232,12 @@ def prepare(manifest: dict, analysis: dict, report_dir: Path, *, narration_timin
             old_digest = previous["resume_identity"]["analysis_sha256"]
             snapshot = json.loads((directory / f"previous_analysis_{old_digest}.json").read_text(encoding="utf-8"))
             identity_only_resume = _analysis_digest(snapshot) == _analysis_digest(analysis)
-        if previous.get("resume_identity") == resume_identity or duration_resume:
+        resume_plan = previous.get("resume_identity") == resume_identity or duration_resume
+        if resume_plan and plan["identity"]["editorial_rules"]["category"] == "zhipin":
+            # A saved composite ID cannot be reassigned to only one of its original facts.
+            resume_plan = all(paper_claims.split_points(s["selling_points"]) == s["selling_points"]
+                              for s in previous.get("sentences", []) if s.get("selling_points"))
+        if resume_plan:
             if frozen_legacy:
                 plan['identity'].pop('presentation_policy_version', None)
                 plan['resume_identity'] = resume_identity
@@ -4568,7 +4643,13 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
         if index > len(original):
             errors.append(f"AI_REFILL_INDEX_OOB:{index}")
             continue
-        sentence = _heuristic_sentence(index, timing_contract.sentence_text(original[index - 1]))
+        spoken = timing_contract.sentence_text(original[index - 1])
+        sentence = _heuristic_sentence(index, spoken)
+        approval = sentence_visuals.approved(manifest, index, spoken)
+        sentence_visuals.apply_to_sentence(sentence, approval)
+        if not approval and contract.rules_identity(manifest)["category"] == "zhipin":
+            sentence["selling_points"] = paper_claims.include_spoken_requirements(spoken, sentence["selling_points"])
+            sentence["selling_points"] = paper_claims.split_points(sentence["selling_points"])
         audio_us, certainty = timing_contract.duration_for(narration_timing, index,
                                                           segment=original[index - 1])
         excluded = qc_rejected_shots(manifest).get(index, set())
@@ -4594,6 +4675,7 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
                 "segments": [{"text": sentence["text"], "visual_requirements": hint}],
                 "revision_feedback": (str(manifest.get("revision_feedback") or "") +
                     "\n本句旧稿质检仅供定位待核查缺口，可能有误；与生效业务规则冲突时不要采纳额外要求：" + hint)}
+            sentence_visuals.project_single(manifest, index, spoken, retrieval_manifest)
             recut = feedback.get("same_shot_recut")
             if isinstance(recut, dict) and recut.get("shot_id") in previous and recut.get("shot_id") in allowed:
                 target = allowed[recut["shot_id"]]
@@ -4666,6 +4748,7 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
             mini_manifest.update(full_script=sentence["text"], selection_mode="ai_editor",
                                  segments=[copy.deepcopy(original[index - 1])],
                                  qc_rejected_shots={"1": sorted(excluded)})
+            local_approval = sentence_visuals.project_single(manifest, index, spoken, mini_manifest)
             timing_row = {"key": "s1", "text": sentence["text"], "audio_duration_us": audio_us,
                           "timing_certainty": certainty}
             if narration_timing and index <= len(narration_timing.get("rows", [])):
@@ -4748,12 +4831,16 @@ def refill_indices(manifest: dict, analysis: dict, matched: dict, indices: list[
                                      "editorial_rules": contract.rules_identity(manifest)}, "ok": True}
                 try:
                     try:
+                        if local_approval:
+                            plan["sentences"][0]["approved_visual"] = local_approval
                         assembled = _assemble(mini_manifest, analysis, plan, narration_timing=mini_timing,
                                               verify_sources=True)
                     except WindowFailure:
                         assembled = _repair_reviewed_rows(mini_manifest, analysis, plan, directory,
                                                           mini_timing, set())
                     row = _reindex_ai_segment(assembled["segments"][0], index)
+                    if approval:
+                        row["approved_visual"] = approval
                     checked = contract.validate_segment_receipt(row, index=index, verify_source=True,
                                                                  manifest=manifest)
                     if not checked["ok"]:

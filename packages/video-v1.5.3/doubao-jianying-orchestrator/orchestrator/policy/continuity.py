@@ -8,14 +8,18 @@ from __future__ import annotations
 import math
 import re
 if __package__:
-    from . import presentation
+    from . import paper_claims, presentation
 else:
     import importlib.util
     from pathlib import Path
-    _presentation_spec = importlib.util.spec_from_file_location(
-        '_chatcut_continuity_presentation', Path(__file__).with_name('presentation.py'))
-    presentation = importlib.util.module_from_spec(_presentation_spec)
-    _presentation_spec.loader.exec_module(presentation)
+    def _load_policy(name):
+        spec = importlib.util.spec_from_file_location('_chatcut_continuity_' + name, Path(__file__).with_name(name + '.py'))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    presentation = _load_policy('presentation')
+    paper_claims = _load_policy('paper_claims')
 
 SCHEMA = "reviewed-sentence-continuity-v1"
 EXPERIMENT_SCHEMA = "reviewed-experiment-sentence-group-v1"
@@ -165,6 +169,10 @@ def validate(group):
             _require(isinstance(observed.get(key), str) and bool(observed[key].strip()), "MEMBER_OBSERVATION_MISSING")
         _require(observed.get("basis") in {"editorial_fit", "visible_result", "readable_label", "product_display"}, "BASIS_INVALID")
         _intervals(observed.get("evidence_intervals_us"), cursor, member["end_us"])
+        if context.get("paper_point_checks"):
+            samples = [t for t in group.get("frame_times_us") or [] if type(t) is int and cursor <= t < member["end_us"]]
+            _require(paper_claims.reusable(member["selling_points"], {**observed, "frame_times_us": samples}),
+                     "MEMBER_PAPER_EVIDENCE_REQUIRED")
         cursor, previous = member["end_us"], index
     _require(cursor == end, "GROUP_DURATION_CHANGED")
     _require(adjacent([m["index"] for m in members]), "NOT_ADJACENT")

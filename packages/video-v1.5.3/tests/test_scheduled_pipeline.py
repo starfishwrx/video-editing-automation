@@ -35,6 +35,49 @@ class ScheduledPipelineTests(unittest.TestCase):
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(json.dumps(payload), encoding="utf-8")
 
+    def test_revised_copy_runs_in_its_own_root_and_retains_each_original_receipt(self):
+        from tools.first_pass import revision
+        for rid, state in (("finished", "OK"), ("partial", "PARTIAL")):
+            self.done(rid, {"record_id": rid, "status": state, "drafts": ["retained"], "resume_stage": "qc"})
+            original = {"record_id": rid, "script": "original", "product": "sample"}
+            directory = self.work / rid
+            (directory / "task.json").write_text(json.dumps(original), encoding="utf8")
+            self.queue_tasks([{**original, "script": "current"}])
+            runs = []
+            def worker(tasks, **kwargs):
+                runs.append((tasks[0]["record_id"], kwargs["work"]))
+                return [{"record_id": rid, "status": "OK"}]
+            result = scheduled.run_once(self.queue, self.work, dispatcher=worker)
+            target = self.work.resolve() / "script_revisions" / revision("current")
+            self.assertEqual(runs, [(rid, target)])
+            self.assertEqual(result["tasks"][0]["stage"], "build")
+            self.assertEqual(json.loads((directory / "done.json").read_text())["drafts"], ["retained"])
+            revised = target / rid
+            revised.mkdir(exist_ok=True, parents=True)
+            (revised / "done.json").write_text(json.dumps({"status": "OK"}), encoding="utf8")
+            self.assertEqual(scheduled.run_once(self.queue, self.work, dry_run=True)["tasks"][0]["reason"], "ALREADY_COMPLETED")
+
+    def test_different_product_or_approval_never_inherits_a_completed_order(self):
+        original = {"record_id": "r", "task_id": "order-a", "script": "same", "category": "paper", "product": "A"}
+        self.done("r", {"record_id": "r", "status": "OK", "drafts": ["old"]})
+        (self.work / "r" / "task.json").write_text(json.dumps(original), encoding="utf8")
+        destinations = []
+        for delta in ({"product": "B", "script": "changed"}, {"task_id": "order-b", "script": "changed"},
+                      {"product": "B"}, {"sentence_visual_approvals": [{"source": "new direction"}]},
+                      {"product": "", "manifest": {"product": "B", "category": "paper"}}, {"product_id": "revised"},
+                      {"revision_feedback": "show the front"}, {"material_dir": "new-materials"}, {"shot_notes": "show label"}):
+            self.queue_tasks([{**original, **delta}])
+            row = scheduled.run_once(self.queue, self.work, dry_run=True)["tasks"][0]
+            self.assertEqual((row["stage"], row["reason"]), ("build", "NEW_TASK"))
+            destinations.append(row["revision_work_root"])
+        # Equivalent top-level and nested product directions share the same revision.
+        self.assertEqual(destinations[2], destinations[4])
+        self.assertEqual(len(set(destinations)), len(destinations) - 1)
+        with patch.dict(os.environ, {"JY_REMARK_FIELD": "VisualInstruction"}):
+            self.queue_tasks([{**original, "VisualInstruction": "new display"}])
+            row = scheduled.run_once(self.queue, self.work, dry_run=True)["tasks"][0]
+            self.assertEqual((row["stage"], row["reason"]), ("build", "NEW_TASK"))
+
     def test_dry_run_lists_stages_without_dispatch_or_state_or_task_lock(self):
         self.queue_tasks([{"record_id": "new"}, {"record_id": "qc", "delivery_mode": "formal"}])
         self.done("qc", {"status": "PARTIAL", "drafts": ["retained"], "resume_stage": "qc"})

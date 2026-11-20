@@ -30,7 +30,7 @@ import threading
 import time
 import traceback
 import uuid
-from tools import production_eval, material_index
+from tools import production_eval, material_index, first_pass
 from tools.queueing import contracts as queue_contracts
 from tools.acceptance import task_review
 from tools.delivery_identity import tree_identity
@@ -319,22 +319,24 @@ def _write_status_snapshot_locked() -> None:
         terminal = str(done.get("status") or "").upper()
         done_finished_at = str(done.get("finished_at") or "")
         live_worker = rid == ACTIVE_RECORD_ID or _record_lock_is_live(task_dir)
-        new_attempt = (
-            live_worker
-            and str(event.get("event") or "").lower() == "start"
-            and str(event.get("ts") or "") > done_finished_at
-        )
+        active_event = str(event.get("event") or "").lower() in {"start", "draft_written", "draft_qc"}
+        current_run, saved_run = event.get("run_id"), done.get("run_id")
+        fresh = (current_run != saved_run if current_run and saved_run
+                 else str(event.get("ts") or "") > done_finished_at)
+        new_attempt = live_worker and active_event and fresh
         if new_attempt:
             state, source = "RUNNING", "live_worker_new_attempt"
         elif done_path.is_file() and terminal in {"OK", "PARTIAL", "PREVIEW_READY", "ERROR", "DEFERRED"}:
             state, source = terminal, "done.json"
-        elif (str(event.get("event") or "").lower() == "start"
-              and live_worker):
+        elif active_event and live_worker:
             state, source = "RUNNING", "live_worker_event"
         elif event:
             state, source = "STALE_ORPHANED", "historical_progress_only"
         else:
             state, source = "NOT_STARTED", "no_evidence"
+        if new_attempt:
+            done, terminal = {}, ""
+            qc_status, qc_count, qc_rows = "PENDING", 0, []
         tasks[rid] = {
             "record_id": rid,
             "state": state,
@@ -823,6 +825,20 @@ def run_post_draft_qc(draft_dir: pathlib.Path, report_dir: pathlib.Path) -> dict
                 "output": str(output), "report": payload})
     return finish({"rc": 0, "status": status, "output": str(output),
             "report": payload})
+
+
+def reread_disputed_draft(draft, report_dir, first, fingerprint):
+    report = first.get("report") or {}
+    if (first.get("status") == "PASS" or not fingerprint or report.get("draft_metadata_sha256") != fingerprint
+            or not any(r.get("action_repair") == "review" for r in report.get("model_review") or [])
+            or not production_eval.visual_qc_contract.report_matches_draft(report, draft)):
+        return first
+    from orchestrator.file_safety import atomic_write_text
+    marker = report_dir / ("draft_visual_first_" + fingerprint + ".json")
+    if marker.is_file():
+        return first
+    atomic_write_text(marker, json.dumps(report, ensure_ascii=False, indent=2))
+    return run_post_draft_qc(draft, report_dir)
 
 
 def resume_task_qc(task: dict, *, delivery_only: bool = False) -> dict:
@@ -1618,8 +1634,10 @@ def process_task(task: dict, *, retry_partial: bool = False,
     log("TASK %s title=%r count=%s voice=%s" % (rid, task.get("title"),
                                                 task.get("count", 1),
                                                 task.get("voice")))
-    progress({"record_id": rid, "event": "start", "run_id": run_id,
-              "parent_run_id": parent_run_id, "pipeline_version": _pipeline_version()})
+    cohort = os.environ.get("JY_FIRST_PASS_COHORT")
+    script_sha = first_pass.revision(str(task.get("script") or ""))
+    progress({"record_id": rid, "event": "start", "run_id": run_id, "first_pass_cohort_id": cohort,
+              "script_sha256": script_sha, "parent_run_id": parent_run_id, "pipeline_version": _pipeline_version()})
     tdir = WORK / rid
     tdir.mkdir(parents=True, exist_ok=True)
     report_root = tdir / "report"
@@ -1627,11 +1645,15 @@ def process_task(task: dict, *, retry_partial: bool = False,
 
     def contract(status: str, *, failures: list[dict] | None = None,
                  error: str = "") -> dict:
-        return _batch_result_contract(
+        receipt = _batch_result_contract(
             status, run_id=run_id, failures=failures, error=error,
             parent_run_id=parent_run_id, task_id=task_id,
             manifest_sha256=manifest_sha256, runtime=runtime,
             task_log=str(report_root))
+        if cohort:
+            receipt.update(first_pass_cohort_id=cohort, first_pass_script_sha256=script_sha,
+                           first_pass_business_batch=task.get("batch_id") or task.get("batch_identity"))
+        return receipt
 
     try:
         record_lock = _acquire_record_lock(tdir, run_id)
@@ -1879,6 +1901,7 @@ def process_task(task: dict, *, retry_partial: bool = False,
 
             rd = tdir / "report" / (name if i == 1 else "report_%d" % i)
             draft_ok = False
+            qc_result = None
             last_failure = None
             from tools.workflow import selection_recovery
             # Restore uses the same per-draft controls that the build freezes.
@@ -2021,11 +2044,27 @@ def process_task(task: dict, *, retry_partial: bool = False,
                                     or actual_path.resolve().parent != DRAFTS.resolve()):
                                 raise ValueError("FALLBACK_DRAFT_IDENTITY_INVALID")
                             a_name = actual_name
+                        draft_event = {"record_id": rid, "run_id": run_id, "batch_id": manifest["batch_id"],
+                                       "first_pass_cohort_id": os.environ.get("JY_FIRST_PASS_COHORT"),
+                                       "script_sha256": first_pass.revision(manifest["full_script"]), "draft": a_name,
+                                       "variant": i, "attempt": attempt, "elapsed_seconds": round(time.time() - task_started, 3)}
+                        try:
+                            draft_event["draft_metadata_sha256"] = production_eval.visual_qc_contract.draft_metadata_fingerprint(DRAFTS / a_name)
+                        except (OSError, ValueError):
+                            draft_event["draft_metadata_sha256"] = None
+                        progress({**draft_event, "event": "draft_written"})
                         visual_ok, visual_message = validate_visual_match(rd)
                         if not visual_ok:
                             failure_text = visual_message
                         else:
                             qc_result = run_post_draft_qc(DRAFTS / a_name, rd)
+                            progress({**draft_event, "event": "draft_qc", "status": qc_result.get("status"),
+                                      "elapsed_seconds": round(time.time() - task_started, 3)})
+                            reread = reread_disputed_draft(DRAFTS / a_name, rd, qc_result, draft_event["draft_metadata_sha256"])
+                            if reread is not qc_result:
+                                qc_result = reread
+                                progress({**draft_event, "event": "draft_qc", "status": reread.get("status"),
+                                          "same_draft_reread": True, "elapsed_seconds": round(time.time() - task_started, 3)})
                             if (qc_result.get("status") != "PASS"
                                     and qc_result.get("status") != "UNCERTIFIED_TIMEOUT"
                                     and not local_preview(task, qc_result)):
@@ -2264,6 +2303,11 @@ def process_task(task: dict, *, retry_partial: bool = False,
                         break
                     continue
             if not draft_ok and last_failure is not None:
+                if (last_failure.get("phase") == "post_draft_qc" and last_failure.get("resume_stage") == "qc"
+                        and qc_result and (DRAFTS / a_name).is_dir() and a_name not in drafts):
+                    drafts.append(a_name)
+                    local_only_drafts.append(a_name)
+                    qc_reports.append({"draft": a_name, "status": qc_result.get("status"), "report": qc_result.get("output")})
                 failures.append(last_failure)
                 log("draft %d/%d unresolved after %d attempt(s); stop current task" % (i, count, attempt))
                 break
@@ -2679,16 +2723,7 @@ def main():
     if not (queue[0].get("batch_id") or queue[0].get("batch_identity")):
         # All tasks read from the same queue snapshot share one durable BGM
         # de-duplication cycle, including a selected task retried later.
-        queue_identity = sorted(({
-            "record_id": str(item.get("record_id") or ""),
-            "task_id": str(item.get("task_id") or ""),
-            "proc_key": str(item.get("proc_key") or ""),
-            "script_sha256": hashlib.sha256(
-                str(item.get("script") or "").encode("utf-8")).hexdigest(),
-        } for item in all_tasks), key=lambda item: (
-            item["record_id"], item["task_id"], item["proc_key"],
-            item["script_sha256"]))
-        queue[0]["worker_batch_identity"] = _payload_sha256(queue_identity)
+        queue[0]["worker_batch_identity"] = first_pass.queue_identity(all_tasks)
     from tools.batch_dispatch import dispatch
     dispatch(queue, work=WORK)
     log("BATCH FINISHED")

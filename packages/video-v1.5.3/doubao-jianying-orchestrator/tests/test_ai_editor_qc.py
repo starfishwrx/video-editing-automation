@@ -155,6 +155,62 @@ class AIEditorQCIntegrationTests(unittest.TestCase):
         self.fixture.video.write_bytes(b"source changed after QC")
         self.assertFalse(production_eval.visual_qc_contract.report_matches_draft(result, self.draft))
 
+    def test_contradictory_paper_grade_needs_facts_from_the_actual_cut(self):
+        from orchestrator.policy import paper_claims
+        self.match["manifest"]["category"] = "zhipin"
+        self.segment["text"] = self.segment["claim_text"] = "到手5大包"
+        self.segment["ai_selection"]["text"] = self.segment["text"]
+        self.match["manifest"]["segments"][0]["text"] = self.segment["text"]
+        self.segment["ai_selection"]["identity"]["editorial_rules"] = contract.rules_identity(self.match["manifest"])
+        self.write_reports()
+        start = round(self.segment["source_start"] * 1e6)
+        facts = {"frames": [[1, start]], "facts": [{"action_frame": 1, "result_frame": 1, "object_matches": True,
+                 "kind": "counted_items", "group": "货架前排", "count": 8, "unit": "包", "result_observed": "前排共八包"}]}
+        with mock.patch.object(qc, "_inspect_paper_facts", return_value=facts):
+            _, report = self.run_qc()
+        self.assertEqual(report["status"], "UNCERTIFIED", report.get("issues"))
+        self.assertNotEqual(visual_qc_contract.report_status(report), "PASS")
+        facts["facts"][0].update(count=5, result_observed="前排共五包")
+        with mock.patch.object(qc, "_inspect_paper_facts", return_value=facts):
+            code, report = self.run_qc()
+        self.assertEqual((code, report["status"]), (0, "PASS"), report.get("issues"))
+        self.assertEqual(visual_qc_contract.report_status(report), "PASS")
+        report["model_review"][0]["observed"] = "同一时刻货架前排共六包"
+        self.assertEqual(visual_qc_contract.report_status(report), "UNCERTIFIED")
+        report["model_review"][0]["observed"] = "最初前排共五包，随后又拿入一包"
+        self.assertEqual(visual_qc_contract.report_status(report), "PASS")
+        report["model_review"][0]["paper_output_evidence"]["frames"][0][0] = 2
+        self.assertEqual(visual_qc_contract.report_status(report), "UNCERTIFIED")
+        self.assertFalse(paper_claims.confirms({"kind": "rub_unfold"}, {"kind": "rub_unfold", "action_us": 1,
+                         "result_us": 2, "result_observed": "只揉成团，未特写展开后的情况"}))
+        self.assertFalse(paper_claims.confirms({"kind": "wet_intact"}, {"kind": "wet_intact", "action_us": 1,
+                         "result_us": 2, "result_observed": "纸张遮挡，完整无法确认"}))
+
+    def test_approval_observation_and_demonstration_follow_actual_cut_order(self):
+        from orchestrator.policy import paper_claims, sentence_visuals
+        approval = {"show": "手持商品包装"}
+        capture = {"approval": approval, "main_product": True, "state": "visible",
+                   "observation": "手持同款包装，正面朝向镜头", "cited_frames": [[2, 10]]}
+        cuts = {2: (0, 20), 1: (0, 20)}
+        self.assertTrue(sentence_visuals.presentation_visible(approval, capture, cuts, "正面朝向镜头"))
+        self.assertFalse(sentence_visuals.presentation_visible(approval, capture, cuts, "没有看到商品包装，只有手在空中活动"))
+        self.assertFalse(sentence_visuals.presentation_visible(approval, {**capture, "main_product": False}, cuts, "手持包装"))
+        raw = [{"timeline_part": 1, "draft_segment": 1, "timestamp": 0.1},
+               {"timeline_part": 0, "draft_segment": 2, "timestamp": 0.1}]
+        self.assertEqual([r["draft_segment"] for r in qc._ordered_cut_frames(raw)], [2, 1])
+        item = dict(kind="rub_unfold", object_matches=True, same_demonstration=True, action_frame=1, result_frame=2,
+                    action_observed="先揉搓纸张", result_observed="展开后表面没有毛絮")
+        evidence = {"facts": [item], "frames": [[2, 10], [1, 10]]}
+        self.assertTrue(paper_claims.output_coverage("揉搓不掉毛", evidence, cuts)[0])
+        self.assertFalse(paper_claims.output_coverage("揉搓不掉毛", {**evidence, "frames": list(reversed(evidence["frames"]))}, cuts)[0])
+        self.assertFalse(paper_claims.action_result("rub_unfold", {**item, "result_observed": "展开后没有毛絮，但纸面明显有纸屑"}))
+        self.assertFalse(paper_claims.action_result("wet_intact", {"action_observed": "浸水", "result_observed": "泡在水里，看上去完整"}))
+        mixed = {"facts": [{**item, "kind": "visible_feature", "feature": "soft_drape", "result_clear": True,
+                            "result_observed": "手指轻捏纸面并弯折"}], "frames": evidence["frames"]}
+        covered, missing = paper_claims.output_coverage("3层加厚柔软", mixed, cuts)
+        self.assertEqual([point["kind"] for point in covered], ["visible_feature"])
+        self.assertEqual([point["kind"] for point in missing], ["quantity"])
+
     def test_upright_working_copy_keeps_original_binding_and_invalidates_on_mapping_change(self):
         from orchestrator.media import source_normalization as prepared
         source = self.fixture.video

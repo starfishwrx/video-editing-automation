@@ -282,13 +282,50 @@ class DefaultExperimentGroupTests(unittest.TestCase):
                    {"index": 3, "parts": [{"experiment_phase": p} for p in ("lift", "result")]}]
         group = {"input": {"members": members}}
         def event(name, *frames):
-            return {"event": name, "frames": list(frames)}
+            fields = ({"outcome": "receding"} if name == "absorb" else
+                      {"outcome": "clean_tissue", "expected": "clean_tissue"} if name == "result" else {})
+            return {"event": name, "frames": list(frames), **fields}
         rows = {1: {"visual_ok": True, "visible_experiment_events": [event("pour", 1, 2), event("absorb", 3, 4)],
                     "experiment_output_frames": [[1, 0], [1, 1], [2, 3], [2, 10]], "observed": "蓝水倒入并被吸收"},
                 2: {"visual_ok": True, "visible_experiment_events": [event("press", 1)],
                     "experiment_output_frames": [[1, 20]], "observed": "纸巾按压巾面"},
                 3: {"visual_ok": True, "visible_experiment_events": [event("lift", 1), event("result", 2, 3)],
                     "experiment_output_frames": [[1, 22], [2, 25], [2, 39]], "observed": "纸巾被提起，纸面干净"}}
+        rows[1]["physical_outcomes"] = [dict(part=2, event="absorb", subject="pad_liquid", outcome="receding", frames=[3, 4],
+                                            observation="可辨液面逐渐缩小")]
+        rows[3]["physical_outcomes"] = [dict(part=2, event="result", subject="lifted_tissue", outcome="clean_tissue", frames=[2, 3],
+                                            observation="提起的白纸表面清楚，没有液印")]
+        for index, updates in [(1, {"outcome": "unchanged"}), (3, {"outcome": "stained_tissue"}),
+                               (3, {"outcome": "uncertain"}), (3, {"frames": [1, 3]}), (3, {"frames": [2]})]:
+            mismatch = copy.deepcopy(rows)
+            mismatch[index]["physical_outcomes"][0].update(updates)
+            self.assertFalse(group_events_visible(group, mismatch))
+        wet = copy.deepcopy(rows)
+        wet[3]["visible_experiment_events"][-1]["outcome"] = "stained_tissue"
+        wet[3]["physical_outcomes"][0]["outcome"] = "stained_tissue"
+        self.assertFalse(group_events_visible(group, wet))
+        wet[3]["visible_experiment_events"][-1]["expected"] = "inspect"
+        wet[3]["observed"] = "提起这张纸巾，纸面可见蓝色液体"
+        wet[3]["physical_outcomes"][0]["observation"] = "纸面有蓝色痕迹"
+        group["input"]["members"][2]["text"] = "一点儿不反渗"
+        self.assertFalse(group_events_visible(group, wet))
+        group["input"]["members"][2]["text"] = "看看是否反渗"
+        self.assertTrue(group_events_visible(group, wet))
+        conflicted = copy.deepcopy(rows)
+        for observation in ("纸面可见沾有蓝色液体痕迹", "纸巾表面有少量蓝色液体", "纸面残留一小片水渍"):
+            conflicted[3]["observed"] = "手指提起这张纸巾，" + observation
+            self.assertFalse(group_events_visible(group, conflicted))
+        for observation in ("纸面未见蓝色液体", "纸巾上没有水渍", "巾体表面有少量蓝色液体"):
+            conflicted[3]["observed"] = "手指提起这张纸巾，" + observation
+            self.assertTrue(group_events_visible(group, conflicted))
+        from orchestrator.visual_qc_contract import experiment_outcomes_disputed
+        still = copy.deepcopy(rows)
+        still[1]["physical_outcomes"][0]["observation"] = "液体仍很多，没有明显减少"
+        self.assertFalse(group_events_visible(group, still))
+        self.assertTrue(experiment_outcomes_disputed(group, still))
+        missing = copy.deepcopy(rows)
+        del missing[1]["physical_outcomes"]
+        self.assertFalse(group_events_visible(group, missing))
         for invalid in ([1], [1, 1], [1, 3], [1, 99]):
             rows[1]["visible_experiment_events"][0]["frames"] = invalid
             self.assertFalse(group_events_visible(group, rows))
@@ -319,6 +356,52 @@ class DefaultExperimentGroupTests(unittest.TestCase):
                          [[1, 1], [1, 2]])
         for (_, label, fraction), tick in zip(plan, (1, 2)):
             self.assertAlmostEqual(cut["target_start"] + fraction * cut["target_duration"], tick / 30)
+
+    def test_blind_phase_review_sees_all_actual_frames_and_cannot_borrow_other_frames(self):
+        from unittest.mock import MagicMock
+        from orchestrator.quality import draft_visual_qc as qc
+        vision = MagicMock()
+        group = {"input": {"members": [{"index": 8, "parts": [{"experiment_phase": "absorb"}]}]}}
+        claims = [{"index": 8, "claim": "private-narration", "ai_segment": {"continuity_group": group}}]
+        frames = {8: [{"path": f"original-{n}", "suffix": f"p1_output{tick}"}
+                      for n, tick in enumerate((70, 75, 81), 1)]}
+        fact = {"sentence": 1, "part": 1, "event": "absorb", "frames": [1, 3],
+                "subject": "pad_liquid", "outcome": "unchanged", "observation": "液面无明显变化"}
+        def respond(sheet, prompt, output, *, validator, **kwargs):
+            self.assertNotIn("private-narration", prompt)
+            raw = json.dumps({"observations": [fact]})
+            validator(raw)
+            return True, raw
+        vision._run_vision_with_retry.side_effect = respond
+        with patch.object(qc, "_prepare_media", side_effect=lambda fn, *a, **kw: fn(*a, **kw)):
+            outcome = qc._inspect_experiment_outcomes(vision, claims, frames, self.root, 1, None)
+            self.assertEqual(outcome[8][0]["outcome"], "unchanged")
+            shown = vision._write_sheet.call_args.args[0]
+            self.assertEqual([i["path"] for i in shown], ["original-1", "original-2", "original-3"])
+            fact["frames"] = [1, 4]
+            with self.assertRaisesRegex(ValueError, "PHYSICAL_FACT_INVALID"):
+                qc._inspect_experiment_outcomes(vision, claims, frames, self.root, 1, None)
+
+    def test_first_missing_output_tick_retries_inside_the_same_physical_cut(self):
+        from orchestrator.quality import draft_visual_qc as qc
+        cut = {"index": 12, "target_start": 17.563611, "target_duration": .1}
+        def extract(_ffmpeg, actual_cut, fps, path, *, output_tick):
+            self.assertIs(actual_cut, cut)
+            if output_tick != 528:
+                return None
+            return {"timestamp": .7, "path": str(path), "target_time": output_tick / fps}
+        with patch.object(qc, "_terminal_frame", side_effect=extract) as locate:
+            actual = qc._locate_output_sample(None, cut, 30, self.root, "p2_output527")
+            self.assertEqual((actual["suffix"], actual["requested_output_tick"], actual["output_tick"]),
+                             ("p2_output528", 527, 528))
+            cut["target_duration"] = .02
+            locate.reset_mock()
+            self.assertIsNone(qc._locate_output_sample(None, cut, 30, self.root, "p2_output527"))
+            self.assertEqual(locate.call_count, 1)
+            cut["target_duration"] = .2
+            locate.reset_mock()
+            self.assertIsNone(qc._locate_output_sample(None, cut, 30, self.root, "p2_output529"))
+            self.assertEqual(locate.call_count, 1)
 
     def test_rule_selection_uses_the_same_review_for_its_group(self):
         originals = self.manifest["segments"]

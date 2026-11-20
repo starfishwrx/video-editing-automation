@@ -170,6 +170,40 @@ class ProductionPlaybackTests(unittest.TestCase):
                                   narration_timing=None, verify_sources=True)
         self.assertEqual([r['temporary_shot_id'] for r in result['segments']], ['long', 'other'])
 
+    def test_exhausted_display_pool_tries_another_source_at_fixed_cta_length(self):
+        self.display_duplicate_fixture()
+        self.manifest["max_source_reuse"] = 1
+        fixed = copy.deepcopy(self.plan["rows"][0])
+        def observe(_manifest, sentence, shot, directory, **kwargs):
+            self.assertEqual(shot["shot_id"], "other")
+            self.assertTrue(sentence["require_sentence_fit"])
+            start, end = (round(shot[k] * 1e6) for k in ("source_start", "source_end"))
+            self.assertEqual(end - start, 2_000_000)
+            return {**self.reviews[2], "supported_point_ids": [], "sentence_fit": True,
+                    "sentence_fit_claim": sentence["text"], "sentence_observation": "同款多包陈列能辨认",
+                    "review_window_us": {"start": start, "end": end},
+                    "evidence_intervals_us": [{"start": start, "end": end}]}
+        with patch.object(editor, "_review", side_effect=observe) as review:
+            self.assertTrue(editor._repair_repeated_window(self.manifest, self.analysis, self.plan,
+                                                           self.root, None, 2, set()))
+        self.assertEqual(review.call_count, 1)
+        self.assertEqual(self.plan["rows"][0], fixed)
+        self.assertTrue(self.plan["rows"][1]["parts"][0]["sentence_fit_required"])
+        checked = editor._assemble(self.manifest, self.analysis, self.plan, narration_timing=None, verify_sources=True)
+        self.assertEqual(contract.sequence_conflict_details(checked["segments"], source_reuse_limit=1), [])
+        self.assertEqual(checked["segments"][1]["video_speed"], 1)
+
+    def test_exhausted_cta_keeps_rows_when_crop_only_shows_generic_packaging(self):
+        self.display_duplicate_fixture()
+        self.manifest["max_source_reuse"] = 1
+        fixed = copy.deepcopy(self.plan["rows"])
+        with patch.object(editor, "_review", return_value={**self.reviews[2], "sentence_fit": False}) as review:
+            self.assertFalse(editor._repair_repeated_window(self.manifest, self.analysis, self.plan,
+                                                            self.root, None, 2, set()))
+        self.assertEqual(review.call_count, 1)
+        self.assertEqual(self.plan["rows"], fixed)
+        self.assertFalse(self.plan.get("window_reviews"))
+
     def test_explicit_reuse_limit_counts_different_cuts_of_same_source(self):
         source = str(self.root / 'source.mp4')
         segments = [{'video': source, 'ai_selection': {'video': source,

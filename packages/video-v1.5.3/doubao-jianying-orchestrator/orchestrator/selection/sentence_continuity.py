@@ -4,7 +4,7 @@ from __future__ import annotations
 import copy
 import json
 from .. import ai_editor_contract as contract
-from ..policy import continuity
+from ..policy import continuity, paper_claims
 from . import timing_contract as timing
 
 
@@ -159,6 +159,9 @@ def proposals(manifest, analysis, plan, index, narration_timing, *, prefer_forwa
                        "window_us": {"start": solution.source_start_us, "end": solution.source_end_us}, "members": allocated,
                        **({'purpose': 'product_presentation'} if presentation_group else {}),
                        **({"presentation_observations": phases} if phases else {})}
+                if contract.rules_identity(manifest)["category"] == "zhipin" and any(
+                        paper_claims.checks_by_id(member.get("selling_points") or []) for member in allocated):
+                    context["paper_point_checks"] = True
                 claim_group = any(m.get('kind') == 'selling_point' for m in members)
                 reserved = [c for _, c in _selected_presentations(plan) if not claim_group or
                             any(m.get('kind') == 'selling_point' for m in c['members'])]
@@ -201,6 +204,11 @@ basis只允许editorial_fit、visible_result、readable_label、product_display�
 非selling_point成员supported_point_ids必须=[]、time_sensitive=false，卖点成员仍逐句支持其全部具体点。
 任何成员实际承担性能/计时证明则拒绝本展示组。完整入点、首次到位和可辨认落点由整组保护，禁止复位或重复。
 """
+    if context.get("paper_point_checks"):
+        prompt += ("\n每个成员独立返回 claim_checks，每项给 id、object_matches、action_seen、result_seen、result_observed，"
+                   "以及本句切片内附图实际拍到的 action_us、result_us。读到包装规格或原料占比时用 kind=readable_label、"
+                   "label_text 抄录这条标称；数清实物用 counted_items、count、unit；揉搓再展开用 rub_unfold；"
+                   "先见湿纸再见完整结果用 wet_intact。缺少本句采样证据时不得以邻句或商品外观补足。")
     result = editor._call(prompt, directory / "continuity" / (contract.digest(context)[:24] + ".json"), media["sheet"])
     if contract.source_identity(shot["video"]) != context["source_identity"]:
         raise ValueError("CONTINUITY_SOURCE_CHANGED")

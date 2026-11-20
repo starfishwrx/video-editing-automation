@@ -339,6 +339,133 @@ class AIEditorTests(unittest.TestCase):
             call.return_value = dict(self.review)
             self.assertNotEqual(prompt(self.manifest, self.sentence), prompt(changed, self.sentence))
 
+    def test_paper_claims_require_the_named_number_or_two_ordered_actions(self):
+        media = {"start": 0, "end": 6, "before": contract.source_identity(self.video),
+                 "times": [0, 2, 3, 5], "sheet": self.root / "sheet.jpg"}
+        manifest = {**self.manifest, "category": "zhipin"}
+        samples = [("三层加厚", "readable_label", 3, 2_000_000, True),
+                   ("三层加厚", "readable_label", 4, 2_000_000, False),
+                   ("三层加厚", "brand", 3, 2_000_000, False),
+                   ("不掉毛絮", "rub_unfold", None, 3_000_000, True),
+                   ("不掉毛絮", "rub_unfold", None, 2_000_000, False),
+                   ("湿水不易破", "wet_intact", None, 3_000_000, True),
+                   ("湿水不易破", "dry_stretch", None, 3_000_000, False)]
+        for text, kind, number, end, accepted in samples:
+            sentence = {**self.sentence, "text": text, "selling_points": [{"id": "p1", "text": text}]}
+            fact = {"id": "p1", "kind": kind, "label_text": f"100抽{number}层", "object_matches": True,
+                    "action_seen": True, "result_seen": True,
+                    "action_observed": "捏揉纸巾" if kind == "rub_unfold" else "从水里提起湿纸",
+                    "result_observed": "重新展开后表面未见毛絮" if kind == "rub_unfold" else "整张纸面完整",
+                    "action_us": 2_000_000, "result_us": end}
+            model = {**self.review, "scene_ids": [], "basis": "readable_label" if number else "visible_result",
+                     "claim_checks": [fact]}
+            with self.subTest(text=text, kind=kind, number=number, end=end), \
+                    mock.patch.object(editor, "_call", return_value=copy.deepcopy(model)):
+                result = editor._pixel_review(manifest, sentence, self.shot, self.root, prepared_media=media)
+                self.assertEqual(result["verdict"] == "matched", accepted)
+
+    def test_spoken_promotion_facts_and_approved_display_use_the_current_order(self):
+        from orchestrator.policy import paper_claims, sentence_visuals
+        spoken = "到手5大包400抽"
+        m = {"task_id": "sample", "category": "zhipin", "full_script": spoken, "product": "合成商品"}
+        approval = {"task_id": "sample", "product": m["product"], "script_sha256": sentence_visuals.script_digest(spoken),
+                    "index": 1, "text": spoken, "mode": "display", "show": "举起同款包装", "source": "编辑确认一"}
+        model = {"sentences": [{"index": 1, "kind": "hook", "selling_points": [], "scene_ids": [],
+                                "candidate_ids": ["handfeel"], "approved_visual": approval}], "display_pool_ids": []}
+        def first(current):
+            with mock.patch.object(editor, "_call", return_value=copy.deepcopy(model)):
+                return editor._inventory(current, [self.shot], self.root)[0]
+        row = first(m)
+        self.assertNotIn("approved_visual", row)
+        self.assertEqual([(f["unit"], f["value"]) for v in paper_claims.checks_by_id(row["selling_points"]).values()
+                          for f in v], [("包", 5), ("抽", 400)])
+        m["sentence_visual_approvals"] = [approval]
+        row = first(m)
+        self.assertEqual(row["approved_visual"], approval)
+        self.assertEqual(row["selling_points"], [{"id": "approved_visual", "text": approval["show"]}])
+        for key, value in [("task_id", "other"), ("product", "另一商品"), ("full_script", spoken + "。开箱")]:
+            self.assertIsNone(sentence_visuals.approved({**m, key: value}, 1, spoken))
+        self.assertIsNone(sentence_visuals.approved(m, 2, spoken))
+        with self.assertRaisesRegex(ValueError, "AMBIGUOUS"):
+            sentence_visuals.approved({**m, "sentence_visual_approvals": [approval, approval]}, 1, spoken)
+
+    def test_paper_combined_claims_keep_unobserved_dimensions_and_bind_to_displayed_time(self):
+        from orchestrator.policy import paper_claims
+        source = [{"id": "p1", "text": "五包400抽"}, {"id": "p2", "text": "三层加厚湿水不易破"}]
+        parts = paper_claims.split_points(source)
+        self.assertEqual([p["text"] for p in parts], ["五包", "400抽", "三层加厚", "湿水不易破"])
+        self.assertEqual(len({p["id"] for p in parts}), 4)
+        fact = {"action_us": 1_100_000, "result_us": 1_100_000, "kind": "readable_label", "label_text": "100抽3层"}
+        layer = [f for _, f in paper_claims.requirements(source[1]["text"])]
+        actual = [0, 2_000_149, 3_000_100, 5_000_000]
+        self.assertFalse(paper_claims.sampled_fact(layer, fact, actual)[1])
+        fact.update(action_us=2_000_000, result_us=2_000_000)
+        bound, covered = paper_claims.sampled_fact(layer, fact, actual)
+        self.assertEqual(bound["result_us"], actual[1])
+        self.assertEqual(covered, [0])
+        self.assertFalse(paper_claims.sampled_fact(layer, {**fact, "label_text": "品牌标志"}, actual)[1])
+        legacy = {k: v for k, v in fact.items() if k not in ("kind", "label_text")}
+        legacy.update(result_seen=True, result_observed="包装右下角清晰可见“三层”字样，手指在旁边。")
+        bound, covered = paper_claims.sampled_fact(layer, legacy, actual, basis="readable_label")
+        self.assertEqual((bound["label_text"], covered), ("三层", [0]))
+        for words in ("包装上清晰显示“3层”字样", "手指指向并停留于包装上的“三层加厚”字样处，文字清晰可读"):
+            with self.subTest(words=words):
+                self.assertEqual(paper_claims.sampled_fact(layer, {**legacy, "result_observed": words}, actual,
+                                                           basis="readable_label")[1], [0])
+        for words in ("未能看清包装上的“三层”", "口播说包装写着“三层”", "包装上清晰可见“品牌标志”"):
+            self.assertFalse(paper_claims.sampled_fact(layer, {**legacy, "result_observed": words},
+                                                       actual, basis="readable_label")[1])
+        targets = [f for _, f in paper_claims.requirements(source[0]["text"])]
+        _, covered = paper_claims.sampled_fact(targets, {**fact, "kind": "counted_items", "count": 5, "unit": "包",
+                                                        "group": "前排陈列", "result_observed": "前排共五包"}, actual)
+        self.assertEqual(covered, [0])
+
+    def test_paper_ingredient_percentage_requires_the_same_readable_material(self):
+        from orchestrator.policy import paper_claims
+        _, needed = paper_claims.requirements("100% 原生木浆的纸")[0]
+        for label, expected in (("主要原料名称：100％原生木浆", True), ("原生木浆：100%", True),
+                                ("百分百原生木浆", True), ("100%天然原生木浆", True), ("100%天然木浆", False),
+                                ("100%再生木浆", False), ("云感柔肤", False), ("100%植物纤维", False), ("100% 木浆", False),
+                                ("含原生木浆，100% 可回收", False), ("非100%原生木浆", False),
+                                ("不是100%原生木浆", False), ("无100%原生木浆", False),
+                                ("并不是由100%原生木浆制成", False), ("本品不使用100%原生木浆", False)):
+            with self.subTest(label=label):
+                self.assertEqual(paper_claims.confirms(needed, {"kind": "readable_label", "label_text": label}), expected)
+
+        for words in ("包装写着100%原生木浆，但该标称属于旁边另一款纸巾。", "标的是纸箱原料而非纸张原料"):
+            with self.subTest(words=words):
+                self.assertFalse(paper_claims.confirms(needed, {"kind": "readable_label", "label_text": "100%原生木浆",
+                                                                "result_observed": words}))
+
+    def test_label_reading_cannot_override_an_obscured_or_unreadable_result(self):
+        from orchestrator.policy import paper_claims
+        needed = [f for _, f in paper_claims.requirements("3层")]
+        fact = {"action_us": 10, "result_us": 10, "result_seen": True, "label_text": "3层", "kind": "readable_label"}
+        for fields, expected in (({"result_observed": "标签被遮挡，文字看不清"}, []),
+                                 ({"kind": None, "label_text": None, "result_observed": "包装写着“三层”，字样被手指遮挡。"}, []),
+                                 ({"label_text": "不是3层", "result_observed": "确实可读"}, []),
+                                 ({"label_text": "本品不超过3层", "result_observed": "标示清楚"}, []),
+                                 ({"label_text": "不足3层", "result_observed": "标示清楚"}, []),
+                                 ({"label_text": "3层左右", "result_observed": "标示清楚"}, []),
+                                 ({"kind": None, "label_text": None, "result_observed": "包装清晰可见“三层”字样，其他小字模糊。"}, [0]),
+                                 ({"result_observed": "包装无遮挡，能读到3层"}, [0])):
+            with self.subTest(fields=fields):
+                _, matches = paper_claims.sampled_fact(needed, {**fact, **fields}, [10], basis="readable_label")
+                self.assertEqual(matches, expected)
+
+    def test_paper_refill_preserves_separate_pack_and_sheet_claims(self):
+        text = "你看我这5包400抽才多少啊"
+        manifest = {**self.manifest, "category": "zhipin", "selection_mode": "rule_then_ai",
+                    "segments": [{"text": text, "audio_duration_us": 2_000_000}]}
+        prior = {"segments": [{"index": 1, "text": text}], "pending_items": []}
+        captured = []
+        def observe(_manifest, sentence, *_):
+            captured.append(sentence["selling_points"])
+            return [], {"feasible": False}
+        with mock.patch.object(editor, "_review_pool", side_effect=observe):
+            editor.refill_indices(manifest, {"shots": [self.shot]}, prior, [1], self.root)
+        self.assertEqual([p["text"] for p in captured[0]], ["你看我这5包", "400抽才多少啊"])
+
     def test_review_accepts_unambiguous_interval_pair(self):
         media = {"start": 0, "end": 6, "before": contract.source_identity(self.video),
                  "times": [0, 3, 5], "sheet": self.root / "sheet.jpg"}
