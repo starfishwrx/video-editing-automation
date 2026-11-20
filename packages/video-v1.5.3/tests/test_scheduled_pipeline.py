@@ -73,6 +73,10 @@ class ScheduledPipelineTests(unittest.TestCase):
         # Equivalent top-level and nested product directions share the same revision.
         self.assertEqual(destinations[2], destinations[4])
         self.assertEqual(len(set(destinations)), len(destinations) - 1)
+        with patch.dict(os.environ, {"JY_REMARK_FIELD": "VisualInstruction"}):
+            self.queue_tasks([{**original, "VisualInstruction": "new display"}])
+            row = scheduled.run_once(self.queue, self.work, dry_run=True)["tasks"][0]
+            self.assertEqual((row["stage"], row["reason"]), ("build", "NEW_TASK"))
 
     def test_dry_run_lists_stages_without_dispatch_or_state_or_task_lock(self):
         self.queue_tasks([{"record_id": "new"}, {"record_id": "qc", "delivery_mode": "formal"}])

@@ -3,6 +3,7 @@ import argparse
 from collections import Counter, defaultdict
 import hashlib
 import json
+import os
 from pathlib import Path, PureWindowsPath
 
 
@@ -26,7 +27,8 @@ def queue_identity(tasks):
 def visual_scope(task):
     from tools.queueing import contracts
     nested = task.get("manifest") if isinstance(task.get("manifest"), dict) else {}
-    notes = contracts.task_shot_note_overrides(task, remark_field="画面备注", new_task=True)
+    notes = contracts.task_shot_note_overrides(task, remark_field=(os.environ.get("JY_REMARK_FIELD") or "画面备注").strip(),
+                                              new_task=True)
     return {"task_id": task.get("task_id") or task.get("record_id"), "product": contracts.task_product_fields(task),
             "overrides": contracts.task_runtime_overrides(task), "notes": notes,
             "inputs": {k: task.get(k) or nested.get(k) for k in (
