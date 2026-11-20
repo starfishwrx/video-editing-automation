@@ -535,6 +535,9 @@ def _topic_positive_or_excluded(shot: dict[str, Any], contract: dict[str, Any],
     positive = any(_observed_keyword(k.lower(), observed)
                    for k in topic.get("shot_keywords") or []
                    if k.lower() not in denied)
+    if topic.get("id") == "dry_wet_use":
+        action = " ".join(str(shot.get(k) or "") for k in ("object", "action"))
+        positive = paper_claims.wet_contact_observed(acted + "。" + action)
     if positive:
         return 1, False
     if excluded:
@@ -702,7 +705,7 @@ def topic_segments(shot: dict[str, Any], contract: dict[str, Any] | None) -> lis
 
 
 # 「未见破洞、散开或碎裂」「排水口无可见碎片」是在否认，同一分句里出现这些词就不算看到。
-_FIT_NEGATIONS = ("未见", "未看到", "没有", "没见", "没看到", "未出现", "并未", "无可见", "看不到", "不见")
+_FIT_NEGATIONS = ("未见", "没有", "没见", "未出现", "并未", "无可见", "看不到", "不见")
 _CLAUSE_BREAK = re.compile(r"[，。；;,.!！?？\n]")
 
 

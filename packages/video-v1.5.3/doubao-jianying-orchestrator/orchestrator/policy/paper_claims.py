@@ -250,19 +250,17 @@ def counted(requirement, fact):
     return bool(group and words.strip() or totals)
 
 
-def _wet_contact(fact):
-    if fact.get("action_complete") is False or fact.get("result_clear") is False or fact.get("contrary_visible") is True:
-        return False
-    observation = "。".join(str(fact.get(key) or "") for key in ("action_observed", "result_observed"))
-    if re.search(r"(?:未|没有|没|并非|无法|看不清|看不到|不能确认)[^，,。；;]{0,12}"
-                 r"(?:遇水|接触(?:到)?水|入水|沾水|湿擦|冲洗|打湿|浸湿|淋湿)", observation):
-        return False
+def wet_contact_observed(observation):
     towel = r"(?:巾体|纸巾|棉柔巾|洁面巾|洗脸巾|毛巾|湿巾|纸张|巾面|纸面|布面|洗面巾)"
+    denied = r"(?:未|没有|没|并非|不是|无法|看不清|看不到|不能|不曾)"
+    qualifier = rf"(?:见到?|看到|确认|任何|实际|直接|发生|被水|接下来|这张|同款|的|让|将|把|到|{towel})*"
+    if re.search(denied + qualifier + r"(?:遇水|接触(?:到)?水|入水|沾水|湿擦|湿用|冲洗|冲刷|打湿|浸湿|浸水|淋湿)", observation):
+        return False
     contact = (r"打湿|浸湿|淋湿|沾水|蘸水|入水|浸水|冲淋|冲洗|冲刷|(?:浸|泡)(?:在|入)?水(?:中|里)|"
                r"放入水|接触(?:到)?水|水龙头下接水|水流.{0,6}(?:淋在|打在|冲在|落在|接触|穿过|积聚在)")
     wipe = r"(?:湿润|打湿|浸湿|沾水|湿的|湿(?:纸|巾|棉柔巾|毛巾)).{0,12}(?:湿擦|擦拭|擦脸|擦手|擦桌|擦洗)"
     for clause in re.split(r"[。；;，,]", observation):
-        if re.search(r"包装|标签|字样|印有|写着|图示|示意图|未|没|无法|不确定|尚|将要|准备|等待|似乎|可能|即将|靠近|水龙头旁|看不清", clause):
+        if re.search(r"包装|标签|字样|印有|写着|图示|示意图|不确定|将要|准备|等待|似乎|可能|即将|靠近|水龙头旁|看不清", clause):
             continue
         if re.search(towel, clause) and (re.search(contact, clause) or re.search(wipe, clause)):
             return True
@@ -271,8 +269,10 @@ def _wet_contact(fact):
 
 def confirms(requirement, fact):
     if requirement["kind"] == "wet_use":
+        observation = "。".join(str(fact.get(k) or "") for k in ("action_observed", "result_observed"))
         return (fact.get("kind") == "wet_use" and fact["action_us"] <= fact["result_us"]
-                and _wet_contact(fact))
+                and fact.get("action_complete") is not False and fact.get("result_clear") is not False
+                and fact.get("contrary_visible") is not True and wet_contact_observed(observation))
     if requirement["kind"] not in {"quantity", "composition"}:
         return (fact.get("kind") == requirement["kind"] and fact["action_us"] < fact["result_us"]
                 and action_result(requirement["kind"], fact))

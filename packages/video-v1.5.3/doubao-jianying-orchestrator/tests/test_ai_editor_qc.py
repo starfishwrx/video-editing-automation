@@ -208,7 +208,7 @@ class AIEditorQCIntegrationTests(unittest.TestCase):
             evidence = {"frames": [[1, instant]], "facts": [row]}
             return paper_claims.output_coverage("干湿两用", evidence, {1: (100, 110)})[0]
         for observed in (fact["result_observed"], "水流冲刷棉柔巾", "棉柔巾浸在水中", "棉柔巾泡在水里",
-                         "用湿润的棉柔巾擦脸", "湿棉柔巾擦拭脸颊"):
+                         "用湿润的棉柔巾擦脸", "湿棉柔巾擦拭脸颊", "纸巾浸湿且没有破损", "水流冲刷棉柔巾后纸面未破"):
             self.assertEqual(covered({**fact, "result_observed": observed}), [requirement], observed)
         self.assertFalse(covered(fact, instant=110))
         self.assertFalse(covered({**fact, "action_complete": False}))
