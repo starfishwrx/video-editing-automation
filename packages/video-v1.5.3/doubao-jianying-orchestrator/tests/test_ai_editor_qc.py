@@ -213,7 +213,8 @@ class AIEditorQCIntegrationTests(unittest.TestCase):
         self.assertFalse(covered(fact, instant=110))
         self.assertFalse(covered({**fact, "action_complete": False}))
         for observed in ("手指着包装印有干湿两用字样", "巾体放在水龙头旁", "巾体等待打湿",
-                         "巾体被水淋湿，但没有任何实际接触水", "未看到巾体入水"):
+                         "巾体被水淋湿，但没有任何实际接触水", "未看到巾体入水", "纸巾尚未被水龙头打湿",
+                         "没有看到纸巾被水龙头冲洗", "纸巾还没放到水盆里浸湿", "手持纸巾等水流冲刷"):
             self.assertFalse(covered({**fact, "result_observed": observed}), observed)
         self.assertFalse(covered({**fact, "kind": "readable_label"}))
         self.assertFalse(paper_claims.sampled_fact([requirement], fact, [100], basis="readable_label")[1])
