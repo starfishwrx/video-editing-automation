@@ -341,7 +341,7 @@ class AIEditorTests(unittest.TestCase):
 
     def test_paper_claims_require_the_named_number_or_two_ordered_actions(self):
         media = {"start": 0, "end": 6, "before": contract.source_identity(self.video),
-                 "times": [0, 2, 3, 5], "sheet": self.root / "sheet.jpg"}
+                 "times": [0, 2, 3, 5], "sheet": self.root / "sheet.jpg", "frame_clock": "decoded_source_pts"}
         manifest = {**self.manifest, "category": "zhipin"}
         samples = [("三层加厚", "readable_label", 3, 2_000_000, True),
                    ("三层加厚", "readable_label", 4, 2_000_000, False),
@@ -363,6 +363,26 @@ class AIEditorTests(unittest.TestCase):
                     mock.patch.object(editor, "_call", return_value=copy.deepcopy(model)):
                 result = editor._pixel_review(manifest, sentence, self.shot, self.root, prepared_media=media)
                 self.assertEqual(result["verdict"] == "matched", accepted)
+
+    def test_wet_use_witness_survives_the_visible_part_of_the_last_frame(self):
+        sentence = {**self.sentence, "text": "干湿两用", "selling_points": [{"id": "p1", "text": "干湿两用"}]}
+        manifest = {**self.manifest, "category": "zhipin"}
+        media = {"start": 0, "end": 2.890604, "before": contract.source_identity(self.video),
+                 "times": [2.033333, 2.866667], "sheet": self.root / "sheet.jpg", "frame_clock": "decoded_source_pts"}
+        fact = {"id": "p1", "kind": "wet_use", "object_matches": True, "action_seen": True, "result_seen": True,
+                "action_frame": 1, "result_frame": 2, "result_observed": "水龙头下打湿棉柔巾"}
+        model = {**self.review, "basis": "visible_result", "claim_checks": [fact], "scene_ids": ["dry_wet_use"],
+                 "evidence_intervals_us": [{"start": 2_033_333, "end": 2_866_667}]}
+        with mock.patch.object(editor, "_call", return_value=copy.deepcopy(model)), \
+                mock.patch.object(editor, "_source_frame_us", return_value=33_333):
+            out = editor._pixel_review(manifest, sentence, self.shot, self.root, prepared_media=media)
+        self.assertEqual(out["verdict"], "matched")
+        self.assertIn({"start": 2_033_333, "end": 2_890_604}, out["evidence_intervals_us"])
+        model["observation"] = "只看到密封包装，没有纸巾遇水。"
+        with mock.patch.object(editor, "_call", return_value=model):
+            rejected = editor._pixel_review(manifest, sentence, self.shot, self.root, prepared_media=media)
+        self.assertEqual(rejected["verdict"], "uncertain")
+        self.assertFalse(rejected["supported_point_ids"])
 
     def test_spoken_promotion_facts_and_approved_display_use_the_current_order(self):
         from orchestrator.policy import paper_claims, sentence_visuals
@@ -403,6 +423,14 @@ class AIEditorTests(unittest.TestCase):
         bound, covered = paper_claims.sampled_fact(layer, fact, actual)
         self.assertEqual(bound["result_us"], actual[1])
         self.assertEqual(covered, [0])
+        indexed = {"action_frame": 2, "result_frame": 2, "kind": "readable_label", "label_text": "100抽3层"}
+        bound, covered = paper_claims.sampled_fact(layer, indexed, actual)
+        self.assertEqual((bound["action_us"], bound["result_us"], covered), (actual[1], actual[1], [0]))
+        self.assertNotIn("result_frame", bound)
+        for invalid in ({"result_frame": 0}, {"result_frame": True}, {"action_frame": 5},
+                        {"result_us": actual[2]}, {"action_us": None}, {"label_text": "产品正面"}):
+            with self.subTest(invalid=invalid):
+                self.assertFalse(paper_claims.sampled_fact(layer, {**indexed, **invalid}, actual)[1])
         self.assertFalse(paper_claims.sampled_fact(layer, {**fact, "label_text": "品牌标志"}, actual)[1])
         legacy = {k: v for k, v in fact.items() if k not in ("kind", "label_text")}
         legacy.update(result_seen=True, result_observed="包装右下角清晰可见“三层”字样，手指在旁边。")

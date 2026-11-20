@@ -11,6 +11,10 @@ _COMPOSITION = re.compile(rf"(?<![\d.])(?P<n>{_PERCENT})\s*(?:的)?\s*(?P<m>{_MA
                           rf"|(?P<material>{_MATERIAL})\s*[:：]?\s*(?P<percentage>{_PERCENT})(?!\d)")
 _RUB = re.compile(r"不(?:易|会|容易)?(?:掉|起)(?:毛絮|絮|毛|屑)")
 _WET = re.compile(r"湿水|沾水|浸水|湿了|打湿")
+_DUAL_USE = re.compile(r"干湿两用|干湿都能用|既能干用也能湿用")
+_USAGE_QUALIFIER = re.compile(r"(?:不是|不能|并非|不支持|并不支持|不可以|无法|不可|不适合|没有|不具备|"
+                              r"(?:包装|标签)(?:上|正面|背面)?(?:只)?(?:标注|标称|标有|写着|印着|印有|写有|显示|注明))"
+                              r"[的为是：:‘“「『\"\s]*$")
 _INTACT = re.compile(r"不(?:易|会|容易)?(?:破|烂|裂|断)")
 _CLEAR_VIEW = re.compile(r"(?:没有|未被|未受|未|毫无|无)(?:被)?(?:手指|手部|手掌)?(?:任何|明显)?(?:遮挡|遮住|挡住)")
 _UNCLEAR_READING = re.compile(r"遮挡|遮住|挡住|看不|读不|无法|不能(?:辨|读|确认|看)|不清|模糊|疑似|似乎|猜测|推测|可能|"
@@ -43,11 +47,16 @@ def _composition_fact(match):
             "percent": 100 if percentage.startswith("百分") else float(percentage[:-1].strip())}
 
 
+def wet_use_mentions(text):
+    return [m for m in _DUAL_USE.finditer(text) if not _USAGE_QUALIFIER.search(text[:m.start()])]
+
+
 def requirements(text):
     facts = [(m.start(), {"kind": "quantity", "unit": m[2], "value": _number(m[1])})
              for m in _SPEC.finditer(text) if m[1] != "一"]
     for match in _COMPOSITION.finditer(text):
         facts.append((match.start(), _composition_fact(match)))
+    facts.extend((m.start(), {"kind": "wet_use"}) for m in wet_use_mentions(text))
     rub = _RUB.search(text)
     if rub:
         facts.append((rub.start(), {"kind": "rub_unfold"}))
@@ -138,18 +147,38 @@ def _observed_label(fact, basis):
     return fact
 
 
-def sampled_fact(requirements, fact, samples, *, basis=None):
+def bind_sample_times(fact, samples):
+    """Resolve a one-based sheet position or an observed microsecond label to that sample."""
+    if not samples:
+        return None
     anchors = {}
-    for clock in ("action_us", "result_us"):
+    for stage in ("action", "result"):
+        clock = stage + "_us"
+        ordinal = stage + "_frame"
         instant = fact.get(clock)
-        if type(instant) is not int or not samples:
-            return None, []
-        sample = min(samples, key=lambda t: abs(t - instant))
-        if abs(sample - instant) > 501:  # Sheet labels show milliseconds.
-            return None, []
+        if ordinal in fact:
+            index = fact[ordinal]
+            if type(index) is not int or not 1 <= index <= len(samples):
+                return None
+            sample = samples[index - 1]
+        elif type(instant) is int:
+            sample = min(samples, key=lambda t: abs(t - instant))
+        else:
+            return None
+        if clock in fact and (type(instant) is not int or abs(sample - instant) > 501):
+            return None
         anchors[clock] = sample
-    bound = {**_observed_label(fact, basis), **anchors}
-    return bound, [i for i, requirement in enumerate(requirements) if confirms(requirement, bound)]
+    return {**{k: v for k, v in fact.items() if k not in ("action_frame", "result_frame")}, **anchors}
+
+
+def sampled_fact(requirements, fact, samples, *, basis=None, observation=None):
+    bound = bind_sample_times(_observed_label(fact, basis), samples)
+    if bound is None:
+        return None, []
+    return bound, [i for i, requirement in enumerate(requirements)
+                   if (requirement["kind"] != "wet_use" or
+                       (basis in (None, "visible_result") and wet_contact_observed(observation) is not False))
+                   and confirms(requirement, bound)]
 
 
 def reusable(points, review):
@@ -158,12 +187,15 @@ def reusable(points, review):
         required = [f for _, f in requirements(point["text"])]
         if point["id"] not in supported or not required:
             continue
+        if review.get("frame_clock") != "decoded_source_pts":
+            return False
         proven = set()
         for fact in review.get("claim_checks") or []:
             if (not isinstance(fact, dict) or fact.get("id") != point["id"] or fact.get("object_matches") is not True
                     or fact.get("result_seen") is not True or not str(fact.get("result_observed") or "").strip()):
                 continue
-            bound, matches = sampled_fact(required, fact, review.get("frame_times_us") or [], basis=review.get("basis"))
+            bound, matches = sampled_fact(required, fact, review.get("frame_times_us") or [],
+                                          basis=review.get("basis"), observation=review.get("observation"))
             if bound and bound["action_us"] <= bound["result_us"]:
                 proven.update(i for i in matches if required[i]["kind"] in ("quantity", "composition") or fact.get("action_seen") is True)
         if len(proven) != len(required):
@@ -220,7 +252,36 @@ def counted(requirement, fact):
     return bool(group and words.strip() or totals)
 
 
+def wet_contact_observed(observation):
+    """Return True for visible wet use, False for explicit contrary evidence, otherwise None."""
+    observation = str(observation or "")
+    towel = r"(?:巾体|纸巾|棉柔巾|洁面巾|洗脸巾|毛巾|湿巾|纸张|巾面|纸面|布面|洗面巾)"
+    contact = (r"打湿|浸湿|淋湿|沾水|蘸水|遇水|入水|浸水|冲淋|冲洗|冲刷|(?:浸|泡)(?:在|入)?水(?:中|里)|"
+               r"放入水|接触(?:到)?水|水龙头下接水|水流.{0,6}(?:淋在|打在|冲在|落在|接触|穿过|积聚在)")
+    wipe = r"(?:湿润|打湿|浸湿|沾水|湿的|湿(?:纸|巾|棉柔巾|毛巾)).{0,12}(?:湿擦|擦拭|擦脸|擦手|擦桌|擦洗)"
+    seen = False
+    only_package = re.search(r"(?:只|仅)(?:看(?:到|见)|展示|拍(?:到|摄)?|有|见)(?:了|到)?[^。；;，,]{0,12}(?:包装|袋面|标签)", observation)
+    for clause in re.split(r"[。；;，,]|但是?|然而|随后|然后", observation):
+        if re.search(r"包装|标签|字样|印有|写着|图示|示意图|靠近|水龙头旁", clause):
+            continue
+        for action in re.finditer(contact + "|" + wipe, clause):
+            # Negation of damage is compatible with wetting. Negation of wetting is a contrary observation.
+            prefix = re.sub(r"(?:没(?:有)?|未|无)(?:出现|见)?(?:破损|破裂|破洞|撕裂|掉絮|掉毛)", "", clause[:action.start()])
+            if re.search(r"未|没|并非|不是|无法|不能|不曾|看不清|看不到|不确定|将要|准备|等待|等(?=水|着)|似乎|可能|即将", prefix):
+                return False
+            if re.search(towel, clause):
+                seen = True
+    if seen:
+        return True
+    return False if only_package else None
+
+
 def confirms(requirement, fact):
+    if requirement["kind"] == "wet_use":
+        observation = "。".join(str(fact.get(k) or "") for k in ("action_observed", "result_observed"))
+        return (fact.get("kind") == "wet_use" and fact["action_us"] <= fact["result_us"]
+                and fact.get("action_complete") is not False and fact.get("result_clear") is not False
+                and fact.get("contrary_visible") is not True and wet_contact_observed(observation) is True)
     if requirement["kind"] not in {"quantity", "composition"}:
         return (fact.get("kind") == requirement["kind"] and fact["action_us"] < fact["result_us"]
                 and action_result(requirement["kind"], fact))
@@ -243,7 +304,7 @@ def confirms(requirement, fact):
     return fact.get("kind") == "counted_items" and counted(requirement, fact)
 
 
-def output_coverage(spoken, evidence, cuts):
+def output_coverage(spoken, evidence, cuts, *, observed_cut=None):
     """Attribute evidence only to source instants in the corresponding final timeline cuts."""
     required = [fact for _, fact in requirements(spoken)]
     # Mixed sensory and specification copy still permits one genuinely observed point.
@@ -284,7 +345,8 @@ def output_coverage(spoken, evidence, cuts):
                              and item.get("result_clear") is True and re.search(pattern, observation)
                              and not _reading_disputed(observation))
             else:
-                supported = confirms(req, bound)
+                supported = (confirms(req, bound) and
+                             (req["kind"] != "wet_use" or wet_contact_observed(observed_cut) is not False))
             if req not in verified and supported:
                 verified.append(req)
     return verified, [r for r in required if r not in verified]

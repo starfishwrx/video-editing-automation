@@ -84,6 +84,19 @@ class AIEditorQCIntegrationTests(unittest.TestCase):
             self.assertFalse(visual_qc_contract.clear_carton_landing(check))
             self.assertTrue(visual_qc_contract.clear_carton_landing(dict(check, flap_over_goods="no")))
 
+    def test_terminal_image_needs_its_own_timestamp(self):
+        log = (b"[Parsed_showinfo_2 @ ff00] config in time_base: 1/25, frame_rate: 25/1\n"
+               b"[Parsed_showinfo_2 @ ff00] n: 0 pts: 0 pts_time:invalid param duration: 1\n"
+               b"[Parsed_showinfo_2 @ ff00] n: 1 pts: NOPTS pts_time:N/A duration: 1\n")
+        path = self.root / "last.jpg"
+        def decode(*args, **kwargs):
+            path.write_bytes(b"last image")
+            return mock.Mock(returncode=0, stderr=log)
+        cut = {"target_start": 0., "target_duration": 0.08, "source_start": 0.,
+               "source_duration": 0.08, "source": str(self.root / "source.mp4")}
+        with mock.patch.object(qc, "run_ffmpeg_decode", side_effect=decode):
+            self.assertIsNone(qc._terminal_frame("ffmpeg", cut, 25., path))
+
     def test_last_tick_at_speed_uses_decoded_pts_and_pixels(self):
         import shutil
         import subprocess
@@ -185,6 +198,30 @@ class AIEditorQCIntegrationTests(unittest.TestCase):
                          "result_us": 2, "result_observed": "只揉成团，未特写展开后的情况"}))
         self.assertFalse(paper_claims.confirms({"kind": "wet_intact"}, {"kind": "wet_intact", "action_us": 1,
                          "result_us": 2, "result_observed": "纸张遮挡，完整无法确认"}))
+
+    def test_wet_use_is_visible_water_contact_in_the_output_cut(self):
+        from orchestrator.policy import paper_claims
+        requirement = {"kind": "wet_use"}
+        fact = {"kind": "wet_use", "object_matches": True, "action_frame": 1, "result_frame": 1,
+                "result_observed": "在水龙头下打湿棉柔巾"}
+        def covered(row, instant=100, observed_cut=None):
+            evidence = {"frames": [[1, instant]], "facts": [row]}
+            return paper_claims.output_coverage("干湿两用", evidence, {1: (100, 110)}, observed_cut=observed_cut)[0]
+        self.assertFalse(covered(fact, observed_cut="只看到密封包装，没有纸巾遇水"))
+        self.assertFalse(covered(fact, observed_cut="仅拍到包装正面"))
+        self.assertTrue(covered(fact, observed_cut="水龙头下打湿棉柔巾，背景中有包装"))
+        for observed in (fact["result_observed"], "水流冲刷棉柔巾", "棉柔巾浸在水中", "棉柔巾泡在水里",
+                         "用湿润的棉柔巾擦脸", "湿棉柔巾擦拭脸颊", "纸巾浸湿且没有破损", "水流冲刷棉柔巾后纸面未破"):
+            self.assertEqual(covered({**fact, "result_observed": observed}), [requirement], observed)
+        self.assertFalse(covered(fact, instant=110))
+        self.assertFalse(covered({**fact, "action_complete": False}))
+        for observed in ("手指着包装印有干湿两用字样", "巾体放在水龙头旁", "巾体等待打湿",
+                         "巾体被水淋湿，但没有任何实际接触水", "未看到巾体入水", "纸巾尚未被水龙头打湿",
+                         "没有看到纸巾被水龙头冲洗", "纸巾还没放到水盆里浸湿", "手持纸巾等水流冲刷"):
+            self.assertFalse(covered({**fact, "result_observed": observed}), observed)
+        self.assertFalse(covered({**fact, "kind": "readable_label"}))
+        self.assertFalse(paper_claims.sampled_fact([requirement], fact, [100], basis="readable_label")[1])
+        self.assertEqual(paper_claims.sampled_fact([requirement], fact, [100], basis="visible_result")[1], [0])
 
     def test_approval_observation_and_demonstration_follow_actual_cut_order(self):
         from orchestrator.policy import paper_claims, sentence_visuals

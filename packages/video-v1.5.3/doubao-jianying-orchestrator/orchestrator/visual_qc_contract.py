@@ -497,7 +497,8 @@ def report_status(report: Any, *, report_dir=None, manifest=None) -> str:
                 spoken = segment.get("claim_text") or segment.get("text") or row.get("claim") or ""
                 if contract.paper_claims.requirements(spoken):
                     cuts = contract.paper_claims.selected_cut_bounds(segment, mapping.get(index, []))
-                    if not contract.paper_claims.output_coverage(spoken, row.get("paper_output_evidence"), cuts)[0]:
+                    if not contract.paper_claims.output_coverage(
+                            spoken, row.get("paper_output_evidence"), cuts, observed_cut=row.get("observed"))[0]:
                         return "UNCERTIFIED"
         if scope.get("full_script"):
             rows = [*rows, {"text": scope["full_script"]}]
@@ -594,7 +595,8 @@ def _report_status(report: Any) -> str:
                     return "UNCERTIFIED"
             elif report["editorial_rules"].get("category") == "zhipin" and paper.requirements(spoken):
                 cuts = paper.selected_cut_bounds(segment, mapping.get(index, []))
-                covered, _ = paper.output_coverage(spoken, row.get("paper_output_evidence"), cuts)
+                covered, _ = paper.output_coverage(spoken, row.get("paper_output_evidence"), cuts,
+                                                   observed_cut=row.get("observed"))
                 if not covered or paper.count_disputed(covered, row.get("observed")):
                     return "UNCERTIFIED"
         if (_ai_contract().unverified_absorption_indices(report["editorial_rules"], segments)

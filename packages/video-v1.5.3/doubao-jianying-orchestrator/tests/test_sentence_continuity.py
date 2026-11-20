@@ -358,6 +358,9 @@ class SentenceContinuityTests(unittest.TestCase):
             with self.subTest(facts=candidate), self.assertRaisesRegex(ValueError, "MEMBER_PAPER_EVIDENCE_REQUIRED"):
                 continuity.validate(group)
         observed["claim_checks"] = [fact]
+        with self.assertRaisesRegex(ValueError, "MEMBER_PAPER_EVIDENCE_REQUIRED"):
+            continuity.validate(group)
+        group["frame_clock"] = "decoded_source_pts"
         self.assertIs(continuity.validate(group), group)
         member["selling_points"][0]["text"] = "到手20包"
         observed["basis"] = "visible_result"

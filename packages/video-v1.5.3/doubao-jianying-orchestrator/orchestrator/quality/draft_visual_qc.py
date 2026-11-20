@@ -24,6 +24,7 @@ from typing import Any
 try:
     from ..runtime.json_extract import EmptyResponseError, is_blank, iter_json_values
     from ..media.video_decode import run_ffmpeg_decode
+    from ..media.action_frames import showinfo_timestamps
     from ..runtime.file_safety import atomic_write_text
     from ..runtime.runtime_policy import load_policy, media_slot
     from ..visual_qc_contract import MATCH_LEVELS, REPORT_VERSION, RESPONSE_VERSION, draft_metadata_fingerprint, normalize_match_level, response_errors, _source_identity, carton_landing_required, clear_carton_landing, member_stage_observed, member_repair, presentation_selection_errors
@@ -32,6 +33,7 @@ except ImportError:
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
     from orchestrator.runtime.json_extract import EmptyResponseError, is_blank, iter_json_values
     from orchestrator.media.video_decode import run_ffmpeg_decode
+    from orchestrator.media.action_frames import showinfo_timestamps
     from orchestrator.runtime.file_safety import atomic_write_text
     from orchestrator.runtime.runtime_policy import load_policy, media_slot
     from orchestrator.visual_qc_contract import (MATCH_LEVELS, REPORT_VERSION, RESPONSE_VERSION,
@@ -408,11 +410,10 @@ def _terminal_frame(ffmpeg, cut, fps, path, *, output_tick=None):
         return None
     # Integer PTS and time base avoid the rounded pts_time in ffmpeg's log.
     log = proc.stderr.decode("utf-8", errors="replace")
-    time_base = re.search(r"config in time_base:\s*(\d+)/(\d+)", log)
-    timestamps = re.findall(r"\bn:\s*\d+\s+pts:\s*(-?\d+)", log)
-    if not time_base or not timestamps:
+    timestamps = showinfo_timestamps(log)
+    if not timestamps:
         return None
-    pts = int(timestamps[-1]) * int(time_base[1]) / int(time_base[2])
+    pts = float(timestamps[-1])
     if not source_start - 1e-7 <= pts <= instant + 1e-7:
         return None
     return {"path": str(path), "timestamp": pts, "mapped_source_time": instant,
@@ -585,7 +586,7 @@ def _inspect_paper_facts(vision, frames, directory, index, ffmpeg, *, read_label
               '[{"kind":"readable_label","object_matches":true,"action_frame":1,"result_frame":1,'
               '"label_text":"实际文字","result_observed":"实际看到的事实"}]}。'
               'object_matches 只准用 true 或 false，表示事实是否属于本次主体商品，不能填物品名称。'
-              'kind 只准用 readable_label、counted_items、rub_unfold、wet_intact、visible_feature。'
+              'kind 只准用 readable_label、counted_items、rub_unfold、wet_intact、wet_use、visible_feature。'
               '可见独立特征填visible_feature，feature可选soft_drape（轻捏或垂坠）、embossing（可见压花）、'
               'stretch（拉伸形变），填result_clear布尔并描述具体可见变化或纹理。'
               '帧号从1开始，属于本组的F整数。best_label_frame 填包装规格文字最容易看清的单帧号或null。'
@@ -593,6 +594,8 @@ def _inspect_paper_facts(vision, frames, directory, index, ffmpeg, *, read_label
               'unit、count、result_observed（这个时刻如何数清）。背景库存及之后手里加入的商品另记。'
               '数不清或无法分组就省略。静态事实两帧号可相同。'
               '揉搓后展开检查掉絮填 rub_unfold，湿纸提起或展开检查完整性填 wet_intact。'
+              '实际看到巾体遇水或用于湿擦填 wet_use，直接描述哪张巾体在哪格接触水或湿擦。'
+              '两格可相同。包装印字填 readable_label。'
               '动作项额外填写布尔 action_complete（确见湿纸提起或揉后重新展开）、result_clear（确见结果）、'
               'contrary_visible（纸面可见碎絮或湿纸已破）。写 action_observed 及 result_observed 描述先后实际情况。'
               '动作跨切片还须填写 same_demonstration，说明是否确能认出同一张纸。'
@@ -601,7 +604,7 @@ def _inspect_paper_facts(vision, frames, directory, index, ffmpeg, *, read_label
         value = raw if isinstance(raw, dict) else next((v for v in iter_json_values(raw) if isinstance(v, dict)), {})
         if (not isinstance(value.get("facts"), list) or not all(
                 isinstance(f, dict) and type(f.get("object_matches")) is bool
-                and f.get("kind") in {"readable_label", "counted_items", "rub_unfold", "wet_intact", "visible_feature"}
+                and f.get("kind") in {"readable_label", "counted_items", "rub_unfold", "wet_intact", "wet_use", "visible_feature"}
                 and all(type(f.get(k)) is int and 1 <= f[k] <= len(items) for k in ("action_frame", "result_frame"))
                 and (f["kind"] not in {"rub_unfold", "wet_intact"} or
                      all(type(f.get(k)) is bool for k in ("action_complete", "result_clear", "contrary_visible")))
@@ -1248,7 +1251,8 @@ def main() -> int:
                                 slots = slots_by_claim[index]
                                 segment = match_data["segments"][index - 1]
                                 cuts = ai_editor_contract.paper_claims.selected_cut_bounds(segment, slots)
-                                covered, missing = ai_editor_contract.paper_claims.output_coverage(claim["claim"], capture, cuts)
+                                covered, missing = ai_editor_contract.paper_claims.output_coverage(
+                                    claim["claim"], capture, cuts, observed_cut=row.get("observed"))
                                 row["visible_paper_facts"], row["unverified_paper_facts"] = covered, missing
                                 if ai_editor_contract.paper_claims.count_disputed(covered, row.get("observed")):
                                     row.update(match_level="INSUFFICIENT_EVIDENCE", action_repair="review",

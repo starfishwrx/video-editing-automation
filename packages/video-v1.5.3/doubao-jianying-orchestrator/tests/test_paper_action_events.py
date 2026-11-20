@@ -1,5 +1,6 @@
 """Frame facts cannot acquire a duration goal or invent an unseen source index."""
 from copy import deepcopy
+from fractions import Fraction
 import json
 from pathlib import Path
 import shutil
@@ -16,6 +17,25 @@ from orchestrator.vision import vision_analyzer
 
 FFMPEG = shutil.which("ffmpeg")
 FFPROBE = shutil.which("ffprobe")
+
+class ShowinfoTimestampTests(unittest.TestCase):
+    clock = "[Parsed_showinfo_2 @ ff00] config in time_base: 1/60000, frame_rate: 60/1"
+
+    def row(self, index, pts, seconds="invalid param"):
+        return f"[Parsed_showinfo_2 @ ff00] n: {index} pts: {pts} pts_time:{seconds} duration: 1000"
+
+    def test_windows_zero_and_long_timestamps_use_integer_pts(self):
+        log = "\n".join((self.clock, self.row(0, 0), self.row(1, 216000001, "3600")))
+        self.assertEqual(action_frames.showinfo_timestamps(log), [0, Fraction(216000001, 60000)])
+
+    def test_missing_clock_frame_or_integer_cannot_supply_evidence(self):
+        for lines in ((self.row(0, 0),), (self.clock, self.row(1, 0)),
+                      (self.clock, self.row(0, "NOPTS", "0")),
+                      (self.clock, self.row(0, 0), self.row(0, 1000)),
+                      (self.clock, self.row(0, 0).replace("ff00", "beef"))):
+            with self.subTest(lines=lines):
+                self.assertEqual(action_frames.showinfo_timestamps("\n".join(lines)), [])
+
 
 class EventContractTests(unittest.TestCase):
     def setUp(self):
@@ -116,9 +136,15 @@ class ActualFrameCoordinateTests(unittest.TestCase):
 
     def test_incorrect_timestamp_cannot_be_attached_to_decoded_frame(self):
         metadata = action_frames.probe(self.source, self.root / "cache", ffprobe=FFPROBE)
+        cache = self.root / "frames"
+        cached, = action_frames.extract(self.source, metadata, [6], cache, ffmpeg=FFMPEG)
+        image = Path(cached["path"])
+        image.write_bytes(b"")
+        action_frames.extract(self.source, metadata, [6], cache, ffmpeg=FFMPEG)
+        self.assertGreater(image.stat().st_size, 0)
         metadata["frames"][6]["pts_us"] += 30000
         with self.assertRaisesRegex(ValueError, "PTS_MISMATCH"):
-            action_frames.extract(self.source, metadata, [6], self.root / "new", ffmpeg=FFMPEG)
+            action_frames.extract(self.source, metadata, [6], cache, ffmpeg=FFMPEG)
 
     def test_nonzero_source_pts_are_explicitly_normalized(self):
         shifted = self.root / "nonzero pts.mp4"
@@ -129,6 +155,28 @@ class ActualFrameCoordinateTests(unittest.TestCase):
         self.assertEqual(metadata["timestamp_origin_us"], 1000000)
         rows = action_frames.extract(shifted, metadata, [0, 6, 23], self.root / "shifted cache", ffmpeg=FFMPEG)
         self.assertEqual([r["pts_us"] for r in rows], [0, 100000, 383333])
+
+    def test_claim_tiles_keep_the_actual_vfr_result_inside_the_cut(self):
+        from PIL import Image
+        from orchestrator.policy import paper_claims
+        source = self.root / "gap.mkv"
+        subprocess.run([FFMPEG, "-v", "error", "-f", "lavfi", "-i", "color=black:s=32x32:r=30:d=1",
+                        "-vf", "drawbox=color=white:t=fill:enable='eq(n,21)',select='not(between(n,15,20))'",
+                        "-fps_mode", "vfr", "-c:v", "ffv1", str(source)], check=True, capture_output=True)
+        cache = self.root / "vfr-cache"
+        cache.mkdir()
+        rows = action_frames.sample_window(source, [0.1, 0.548571, 0.60, 0.75], 0., 0.75, cache,
+                                           ffmpeg=FFMPEG, ffprobe=FFPROBE)
+        times = [round(r["timestamp"] * 1_000_000) for r in rows]
+        self.assertEqual(times, [100000, 700000])
+        with Image.open(rows[1]["path"]) as result:
+            self.assertGreater(result.convert("L").getpixel((16, 16)), 225)
+        fact = {"kind": "rub_unfold", "action_frame": 1, "result_frame": 2,
+                "action_observed": "揉搓", "result_observed": "展开后没有毛絮"}
+        bound, covered = paper_claims.sampled_fact([{"kind": "rub_unfold"}], fact, times)
+        self.assertEqual((bound["result_us"], covered), (700000, [0]))
+        with self.assertRaisesRegex(ValueError, "NO_SOURCE_FRAME"):
+            action_frames.sample_window(source, [0.548571], 0.5, 0.7, cache, ffmpeg=FFMPEG, ffprobe=FFPROBE)
 
     def test_stale_source_and_invalid_frame_requests_fail_before_decode(self):
         metadata = action_frames.probe(self.source, self.root / "cache", ffprobe=FFPROBE)

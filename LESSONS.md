@@ -7,6 +7,12 @@
 
 ## 新增条目
 
+### L-20261120-filter-pts 用解码器的整数时间戳核对实际画面
+
+- status: OPEN
+- hits: 1
+- 同一段实验原片在剪映和通用 FFmpeg 上首帧都能导出，剪映会把时间零的秒数字段打印为 `invalid param`。取该滤镜报告的整数 PTS、时间基与输出序号，再逐帧和源记录对齐。仍缺时间基、帧数或序号时继续拦截。[解码回归](packages/video-v1.5.3/doubao-jianying-orchestrator/tests/test_paper_action_events.py)
+
 ### L-20261119-analysis-digest 复看原片时保护已绑定的选镜输入
 
 - status: OPEN

@@ -6,6 +6,7 @@ import re
 import unicodedata
 
 from .. import ai_editor_contract as contract
+from ..policy import paper_claims
 from ..vision import evidence_store as store
 
 
@@ -338,18 +339,24 @@ def appearance_review(manifest, sentence, shot, rows, *, dense_sheet=None):
     return None
 
 
-def inspect(manifest, sentence, shot, *, rows=None, judge=None):
+def inspect(manifest, sentence, shot, *, rows=None, judge=None, for_placement=False):
     if not _eligible(manifest, sentence):
         return None, None
     text = sentence["text"]
+    points = sentence["selling_points"]
+    clocked = (for_placement and contract.rules_identity(manifest)["category"] == "zhipin"
+               and paper_claims.checks_by_id(points))
+    def usable(review):
+        return review is not None and (not clocked or paper_claims.reusable(points, review))
     best, score = None, 0
     semantic = None
     candidates = list(store.windows(manifest, shot) if rows is None else rows)
     appearance = appearance_review(manifest, sentence, shot, candidates)
-    if appearance:
+    if usable(appearance):
         return appearance, None
     negatives = [(r["start_us"], r["end_us"]) for r in candidates
                  if r["grade"] == "review" and r["facts"].get("completed_dense_review")
+                 and (not clocked or r["facts"].get("frame_clock") == "decoded_source_pts")
                  and r["facts"].get("verdict") == "mismatch"
                  and _canonical(r["facts"].get("claim_context")) == _canonical(text)
                  and store.proof_available(r)]
@@ -362,6 +369,8 @@ def inspect(manifest, sentence, shot, *, rows=None, judge=None):
         missing = _gap(text, observed)
         if overlap > score:
             best, score = (row, missing), overlap
+        if clocked and f.get("frame_clock") != "decoded_source_pts":
+            continue
         if (row["grade"] not in ("qc","review") or not observed or f.get("verdict") != "matched"
                 or f.get("same_product") is not True or missing
                 or not set(sentence.get("scene_ids") or []) <= set(f.get("scene_ids") or [])):
@@ -391,7 +400,7 @@ def inspect(manifest, sentence, shot, *, rows=None, judge=None):
                 semantic = (overlap, row)
             continue
         return_value = _review_result(row, points, mapped, shot)
-        if return_value is not None:
+        if usable(return_value):
             return return_value, None
     if semantic:
         row = semantic[1]
@@ -400,7 +409,7 @@ def inspect(manifest, sentence, shot, *, rows=None, judge=None):
         mapped = _mapped_claims(answer, f, sentence["selling_points"])
         if mapped:
             result = _review_result(row, sentence["selling_points"], mapped, shot)
-            if result:
+            if usable(result):
                 return result, None
         gaps = answer.get("missing") if isinstance(answer, dict) else None
         if isinstance(gaps, list) and gaps and all(isinstance(g, str) for g in gaps):
@@ -418,7 +427,7 @@ def _review_result(row, points, mapped, shot):
         return None
     proof = {k:f[k] for k in ("basis","observation","scene_ids","time_sensitive","evidence_intervals_us",
                                 "presentation_observation","playback_observation","presentation_status",
-                                "preferred_speed","speed_range_override")
+                                "preferred_speed","speed_range_override","frame_clock")
              if k in f}
     return {**proof, "verdict":"matched", "same_product":True,
             "reason":observed, "confidence":f["confidence"],

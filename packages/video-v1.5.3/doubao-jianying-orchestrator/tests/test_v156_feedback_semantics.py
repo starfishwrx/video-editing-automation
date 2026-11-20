@@ -64,6 +64,21 @@ class CountSemanticsTests(unittest.TestCase):
 
 
 class PackagingBoundaryTests(unittest.TestCase):
+    def test_dry_wet_use_recalls_the_towel_in_water(self):
+        c = contract("这款可以干湿两用")
+        topic = "dry_wet_use"
+        self.assertIn(topic, {t["id"] for t in c["topics"]})
+        self.assertGreater(da.shot_fit({"action": "在水龙头下打湿巾体"}, c), 0)
+        self.assertEqual(da.shot_fit(pointed("干湿两用"), c), 0)
+        self.assertTrue(da.topic_hard_excluded({"action": "手指指向包装正面"}, c))
+        for absent in ("未看到巾体入水", "纸巾不是入水，而是干态展示", "纸巾并非入水，只是在水边", "纸巾无法入水"):
+            self.assertEqual(da.shot_fit({"action": absent}, c), 0, absent)
+        for other in ("不是干湿两用", "包装上写着“干湿两用”", "湿水不破", "没有干湿两用功能",
+                      "不具备干湿两用功能", "包装标称：干湿两用", "标签显示干湿两用"):
+            self.assertNotIn(topic, {t["id"] for t in contract(other)["topics"]})
+        self.assertNotIn(topic, {t["id"] for t in contract("干湿两用", "weipin")["topics"]})
+        self.assertIn(topic, {t["id"] for t in contract("那款不能干湿两用，这款能干湿两用")["topics"]})
+
     def test_pure_marks_remain_narrow_packaging_claims(self):
         for label, text in (("100%原生木浆", "百分百原生木浆"),
                             ("100%纯棉", "优选天然纯棉制作的面料"),

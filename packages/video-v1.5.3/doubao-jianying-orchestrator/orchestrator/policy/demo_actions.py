@@ -32,6 +32,8 @@ import math
 import re
 from typing import Any
 
+from . import paper_claims
+
 # ── 角色与强度序 ──────────────────────────────────────────────────────
 # 数值只用于「不低于」比较；顺序即门槛语义。
 ROLE_RANK: dict[str, int] = {
@@ -365,6 +367,8 @@ def sentence_contract(text: str, claim_text: str = "", *, category: str = "",
     topics = []
     for topic in rules.get("sentence_topics") or []:
         hits = [k for k in topic.get("text_keywords") or [] if k and k in blob]
+        if hits and topic.get("id") == "dry_wet_use":
+            hits = [m.group() for m in paper_claims.wet_use_mentions(blob)]
         if topic.get("match") == "count" and count_mentions(blob):
             hits.append("count")
         if hits:
@@ -531,6 +535,9 @@ def _topic_positive_or_excluded(shot: dict[str, Any], contract: dict[str, Any],
     positive = any(_observed_keyword(k.lower(), observed)
                    for k in topic.get("shot_keywords") or []
                    if k.lower() not in denied)
+    if topic.get("id") == "dry_wet_use":
+        action = " ".join(str(shot.get(k) or "") for k in ("object", "action"))
+        positive = paper_claims.wet_contact_observed(acted + "。" + action)
     if positive:
         return 1, False
     if excluded:
@@ -557,7 +564,7 @@ def topic_hard_excluded(shot: dict[str, Any], contract: dict[str, Any] | None) -
 KEYWORD_LOCKED_TOPICS = frozenset({
     "breath", "thin", "absorb", "fluorescence", "core", "side_leak",
     "lint_free", "texture", "layers", "count", "sheet_count", "cotton",
-    "surface", "soft", "waist", "pants_open",
+    "surface", "soft", "waist", "pants_open", "dry_wet_use",
 })
 # 主题命中但常不在 AI top3 时，补到及格线参与排序的主题。
 SCORE_BOOST_TOPICS = KEYWORD_LOCKED_TOPICS | frozenset({
