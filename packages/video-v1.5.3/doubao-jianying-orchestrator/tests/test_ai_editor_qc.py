@@ -13,6 +13,70 @@ from orchestrator import draft_visual_qc as qc, vision_analyzer, visual_qc_contr
 
 
 class AIEditorQCIntegrationTests(unittest.TestCase):
+    def test_pcs_identifies_sheets_of_the_primary_pack_in_selection_and_final_cut(self):
+        from orchestrator.policy import paper_claims
+
+        samples = [101, 109]
+        req = {"kind": "quantity", "value": 80, "unit": "抽"}
+        base = {"kind": "readable_label", "object_matches": True, "action_frame": 1, "result_frame": 2,
+                "result_observed": "主商品包装原帧可读标示"}
+        cases = [
+            ("棉柔洁面巾\n８０ ＰＣＳ", {}, True),
+            ("80pcs", {"result_observed": "棉柔巾包装上清晰印有数量"}, True),
+            ("洗脸巾 80PCS", {"object_matches": False}, False),
+            ("80PCS", {}, False),
+            ("加厚升级 80PCS", {"pcs_scope": "single_sheet_pack"}, True),
+            ("洁面巾 80PCS", {"pcs_scope": "unclear"}, False),
+            ("洁面巾 附赠80PCS发夹", {"pcs_scope": "single_sheet_pack"}, False),
+            ("棉柔巾 8包合装 共80PCS", {}, False),
+            ("洁面巾 80PCS（不是80抽）", {}, False),
+            ("洁面巾 80PCS，实际仅60张", {}, False),
+            ("洁面巾 80抽 100PCS", {}, False),
+            ("棉柔巾 80PCS发夹配套", {"pcs_scope": "single_sheet_pack"}, False),
+            ("棉柔巾 发夹80PCS", {"pcs_scope": "single_sheet_pack"}, False),
+            ("80PCS棉柔巾专用发夹", {"pcs_scope": "single_sheet_pack"}, False),
+            ("80PCS洗脸巾防尘盖", {"pcs_scope": "single_sheet_pack"}, False),
+            ("BATTERIES 80PCS", {"pcs_scope": "single_sheet_pack"}, False),
+            ("加厚升级 80PCS 棉柔洗脸巾", {}, True),
+            ("80PCS/抽", {"pcs_scope": "single_sheet_pack"}, True),
+            ("棉柔巾 80PCS", {"pcs_scope": "single_sheet_pack",
+                              "result_observed": "前景手持单包棉柔巾，包装正面印有80PCS，背景摆放3包同款"}, True),
+            ("棉柔巾 80PCS", {"pcs_scope": "single_sheet_pack",
+                              "result_observed": "前景手持单包，背景外箱印有80PCS"}, False),
+            ("棉柔巾 180PCS", {}, False),
+            ("洁面巾 80PCS/箱", {}, False),
+            ("抽纸 4×80PCS", {}, False),
+            ("洗脸巾 40抽 80PCS", {}, False),
+            ("面巾纸 约80PCS", {}, False),
+            ("洁面巾 附赠配件80PCS", {}, False),
+            ("棉柔巾 60PCS/80PCS", {}, False),
+            ("洁面巾 80PCS", {"result_observed": "数量字样来自旁边的另一款商品"}, False),
+        ]
+        for label, change, expected in cases:
+            with self.subTest(label=label, change=change):
+                fact = {**base, "label_text": label, **change}
+                _, selection = paper_claims.sampled_fact([req], fact, samples, basis="readable_label")
+                evidence = {"frames": [[1, i] for i in samples], "facts": [fact]}
+                final, _ = paper_claims.output_coverage("一包80抽", evidence, {1: (100, 110)})
+                self.assertEqual(bool(selection), expected)
+                self.assertEqual(bool(final), expected)
+        legacy = {**base, "label_text": "80PCS", "result_observed": "包装上清晰印有80PCS"}
+        observation = "手持一包棉柔巾，包装正面清晰印有80PCS。"
+        self.assertEqual(paper_claims.sampled_fact([req], legacy, samples, observation=observation)[1], [0])
+        self.assertFalse(paper_claims.sampled_fact([req], legacy, samples, observation=observation.replace("80", "60"))[1])
+        scoped = {**legacy, "pcs_scope": "single_sheet_pack"}
+        for contrary in ("前景手持单包，背景外箱印有80PCS", "前景主商品包装标明每包60张，并非80抽",
+                         "前景单包标明80PCS但清楚写着不是80抽", "前景单包包装清楚写着不是80PCS"):
+            self.assertFalse(paper_claims.sampled_fact([req], scoped, samples, observation=contrary)[1])
+            evidence = {"frames": [[1, i] for i in samples], "facts": [scoped]}
+            self.assertFalse(paper_claims.output_coverage("80抽", evidence, {1: (100, 110)}, observed_cut=contrary)[0])
+        evidence = {"frames": [[1, i] for i in samples], "facts": [legacy]}
+        self.assertFalse(paper_claims.output_coverage("80抽", evidence, {1: (100, 110)}, observed_cut=observation)[0])
+        for script in ("80包", "80层"):
+            evidence = {"frames": [[1, i] for i in samples], "facts": [{**base, "label_text": "洁面巾 80PCS"}]}
+            self.assertFalse(paper_claims.output_coverage(script, evidence, {1: (100, 110)})[0])
+
+
     def setUp(self):
         self.fixture = fixtures.AIEditorTests()
         self.fixture.setUp()

@@ -600,6 +600,9 @@ def _inspect_paper_facts(vision, frames, directory, index, ffmpeg, *, read_label
               'contrary_visible（纸面可见碎絮或湿纸已破）。写 action_observed 及 result_observed 描述先后实际情况。'
               '动作跨切片还须填写 same_demonstration，说明是否确能认出同一张纸。'
               '只看到揉搓、未展示结果或看不清时如实描述，禁止推测。')
+    if read_labels:
+        prompt += ("\n读到 PCS 时，该条事实额外填 pcs_scope，single_sheet_pack 表示从实帧确认件数属于前景单包"
+                   "抽纸或洁面巾内的单张，other 表示其他物品或组合总数，unclear 表示无法辨认。")
     if inspect_water:
         prompt += ('\n另独立记录前景巾体与水的关系。按图片实际情况在 JSON 顶层填写 water_state：'
                    'contact（看见水或湿擦接触巾体）、no_contact（只有干态、包装或水流未接触主体）、'
@@ -645,7 +648,9 @@ def _inspect_paper_facts(vision, frames, directory, index, ffmpeg, *, read_label
                 validate_label.expects_json_object = True
                 prompt = ('仅抄录前景主商品自身纸品或包装上清晰可读的文字，尤其品名、原料、百分比、规格、层数、抽数和包数，'
                           '用原图逐行查看。背景纸箱、其他商品和猜测不写。输出JSON对象 '
-                          '{"main_product":true,"label_text":"逐字抄录"}。无法定位主商品或读不到文字时写空串。')
+                           '{"main_product":true,"label_text":"逐字抄录"}。无法定位主商品或读不到文字时写空串。'
+                           '读到 PCS 时另填 pcs_scope。看清是单包抽纸或洁面巾内单张数量填 single_sheet_pack，'
+                           '其他物品、整箱或组合总数填 other，无法确认件数指向填 unclear。')
                 remaining = _remaining_request_timeout()
                 if remaining > 0:
                     ok, raw = vision._run_vision_with_retry(pathlib.Path(items[number - 1]["path"]), prompt,
@@ -653,8 +658,11 @@ def _inspect_paper_facts(vision, frames, directory, index, ffmpeg, *, read_label
                     if ok:
                         label = validate_label(raw)
                         if label["main_product"] and label["label_text"].strip():
-                            capture["facts"].append({"kind": "readable_label", "object_matches": True, "action_frame": number,
-                                "result_frame": number, "label_text": label["label_text"], "result_observed": "主商品包装原帧可读标示"})
+                            fact = {"kind": "readable_label", "object_matches": True, "action_frame": number,
+                                    "result_frame": number, "label_text": label["label_text"], "result_observed": "主商品包装原帧可读标示"}
+                            if "pcs_scope" in label:
+                                fact["pcs_scope"] = label["pcs_scope"]
+                            capture["facts"].append(fact)
     return capture
 
 
