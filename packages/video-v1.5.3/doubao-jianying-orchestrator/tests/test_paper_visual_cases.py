@@ -1,4 +1,4 @@
-"""Thirteen semantic regression pairs, with frozen synthetic model judgments.
+"""Semantic regression pairs, with frozen synthetic model judgments.
 
 These verify downstream acceptance/rejection, not GLM pixel recognition accuracy.
 """
@@ -11,6 +11,7 @@ CASES = [
     ("wipe_face_hands", "擦脸擦手", "脸和手各有擦拭动作", "只有擦桌面"),
     ("absorb_squeeze_clear_water", "吸水力很好", "挤压巾体清水大量涌出", "只有湿润包装"),
     ("lift_from_water", "可以当毛巾", "从水中捞出巾体并手持", "只有干巾静置"),
+    ("dry_wet_use", "干湿两用", "同款干巾在水龙头下打湿", "手指指点密封包装上的干湿两用字样"),
     ("cleaning_wipe", "擦桌面打扫", "擦前污渍到擦后消失均可见", "结果已被裁掉"),
     ("ef_plain_both_sides", "一面EF压纹一面平纹", "翻面后两面纹理清楚", "仅有一面"),
     ("fluorescence_zero_test", "没有荧光剂", "明确荧光检测过程及0.00读数", "包装0荧光文字"),
@@ -25,7 +26,7 @@ CASES = [
 
 
 class PaperVisualCaseTests(unittest.TestCase):
-    def test_thirteen_positive_negative_pairs_keep_model_verdicts(self):
+    def test_positive_negative_pairs_keep_model_verdicts(self):
         for scene, text, positive, negative in CASES:
             with self.subTest(scene=scene):
                 fixture = fixtures.AIEditorTests()

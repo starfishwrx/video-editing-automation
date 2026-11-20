@@ -66,7 +66,7 @@ class PaperProductionTests(unittest.TestCase):
         fixture = self.fixture
         context = contract.editorial_context(fixture.manifest)
         identifiers = [s["id"] for s in context["rules"]["semantic_contracts"]]
-        self.assertEqual(len(identifiers), 13)
+        self.assertIn("dry_wet_use", identifiers)
         prompts = []
         def inventory(prompt, _path):
             prompts.append(prompt)

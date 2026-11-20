@@ -365,6 +365,10 @@ def sentence_contract(text: str, claim_text: str = "", *, category: str = "",
     topics = []
     for topic in rules.get("sentence_topics") or []:
         hits = [k for k in topic.get("text_keywords") or [] if k and k in blob]
+        ignored_prefix = topic.get("ignore_prefix_pattern")
+        if hits and ignored_prefix:
+            hits = [k for k in hits if any(not re.search(ignored_prefix, blob[:m.start()])
+                                           for m in re.finditer(re.escape(k), blob))]
         if topic.get("match") == "count" and count_mentions(blob):
             hits.append("count")
         if hits:
@@ -557,7 +561,7 @@ def topic_hard_excluded(shot: dict[str, Any], contract: dict[str, Any] | None) -
 KEYWORD_LOCKED_TOPICS = frozenset({
     "breath", "thin", "absorb", "fluorescence", "core", "side_leak",
     "lint_free", "texture", "layers", "count", "sheet_count", "cotton",
-    "surface", "soft", "waist", "pants_open",
+    "surface", "soft", "waist", "pants_open", "dry_wet_use",
 })
 # 主题命中但常不在 AI top3 时，补到及格线参与排序的主题。
 SCORE_BOOST_TOPICS = KEYWORD_LOCKED_TOPICS | frozenset({

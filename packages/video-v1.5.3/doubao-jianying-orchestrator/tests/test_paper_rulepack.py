@@ -37,18 +37,18 @@ class PaperRulepackTests(unittest.TestCase):
         named = rulepack.apply_manifest_defaults({"product": "纸巾", "voice": "女声1.2倍速"})
         self.assertEqual(named["voice_tempo"], 1.2)
 
-    def test_all_thirteen_contracts_and_intent_separation(self):
+    def test_declared_contracts_and_intent_separation(self):
         context = rulepack.editorial_context({"category": "纸品"})
         self.assertEqual(set(context), {"category", "versions", "rules"})
         contracts = context["rules"]["semantic_contracts"]
         ids = {c["id"] for c in contracts}
-        self.assertEqual(len(contracts), 13)
+        self.assertEqual(len(contracts), len(ids))
         self.assertTrue({
             "wipe_face_hands", "absorb_squeeze_clear_water", "lift_from_water",
             "cleaning_wipe", "ef_plain_both_sides", "fluorescence_zero_test",
             "lint_rub_unfold", "tensile_both_directions", "imported_wood_fiber_label",
             "medical_grade_package_claims", "count_140", "washcloth_mop_install",
-            "five_packs_countable",
+            "five_packs_countable", "dry_wet_use",
         }.issubset(ids))
         fluoro = next(c for c in contracts if c["id"] == "fluorescence_zero_test")
         label = next(c for c in contracts if c["id"] == "medical_grade_package_claims")
