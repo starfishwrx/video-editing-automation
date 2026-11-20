@@ -64,6 +64,14 @@ class AIEditorQCIntegrationTests(unittest.TestCase):
         observation = "手持一包棉柔巾，包装正面清晰印有80PCS。"
         self.assertEqual(paper_claims.sampled_fact([req], legacy, samples, observation=observation)[1], [0])
         self.assertFalse(paper_claims.sampled_fact([req], legacy, samples, observation=observation.replace("80", "60"))[1])
+        scoped = {**legacy, "pcs_scope": "single_sheet_pack"}
+        for contrary in ("前景手持单包，背景外箱印有80PCS", "前景主商品包装标明每包60张，并非80抽",
+                         "前景单包标明80PCS但清楚写着不是80抽"):
+            self.assertFalse(paper_claims.sampled_fact([req], scoped, samples, observation=contrary)[1])
+            evidence = {"frames": [[1, i] for i in samples], "facts": [scoped]}
+            self.assertFalse(paper_claims.output_coverage("80抽", evidence, {1: (100, 110)}, observed_cut=contrary)[0])
+        evidence = {"frames": [[1, i] for i in samples], "facts": [legacy]}
+        self.assertFalse(paper_claims.output_coverage("80抽", evidence, {1: (100, 110)}, observed_cut=observation)[0])
         for script in ("80包", "80层"):
             evidence = {"frames": [[1, i] for i in samples], "facts": [{**base, "label_text": "洁面巾 80PCS"}]}
             self.assertFalse(paper_claims.output_coverage(script, evidence, {1: (100, 110)})[0])

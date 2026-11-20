@@ -288,22 +288,33 @@ _SHEET_UNITS = re.compile(r"([1-9]\d*|[一二两三四五六七八九十百千]+
 
 
 
-def _sheet_count_label(value, text, fact, source_observation):
+def _foreground_pack_words(raw, value):
+    raw = str(raw or "")
+    clauses = [c for c in re.split(r"[，,。；;]", raw)
+               if not re.match(r"\s*(?:背景|后景|后排|远处|另有|旁边另)", c)]
+    foreground = "，".join(clauses)
+    if (_BULK_LABEL.search(foreground) or (_PCS.search(raw) and not _PCS.search(foreground))
+            or any(int(m[1]) != value for m in _PCS.finditer(foreground))):
+        return None
+    for clause in clauses:
+        if re.search(r"标明|标注|标示|印有|字样|写|仅有|实际|并非|不是|每包", clause):
+            if any(_number(m[1]) != value or not _exact_at(clause, m.start(), m.end())
+                   for m in _SHEET_UNITS.finditer(clause)):
+                return None
+    return foreground
+
+
+def _sheet_count_label(value, text, fact, source_observation, cut_observation):
     """A PCS count belongs to single sheets only when the primary sheet pack is identifiable."""
     text = unicodedata.normalize("NFKC", text)
     matches = list(_PCS.finditer(text))
     if not matches or fact.get("object_matches") is not True:
         return False
-    contexts = []
-    for raw in (fact.get("result_observed"), source_observation):
-        clauses = re.split(r"[，,。；;]", str(raw or ""))
-        foreground = "，".join(c for c in clauses if not re.match(r"\s*(?:背景|后景|后排|远处|另有|旁边另)", c))
-        if (_BULK_LABEL.search(foreground)
-                or (_PCS.search(str(raw or "")) and not _PCS.search(foreground))):
-            return False
-        contexts.append(foreground)
-    description, observation = contexts
-    if _BULK_LABEL.search(text):
+    description = _foreground_pack_words(fact.get("result_observed"), value)
+    observation = _foreground_pack_words(source_observation, value)
+    # A claim-aware QC description may contradict a label. It cannot supply a missing blind pack identity.
+    if (description is None or observation is None or _foreground_pack_words(cut_observation, value) is None
+            or _BULK_LABEL.search(text)):
         return False
     # New observations record what is counted on this exact pack. Older observations need a visible sheet identity.
     scope = fact.get("pcs_scope")
@@ -333,7 +344,7 @@ def _sheet_count_label(value, text, fact, source_observation):
                for m in matches)
 
 
-def confirms(requirement, fact, *, source_observation=None):
+def confirms(requirement, fact, *, source_observation=None, cut_observation=None):
     if requirement["kind"] == "wet_use":
         observation = "。".join(str(fact.get(k) or "") for k in ("action_observed", "result_observed"))
         return (fact.get("kind") == "wet_use" and fact["action_us"] <= fact["result_us"]
@@ -357,7 +368,7 @@ def confirms(requirement, fact, *, source_observation=None):
         literal = any(m[2] == requirement["unit"] and _number(m[1]) == requirement["value"]
                       and _exact_at(text, m.start(), m.end()) for m in _SPEC.finditer(text))
         if requirement["unit"] == "抽" and _PCS.search(unicodedata.normalize("NFKC", text)):
-            return _sheet_count_label(requirement["value"], text, fact, source_observation)
+            return _sheet_count_label(requirement["value"], text, fact, source_observation, cut_observation)
         return literal
     if requirement["kind"] == "composition":
         return False
@@ -405,7 +416,7 @@ def output_coverage(spoken, evidence, cuts, *, observed_cut=None):
                              and item.get("result_clear") is True and re.search(pattern, observation)
                              and not _reading_disputed(observation))
             else:
-                supported = (confirms(req, bound) and
+                supported = (confirms(req, bound, cut_observation=observed_cut) and
                              (req["kind"] != "wet_use" or (evidence.get("water_state", "contact") == "contact"
                               and wet_contact_observed(observed_cut) is not False)))
             if req not in verified and supported:
