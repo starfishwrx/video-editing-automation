@@ -288,13 +288,18 @@ _SHEET_UNITS = re.compile(r"([1-9]\d*|[一二两三四五六七八九十百千]+
 
 
 
+def _exact_pcs(text, match, value):
+    return (int(match[1]) == value and _exact_at(text, match.start(), match.end())
+            and not re.search(r"\b(?:up to|approx\.?|about|not)\s*$", text[:match.start()], re.I))
+
+
 def _foreground_pack_words(raw, value):
     raw = str(raw or "")
     clauses = [c for c in re.split(r"[，,。；;]", raw)
                if not re.match(r"\s*(?:背景|后景|后排|远处|另有|旁边另)", c)]
     foreground = "，".join(clauses)
     if (_BULK_LABEL.search(foreground) or (_PCS.search(raw) and not _PCS.search(foreground))
-            or any(int(m[1]) != value for m in _PCS.finditer(foreground))):
+            or any(not _exact_pcs(foreground, m, value) for m in _PCS.finditer(foreground))):
         return None
     for clause in clauses:
         if re.search(r"标明|标注|标示|印有|字样|写|仅有|实际|并非|不是|每包", clause):
@@ -339,9 +344,7 @@ def _sheet_count_label(value, text, fact, source_observation, cut_observation):
             return False
     if any(_number(m[1]) != value or not _exact_at(text, m.start(), m.end()) for m in _SHEET_UNITS.finditer(text)):
         return False
-    return all(int(m[1]) == value and _exact_at(text, m.start(), m.end())
-               and not re.search(r"\b(?:up to|approx\.?|about|not)\s*$", text[:m.start()], re.I)
-               for m in matches)
+    return all(_exact_pcs(text, m, value) for m in matches)
 
 
 def confirms(requirement, fact, *, source_observation=None, cut_observation=None):
