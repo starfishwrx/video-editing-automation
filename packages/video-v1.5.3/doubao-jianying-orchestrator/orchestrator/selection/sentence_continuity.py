@@ -173,7 +173,8 @@ def proposals(manifest, analysis, plan, index, narration_timing, *, prefer_forwa
 def review_group(manifest, context, shot, directory):
     from . import ai_editor as editor
     media = editor._review_media({**shot, "source_start": context["window_us"]["start"] / 1e6,
-                                 "source_end": context["window_us"]["end"] / 1e6}, directory, dense=True)
+                                 "source_end": context["window_us"]["end"] / 1e6,
+                                 "_paper_claim_pts": bool(context.get("paper_point_checks"))}, directory, dense=True)
     if media["before"] != context["source_identity"]:
         raise ValueError("CONTINUITY_SOURCE_CHANGED")
     prompt = contract.policy_prompt(manifest) + "\n联合复核连续演示；原素材时间戳，画面原速，不允许改变以下逐句区间。\n"
@@ -205,15 +206,25 @@ basis只允许editorial_fit、visible_result、readable_label、product_display�
 任何成员实际承担性能/计时证明则拒绝本展示组。完整入点、首次到位和可辨认落点由整组保护，禁止复位或重复。
 """
     if context.get("paper_point_checks"):
-        prompt += ("\n每个成员独立返回 claim_checks，每项给 id、object_matches、action_seen、result_seen、result_observed，"
-                   "以及本句切片内附图实际拍到的 action_us、result_us。读到包装规格或原料占比时用 kind=readable_label、"
+        prompt += ("\n每个成员独立返回 claim_checks，每项给 id、kind、object_matches、action_seen、result_seen、"
+                   "action_observed、result_observed、action_frame、result_frame。从整张图首行左上角起按行从1数，"
+                   "两张实际看见动作和结果的格子都须属于本句。格号对应原片微秒为"
+                   + json.dumps([round(t * 1e6) for t in media["times"]]) + "。读到包装规格或原料占比时用 kind=readable_label、"
                    "label_text 抄录这条标称；数清实物用 counted_items、count、unit；揉搓再展开用 rub_unfold；"
                    "先见湿纸再见完整结果用 wet_intact。缺少本句采样证据时不得以邻句或商品外观补足。")
     result = editor._call(prompt, directory / "continuity" / (contract.digest(context)[:24] + ".json"), media["sheet"])
     if contract.source_identity(shot["video"]) != context["source_identity"]:
         raise ValueError("CONTINUITY_SOURCE_CHANGED")
-    group = {"schema": continuity.SCHEMA, "input": context, "review": result,
-             "frame_times_us": [round(t * 1e6) for t in media["times"]]}
+    times = [round(t * 1e6) for t in media["times"]]
+    if context.get("paper_point_checks") and isinstance(result.get("members"), list):
+        result = copy.deepcopy(result)
+        for member in result["members"]:
+            if isinstance(member, dict) and isinstance(member.get("claim_checks"), list):
+                member["claim_checks"] = [bound for fact in member["claim_checks"] if isinstance(fact, dict)
+                                          if (bound := paper_claims.bind_sample_times(fact, times)) is not None]
+    group = {"schema": continuity.SCHEMA, "input": context, "review": result, "frame_times_us": times}
+    if context.get("paper_point_checks"):
+        group["frame_clock"] = media.get("frame_clock")
     return continuity.validate(group)
 
 

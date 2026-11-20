@@ -36,6 +36,34 @@ class EvidenceTest(unittest.TestCase):
                     "claims":[{"id":"old","text":self.original}],"claim_context":self.original,
                     "scene_ids":[],"time_sensitive":False,"evidence_intervals_us":[{"start":2000000,"end":5000000}]}
 
+    def test_paper_clock_survives_database_reuse_and_legacy_rows_need_pixels(self):
+        from orchestrator.policy import paper_claims
+        point = {"id": "old", "text": self.original}
+        sentence = {"text": self.original, "selling_points": [point]}
+        fact = {"id": "old", "kind": "rub_unfold", "object_matches": True, "action_seen": True,
+                "result_seen": True, "action_us": 100000, "result_us": 700000,
+                "action_observed": "揉搓", "result_observed": "展开后未见毛絮"}
+        review = {**self.facts, "source_identity": contract.source_identity(self.shot["video"]),
+                  "source_sha256": store.identity(self.path), "review_window_us": {"start": 0, "end": 800000},
+                  "supported_point_ids": ["old"], "sheet": str(self.proof), "claim_checks": [fact],
+                  "frame_times_us": [100000, 700000], "completed_dense_review": True,
+                  "evidence_intervals_us": [{"start": 100000, "end": 733333}]}
+        published = []
+        for clock in (None, "decoded_source_pts"):
+            if clock:
+                review["frame_clock"] = clock
+            store.remember_review(self.manifest, sentence, self.shot, review)
+            saved = next(r for r in store.windows(self.manifest, self.shot) if r["facts"].get("frame_clock") == clock)
+            restored = evidence_recall._review_result(saved, [point], {"old": "old"}, self.shot)
+            self.assertEqual(paper_claims.reusable([point], restored), bool(clock))
+            published.append(saved)
+        legacy, clocked = published
+        incomplete = {**clocked, "facts": {**clocked["facts"], "claim_checks": [{**fact, "kind": "dry_stretch"}]}}
+        hit, _ = evidence_recall.inspect(self.manifest, sentence, self.shot, rows=[legacy, incomplete, clocked],
+                                        for_placement=True)
+        self.assertEqual(hit["evidence_id"], clocked["id"])
+        self.assertEqual(hit["claim_checks"], [fact])
+
     def add(self):
         with store.connect() as db:
             store.put(db,store.scope(self.manifest),store.identity(self.path),self.path,2000000,5000000,

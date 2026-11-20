@@ -487,10 +487,19 @@ def _review_media(shot: dict, directory: Path, *, dense: bool = False, fit: bool
         focus_last = hi - min(.04, (hi - lo) / 10)
         times = sorted(set([*times, lo, (lo + focus_last) / 2, focus_last]))
         protocol = f"candidate-focus-window-{count}-v2:{contract.digest(times)}"
+    decoded_clock = shot.get("_paper_claim_pts") is True
+    if decoded_clock:
+        times = shot.get("_claim_sample_targets", times)
+        protocol += ":decoded-source-pts-v1:" + contract.digest(times)
     def prepare_frames(frame_dir):
-        ffmpeg, _ = platform_env.find_ffmpeg()
+        ffmpeg, ffprobe = platform_env.find_ffmpeg()
         if not ffmpeg:
             raise ValueError("AI_EDITOR_FFMPEG_MISSING")
+        if decoded_clock:
+            from ..media import action_frames
+            if not ffprobe:
+                raise ValueError("AI_EDITOR_FFPROBE_MISSING")
+            return action_frames.sample_window(source, times, start, end, frame_dir, ffmpeg=ffmpeg, ffprobe=ffprobe)
         frames = []
         with media_slot(timeout=600) as handle:
             if not handle.acquired:
@@ -530,7 +539,9 @@ def _review_media(shot: dict, directory: Path, *, dense: bool = False, fit: bool
         raise ValueError("AI_EDITOR_CONTACT_SHEET_FAILED")
     if before != contract.source_identity(source):
         raise ValueError("AI_EDITOR_SOURCE_CHANGED_DURING_REVIEW")
-    return {"start": start, "end": end, "before": before, "source_sha256": sha, "times": times, "sheet": sheet, "frames": frames}
+    return {"start": start, "end": end, "before": before, "source_sha256": sha,
+            "times": [f["timestamp"] for f in frames] if decoded_clock else times, "sheet": sheet, "frames": frames,
+            "frame_clock": "decoded_source_pts" if decoded_clock else "requested"}
 
 
 def _iter_review_round(ids, shots, directory, review, *, dense=False, on_error=None):
@@ -628,6 +639,13 @@ def _review(manifest: dict, sentence: dict, shot: dict, directory: Path, *, dens
 
 def _pixel_review(manifest: dict, sentence: dict, shot: dict, directory: Path, *, dense: bool = False,
                   prepared_media=None) -> dict:
+    paper_checks = (paper_claims.checks_by_id(sentence.get("selling_points") or [])
+                    if contract.rules_identity(manifest)["category"] == "zhipin" else {})
+    if paper_checks and (prepared_media or {}).get("frame_clock") != "decoded_source_pts":
+        sampled = {**shot, "_paper_claim_pts": True}
+        if prepared_media:
+            sampled["_claim_sample_targets"] = prepared_media["times"]
+        prepared_media = _review_media(sampled, directory, dense=dense, fit=True)
     media = prepared_media if prepared_media is not None else _review_media(shot, directory, dense=dense)
     if prepared_media is not None and media["before"] != contract.source_identity(shot["video"]):
         raise ValueError("AI_EDITOR_SOURCE_CHANGED_DURING_REVIEW")
@@ -702,8 +720,6 @@ shot_value_request非空时，可额外返回shot_value_observation，逐项评�
         prompt += "\n这是同一原片区间的补查。只补查缺少的条件，不重复拆解已记录的动作。"
         prompt += "完整卖点仍须有本窗口可见依据；缺少条件时返回 uncertain。"
         prompt += json.dumps(shot["_evidence_gap"], ensure_ascii=False)
-    paper_checks = (paper_claims.checks_by_id(sentence.get("selling_points") or [])
-                    if contract.rules_identity(manifest)["category"] == "zhipin" else {})
     claim_checks = bool(paper_checks or (sentence.get("first_look_ids") and sentence.get("selling_points")))
     if claim_checks and not paper_checks:
         prompt += """
@@ -899,6 +915,9 @@ shot_value_request非空时，可额外返回shot_value_observation，逐项评�
             "review_window_us": {"start": round(start * 1e6), "end": round(end * 1e6)},
             "shot_id": shot["shot_id"], "source_identity": before,
             "frame_times_us": [round(t * 1e6) for t in times], "sheet": str(sheet)}
+    reviewed.pop("frame_clock", None)
+    if paper_checks:
+        reviewed["frame_clock"] = media["frame_clock"]
     from ..vision import evidence_store
     if media.get("source_sha256") and evidence_store.identity(shot["video"]) != media["source_sha256"]:
         raise ValueError("AI_EDITOR_SOURCE_CHANGED_DURING_REVIEW")
@@ -1115,6 +1134,10 @@ def _review_pool(manifest: dict, sentence: dict, shots: dict, directory: Path, a
     """
     _ = early_window_repair  # API compatibility only; evidence-stop is unconditional.
     from . import shot_analyzer
+    paper_checks = (contract.rules_identity(manifest)["category"] == "zhipin"
+                    and paper_claims.checks_by_id(sentence.get("selling_points") or []))
+    if paper_checks:
+        shots = {sid: {**shot, "_paper_claim_pts": True} for sid, shot in shots.items()}
     def feasible(good: list[dict]) -> bool:
         return _cached_reviews_feasible(manifest, sentence, shots, good, audio)
 
@@ -1140,6 +1163,7 @@ def _review_pool(manifest: dict, sentence: dict, shots: dict, directory: Path, a
         return False
     reviewed_by_id = {str(row.get("shot_id")): row for row in (existing_reviews or [])
                       if isinstance(row, dict) and row.get("shot_id") in shots
+                      and (not paper_checks or row.get("frame_clock") == "decoded_source_pts")
                       and row.get("shot_id") not in (excluded_ids or set())
                       and not failure_fields(str(row.get("error", ""))).get("retryable")}
     ids = [sid for sid in sentence["candidate_ids"] if sid not in (excluded_ids or set())]
@@ -1159,7 +1183,8 @@ def _review_pool(manifest: dict, sentence: dict, shots: dict, directory: Path, a
         located.append({"shot_id": sid, "verdict": (candidate or {}).get("verdict", "not_located"),
                         "location": (candidate or {}).get("first_look_location"),
                         "observation": (candidate or {}).get("observation")})
-        if candidate and candidate.get("verdict") == "matched":
+        if (candidate and candidate.get("verdict") == "matched"
+                and (not paper_checks or paper_claims.reusable(sentence["selling_points"], candidate))):
             reviewed_by_id[sid] = candidate
             if feasible([candidate]):
                 break
@@ -1173,8 +1198,9 @@ def _review_pool(manifest: dict, sentence: dict, shots: dict, directory: Path, a
         for sid in ids:
             if sid in reviewed_by_id:
                 continue
-            found, _ = evidence_recall.inspect(manifest, sentence, shots[sid])
-            if found and feasible([found]):
+            found, _ = evidence_recall.inspect(manifest, sentence, shots[sid], for_placement=True)
+            if (found and (not paper_checks or paper_claims.reusable(sentence["selling_points"], found))
+                    and feasible([found])):
                 reviewed_by_id[sid] = found
                 evidence_queries.record_hit(manifest, shots[sid], found)
                 library_alternative = True
@@ -4247,6 +4273,19 @@ def prepare(manifest: dict, analysis: dict, report_dir: Path, *, narration_timin
             # A saved composite ID cannot be reassigned to only one of its original facts.
             resume_plan = all(paper_claims.split_points(s["selling_points"]) == s["selling_points"]
                               for s in previous.get("sentences", []) if s.get("selling_points"))
+            stale = {str(s["index"]) for s in previous.get("sentences", [])
+                     if paper_claims.checks_by_id(s.get("selling_points") or [])
+                     and any(r.get("frame_clock") != "decoded_source_pts"
+                             for r in previous.get("reviews", {}).get(str(s["index"]), []))}
+            if stale:
+                # Preserve independent observations. A timeline built from an unlocated
+                # result must be placed again after that sentence has verified frames.
+                previous = {k: previous[k] for k in ("sentences", "reviews", "coverage", "display_reviews")
+                            if k in previous}
+                previous["reviews"] = {k: [r for r in rows if k not in stale or r.get("frame_clock") == "decoded_source_pts"]
+                                       for k, rows in previous.get("reviews", {}).items()}
+                previous["coverage"] = {k: v for k, v in previous.get("coverage", {}).items() if k not in stale}
+                duration_resume = False
         if resume_plan:
             if frozen_legacy:
                 plan['identity'].pop('presentation_policy_version', None)

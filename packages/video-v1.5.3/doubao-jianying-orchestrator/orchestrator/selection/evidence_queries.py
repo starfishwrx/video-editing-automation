@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 
 from .. import ai_editor_contract as contract
+from ..policy import paper_claims
 from ..runtime.file_safety import file_lock
 from ..vision import evidence_store as store
 from . import evidence_recall as recall
@@ -23,7 +24,7 @@ def lookup(manifest, sentence, shot, directory, call):
             return call(prompt, directory / "evidence_fit" / (contract.digest(prompt) + ".json"))
         except (OSError, ValueError):
             return {}
-    result, hint = recall.inspect(manifest, sentence, shot, judge=judge)
+    result, hint = recall.inspect(manifest, sentence, shot, judge=judge, for_placement=True)
     if result:
         record_hit(manifest, shot, result)
     return result, hint
@@ -47,7 +48,10 @@ def first_look(manifest, sentence, shot, directory, call, original, review, medi
         if hint:
             row, missing = hint
             facts = row["facts"]
+            clocked = (contract.rules_identity(manifest)["category"] == "zhipin"
+                       and paper_claims.checks_by_id(sentence.get("selling_points") or []))
             if (row["grade"] == "review" and facts.get("completed_dense_review")
+                    and (not clocked or facts.get("frame_clock") == "decoded_source_pts")
                     and facts.get("verdict") == "mismatch" and store.proof_available(row)
                     and recall._canonical(facts.get("claim_context")) == recall._canonical(sentence["text"])):
                 store.record(manifest, "known_window_gap", {"id":row["id"],"shot":shot["shot_id"]})

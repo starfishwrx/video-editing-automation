@@ -156,6 +156,28 @@ class ActualFrameCoordinateTests(unittest.TestCase):
         rows = action_frames.extract(shifted, metadata, [0, 6, 23], self.root / "shifted cache", ffmpeg=FFMPEG)
         self.assertEqual([r["pts_us"] for r in rows], [0, 100000, 383333])
 
+    def test_claim_tiles_keep_the_actual_vfr_result_inside_the_cut(self):
+        from PIL import Image
+        from orchestrator.policy import paper_claims
+        source = self.root / "gap.mkv"
+        subprocess.run([FFMPEG, "-v", "error", "-f", "lavfi", "-i", "color=black:s=32x32:r=30:d=1",
+                        "-vf", "drawbox=color=white:t=fill:enable='eq(n,21)',select='not(between(n,15,20))'",
+                        "-fps_mode", "vfr", "-c:v", "ffv1", str(source)], check=True, capture_output=True)
+        cache = self.root / "vfr-cache"
+        cache.mkdir()
+        rows = action_frames.sample_window(source, [0.1, 0.548571, 0.60, 0.75], 0., 0.75, cache,
+                                           ffmpeg=FFMPEG, ffprobe=FFPROBE)
+        times = [round(r["timestamp"] * 1_000_000) for r in rows]
+        self.assertEqual(times, [100000, 700000])
+        with Image.open(rows[1]["path"]) as result:
+            self.assertGreater(result.convert("L").getpixel((16, 16)), 225)
+        fact = {"kind": "rub_unfold", "action_frame": 1, "result_frame": 2,
+                "action_observed": "揉搓", "result_observed": "展开后没有毛絮"}
+        bound, covered = paper_claims.sampled_fact([{"kind": "rub_unfold"}], fact, times)
+        self.assertEqual((bound["result_us"], covered), (700000, [0]))
+        with self.assertRaisesRegex(ValueError, "NO_SOURCE_FRAME"):
+            action_frames.sample_window(source, [0.548571], 0.5, 0.7, cache, ffmpeg=FFMPEG, ffprobe=FFPROBE)
+
     def test_stale_source_and_invalid_frame_requests_fail_before_decode(self):
         metadata = action_frames.probe(self.source, self.root / "cache", ffprobe=FFPROBE)
         for indices in ([1, 1], [3, 2], [True], [24], []):

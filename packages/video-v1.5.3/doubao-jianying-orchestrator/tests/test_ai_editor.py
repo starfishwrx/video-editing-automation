@@ -341,7 +341,7 @@ class AIEditorTests(unittest.TestCase):
 
     def test_paper_claims_require_the_named_number_or_two_ordered_actions(self):
         media = {"start": 0, "end": 6, "before": contract.source_identity(self.video),
-                 "times": [0, 2, 3, 5], "sheet": self.root / "sheet.jpg"}
+                 "times": [0, 2, 3, 5], "sheet": self.root / "sheet.jpg", "frame_clock": "decoded_source_pts"}
         manifest = {**self.manifest, "category": "zhipin"}
         samples = [("三层加厚", "readable_label", 3, 2_000_000, True),
                    ("三层加厚", "readable_label", 4, 2_000_000, False),

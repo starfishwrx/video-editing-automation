@@ -1,6 +1,7 @@
 """Source-PTS frames and motion cues for bounded action review, without AI."""
 from __future__ import annotations
 
+from bisect import bisect_left
 from fractions import Fraction
 import hashlib
 import json
@@ -92,11 +93,11 @@ def showinfo_timestamps(stderr: str) -> list[Fraction]:
     return timestamps
 
 
-def extract(source: str | Path, metadata: dict, indices: list[int], directory: Path, *, ffmpeg="ffmpeg", width: int = 360) -> list[dict]:
+def extract(source: str | Path, metadata: dict, indices: list[int], directory: Path, *, ffmpeg="ffmpeg", width: int | None = 360) -> list[dict]:
     """Select decoder frame indices and verify the observed PTS, never relabel requested times."""
     if metadata["source_identity"] != identity(source):
         raise ValueError("ACTION_SOURCE_IDENTITY_CHANGED")
-    if type(width) is not int or width < 32 or width % 2:
+    if width is not None and (type(width) is not int or width < 32 or width % 2):
         raise ValueError("ACTION_EXTRACTION_WIDTH_INVALID")
     if (not isinstance(indices, list) or not indices
             or any(type(i) is not int or not 0 <= i < len(metadata["frames"]) for i in indices)
@@ -110,13 +111,17 @@ def extract(source: str | Path, metadata: dict, indices: list[int], directory: P
     if missing:
         import tempfile
         selected = "+".join("eq(n\\,%d)" % r["index"] for r in missing)
+        filters = [f"select='{selected}'"]
+        if width is not None:
+            filters.append(f"scale={width}:-2")
+        filters.append("showinfo")
         with tempfile.TemporaryDirectory(prefix="extract-", dir=root) as temp:
             pattern = str(Path(temp) / "%06d.jpg")
             with media_slot(timeout=600) as handle:
                 if not handle.acquired:
                     raise ValueError("ACTION_MEDIA_SLOT_TIMEOUT")
                 proc = run_ffmpeg_decode([ffmpeg, "-hide_banner", "-nostdin", "-v", "info", "-copyts", "-i", str(source),
-                    "-an", "-vf", "select='" + selected + "',scale=" + str(width) + ":-2,showinfo", "-fps_mode", "vfr",
+                    "-an", "-vf", ",".join(filters), "-fps_mode", "vfr",
                     "-frames:v", str(len(missing)), "-q:v", "2", "-y", pattern],
                     capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
             paths = sorted(Path(temp).glob("*.jpg"))
@@ -132,6 +137,19 @@ def extract(source: str | Path, metadata: dict, indices: list[int], directory: P
     if metadata["source_identity"] != identity(source):
         raise ValueError("ACTION_SOURCE_CHANGED_DURING_EXTRACTION")
     return rows
+
+
+def sample_window(source, requested, start, end, directory, *, ffmpeg, ffprobe):
+    """Return distinct decoded source images at or after the requested instants, inside the cut."""
+    metadata = probe(source, directory, ffprobe=ffprobe)
+    pts = [frame["pts_us"] for frame in metadata["frames"]]
+    lo, hi = bisect_left(pts, round(start * 1_000_000)), bisect_left(pts, round(end * 1_000_000))
+    indices = {bisect_left(pts, round(t * 1_000_000), lo, hi) for t in requested}
+    indices.discard(hi)
+    if not indices:
+        raise ValueError("ACTION_WINDOW_HAS_NO_SOURCE_FRAME")
+    rows = extract(source, metadata, sorted(indices), directory, ffmpeg=ffmpeg, width=None)
+    return [{"path": row["path"], "timestamp": row["pts_us"] / 1_000_000} for row in rows]
 
 
 def motion_cues(frames: list[dict]) -> dict:

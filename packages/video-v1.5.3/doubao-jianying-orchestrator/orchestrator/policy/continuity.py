@@ -171,7 +171,10 @@ def validate(group):
         _intervals(observed.get("evidence_intervals_us"), cursor, member["end_us"])
         if context.get("paper_point_checks"):
             samples = [t for t in group.get("frame_times_us") or [] if type(t) is int and cursor <= t < member["end_us"]]
-            _require(paper_claims.reusable(member["selling_points"], {**observed, "frame_times_us": samples}),
+            checks = [f for f in observed.get("claim_checks") or [] if isinstance(f, dict) and all(
+                type(f.get(k)) is int and cursor <= f[k] < member["end_us"] for k in ("action_us", "result_us"))]
+            _require(paper_claims.reusable(member["selling_points"], {**observed, "claim_checks": checks,
+                        "frame_times_us": samples, "frame_clock": group.get("frame_clock")}),
                      "MEMBER_PAPER_EVIDENCE_REQUIRED")
         cursor, previous = member["end_us"], index
     _require(cursor == end, "GROUP_DURATION_CHANGED")

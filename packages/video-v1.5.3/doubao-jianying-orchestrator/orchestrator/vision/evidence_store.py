@@ -255,7 +255,7 @@ def remember_review(manifest, sentence, shot, review):
     point_ids = set(review.get("supported_point_ids") or [])
     points = [p for p in sentence.get("selling_points", []) if p["id"] in point_ids]
     proof = {k: review[k] for k in ("basis","observation","evidence_intervals_us","claim_checks",
-             "time_sensitive","scene_ids","frame_times_us","same_product","verdict","sheet",
+             "time_sensitive","scene_ids","frame_times_us","frame_clock","same_product","verdict","sheet",
              "completed_dense_review","presentation_observation","playback_observation","presentation_status",
              "confidence","preferred_speed","speed_range_override") if k in review}
     proof["reason"] = review.get("reason")

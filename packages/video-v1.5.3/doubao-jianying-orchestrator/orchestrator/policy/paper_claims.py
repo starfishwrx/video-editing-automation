@@ -175,6 +175,8 @@ def reusable(points, review):
         required = [f for _, f in requirements(point["text"])]
         if point["id"] not in supported or not required:
             continue
+        if review.get("frame_clock") != "decoded_source_pts":
+            return False
         proven = set()
         for fact in review.get("claim_checks") or []:
             if (not isinstance(fact, dict) or fact.get("id") != point["id"] or fact.get("object_matches") is not True
