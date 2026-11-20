@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 
 _NUMBERS = "零一二三四五六七八九"
 _SPEC = re.compile(r"(?<![\d零一二两三四五六七八九十百千])([1-9]\d*|[一二两三四五六七八九十百千][零一二两三四五六七八九十百千]*)\s*(?:[大小](?=包))?(层|包|抽)(?!层)")
@@ -178,7 +179,7 @@ def sampled_fact(requirements, fact, samples, *, basis=None, observation=None):
     return bound, [i for i, requirement in enumerate(requirements)
                    if (requirement["kind"] != "wet_use" or
                        (basis in (None, "visible_result") and wet_contact_observed(observation) is not False))
-                   and confirms(requirement, bound)]
+                   and confirms(requirement, bound, source_observation=observation)]
 
 
 def reusable(points, review):
@@ -276,7 +277,63 @@ def wet_contact_observed(observation):
     return False if only_package else None
 
 
-def confirms(requirement, fact):
+_SHEET_NAME = re.compile(r"棉柔(?:洁面|洗脸)?巾|洁面巾|洗脸巾|柔巾|面巾纸|抽纸|抽取式(?:纸巾|面纸)")
+_PCS = re.compile(r"(?<![a-z0-9_.])([1-9][0-9]*)\s*pcs(?![a-z0-9_])", re.I | re.ASCII)
+_BULK_LABEL = re.compile(r"整箱|每箱|外箱|整组|整套|组合|合装|套装|总计|总数|合计|共计|"
+                         r"(?:[1-9]\d+|[2-9]|[两二三四五六七八九十]+)\s*(?:大|小)?[包袋盒]|"
+                         r"赠|附带|附送|另配|送.{0,8}\d|配件|包装袋|"
+                         r"(?:/|每)\s*(?:箱|组|套|提)|\b(?:carton|case|set|total|bonus|accessories)\b|"
+                         r"\d\s*(?:pcs\s*)?[×*+~–—-]\s*\d|\d\s*[x×*+]\s*\d", re.I)
+_SHEET_UNITS = re.compile(r"([1-9]\d*|[一二两三四五六七八九十百千]+)\s*[抽张片]")
+
+
+
+def _sheet_count_label(value, text, fact, source_observation):
+    """A PCS count belongs to single sheets only when the primary sheet pack is identifiable."""
+    text = unicodedata.normalize("NFKC", text)
+    matches = list(_PCS.finditer(text))
+    if not matches or fact.get("object_matches") is not True:
+        return False
+    contexts = []
+    for raw in (fact.get("result_observed"), source_observation):
+        clauses = re.split(r"[，,。；;]", str(raw or ""))
+        foreground = "，".join(c for c in clauses if not re.match(r"\s*(?:背景|后景|后排|远处|另有|旁边另)", c))
+        if (_BULK_LABEL.search(foreground)
+                or (_PCS.search(str(raw or "")) and not _PCS.search(foreground))):
+            return False
+        contexts.append(foreground)
+    description, observation = contexts
+    if _BULK_LABEL.search(text):
+        return False
+    # New observations record what is counted on this exact pack. Older observations need a visible sheet identity.
+    scope = fact.get("pcs_scope")
+    if scope is not None and scope != "single_sheet_pack":
+        return False
+    for match in matches:
+        prefix = text[:match.start()].rsplit("\n", 1)[-1].strip(" \t:：，,")
+        suffix = text[match.end():].split("\n", 1)[0].strip(" \t，,。")
+        named = list(_SHEET_NAME.finditer(prefix))
+        prefix = prefix[named[-1].end():] if named else prefix
+        if not re.fullmatch(r"(?:加厚|升级|规格|数量|净含量|内装|[*：:\s])*", prefix):
+            return False
+        subject = _SHEET_NAME.match(suffix)
+        suffix = suffix[subject.end():] if subject else suffix
+        if not re.fullmatch(r"(?:/\s*[包袋盒抽]|[SMLX]{1,4}码|加厚|升级|装|[()（）\s])*", suffix, re.I):
+            return False
+    if scope is None and not _SHEET_NAME.search(text):
+        pack = description if _SHEET_NAME.search(description) else observation
+        if (not _SHEET_NAME.search(pack) or _reading_disputed(pack)
+                or not re.search(r"(?:包装|纸包|袋|盒).{0,18}(?:印|写|标|显示|可读|可见)", pack)
+                or (pack == observation and not any(int(m[1]) == value for m in _PCS.finditer(pack)))):
+            return False
+    if any(_number(m[1]) != value or not _exact_at(text, m.start(), m.end()) for m in _SHEET_UNITS.finditer(text)):
+        return False
+    return all(int(m[1]) == value and _exact_at(text, m.start(), m.end())
+               and not re.search(r"\b(?:up to|approx\.?|about|not)\s*$", text[:m.start()], re.I)
+               for m in matches)
+
+
+def confirms(requirement, fact, *, source_observation=None):
     if requirement["kind"] == "wet_use":
         observation = "。".join(str(fact.get(k) or "") for k in ("action_observed", "result_observed"))
         return (fact.get("kind") == "wet_use" and fact["action_us"] <= fact["result_us"]
@@ -297,8 +354,11 @@ def confirms(requirement, fact):
                 names.add("天然" + requirement["material"])
             return any(_exact_at(text, m.start(), m.end()) and _composition_fact(m)["percent"] == requirement["percent"]
                        and (m["m"] or m["material"]) in names for m in _COMPOSITION.finditer(text))
-        return any(m[2] == requirement["unit"] and _number(m[1]) == requirement["value"]
-                   and _exact_at(text, m.start(), m.end()) for m in _SPEC.finditer(text))
+        literal = any(m[2] == requirement["unit"] and _number(m[1]) == requirement["value"]
+                      and _exact_at(text, m.start(), m.end()) for m in _SPEC.finditer(text))
+        if requirement["unit"] == "抽" and _PCS.search(unicodedata.normalize("NFKC", text)):
+            return _sheet_count_label(requirement["value"], text, fact, source_observation)
+        return literal
     if requirement["kind"] == "composition":
         return False
     return fact.get("kind") == "counted_items" and counted(requirement, fact)

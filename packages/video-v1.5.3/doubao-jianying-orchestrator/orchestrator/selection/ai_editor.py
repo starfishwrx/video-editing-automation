@@ -744,6 +744,10 @@ shot_value_request非空时，可额外返回shot_value_observation，逐项评�
                    "干湿两用的湿用镜头只需巾体实际遇水或用打湿的巾体擦拭，basis=visible_result、kind=wet_use。"
                    "写清哪张巾体在哪格接触水或用于湿擦，单格看清接触时两个格号可以相同。另一画面可交代干态。包装标称不能作湿用证据。"
                    "看不清的项从支持列表移除，可以保留同句其他已证实的卖点。待核对项：" + json.dumps(paper_checks, ensure_ascii=False))
+        if any(f.get("unit") == "抽" for facts in paper_checks.values() for f in facts):
+            prompt += ("如果包装用 PCS 标数量，在 label_text 逐字抄录同一包装能读到的品名、数量、单位和组装标记。"
+                       "该条 claim_check 再填 pcs_scope，single_sheet_pack 表示看清是前景单包抽纸或洁面巾内的单张数，"
+                       "other 表示其他物品或组合总数，unclear 表示看不出数量指向。不要根据口播补全。")
     from . import evidence_recall
     requirement = evidence_recall.appearance_requirement(manifest, sentence, shot)
     output = directory / "reviews" / f"{key}.json"
