@@ -211,7 +211,8 @@ basis只允许editorial_fit、visible_result、readable_label、product_display�
                    "两张实际看见动作和结果的格子都须属于本句。格号对应原片微秒为"
                    + json.dumps([round(t * 1e6) for t in media["times"]]) + "。读到包装规格或原料占比时用 kind=readable_label、"
                    "label_text 抄录这条标称；数清实物用 counted_items、count、unit；揉搓再展开用 rub_unfold；"
-                   "先见湿纸再见完整结果用 wet_intact。缺少本句采样证据时不得以邻句或商品外观补足。")
+                   "先见湿纸再见完整结果用 wet_intact；看到同款巾体实际遇水或湿擦用 wet_use，接触可以在同一格。"
+                   "缺少本句采样证据时不得以邻句或商品外观补足。")
     result = editor._call(prompt, directory / "continuity" / (contract.digest(context)[:24] + ".json"), media["sheet"])
     if contract.source_identity(shot["video"]) != context["source_identity"]:
         raise ValueError("CONTINUITY_SOURCE_CHANGED")

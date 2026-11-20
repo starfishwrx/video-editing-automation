@@ -199,6 +199,26 @@ class AIEditorQCIntegrationTests(unittest.TestCase):
         self.assertFalse(paper_claims.confirms({"kind": "wet_intact"}, {"kind": "wet_intact", "action_us": 1,
                          "result_us": 2, "result_observed": "纸张遮挡，完整无法确认"}))
 
+    def test_wet_use_is_visible_water_contact_in_the_output_cut(self):
+        from orchestrator.policy import paper_claims
+        requirement = {"kind": "wet_use"}
+        fact = {"kind": "wet_use", "object_matches": True, "action_frame": 1, "result_frame": 1,
+                "result_observed": "在水龙头下打湿棉柔巾"}
+        def covered(row, instant=100):
+            evidence = {"frames": [[1, instant]], "facts": [row]}
+            return paper_claims.output_coverage("干湿两用", evidence, {1: (100, 110)})[0]
+        for observed in (fact["result_observed"], "水流冲刷棉柔巾", "棉柔巾浸在水中", "棉柔巾泡在水里",
+                         "用湿润的棉柔巾擦脸", "湿棉柔巾擦拭脸颊"):
+            self.assertEqual(covered({**fact, "result_observed": observed}), [requirement], observed)
+        self.assertFalse(covered(fact, instant=110))
+        self.assertFalse(covered({**fact, "action_complete": False}))
+        for observed in ("手指着包装印有干湿两用字样", "巾体放在水龙头旁", "巾体等待打湿",
+                         "巾体被水淋湿，但没有任何实际接触水", "未看到巾体入水"):
+            self.assertFalse(covered({**fact, "result_observed": observed}), observed)
+        self.assertFalse(covered({**fact, "kind": "readable_label"}))
+        self.assertFalse(paper_claims.sampled_fact([requirement], fact, [100], basis="readable_label")[1])
+        self.assertEqual(paper_claims.sampled_fact([requirement], fact, [100], basis="visible_result")[1], [0])
+
     def test_approval_observation_and_demonstration_follow_actual_cut_order(self):
         from orchestrator.policy import paper_claims, sentence_visuals
         approval = {"show": "手持商品包装"}

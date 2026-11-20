@@ -586,7 +586,7 @@ def _inspect_paper_facts(vision, frames, directory, index, ffmpeg, *, read_label
               '[{"kind":"readable_label","object_matches":true,"action_frame":1,"result_frame":1,'
               '"label_text":"实际文字","result_observed":"实际看到的事实"}]}。'
               'object_matches 只准用 true 或 false，表示事实是否属于本次主体商品，不能填物品名称。'
-              'kind 只准用 readable_label、counted_items、rub_unfold、wet_intact、visible_feature。'
+              'kind 只准用 readable_label、counted_items、rub_unfold、wet_intact、wet_use、visible_feature。'
               '可见独立特征填visible_feature，feature可选soft_drape（轻捏或垂坠）、embossing（可见压花）、'
               'stretch（拉伸形变），填result_clear布尔并描述具体可见变化或纹理。'
               '帧号从1开始，属于本组的F整数。best_label_frame 填包装规格文字最容易看清的单帧号或null。'
@@ -594,6 +594,8 @@ def _inspect_paper_facts(vision, frames, directory, index, ffmpeg, *, read_label
               'unit、count、result_observed（这个时刻如何数清）。背景库存及之后手里加入的商品另记。'
               '数不清或无法分组就省略。静态事实两帧号可相同。'
               '揉搓后展开检查掉絮填 rub_unfold，湿纸提起或展开检查完整性填 wet_intact。'
+              '实际看到巾体遇水或用于湿擦填 wet_use，直接描述哪张巾体在哪格接触水或湿擦。'
+              '两格可相同。包装印字填 readable_label。'
               '动作项额外填写布尔 action_complete（确见湿纸提起或揉后重新展开）、result_clear（确见结果）、'
               'contrary_visible（纸面可见碎絮或湿纸已破）。写 action_observed 及 result_observed 描述先后实际情况。'
               '动作跨切片还须填写 same_demonstration，说明是否确能认出同一张纸。'
@@ -602,7 +604,7 @@ def _inspect_paper_facts(vision, frames, directory, index, ffmpeg, *, read_label
         value = raw if isinstance(raw, dict) else next((v for v in iter_json_values(raw) if isinstance(v, dict)), {})
         if (not isinstance(value.get("facts"), list) or not all(
                 isinstance(f, dict) and type(f.get("object_matches")) is bool
-                and f.get("kind") in {"readable_label", "counted_items", "rub_unfold", "wet_intact", "visible_feature"}
+                and f.get("kind") in {"readable_label", "counted_items", "rub_unfold", "wet_intact", "wet_use", "visible_feature"}
                 and all(type(f.get(k)) is int and 1 <= f[k] <= len(items) for k in ("action_frame", "result_frame"))
                 and (f["kind"] not in {"rub_unfold", "wet_intact"} or
                      all(type(f.get(k)) is bool for k in ("action_complete", "result_clear", "contrary_visible")))

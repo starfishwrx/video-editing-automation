@@ -741,6 +741,8 @@ shot_value_request非空时，可额外返回shot_value_observation，逐项评�
                    "可直接数清则填kind=counted_items、count、unit、group（所数商品的位置和分组），result_observed写该帧怎样数清。"
                    "揉搓后展开检查填kind=rub_unfold，action_observed描述揉搓，result_observed说明展开后有无毛絮。"
                    "湿纸提起/展开且完整填kind=wet_intact，action_observed描述实际湿水，result_observed写展开或提起后纸张是否完整。"
+                   "干湿两用的湿用镜头只需巾体实际遇水或用打湿的巾体擦拭，basis=visible_result、kind=wet_use。"
+                   "写清哪张巾体在哪格接触水或用于湿擦，单格看清接触时两个格号可以相同。另一画面可交代干态。包装标称不能作湿用证据。"
                    "看不清的项从支持列表移除，可以保留同句其他已证实的卖点。待核对项：" + json.dumps(paper_checks, ensure_ascii=False))
     from . import evidence_recall
     requirement = evidence_recall.appearance_requirement(manifest, sentence, shot)
@@ -834,7 +836,11 @@ shot_value_request非空时，可额外返回shot_value_observation，逐项评�
                         and type(a) is int and type(b) is int and round(start * 1e6) <= a <= b <= round(end * 1e6)):
                     # Keep both visually confirmed anchors through assembly and speed fitting.
                     last_frame_end = b + (_source_frame_us(shot) or 1)
-                    if last_frame_end <= round(end * 1e6):
+                    cut_end = round(end * 1e6)
+                    if required and media.get("frame_clock") == "decoded_source_pts":
+                        # A decoded terminal picture can be visible up to a fractional cut boundary.
+                        last_frame_end = min(last_frame_end, cut_end)
+                    if b < last_frame_end <= cut_end:
                         intervals.append({"start": a, "end": last_frame_end})
                         checked_facts.append(fact)
                         verified.add(fact["id"])

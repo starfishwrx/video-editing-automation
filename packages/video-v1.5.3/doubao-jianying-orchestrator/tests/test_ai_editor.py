@@ -364,6 +364,21 @@ class AIEditorTests(unittest.TestCase):
                 result = editor._pixel_review(manifest, sentence, self.shot, self.root, prepared_media=media)
                 self.assertEqual(result["verdict"] == "matched", accepted)
 
+    def test_wet_use_witness_survives_the_visible_part_of_the_last_frame(self):
+        sentence = {**self.sentence, "text": "干湿两用", "selling_points": [{"id": "p1", "text": "干湿两用"}]}
+        manifest = {**self.manifest, "category": "zhipin"}
+        media = {"start": 0, "end": 2.890604, "before": contract.source_identity(self.video),
+                 "times": [2.033333, 2.866667], "sheet": self.root / "sheet.jpg", "frame_clock": "decoded_source_pts"}
+        fact = {"id": "p1", "kind": "wet_use", "object_matches": True, "action_seen": True, "result_seen": True,
+                "action_frame": 1, "result_frame": 2, "result_observed": "水龙头下打湿棉柔巾"}
+        model = {**self.review, "basis": "visible_result", "claim_checks": [fact], "scene_ids": ["dry_wet_use"],
+                 "evidence_intervals_us": [{"start": 2_033_333, "end": 2_866_667}]}
+        with mock.patch.object(editor, "_call", return_value=copy.deepcopy(model)), \
+                mock.patch.object(editor, "_source_frame_us", return_value=33_333):
+            out = editor._pixel_review(manifest, sentence, self.shot, self.root, prepared_media=media)
+        self.assertEqual(out["verdict"], "matched")
+        self.assertIn({"start": 2_033_333, "end": 2_890_604}, out["evidence_intervals_us"])
+
     def test_spoken_promotion_facts_and_approved_display_use_the_current_order(self):
         from orchestrator.policy import paper_claims, sentence_visuals
         spoken = "到手5大包400抽"

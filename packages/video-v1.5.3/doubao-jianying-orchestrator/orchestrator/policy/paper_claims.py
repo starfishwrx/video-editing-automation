@@ -11,6 +11,10 @@ _COMPOSITION = re.compile(rf"(?<![\d.])(?P<n>{_PERCENT})\s*(?:的)?\s*(?P<m>{_MA
                           rf"|(?P<material>{_MATERIAL})\s*[:：]?\s*(?P<percentage>{_PERCENT})(?!\d)")
 _RUB = re.compile(r"不(?:易|会|容易)?(?:掉|起)(?:毛絮|絮|毛|屑)")
 _WET = re.compile(r"湿水|沾水|浸水|湿了|打湿")
+_DUAL_USE = re.compile(r"干湿两用|干湿都能用|既能干用也能湿用")
+_USAGE_QUALIFIER = re.compile(r"(?:不是|不能|并非|不支持|并不支持|不可以|无法|不可|不适合|没有|不具备|"
+                              r"(?:包装|标签)(?:上|正面|背面)?(?:只)?(?:标注|标称|标有|写着|印着|印有|写有|显示|注明))"
+                              r"[的为是：:‘“「『\"\s]*$")
 _INTACT = re.compile(r"不(?:易|会|容易)?(?:破|烂|裂|断)")
 _CLEAR_VIEW = re.compile(r"(?:没有|未被|未受|未|毫无|无)(?:被)?(?:手指|手部|手掌)?(?:任何|明显)?(?:遮挡|遮住|挡住)")
 _UNCLEAR_READING = re.compile(r"遮挡|遮住|挡住|看不|读不|无法|不能(?:辨|读|确认|看)|不清|模糊|疑似|似乎|猜测|推测|可能|"
@@ -43,11 +47,16 @@ def _composition_fact(match):
             "percent": 100 if percentage.startswith("百分") else float(percentage[:-1].strip())}
 
 
+def wet_use_mentions(text):
+    return [m for m in _DUAL_USE.finditer(text) if not _USAGE_QUALIFIER.search(text[:m.start()])]
+
+
 def requirements(text):
     facts = [(m.start(), {"kind": "quantity", "unit": m[2], "value": _number(m[1])})
              for m in _SPEC.finditer(text) if m[1] != "一"]
     for match in _COMPOSITION.finditer(text):
         facts.append((match.start(), _composition_fact(match)))
+    facts.extend((m.start(), {"kind": "wet_use"}) for m in wet_use_mentions(text))
     rub = _RUB.search(text)
     if rub:
         facts.append((rub.start(), {"kind": "rub_unfold"}))
@@ -166,7 +175,9 @@ def sampled_fact(requirements, fact, samples, *, basis=None):
     bound = bind_sample_times(_observed_label(fact, basis), samples)
     if bound is None:
         return None, []
-    return bound, [i for i, requirement in enumerate(requirements) if confirms(requirement, bound)]
+    return bound, [i for i, requirement in enumerate(requirements)
+                   if (requirement["kind"] != "wet_use" or basis in (None, "visible_result"))
+                   and confirms(requirement, bound)]
 
 
 def reusable(points, review):
@@ -239,7 +250,29 @@ def counted(requirement, fact):
     return bool(group and words.strip() or totals)
 
 
+def _wet_contact(fact):
+    if fact.get("action_complete") is False or fact.get("result_clear") is False or fact.get("contrary_visible") is True:
+        return False
+    observation = "。".join(str(fact.get(key) or "") for key in ("action_observed", "result_observed"))
+    if re.search(r"(?:未|没有|没|并非|无法|看不清|看不到|不能确认)[^，,。；;]{0,12}"
+                 r"(?:遇水|接触(?:到)?水|入水|沾水|湿擦|冲洗|打湿|浸湿|淋湿)", observation):
+        return False
+    towel = r"(?:巾体|纸巾|棉柔巾|洁面巾|洗脸巾|毛巾|湿巾|纸张|巾面|纸面|布面|洗面巾)"
+    contact = (r"打湿|浸湿|淋湿|沾水|蘸水|入水|浸水|冲淋|冲洗|冲刷|(?:浸|泡)(?:在|入)?水(?:中|里)|"
+               r"放入水|接触(?:到)?水|水龙头下接水|水流.{0,6}(?:淋在|打在|冲在|落在|接触|穿过|积聚在)")
+    wipe = r"(?:湿润|打湿|浸湿|沾水|湿的|湿(?:纸|巾|棉柔巾|毛巾)).{0,12}(?:湿擦|擦拭|擦脸|擦手|擦桌|擦洗)"
+    for clause in re.split(r"[。；;，,]", observation):
+        if re.search(r"包装|标签|字样|印有|写着|图示|示意图|未|没|无法|不确定|尚|将要|准备|等待|似乎|可能|即将|靠近|水龙头旁|看不清", clause):
+            continue
+        if re.search(towel, clause) and (re.search(contact, clause) or re.search(wipe, clause)):
+            return True
+    return False
+
+
 def confirms(requirement, fact):
+    if requirement["kind"] == "wet_use":
+        return (fact.get("kind") == "wet_use" and fact["action_us"] <= fact["result_us"]
+                and _wet_contact(fact))
     if requirement["kind"] not in {"quantity", "composition"}:
         return (fact.get("kind") == requirement["kind"] and fact["action_us"] < fact["result_us"]
                 and action_result(requirement["kind"], fact))

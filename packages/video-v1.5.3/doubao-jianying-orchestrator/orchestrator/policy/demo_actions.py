@@ -32,6 +32,8 @@ import math
 import re
 from typing import Any
 
+from . import paper_claims
+
 # ── 角色与强度序 ──────────────────────────────────────────────────────
 # 数值只用于「不低于」比较；顺序即门槛语义。
 ROLE_RANK: dict[str, int] = {
@@ -365,10 +367,8 @@ def sentence_contract(text: str, claim_text: str = "", *, category: str = "",
     topics = []
     for topic in rules.get("sentence_topics") or []:
         hits = [k for k in topic.get("text_keywords") or [] if k and k in blob]
-        ignored_prefix = topic.get("ignore_prefix_pattern")
-        if hits and ignored_prefix:
-            hits = [k for k in hits if any(not re.search(ignored_prefix, blob[:m.start()])
-                                           for m in re.finditer(re.escape(k), blob))]
+        if hits and topic.get("id") == "dry_wet_use":
+            hits = [m.group() for m in paper_claims.wet_use_mentions(blob)]
         if topic.get("match") == "count" and count_mentions(blob):
             hits.append("count")
         if hits:
@@ -702,7 +702,7 @@ def topic_segments(shot: dict[str, Any], contract: dict[str, Any] | None) -> lis
 
 
 # 「未见破洞、散开或碎裂」「排水口无可见碎片」是在否认，同一分句里出现这些词就不算看到。
-_FIT_NEGATIONS = ("未见", "没有", "没见", "未出现", "并未", "无可见", "看不到", "不见")
+_FIT_NEGATIONS = ("未见", "未看到", "没有", "没见", "没看到", "未出现", "并未", "无可见", "看不到", "不见")
 _CLAUSE_BREAK = re.compile(r"[，。；;,.!！?？\n]")
 
 

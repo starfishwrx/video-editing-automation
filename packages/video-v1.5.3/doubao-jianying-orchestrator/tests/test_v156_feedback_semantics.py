@@ -71,7 +71,9 @@ class PackagingBoundaryTests(unittest.TestCase):
         self.assertGreater(da.shot_fit({"action": "在水龙头下打湿巾体"}, c), 0)
         self.assertEqual(da.shot_fit(pointed("干湿两用"), c), 0)
         self.assertTrue(da.topic_hard_excluded({"action": "手指指向包装正面"}, c))
-        for other in ("不是干湿两用", "包装上写着“干湿两用”", "湿水不破"):
+        self.assertEqual(da.shot_fit({"action": "未看到巾体入水"}, c), 0)
+        for other in ("不是干湿两用", "包装上写着“干湿两用”", "湿水不破", "没有干湿两用功能",
+                      "不具备干湿两用功能", "包装标称：干湿两用", "标签显示干湿两用"):
             self.assertNotIn(topic, {t["id"] for t in contract(other)["topics"]})
         self.assertNotIn(topic, {t["id"] for t in contract("干湿两用", "weipin")["topics"]})
         self.assertIn(topic, {t["id"] for t in contract("那款不能干湿两用，这款能干湿两用")["topics"]})
