@@ -185,6 +185,9 @@ def record(manifest, stage, detail):
         with connect() as db:
             run = str(os.environ.get("JY_EVIDENCE_BATCH_ID") or manifest.get("parent_run_id") or manifest.get("record_id") or
                       manifest.get("task_id") or manifest.get("draft_name") or "")
+            if stage == "model_http" and os.environ.get("JY_FIRST_PASS_COHORT") and os.environ.get("JY_FIRST_PASS_RECORD"):
+                detail = {**detail, "first_pass_cohort_id": os.environ["JY_FIRST_PASS_COHORT"],
+                          "first_pass_record_id": os.environ["JY_FIRST_PASS_RECORD"]}
             db.execute("INSERT INTO usage(recorded,run,stage,detail) VALUES(?,?,?,?)",
                        (time.time(), run, stage, json.dumps(detail, ensure_ascii=False)))
 

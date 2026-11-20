@@ -35,6 +35,28 @@ class ScheduledPipelineTests(unittest.TestCase):
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(json.dumps(payload), encoding="utf-8")
 
+    def test_revised_copy_runs_in_its_own_root_and_retains_each_original_receipt(self):
+        from tools.first_pass import revision
+        for rid, state in (("finished", "OK"), ("partial", "PARTIAL")):
+            self.done(rid, {"record_id": rid, "status": state, "drafts": ["retained"], "resume_stage": "qc"})
+            original = {"record_id": rid, "script": "original", "product": "sample"}
+            directory = self.work / rid
+            (directory / "task.json").write_text(json.dumps(original), encoding="utf8")
+            self.queue_tasks([{**original, "script": "current"}])
+            runs = []
+            def worker(tasks, **kwargs):
+                runs.append((tasks[0]["record_id"], kwargs["work"]))
+                return [{"record_id": rid, "status": "OK"}]
+            result = scheduled.run_once(self.queue, self.work, dispatcher=worker)
+            target = self.work.resolve() / "script_revisions" / revision("current")
+            self.assertEqual(runs, [(rid, target)])
+            self.assertEqual(result["tasks"][0]["stage"], "build")
+            self.assertEqual(json.loads((directory / "done.json").read_text())["drafts"], ["retained"])
+            revised = target / rid
+            revised.mkdir(exist_ok=True, parents=True)
+            (revised / "done.json").write_text(json.dumps({"status": "OK"}), encoding="utf8")
+            self.assertEqual(scheduled.run_once(self.queue, self.work, dry_run=True)["tasks"][0]["reason"], "ALREADY_COMPLETED")
+
     def test_dry_run_lists_stages_without_dispatch_or_state_or_task_lock(self):
         self.queue_tasks([{"record_id": "new"}, {"record_id": "qc", "delivery_mode": "formal"}])
         self.done("qc", {"status": "PARTIAL", "drafts": ["retained"], "resume_stage": "qc"})

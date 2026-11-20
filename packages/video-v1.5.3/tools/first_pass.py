@@ -23,6 +23,23 @@ def queue_identity(tasks):
                                      separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
+def revision_work_root(task, work):
+    """Give a changed script its own durable receipts and drafts under the existing record identity."""
+    rid = task.get("record_id")
+    script = task.get("script")
+    if not isinstance(rid, str) or Path(rid).name != rid or rid in {"", ".", ".."} or not isinstance(script, str) or not script.strip():
+        return work
+    original = read(work / rid / "task.json", {})
+    done = read(work / rid / "done.json", {})
+    if any(original.get(k) and task.get(k) and original[k] != task[k] for k in ("task_id", "product", "category")):
+        return work
+    old = done.get("first_pass_script_sha256") or (revision(original["script"]) if original.get("script") else None)
+    current = revision(script)
+    if old and current != old:
+        return work / "script_revisions" / current
+    return work
+
+
 def recovered_cohort(task, done):
     cohort = done.get("first_pass_cohort_id")
     if (cohort and done.get("run_id") and done.get("record_id") == task.get("record_id")
@@ -121,7 +138,8 @@ def summarize(tasks, work, events, reviews):
         counts["false_rejection"] += int(bool(machine) and machine != "PASS" and blind == "PASS")
         counts["manual_intervention"] += int(audit.get("manual_before_first") is True or manual_delivery is True)
         counts["unverified_intervention"] += int(type(manual_delivery) is not bool)
-        row = {"record_id": rid, "category": category, "script_sha256": token, "later_script_revisions": [],
+        row = {"record_id": rid, "category": category, "first_pass_cohort_id": cohort, "script_sha256": token,
+               "recorded_worker_http_calls": None, "later_script_revisions": [],
                "first_draft": first, "first_qc": machine, "written_outputs": len(drafts), "blind": blind,
                "formal_delivery": audited_delivery, "first_business_pass": first_pass, "unattended_delivery": unattended,
                "first_draft_seconds": first.get("elapsed_seconds"), "draft_qc_checks": sum(e.get("event") == "draft_qc" for e in owned),
@@ -135,17 +153,37 @@ def summarize(tasks, work, events, reviews):
     return {"by_category": dict(categories), "orders": rows}
 
 
+def attach_http_counts(report, database):
+    import sqlite3
+    from contextlib import closing
+    if not database.is_file():
+        return
+    with closing(sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True)) as conn:
+        for row in report["orders"]:
+            cohort = row.get("first_pass_cohort_id")
+            if not cohort:
+                continue
+            count = conn.execute(
+                "SELECT count(*) FROM usage WHERE stage='model_http' AND json_extract(detail,'$.first_pass_cohort_id')=? "
+                "AND json_extract(detail,'$.first_pass_record_id')=?", (cohort, row["record_id"])).fetchone()[0]
+            if count:
+                row["recorded_worker_http_calls"] = count
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--queue", type=Path, required=True)
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--reviews", type=Path)
+    parser.add_argument("--usage-db", type=Path, help="Optional read-only material evidence ledger for worker HTTP counts")
     args = parser.parse_args()
     queue = read(args.queue)
     history = args.work / "batch_progress.jsonl"
     lines = history.read_text(encoding="utf-8-sig").splitlines() if history.is_file() else []
     report = summarize(queue["tasks"] if isinstance(queue, dict) else queue, args.work,
                        [json.loads(line) for line in lines if line.strip()], read(args.reviews, {}) if args.reviews else {})
+    if args.usage_db:
+        attach_http_counts(report, args.usage_db)
     print(json.dumps(report, ensure_ascii=False, indent=2))
 
 

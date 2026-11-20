@@ -126,6 +126,9 @@ def _plan(task: dict, work: Path, prior: dict) -> tuple[str | None, str]:
         return None, "INVALID_TASK_COUNT"
     done_path = directory / "done.json"
     done = _read(done_path) if done_path.exists() else {}
+    from tools.first_pass import revision_work_root
+    if revision_work_root(task, work) != work:
+        return "build", "NEW_SCRIPT_REVISION"
     if done.get("status") == "OK":
         return None, "ALREADY_COMPLETED"
     if prior and prior.get("input_key") != _input_key(task):
@@ -210,6 +213,14 @@ def _execute(queue_path: Path, work: Path, summary: dict, dispatcher, record_id:
             if not isinstance(prior, dict):
                 raise ValueError("TASK_STATE_INVALID")
             stage, reason = _plan(task, work, prior)
+            if reason == "NEW_SCRIPT_REVISION":
+                from tools.first_pass import revision_work_root
+                revision_root = revision_work_root(task, work)
+                revised = {**summary, "tasks": [], "dispatch_results": []}
+                _execute(queue_path, revision_root, revised, dispatcher, record_id=rid)
+                row.update(revised["tasks"][0], revision_work_root=str(revision_root))
+                summary["dispatch_results"].extend(revised["dispatch_results"])
+                continue
             row.update(stage=stage, reason=reason)
             if stage:
                 row["status"] = "PLANNED"

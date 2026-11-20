@@ -63,4 +63,6 @@ python -m tools.first_pass --queue work/first_pass_cohorts/enrolled.json --work 
 
 盲审文件以 `record_id` 为键。每项填入 `first_pass_cohort_id`、`batch_id`、`script_sha256`、首稿 `draft_metadata_sha256`、`blind`（PASS 或 FAIL）和 `manual_before_first`。交付审核再填 `delivery_run_id` 和 `manual_before_delivery`。已有覆盖该单全程的调用账时可填 `model_calls` 与 `call_count_source`，缺账显示为空。逐类输出首稿机器放行、首稿盲审通过、误放、误拦、待审和无人正式交付。无人交付需对上该次运行的各份草稿质检、分发及飞书回读。历史日志缺首稿身份时仍保留在入批分母中。
 
+命令可追加 `--usage-db work/.cache/material_evidence.sqlite3`，按入批标识和订单统计已记账的 worker 模型 HTTP 请求；同商品共享准备的调用单独核对。已有工单变更文案后，调度器按新文案摘要使用 `work/script_revisions/<摘要>`，原稿和原交付回执保留在原路径。在调度结果的 `revision_work_root` 可找到新版统计所用的工作目录。
+
 在两份既有纸品成稿上，用不含原口播和旧结论的观察重看了五包与揉搓结果。两项旧报告都曾判直接支持，当前实际切片需要复核。另一份已知可用稿的原料标示、三层标示和湿纸完整三处，独立观察均在实际切片中找到对应证据。这是五段成稿的对照。新批次的首稿业务通过率另由同口径盲审统计。

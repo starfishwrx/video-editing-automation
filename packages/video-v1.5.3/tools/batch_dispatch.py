@@ -279,7 +279,8 @@ def prepare_product(task: dict, product_dir: Path, env: dict) -> str:
 
 
 def run_task(task: dict, stage: str, env: dict, work: Path) -> dict:
-    env = dict(env, JY_FIRST_PASS_COHORT=str(task.get("_dispatch_first_pass_cohort") or ""))
+    env = dict(env, JY_FIRST_PASS_COHORT=str(task.get("_dispatch_first_pass_cohort") or ""),
+               JY_FIRST_PASS_RECORD=task["record_id"])
     task = {key: value for key, value in task.items() if not key.startswith("_dispatch_")}
     task_dir = work / task["record_id"]
     task_dir.mkdir(parents=True, exist_ok=True)
@@ -343,6 +344,18 @@ def dispatch(tasks: list[dict], *, work: Path, policy: RuntimePolicy | None = No
              preparer: Callable = prepare_product, runner: Callable = run_task,
              dry_run: bool = False, resume_stage: str | None = None,
              on_task_start: Callable | None = None) -> list[dict]:
+    from tools import first_pass
+    routes = {}
+    for task in tasks:
+        destination = first_pass.revision_work_root(task, work)
+        routes.setdefault(destination, []).append(task)
+    if any(destination != work for destination in routes):
+        results = []
+        for destination, group in routes.items():
+            results.extend(dispatch(group, work=destination, policy=policy, preparer=preparer, runner=runner,
+                                    dry_run=dry_run, resume_stage=resume_stage if destination == work else None,
+                                    on_task_start=on_task_start))
+        return results
     policy = policy or load_policy()
     started_at = time.time()
     started_clock = time.monotonic()
@@ -357,13 +370,6 @@ def dispatch(tasks: list[dict], *, work: Path, policy: RuntimePolicy | None = No
             task["record_id"] = rid
             task["_dispatch_admitted_clock"] = started_clock
             task["_dispatch_wait_origin"] = "supervisor_admission"
-            previous = _read(work / rid / "done.json")
-            if previous and task.get("script"):
-                original = _read(work / rid / "task.json").get("script")
-                from tools import first_pass
-                old_digest = previous.get("first_pass_script_sha256") or (first_pass.revision(original) if original else None)
-                if old_digest and old_digest != first_pass.revision(task["script"]):
-                    task["force_rebuild"] = True
             unique.append(task)
     pending = [(task, "build" if task.get("force_rebuild") else resume_stage if resume_stage in {"qc", "delivery"} else
                 "qc" if not resume_stage and _qc_pending(task, work) else "build") for task in unique]
@@ -394,7 +400,6 @@ def dispatch(tasks: list[dict], *, work: Path, policy: RuntimePolicy | None = No
         submitted_files = set()
         spool_blocked = False
         run_file = work / "dispatch_runs" / (str(time.time_ns()) + "-" + uuid.uuid4().hex[:8] + ".json")
-        from tools import first_pass
         cohort_path = work / "first_pass_cohorts" / run_file.name
         enrolled = []
         bindings_path = work / "first_pass_cohorts" / "active.json"
