@@ -129,12 +129,12 @@ def _plan(task: dict, work: Path, prior: dict) -> tuple[str | None, str]:
     from tools.first_pass import revision_work_root
     if revision_work_root(task, work) != work:
         return "build", "NEW_SCRIPT_REVISION"
-    if done.get("status") == "OK":
-        return None, "ALREADY_COMPLETED"
     if prior and prior.get("input_key") != _input_key(task):
         # A scheduled tick is not permission to overwrite a frozen run. Queue
         # edits require a new record or explicit, targeted recovery/reset.
         return None, "TASK_INPUT_CHANGED_REQUIRES_RESET"
+    if done.get("status") == "OK":
+        return None, "ALREADY_COMPLETED"
     if done.get("drafts"):
         drafts = done["drafts"]
         if not isinstance(drafts, list) or not all(_safe_name(name) for name in drafts):

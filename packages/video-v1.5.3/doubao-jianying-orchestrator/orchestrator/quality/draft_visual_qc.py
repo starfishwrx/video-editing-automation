@@ -487,7 +487,11 @@ def _inspect_experiment_outcomes(vision, claims, claim_frames, directory, batch_
     if not _prepare_media(vision._write_sheet, items, sheet, columns=min(4, len(items)),
                           tile_width=360, tile_height=674, fit=True, ffmpeg=ffmpeg):
         return None
-    prompt = ("只观察这些按时间顺序排列的原比例画面。每个S/P单独回答。只引用该组实际可见的F编号，"
+    form = [{"sentence": s, "part": p, "event": event, "subject": "uncertain", "outcome": "uncertain",
+             "frames": [], "observation": ""} for s, p, event in sorted(targets)]
+    prompt = ("只输出有 observations 键的JSON对象。照抄以下模板的行数和每行 sentence、part 整数及 event 字符串，"
+              "这三个字段是编号或阶段，不能写描述。填写其余四个字段。模板 " + json.dumps({"observations": form})
+              + "。只观察这些按时间顺序排列的原比例画面。每个S/P单独回答。只引用该组实际可见的F编号，"
               "不要跨镜头推断。absorb观察巾体表面液体是否减少，填receding、unchanged或uncertain；"
               "result只看提起离开后的纸巾本身，填clean_tissue、stained_tissue或uncertain。"
               "巾体上的液体不能当作提起纸巾上的液体；不清楚填uncertain。列出直接证明所见的全部帧号，"
@@ -516,6 +520,7 @@ def _inspect_experiment_outcomes(vision, claims, claim_frames, directory, batch_
                 raise ValueError("EXPERIMENT_PHYSICAL_FACT_INVALID")
             seen.add(key)
         return facts
+    validate.expects_json_object = True
     timeout = _remaining_request_timeout()
     if timeout <= 0:
         return None
@@ -553,6 +558,7 @@ def _inspect_approved_show(vision, frames, directory, index, approval, ffmpeg):
                 or any(type(n) is not int or not 1 <= n <= len(items) for n in data["frames"])):
             raise ValueError("APPROVED_SHOW_OBSERVATION_INVALID")
         return data
+    validate.expects_json_object = True
     remaining = _remaining_request_timeout()
     if remaining <= 0:
         return {}
@@ -602,6 +608,7 @@ def _inspect_paper_facts(vision, frames, directory, index, ffmpeg, *, read_label
                 for f in value["facts"])):
             raise ValueError("PAPER_FACT_OBSERVATIONS_INVALID")
         return value
+    validate.expects_json_object = True
     timeout = _remaining_request_timeout()
     if timeout > 0:
         ok, raw = vision._run_vision_with_retry(sheet, prompt, directory / f"paper_facts_{index:03d}.json",
@@ -617,6 +624,7 @@ def _inspect_paper_facts(vision, frames, directory, index, ffmpeg, *, read_label
                     if type(data.get("main_product")) is not bool or not isinstance(data.get("label_text"), str):
                         raise ValueError("PAPER_LABEL_TRANSCRIPTION_INVALID")
                     return data
+                validate_label.expects_json_object = True
                 prompt = ('仅抄录前景主商品自身纸品或包装上清晰可读的文字，尤其品名、原料、百分比、规格、层数、抽数和包数，'
                           '用原图逐行查看。背景纸箱、其他商品和猜测不写。输出JSON对象 '
                           '{"main_product":true,"label_text":"逐字抄录"}。无法定位主商品或读不到文字时写空串。')

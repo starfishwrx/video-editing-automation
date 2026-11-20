@@ -63,12 +63,16 @@ class ScheduledPipelineTests(unittest.TestCase):
         (self.work / "r" / "task.json").write_text(json.dumps(original), encoding="utf8")
         destinations = []
         for delta in ({"product": "B", "script": "changed"}, {"task_id": "order-b", "script": "changed"},
-                      {"product": "B"}, {"sentence_visual_approvals": [{"source": "new direction"}]}):
+                      {"product": "B"}, {"sentence_visual_approvals": [{"source": "new direction"}]},
+                      {"product": "", "manifest": {"product": "B", "category": "paper"}}, {"product_id": "revised"},
+                      {"revision_feedback": "show the front"}, {"material_dir": "new-materials"}, {"shot_notes": "show label"}):
             self.queue_tasks([{**original, **delta}])
             row = scheduled.run_once(self.queue, self.work, dry_run=True)["tasks"][0]
             self.assertEqual((row["stage"], row["reason"]), ("build", "NEW_TASK"))
             destinations.append(row["revision_work_root"])
-        self.assertEqual(len(set(destinations)), len(destinations))
+        # Equivalent top-level and nested product directions share the same revision.
+        self.assertEqual(destinations[2], destinations[4])
+        self.assertEqual(len(set(destinations)), len(destinations) - 1)
 
     def test_dry_run_lists_stages_without_dispatch_or_state_or_task_lock(self):
         self.queue_tasks([{"record_id": "new"}, {"record_id": "qc", "delivery_mode": "formal"}])

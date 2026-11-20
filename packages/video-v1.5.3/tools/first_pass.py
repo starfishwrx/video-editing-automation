@@ -23,6 +23,16 @@ def queue_identity(tasks):
                                      separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
+def visual_scope(task):
+    from tools.queueing import contracts
+    nested = task.get("manifest") if isinstance(task.get("manifest"), dict) else {}
+    notes = contracts.task_shot_note_overrides(task, remark_field="画面备注", new_task=True)
+    return {"task_id": task.get("task_id") or task.get("record_id"), "product": contracts.task_product_fields(task),
+            "overrides": contracts.task_runtime_overrides(task), "notes": notes,
+            "inputs": {k: task.get(k) or nested.get(k) for k in (
+                "revision_feedback", "issue", "material_dir", "material_sources", "voice", "voice_tempo", "bgm")}}
+
+
 def revision_work_root(task, work):
     """Give a changed script its own durable receipts and drafts under the existing record identity."""
     rid = task.get("record_id")
@@ -33,10 +43,6 @@ def revision_work_root(task, work):
     done = read(work / rid / "done.json", {})
     old = done.get("first_pass_script_sha256") or (revision(original["script"]) if original.get("script") else None)
     current = revision(script)
-    def visual_scope(row):
-        nested = row.get("manifest") if isinstance(row.get("manifest"), dict) else {}
-        return [row.get("task_id") or rid, row.get("product"), row.get("category"),
-                row.get("sentence_visual_approvals", nested.get("sentence_visual_approvals", []))]
     scope = visual_scope(task)
     scope_changed = bool(original and visual_scope(original) != scope)
     if old and (current != old or scope_changed):
