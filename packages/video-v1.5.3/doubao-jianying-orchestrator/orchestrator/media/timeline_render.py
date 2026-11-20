@@ -282,13 +282,11 @@ def render_timeline(timeline: EditTimeline, output_dir, *, ffmpeg="ffmpeg", ffpr
                 "-fps_mode", "cfr", "-r", str(fps), "-frames:v", str(len(mapping))], clip,
                 trailing=["-pix_fmt", "yuv420p"], timeout=180)
             _no_sync_changes(proc)
-            units = re.findall(r"config in time_base:\s*(\d+/\d+)", proc.stderr or "")
-            observed = re.findall(r"\bn:\s*\d+\s+pts:\s*(-?\d+)", proc.stderr or "")
-            if not units or len(observed) != len(mapping):
+            observed = action_frames.showinfo_timestamps(proc.stderr or "")
+            if len(observed) != len(mapping):
                 raise TimelineError("RENDER_SOURCE_DECODE_INCOMPLETE")
-            unit = Fraction(units[-1])
-            for row, raw_pts in zip(mapping, observed):
-                pts = round(int(raw_pts) * unit * US) - metadata["timestamp_origin_us"]
+            for row, decoded_pts in zip(mapping, observed):
+                pts = round(decoded_pts * US) - metadata["timestamp_origin_us"]
                 if abs(pts - row["source_pts_us"]) > 1:
                     raise TimelineError("RENDER_SOURCE_PTS_MISMATCH")
                 row["decoded_source_pts_us"] = pts

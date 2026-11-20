@@ -84,6 +84,19 @@ class AIEditorQCIntegrationTests(unittest.TestCase):
             self.assertFalse(visual_qc_contract.clear_carton_landing(check))
             self.assertTrue(visual_qc_contract.clear_carton_landing(dict(check, flap_over_goods="no")))
 
+    def test_terminal_image_needs_its_own_timestamp(self):
+        log = (b"[Parsed_showinfo_2 @ ff00] config in time_base: 1/25, frame_rate: 25/1\n"
+               b"[Parsed_showinfo_2 @ ff00] n: 0 pts: 0 pts_time:invalid param duration: 1\n"
+               b"[Parsed_showinfo_2 @ ff00] n: 1 pts: NOPTS pts_time:N/A duration: 1\n")
+        path = self.root / "last.jpg"
+        def decode(*args, **kwargs):
+            path.write_bytes(b"last image")
+            return mock.Mock(returncode=0, stderr=log)
+        cut = {"target_start": 0., "target_duration": 0.08, "source_start": 0.,
+               "source_duration": 0.08, "source": str(self.root / "source.mp4")}
+        with mock.patch.object(qc, "run_ffmpeg_decode", side_effect=decode):
+            self.assertIsNone(qc._terminal_frame("ffmpeg", cut, 25., path))
+
     def test_last_tick_at_speed_uses_decoded_pts_and_pixels(self):
         import shutil
         import subprocess

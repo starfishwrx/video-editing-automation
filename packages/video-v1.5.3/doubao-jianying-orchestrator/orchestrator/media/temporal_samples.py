@@ -2,9 +2,8 @@
 from pathlib import Path
 from fractions import Fraction
 import json
-import re
 
-from .action_frames import identity, probe
+from .action_frames import identity, probe, showinfo_timestamps
 from .video_encode import run_h264_encode
 
 
@@ -36,8 +35,8 @@ def prepare(original, directory, *, ffmpeg="ffmpeg", ffprobe="ffprobe", font_pat
     _, proc = run_h264_encode(ffmpeg, ["-v", "info", "-nostdin", "-i", str(source), "-an", "-vf", filters,
         "-r", "10", "-fps_mode", "cfr"], target,
         trailing=["-pix_fmt", "yuv420p"], timeout=180)
-    observed = [round(float(t)*1_000_000) for t in re.findall(r"pts_time:\s*([-0-9.]+)",proc.stderr or "")]
-    if len(observed) != len(frames) or any(abs(t-r["pts_us"]) > 10 for t,r in zip(observed,frames)):
+    observed = showinfo_timestamps(proc.stderr or "")
+    if len(observed) != len(frames) or any(abs(round(t * 1_000_000) - r["pts_us"]) > 10 for t, r in zip(observed, frames)):
         raise ValueError("EXPERIMENT_SAMPLED_PTS_MISMATCH")
     output_metadata = probe(target,root,ffprobe=ffprobe)
     if len(output_metadata["frames"]) != len(frames):

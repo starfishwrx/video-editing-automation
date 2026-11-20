@@ -74,6 +74,24 @@ def probe(source: str | Path, directory: Path, *, ffprobe="ffprobe") -> dict:
     return row
 
 
+def showinfo_timestamps(stderr: str) -> list[Fraction]:
+    """Read decoder PTS on the reporting filter's clock, in output order."""
+    clocks = {}
+    timestamps = []
+    for instance, message in re.findall(r"\[(Parsed_showinfo_[^\]]+)\]\s*([^\r\n]*)", stderr):
+        if message.startswith("config in time_base:"):
+            clock = re.match(r"config in time_base:\s*([1-9]\d*/[1-9]\d*)\s*,", message)
+            if not clock:
+                return []
+            clocks[instance] = Fraction(clock[1])
+        elif message.startswith("n:"):
+            frame = re.match(r"n:\s*(\d+)\s+pts:\s*(-?\d+)\s", message)
+            if not frame or instance not in clocks or int(frame[1]) != len(timestamps):
+                return []
+            timestamps.append(int(frame[2]) * clocks[instance])
+    return timestamps
+
+
 def extract(source: str | Path, metadata: dict, indices: list[int], directory: Path, *, ffmpeg="ffmpeg", width: int = 360) -> list[dict]:
     """Select decoder frame indices and verify the observed PTS, never relabel requested times."""
     if metadata["source_identity"] != identity(source):
@@ -86,8 +104,12 @@ def extract(source: str | Path, metadata: dict, indices: list[int], directory: P
         raise ValueError("ACTION_FRAME_INDICES_INVALID")
     root = Path(directory) / ("frames-" + _key([metadata["source_identity"], {"width": width, "protocol": "source-index-v1"}]))
     root.mkdir(parents=True, exist_ok=True)
-    rows = [dict(metadata["frames"][i], path=str(root / ("%06d.jpg" % i))) for i in indices]
-    missing = [r for r in rows if not Path(r["path"]).is_file()]
+    rows = []
+    for i in indices:
+        frame = metadata["frames"][i]
+        source_pts = frame["pts_us"] + metadata["timestamp_origin_us"]
+        rows.append(dict(frame, path=str(root / f"{i:06d}-{source_pts}.jpg")))
+    missing = [row for row in rows if not Path(row["path"]).is_file() or not Path(row["path"]).stat().st_size]
     if missing:
         import tempfile
         selected = "+".join("eq(n\\,%d)" % r["index"] for r in missing)
@@ -101,14 +123,15 @@ def extract(source: str | Path, metadata: dict, indices: list[int], directory: P
                     "-frames:v", str(len(missing)), "-q:v", "2", "-y", pattern],
                     capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
             paths = sorted(Path(temp).glob("*.jpg"))
-            observed = [round(float(v) * 1e6) - metadata["timestamp_origin_us"]
-                        for v in re.findall(r"pts_time:\s*([-0-9.]+)", proc.stderr or "")]
-            if proc.returncode or len(paths) != len(missing) or len(observed) != len(missing):
+            observed = showinfo_timestamps(proc.stderr or "")
+            if (proc.returncode or len(paths) != len(missing) or len(observed) != len(missing)
+                    or any(path.stat().st_size == 0 for path in paths)):
                 raise ValueError("ACTION_FRAME_EXTRACTION_INCOMPLETE")
-            for row, path, pts in zip(missing, paths, observed):
-                if abs(pts - row["pts_us"]) > 10:
-                    raise ValueError("ACTION_FRAME_PTS_MISMATCH")
-                Path(row["path"]).write_bytes(path.read_bytes())
+            if any(abs(round(pts * 1_000_000) - metadata["timestamp_origin_us"] - row["pts_us"]) > 10
+                   for row, pts in zip(missing, observed)):
+                raise ValueError("ACTION_FRAME_PTS_MISMATCH")
+            for row, path in zip(missing, paths):
+                path.replace(row["path"])
     if metadata["source_identity"] != identity(source):
         raise ValueError("ACTION_SOURCE_CHANGED_DURING_EXTRACTION")
     return rows

@@ -24,6 +24,7 @@ from typing import Any
 try:
     from ..runtime.json_extract import EmptyResponseError, is_blank, iter_json_values
     from ..media.video_decode import run_ffmpeg_decode
+    from ..media.action_frames import showinfo_timestamps
     from ..runtime.file_safety import atomic_write_text
     from ..runtime.runtime_policy import load_policy, media_slot
     from ..visual_qc_contract import MATCH_LEVELS, REPORT_VERSION, RESPONSE_VERSION, draft_metadata_fingerprint, normalize_match_level, response_errors, _source_identity, carton_landing_required, clear_carton_landing, member_stage_observed, member_repair, presentation_selection_errors
@@ -32,6 +33,7 @@ except ImportError:
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
     from orchestrator.runtime.json_extract import EmptyResponseError, is_blank, iter_json_values
     from orchestrator.media.video_decode import run_ffmpeg_decode
+    from orchestrator.media.action_frames import showinfo_timestamps
     from orchestrator.runtime.file_safety import atomic_write_text
     from orchestrator.runtime.runtime_policy import load_policy, media_slot
     from orchestrator.visual_qc_contract import (MATCH_LEVELS, REPORT_VERSION, RESPONSE_VERSION,
@@ -408,11 +410,10 @@ def _terminal_frame(ffmpeg, cut, fps, path, *, output_tick=None):
         return None
     # Integer PTS and time base avoid the rounded pts_time in ffmpeg's log.
     log = proc.stderr.decode("utf-8", errors="replace")
-    time_base = re.search(r"config in time_base:\s*(\d+)/(\d+)", log)
-    timestamps = re.findall(r"\bn:\s*\d+\s+pts:\s*(-?\d+)", log)
-    if not time_base or not timestamps:
+    timestamps = showinfo_timestamps(log)
+    if not timestamps:
         return None
-    pts = int(timestamps[-1]) * int(time_base[1]) / int(time_base[2])
+    pts = float(timestamps[-1])
     if not source_start - 1e-7 <= pts <= instant + 1e-7:
         return None
     return {"path": str(path), "timestamp": pts, "mapped_source_time": instant,
