@@ -307,6 +307,9 @@ def _absorb_scene():
 
 def absorption_experiment_role(row):
     role = row.get("experiment_role")
+    approval = row.get("approved_visual") or {}
+    if approval.get("mode") == "absorption":
+        return "absorption"
     if role in {"absorption", "rewet", "frozen"}:
         return role
     text = str(row.get("text") or "")
@@ -316,6 +319,8 @@ def absorption_experiment_role(row):
     explicit = re.search(r"倒(?:入|上|了)?(?:蓝水|水|液体)|倒液|瞬吸|秒吸|吸(?:收完|完|干|得快)", claim)
     if "absorb" in (row.get("scene_ids") or []) or explicit:
         return "absorption"
+    if approval.get("mode") == "display":
+        return "other"
     if role in (None, "other", "uncertain") and claim and text_hits_scene(_absorb_scene(), claim):
         return "absorption"
     return role or "other"

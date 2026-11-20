@@ -6,7 +6,7 @@
     "machine-specific paths",
     "knowledge-base bodies"
   ],
-  "file_count": 488,
+  "file_count": 491,
   "files": [
     {
       "path": ".gitignore"
@@ -337,6 +337,9 @@
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/policy/semantic_gate.py"
+    },
+    {
+      "path": "doubao-jianying-orchestrator/orchestrator/policy/sentence_visuals.py"
     },
     {
       "path": "doubao-jianying-orchestrator/orchestrator/proc_slots.py"
@@ -1269,6 +1272,9 @@
       "path": "tests/test_feedback_candidates.py"
     },
     {
+      "path": "tests/test_first_pass.py"
+    },
+    {
       "path": "tests/test_fixed_narration.py"
     },
     {
@@ -1393,6 +1399,9 @@
     },
     {
       "path": "tools/feedback_candidates.py"
+    },
+    {
+      "path": "tools/first_pass.py"
     },
     {
       "path": "tools/headless_review_delivery.py"

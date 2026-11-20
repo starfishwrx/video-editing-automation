@@ -227,17 +227,24 @@ def _expected_claims(report_dir: pathlib.Path) -> list[dict[str, Any]]:
     if not path.is_file():
         return []
     data = json.loads(path.read_text(encoding="utf-8-sig"))
+    from orchestrator.policy import sentence_visuals
     result = []
+    manifest = data.get("manifest") or {}
     for idx, row in enumerate(data.get("segments") or [], 1):
         if not isinstance(row, dict):
             continue
         parts = row.get("span_parts") if row.get("multi_shot") else None
+        spoken = str(row.get("claim_text") or row.get("text") or "")
+        approval = sentence_visuals.approved(manifest, idx, spoken)
+        if approval != row.get("approved_visual"):
+            raise ValueError(f"SENTENCE_VISUAL_APPROVAL_CHANGED:{idx}")
         result.append({
             # 一句口播在时间线上占几个物理片段（场景分段变速、多镜段会拆成多段）。
             "slots": len(parts) if isinstance(parts, list) and len(parts) >= 2 else 1,
             "scene_rule": row.get("scene_rule") if isinstance(row.get("scene_rule"), dict) else {},
             "index": idx,
-            "claim": str(row.get("claim_text") or row.get("text") or ""),
+            "claim": spoken,
+            **({"approved_visual": approval} if approval else {}),
             "shot_id": str(row.get("temporary_shot_id") or ""),
             "selection_mode": str(row.get("selection_mode") or ""),
             "delivery_mode": _match_delivery_mode(data),
@@ -454,30 +461,23 @@ def _inspect_carton_landing(vision, frame, output, timeout):
             "mapped_source_time": frame["mapped_source_time"]}
 
 
-def _inspect_experiment_outcomes(vision, claims, rows, claim_frames, directory, batch_no, ffmpeg):
-    """Ask a second observation question using only the cited pixels, with no copy or verdict."""
+def _inspect_experiment_outcomes(vision, claims, claim_frames, directory, batch_no, ffmpeg):
+    """Inspect each physical phase before semantic review, using its own output frames."""
     from orchestrator import visual_qc_contract as qc
+    from orchestrator.quality.ai_editor_qc import experiment_output_frames
     targets, images = {}, {}
     for local, claim in enumerate(claims, 1):
         index = claim["index"]
         group = (claim.get("ai_segment") or {}).get("continuity_group") or {}
         member = next((m for m in group.get("input", {}).get("members", []) if m["index"] == index), None)
-        row = rows.get(index, {})
-        events = row.get("visible_experiment_events")
-        if not member or row.get("visual_ok") is not True or not qc.valid_experiment_observations(events):
+        if not member:
             continue
-        mapping = row.get("experiment_output_frames") or []
-        for entry in events:
-            event = entry["event"]
-            if event not in qc.EXPERIMENT_OUTCOMES:
+        for n, sample in enumerate(experiment_output_frames(claim_frames[index]), 1):
+            if not sample or not 1 <= sample[0] <= len(member["parts"]):
                 continue
-            for n in entry["frames"]:
-                sample = mapping[n - 1] if n <= len(mapping) else None
-                if not sample or not 1 <= sample[0] <= len(member["parts"]):
-                    continue
-                part = sample[0]
-                if member["parts"][part - 1].get("experiment_phase") != event:
-                    continue
+            part = sample[0]
+            event = member["parts"][part - 1].get("experiment_phase")
+            if event in qc.EXPERIMENT_OUTCOMES:
                 targets.setdefault((local, part, event), set()).add(n)
                 images[local, n] = dict(claim_frames[index][n - 1], label=f"S{local:02d} P{part} F{n:02d}")
     if not targets:
@@ -492,7 +492,8 @@ def _inspect_experiment_outcomes(vision, claims, rows, claim_frames, directory, 
               "result只看提起离开后的纸巾本身，填clean_tissue、stained_tissue或uncertain。"
               "巾体上的液体不能当作提起纸巾上的液体；不清楚填uncertain。列出直接证明所见的全部帧号，"
               "描述对象、前后变化和遮挡。返回JSON对象，observations数组每项含sentence、part、event、"
-              "outcome、frames和observation。要看的组和各自提供的帧为：" + json.dumps([
+               "outcome、frames、observation和subject。subject按实际所见填pad_liquid、lifted_tissue或uncertain，"
+               "无法看清指定对象时outcome填uncertain。要看的组和各自提供的帧为：" + json.dumps([
                   [s, p, e, sorted(numbers)] for (s, p, e), numbers in sorted(targets.items())]))
     def validate(raw):
         data = raw if isinstance(raw, dict) else next((v for v in iter_json_values(raw) if isinstance(v, dict)), {})
@@ -507,6 +508,8 @@ def _inspect_experiment_outcomes(vision, claims, rows, claim_frames, directory, 
             numbers = fact.get("frames")
             if (type(key[0]) is not int or type(key[1]) is not int or not isinstance(key[2], str)
                     or key not in targets or key in seen or fact.get("outcome") not in qc.EXPERIMENT_OUTCOMES[key[2]]
+                    or fact.get("subject") not in (qc.OUTCOME_SUBJECT[key[2]], "uncertain")
+                    or (fact["outcome"] != "uncertain" and fact["subject"] != qc.OUTCOME_SUBJECT[key[2]])
                     or not isinstance(fact.get("observation"), str) or not fact["observation"].strip()
                     or not isinstance(numbers, list) or any(type(n) is not int or n not in targets[key] for n in numbers)
                     or numbers != sorted(set(numbers)) or (not numbers and fact["outcome"] != "uncertain")):
@@ -524,6 +527,109 @@ def _inspect_experiment_outcomes(vision, claims, rows, claim_frames, directory, 
     for fact in validate(raw):
         by_index.setdefault(claims[fact["sentence"] - 1]["index"], []).append(fact)
     return by_index
+
+
+def _ordered_cut_frames(frames):
+    # track.segments can be stored out of playback order. claim_rows supplies the order of physical cuts.
+    order = {slot: n for n, slot in enumerate(dict.fromkeys(f["draft_segment"] for f in frames))}
+    return sorted(frames, key=lambda f: (f.get("timeline_part", order[f["draft_segment"]]), f["timestamp"]))
+
+
+def _inspect_approved_show(vision, frames, directory, index, approval, ffmpeg):
+    ordered = _ordered_cut_frames(frames)
+    items = [dict(f, label=f"F{n:02d}") for n, f in enumerate(ordered, 1)]
+    sheet = directory / f"approved_show_{index:03d}.jpg"
+    if not items or not _prepare_media(vision._write_sheet, items, sheet, columns=min(4, len(items)),
+                                       tile_width=360, tile_height=674, fit=True, ffmpeg=ffmpeg):
+        return {}
+    prompt = ("只检查画面指定的展示，不评价口播。要看的展示为 " + json.dumps(approval["show"], ensure_ascii=False)
+              + '。独立辨认展示对象、动作和结果。输出JSON对象，state为visible、absent或uncertain，'
+                'main_product为布尔，说明是否属于前景主商品。frames为直接支持判读的F整数编号，observation写实际所见。')
+    def validate(raw):
+        data = raw if isinstance(raw, dict) else next((v for v in iter_json_values(raw) if isinstance(v, dict)), {})
+        if (data.get("state") not in {"visible", "absent", "uncertain"} or type(data.get("main_product")) is not bool
+                or not isinstance(data.get("observation"), str) or not data["observation"].strip()
+                or not isinstance(data.get("frames"), list)
+                or any(type(n) is not int or not 1 <= n <= len(items) for n in data["frames"])):
+            raise ValueError("APPROVED_SHOW_OBSERVATION_INVALID")
+        return data
+    remaining = _remaining_request_timeout()
+    if remaining <= 0:
+        return {}
+    ok, raw = vision._run_vision_with_retry(sheet, prompt, sheet.with_suffix(".json"), timeout=remaining,
+                                            max_retries=0, validator=validate)
+    if not ok:
+        return {}
+    data = validate(raw)
+    return {**data, "approval": approval, "cited_frames": [[ordered[n - 1]["draft_segment"],
+            round(ordered[n - 1]["timestamp"] * 1e6)] for n in data["frames"]]}
+
+
+def _inspect_paper_facts(vision, frames, directory, index, ffmpeg, *, read_labels=False):
+    """Observe only this sentence's final pixels without revealing expected quantities or copy."""
+    unique = {(f["draft_segment"], round(f["timestamp"] * 1e6)): f for f in _ordered_cut_frames(frames)}
+    ordered = list(unique)
+    items = [dict(unique[key], label=f"F{n:02d} cut {key[0]}") for n, key in enumerate(ordered, 1)]
+    sheet = directory / f"paper_facts_{index:03d}.jpg"
+    capture = {"frames": [list(k) for k in ordered], "facts": []}
+    if not items or not _prepare_media(vision._write_sheet, items, sheet, columns=min(4, len(items)),
+                                      tile_width=400, tile_height=710, fit=True, ffmpeg=ffmpeg):
+        return capture
+    prompt = ('只看本组按裁切与时间排序的实帧。只输出JSON对象。格式为 {"best_label_frame":null,"facts":'
+              '[{"kind":"readable_label","object_matches":true,"action_frame":1,"result_frame":1,'
+              '"label_text":"实际文字","result_observed":"实际看到的事实"}]}。'
+              'object_matches 只准用 true 或 false，表示事实是否属于本次主体商品，不能填物品名称。'
+              'kind 只准用 readable_label、counted_items、rub_unfold、wet_intact、visible_feature。'
+              '可见独立特征填visible_feature，feature可选soft_drape（轻捏或垂坠）、embossing（可见压花）、'
+              'stretch（拉伸形变），填result_clear布尔并描述具体可见变化或纹理。'
+              '帧号从1开始，属于本组的F整数。best_label_frame 填包装规格文字最容易看清的单帧号或null。'
+              '可读包装填 readable_label 和 label_text 原样抄字。实物计数填 counted_items、group（画面位置及所数的组合）、'
+              'unit、count、result_observed（这个时刻如何数清）。背景库存及之后手里加入的商品另记。'
+              '数不清或无法分组就省略。静态事实两帧号可相同。'
+              '揉搓后展开检查掉絮填 rub_unfold，湿纸提起或展开检查完整性填 wet_intact。'
+              '动作项额外填写布尔 action_complete（确见湿纸提起或揉后重新展开）、result_clear（确见结果）、'
+              'contrary_visible（纸面可见碎絮或湿纸已破）。写 action_observed 及 result_observed 描述先后实际情况。'
+              '动作跨切片还须填写 same_demonstration，说明是否确能认出同一张纸。'
+              '只看到揉搓、未展示结果或看不清时如实描述，禁止推测。')
+    def validate(raw):
+        value = raw if isinstance(raw, dict) else next((v for v in iter_json_values(raw) if isinstance(v, dict)), {})
+        if (not isinstance(value.get("facts"), list) or not all(
+                isinstance(f, dict) and type(f.get("object_matches")) is bool
+                and f.get("kind") in {"readable_label", "counted_items", "rub_unfold", "wet_intact", "visible_feature"}
+                and all(type(f.get(k)) is int and 1 <= f[k] <= len(items) for k in ("action_frame", "result_frame"))
+                and (f["kind"] not in {"rub_unfold", "wet_intact"} or
+                     all(type(f.get(k)) is bool for k in ("action_complete", "result_clear", "contrary_visible")))
+                for f in value["facts"])):
+            raise ValueError("PAPER_FACT_OBSERVATIONS_INVALID")
+        return value
+    timeout = _remaining_request_timeout()
+    if timeout > 0:
+        ok, raw = vision._run_vision_with_retry(sheet, prompt, directory / f"paper_facts_{index:03d}.json",
+                                                timeout=timeout, max_retries=1, validator=validate)
+        if ok:
+            answer = validate(raw)
+            capture["facts"] = answer["facts"]
+            number = answer.get("best_label_frame")
+            if read_labels and type(number) is int and 1 <= number <= len(items):
+                # Read the original full-size frame. The observer sees neither the claim nor the expected value.
+                def validate_label(raw):
+                    data = raw if isinstance(raw, dict) else next((v for v in iter_json_values(raw) if isinstance(v, dict)), {})
+                    if type(data.get("main_product")) is not bool or not isinstance(data.get("label_text"), str):
+                        raise ValueError("PAPER_LABEL_TRANSCRIPTION_INVALID")
+                    return data
+                prompt = ('仅抄录前景主商品自身纸品或包装上清晰可读的文字，尤其品名、原料、百分比、规格、层数、抽数和包数，'
+                          '用原图逐行查看。背景纸箱、其他商品和猜测不写。输出JSON对象 '
+                          '{"main_product":true,"label_text":"逐字抄录"}。无法定位主商品或读不到文字时写空串。')
+                remaining = _remaining_request_timeout()
+                if remaining > 0:
+                    ok, raw = vision._run_vision_with_retry(pathlib.Path(items[number - 1]["path"]), prompt,
+                        directory / f"paper_label_{index:03d}.json", timeout=remaining, max_retries=0, validator=validate_label)
+                    if ok:
+                        label = validate_label(raw)
+                        if label["main_product"] and label["label_text"].strip():
+                            capture["facts"].append({"kind": "readable_label", "object_matches": True, "action_frame": number,
+                                "result_frame": number, "label_text": label["label_text"], "result_observed": "主商品包装原帧可读标示"})
+    return capture
 
 
 def _inspect_member_stage(vision, frames, directory, index, ffmpeg):
@@ -787,9 +893,8 @@ def main() -> int:
                 if path not in bound:
                     result["source_bindings"].append({"path": path, "identity": _source_identity(path)})
                     bound.add(path)
-        result["segment_map"] = [
-            {"claim_index": claim["index"], "draft_segments": [row["index"] for row in rows]}
-            for claim, rows in claim_rows]
+        slots_by_claim = {claim["index"]: [r["index"] for r in rows] for claim, rows in claim_rows}
+        result["segment_map"] = [{"claim_index": i, "draft_segments": slots} for i, slots in slots_by_claim.items()]
         for claim in active_claims:
             rule = claim["scene_rule"]
             if rule.get("status") not in ("unmet", "partial"):
@@ -828,6 +933,7 @@ def main() -> int:
             expected_frames += len(plan)
             frames = claim_frames.setdefault(claim["index"], [])
             sampled_outputs = set()
+            part_order = {r["index"]: n for n, r in enumerate(rows)}
             for row, suffix, fraction in plan:
                 if not ffmpeg or not _is_file(pathlib.Path(row["source"])):
                     continue
@@ -858,7 +964,8 @@ def main() -> int:
                     "path": str(frame), "label": f"S{claim['index']:02d} {suffix}",
                     "shot_id": claim["shot_id"], "source_start": row["source_start"],
                     "source_end": row["source_start"] + row["source_duration"],
-                    "suffix": suffix, "timestamp": seconds, "draft_segment": row["index"], **output_evidence,
+                    "suffix": suffix, "timestamp": seconds, "draft_segment": row["index"],
+                    "timeline_part": part_order[row["index"]], **output_evidence,
                 }
                 frames.append(item)
                 frame_items.append(item)
@@ -891,6 +998,9 @@ def main() -> int:
                 bindings = {}
                 checkpoints = {}
                 request_errors = {}
+                physical_by_batch = {}
+                paper_observations = {}
+                approved_observations = {}
                 def prepare_batch(job):
                     batch_no, claims = job
                     items = [dict(item, label=(ai_editor_qc.blind_frame_label(local,frame_no,item) if ai_mode else f"S{local:02d} {item['suffix']}"))
@@ -904,8 +1014,8 @@ def main() -> int:
                     # those empty cells for a black end frame.  Keep the
                     # sheet dense so every visible tile is evidence.
                     chunk_columns = min(4, max(2, len(items)))
-                    paper_detail = ai_mode and any(c.get("category") == "zhipin" and re.search(
-                        r"层|抽数|[零一二两三四五六七八九十百千\d]+\s*(?:包|抽)|[%％]|百分之|毛絮|掉屑|湿水", c["claim"]) for c in claims)
+                    paper_detail = result["category"] == "zhipin" and any(
+                        ai_editor_contract.paper_claims.requirements(c["claim"]) for c in claims)
                     tile = ({"tile_width": 360, "tile_height": 674, "fit": True} if paper_detail else
                             {"tile_width": 420 if ai_mode else 260, "tile_height": 300 if ai_mode else 190})
                     if not vision_analyzer._write_sheet(items, chunk_sheet, columns=chunk_columns, **tile, ffmpeg=ffmpeg):
@@ -947,6 +1057,22 @@ def main() -> int:
 
                 def call_batch(job):
                     batch_no, (claims, chunk_sheet, prompt, response) = job
+                    if experiment_indices(claims):
+                        physical_by_batch[batch_no] = _inspect_experiment_outcomes(
+                            vision_analyzer, claims, claim_frames, report_dir, batch_no, ffmpeg)
+                    for claim in claims:
+                        if claim.get("approved_visual"):
+                            i = claim["index"]
+                            approved_observations[i] = _inspect_approved_show(
+                                vision_analyzer, claim_frames[i], report_dir, i, claim["approved_visual"], ffmpeg)
+                    if result["category"] == "zhipin":
+                        for claim in claims:
+                            if not claim.get("approved_visual") and ai_editor_contract.paper_claims.requirements(claim["claim"]):
+                                i = claim["index"]
+                                read_labels = any(f["kind"] in {"quantity", "composition"}
+                                                  for _, f in ai_editor_contract.paper_claims.requirements(claim["claim"]))
+                                paper_observations[i] = _inspect_paper_facts(
+                                    vision_analyzer, claim_frames[i], report_dir, i, ffmpeg, read_labels=read_labels)
                     cached = _load_batch_checkpoint(checkpoints[batch_no],
                         bindings[batch_no], len(claims), response_version, experiment_indices(claims))
                     if cached is not None:
@@ -1019,8 +1145,7 @@ def main() -> int:
                                                ai_editor_qc.experiment_output_frames(claim_frames[index])}
                                 model_rows[index] = raw_row
                         if experiment_indices(claims):
-                            physical = _inspect_experiment_outcomes(
-                                vision_analyzer, claims, model_rows, claim_frames, report_dir, batch_no, ffmpeg)
+                            physical = physical_by_batch.get(batch_no)
                             if physical is None:
                                 result["response_contract"]["errors"].append(f"B{batch_no:02d}:EXPERIMENT_PHYSICAL_CALL_FAILED")
                                 result["uncertified"] = True
@@ -1090,8 +1215,43 @@ def main() -> int:
                                         and row["match_level"] in {"DIRECT", "ACCEPTABLE_DEGRADED"}):
                                     row.update(match_level="INSUFFICIENT_EVIDENCE",
                                                reason="成稿帧及独立观察未共同确认倒液、可见吸收、纸巾接触提起和口播所需的纸面结果。")
+                                if ai_editor_qc.visual_qc_contract.experiment_outcomes_disputed(experiment, model_rows):
+                                    row["action_repair"] = "review"
                             else:
                                 row = ai_editor_qc.apply_tissue_press_gate(row, category=str(claim.get("category") or ""))
+                            if claim.get("approved_visual"):
+                                row["evidence_basis"] = "approved_presentation"
+                                index = claim["index"]
+                                segment = match_data["segments"][index - 1]
+                                slots = slots_by_claim[index]
+                                cuts = ai_editor_contract.paper_claims.selected_cut_bounds(segment, slots)
+                                capture = row["approved_show_evidence"] = approved_observations.get(index, {})
+                                visible = ai_editor_contract.sentence_visuals.presentation_visible(
+                                    claim["approved_visual"], capture, cuts, row.get("observed"))
+                                if row.get("approved_show_seen") is not True or not visible:
+                                    if row["match_level"] != "MISMATCH":
+                                        row.update(match_level="INSUFFICIENT_EVIDENCE", reason="成稿未确认本句获批准的实际展示。")
+                                    if visible or capture.get("state") != "absent" or row.get("approved_show_seen") is True:
+                                        row["action_repair"] = "review"
+                            elif result["category"] == "zhipin" and ai_editor_contract.paper_claims.requirements(claim["claim"]):
+                                index = claim["index"]
+                                capture = paper_observations.get(index, {})
+                                row["paper_output_evidence"] = capture
+                                slots = slots_by_claim[index]
+                                segment = match_data["segments"][index - 1]
+                                cuts = ai_editor_contract.paper_claims.selected_cut_bounds(segment, slots)
+                                covered, missing = ai_editor_contract.paper_claims.output_coverage(claim["claim"], capture, cuts)
+                                row["visible_paper_facts"], row["unverified_paper_facts"] = covered, missing
+                                if row["match_level"] == "MISMATCH":
+                                    if covered or not capture.get("facts"):
+                                        row["action_repair"] = "review"
+                                elif not covered:
+                                    # Disagreement or missing observations require rereading this cut.
+                                    # A jointly rejected, observable cut keeps its existing local refill path.
+                                    if row["match_level"] in {"DIRECT", "ACCEPTABLE_DEGRADED"} or not capture.get("facts"):
+                                        row["action_repair"] = "review"
+                                    row.update(match_level="INSUFFICIENT_EVIDENCE",
+                                               reason="本句成稿的独立观察未确认可读规格、可数的商品组或完整动作结果。")
                             row["visual_ok"] = row["match_level"] in {"DIRECT", "ACCEPTABLE_DEGRADED"}
                             visual_rows.append(row)
                             if row["match_level"] == "ACCEPTABLE_DEGRADED":

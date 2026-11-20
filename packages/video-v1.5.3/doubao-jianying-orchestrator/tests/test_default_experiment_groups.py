@@ -291,9 +291,9 @@ class DefaultExperimentGroupTests(unittest.TestCase):
                     "experiment_output_frames": [[1, 20]], "observed": "纸巾按压巾面"},
                 3: {"visual_ok": True, "visible_experiment_events": [event("lift", 1), event("result", 2, 3)],
                     "experiment_output_frames": [[1, 22], [2, 25], [2, 39]], "observed": "纸巾被提起，纸面干净"}}
-        rows[1]["physical_outcomes"] = [dict(part=2, event="absorb", outcome="receding", frames=[3, 4],
+        rows[1]["physical_outcomes"] = [dict(part=2, event="absorb", subject="pad_liquid", outcome="receding", frames=[3, 4],
                                             observation="可辨液面逐渐缩小")]
-        rows[3]["physical_outcomes"] = [dict(part=2, event="result", outcome="clean_tissue", frames=[2, 3],
+        rows[3]["physical_outcomes"] = [dict(part=2, event="result", subject="lifted_tissue", outcome="clean_tissue", frames=[2, 3],
                                             observation="提起的白纸表面清楚，没有液印")]
         for index, updates in [(1, {"outcome": "unchanged"}), (3, {"outcome": "stained_tissue"}),
                                (3, {"outcome": "uncertain"}), (3, {"frames": [1, 3]}), (3, {"frames": [2]})]:
@@ -352,17 +352,16 @@ class DefaultExperimentGroupTests(unittest.TestCase):
         for (_, label, fraction), tick in zip(plan, (1, 2)):
             self.assertAlmostEqual(cut["target_start"] + fraction * cut["target_duration"], tick / 30)
 
-    def test_physical_second_read_sees_only_selected_pixels_and_cannot_borrow_local_frames(self):
+    def test_blind_phase_review_sees_all_actual_frames_and_cannot_borrow_other_frames(self):
         from unittest.mock import MagicMock
         from orchestrator.quality import draft_visual_qc as qc
         vision = MagicMock()
         group = {"input": {"members": [{"index": 8, "parts": [{"experiment_phase": "absorb"}]}]}}
         claims = [{"index": 8, "claim": "private-narration", "ai_segment": {"continuity_group": group}}]
-        frames = {8: [{"path": f"original-{n}"} for n in (1, 2, 3)]}
-        rows = {8: {"visual_ok": True, "experiment_output_frames": [[1, 70], [1, 75], [1, 81]],
-                    "visible_experiment_events": [{"event": "absorb", "outcome": "receding", "frames": [1, 3]}]}}
+        frames = {8: [{"path": f"original-{n}", "suffix": f"p1_output{tick}"}
+                      for n, tick in enumerate((70, 75, 81), 1)]}
         fact = {"sentence": 1, "part": 1, "event": "absorb", "frames": [1, 3],
-                "outcome": "unchanged", "observation": "液面无明显变化"}
+                "subject": "pad_liquid", "outcome": "unchanged", "observation": "液面无明显变化"}
         def respond(sheet, prompt, output, *, validator, **kwargs):
             self.assertNotIn("private-narration", prompt)
             raw = json.dumps({"observations": [fact]})
@@ -370,13 +369,13 @@ class DefaultExperimentGroupTests(unittest.TestCase):
             return True, raw
         vision._run_vision_with_retry.side_effect = respond
         with patch.object(qc, "_prepare_media", side_effect=lambda fn, *a, **kw: fn(*a, **kw)):
-            outcome = qc._inspect_experiment_outcomes(vision, claims, rows, frames, self.root, 1, None)
+            outcome = qc._inspect_experiment_outcomes(vision, claims, frames, self.root, 1, None)
             self.assertEqual(outcome[8][0]["outcome"], "unchanged")
             shown = vision._write_sheet.call_args.args[0]
-            self.assertEqual([i["path"] for i in shown], ["original-1", "original-3"])
-            fact["frames"] = [1, 2]
+            self.assertEqual([i["path"] for i in shown], ["original-1", "original-2", "original-3"])
+            fact["frames"] = [1, 4]
             with self.assertRaisesRegex(ValueError, "PHYSICAL_FACT_INVALID"):
-                qc._inspect_experiment_outcomes(vision, claims, rows, frames, self.root, 1, None)
+                qc._inspect_experiment_outcomes(vision, claims, frames, self.root, 1, None)
 
     def test_first_missing_output_tick_retries_inside_the_same_physical_cut(self):
         from orchestrator.quality import draft_visual_qc as qc

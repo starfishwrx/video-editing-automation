@@ -353,7 +353,9 @@ class AIEditorTests(unittest.TestCase):
         for text, kind, number, end, accepted in samples:
             sentence = {**self.sentence, "text": text, "selling_points": [{"id": "p1", "text": text}]}
             fact = {"id": "p1", "kind": kind, "label_text": f"100抽{number}层", "object_matches": True,
-                    "action_seen": True, "result_seen": True, "result_observed": "实际展示的结果",
+                    "action_seen": True, "result_seen": True,
+                    "action_observed": "捏揉纸巾" if kind == "rub_unfold" else "从水里提起湿纸",
+                    "result_observed": "重新展开后表面未见毛絮" if kind == "rub_unfold" else "整张纸面完整",
                     "action_us": 2_000_000, "result_us": end}
             model = {**self.review, "scene_ids": [], "basis": "readable_label" if number else "visible_result",
                      "claim_checks": [fact]}
@@ -361,6 +363,31 @@ class AIEditorTests(unittest.TestCase):
                     mock.patch.object(editor, "_call", return_value=copy.deepcopy(model)):
                 result = editor._pixel_review(manifest, sentence, self.shot, self.root, prepared_media=media)
                 self.assertEqual(result["verdict"] == "matched", accepted)
+
+    def test_spoken_promotion_facts_and_approved_display_use_the_current_order(self):
+        from orchestrator.policy import paper_claims, sentence_visuals
+        spoken = "到手5大包400抽"
+        m = {"task_id": "sample", "category": "zhipin", "full_script": spoken, "product": "合成商品"}
+        approval = {"task_id": "sample", "product": m["product"], "script_sha256": sentence_visuals.script_digest(spoken),
+                    "index": 1, "text": spoken, "mode": "display", "show": "举起同款包装", "source": "编辑确认一"}
+        model = {"sentences": [{"index": 1, "kind": "hook", "selling_points": [], "scene_ids": [],
+                                "candidate_ids": ["handfeel"], "approved_visual": approval}], "display_pool_ids": []}
+        def first(current):
+            with mock.patch.object(editor, "_call", return_value=copy.deepcopy(model)):
+                return editor._inventory(current, [self.shot], self.root)[0]
+        row = first(m)
+        self.assertNotIn("approved_visual", row)
+        self.assertEqual([(f["unit"], f["value"]) for v in paper_claims.checks_by_id(row["selling_points"]).values()
+                          for f in v], [("包", 5), ("抽", 400)])
+        m["sentence_visual_approvals"] = [approval]
+        row = first(m)
+        self.assertEqual(row["approved_visual"], approval)
+        self.assertEqual(row["selling_points"], [{"id": "approved_visual", "text": approval["show"]}])
+        for key, value in [("task_id", "other"), ("product", "另一商品"), ("full_script", spoken + "。开箱")]:
+            self.assertIsNone(sentence_visuals.approved({**m, key: value}, 1, spoken))
+        self.assertIsNone(sentence_visuals.approved(m, 2, spoken))
+        with self.assertRaisesRegex(ValueError, "AMBIGUOUS"):
+            sentence_visuals.approved({**m, "sentence_visual_approvals": [approval, approval]}, 1, spoken)
 
     def test_paper_combined_claims_keep_unobserved_dimensions_and_bind_to_displayed_time(self):
         from orchestrator.policy import paper_claims
@@ -389,7 +416,8 @@ class AIEditorTests(unittest.TestCase):
             self.assertFalse(paper_claims.sampled_fact(layer, {**legacy, "result_observed": words},
                                                        actual, basis="readable_label")[1])
         targets = [f for _, f in paper_claims.requirements(source[0]["text"])]
-        _, covered = paper_claims.sampled_fact(targets, {**fact, "kind": "counted_items", "count": 5, "unit": "包"}, actual)
+        _, covered = paper_claims.sampled_fact(targets, {**fact, "kind": "counted_items", "count": 5, "unit": "包",
+                                                        "group": "前排陈列", "result_observed": "前排共五包"}, actual)
         self.assertEqual(covered, [0])
 
     def test_paper_ingredient_percentage_requires_the_same_readable_material(self):

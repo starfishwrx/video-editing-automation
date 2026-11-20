@@ -77,6 +77,10 @@ def prompt(claims: list[dict], frame_count: int) -> str:
     mapping = "\n".join(f"S{i:02d}: 商品={c.get('product', '')}；口播={c['claim']}；建议用途={c.get('sentence_kind', '')}；物理片段数={c.get('slots', 1)}"
                         for i, c in enumerate(claims, 1))
     for i, claim in enumerate(claims, 1):
+        if claim.get("approved_visual"):
+            from ..policy import sentence_visuals
+            mapping += f"\nS{i:02d} " + sentence_visuals.goal(claim["approved_visual"])
+            mapping += ' 本句另填 approved_show_seen 布尔值和 observed，说明具体看见什么。'
         phases = _action_phases(claim)
         goals = list(dict.fromkeys(p['action'] for p in phases if isinstance(p, dict) and p.get('action')))
         intended = {

@@ -279,6 +279,7 @@ def prepare_product(task: dict, product_dir: Path, env: dict) -> str:
 
 
 def run_task(task: dict, stage: str, env: dict, work: Path) -> dict:
+    env = dict(env, JY_FIRST_PASS_COHORT=str(task.get("_dispatch_first_pass_cohort") or ""))
     task = {key: value for key, value in task.items() if not key.startswith("_dispatch_")}
     task_dir = work / task["record_id"]
     task_dir.mkdir(parents=True, exist_ok=True)
@@ -386,6 +387,20 @@ def dispatch(tasks: list[dict], *, work: Path, policy: RuntimePolicy | None = No
         submitted_files = set()
         spool_blocked = False
         run_file = work / "dispatch_runs" / (str(time.time_ns()) + "-" + uuid.uuid4().hex[:8] + ".json")
+        from tools import first_pass
+        cohort_path = work / "first_pass_cohorts" / run_file.name
+        enrolled = []
+        for task in unique:
+            previous = _read(work / task["record_id"] / "done.json")
+            retained_cohort = first_pass.recovered_cohort(task, previous)
+            task["_dispatch_first_pass_cohort"] = retained_cohort or run_file.stem
+            if retained_cohort:
+                continue
+            enrolled.append({"record_id": task["record_id"], "task_id": task.get("task_id") or task["record_id"],
+                             "category": task.get("category"), "first_pass_cohort_id": run_file.stem,
+                             "script_sha256": first_pass.revision(str(task.get("script") or ""))})
+        if enrolled:
+            atomic_write_text(cohort_path, json.dumps({"tasks": enrolled}, ensure_ascii=False, indent=2))
         atomic_write_text(run_file, json.dumps({"policy": policy.to_dict(),
             "started_at": started_at, "finished_at": None, "results": []}, indent=2))
 

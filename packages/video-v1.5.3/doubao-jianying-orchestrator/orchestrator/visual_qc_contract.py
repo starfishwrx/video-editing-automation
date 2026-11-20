@@ -151,7 +151,8 @@ def bound_selection(report):
     return segments
 
 
-EXPERIMENT_OUTCOME_PROTOCOL = "cut-outcomes-v1"
+EXPERIMENT_OUTCOME_PROTOCOL = "cut-outcomes-v2"
+OUTCOME_SUBJECT = {"absorb": "pad_liquid", "result": "lifted_tissue"}
 EXPERIMENT_OUTCOMES = {
     "absorb": ("receding", "unchanged", "uncertain"),
     "result": ("clean_tissue", "stained_tissue", "uncertain"),
@@ -183,15 +184,32 @@ def _stained_result_supported(members):
 def _opposes_outcome(fact, outcome):
     # Only an explicit observation about this object can contradict the typed result.
     if outcome == "receding":
-        return bool(re.search(r"(?:液面|液体|水渍)(?:仍然|仍|始终|持续)?(?:保持原状|没有变化|未见变化)"
+        return bool(re.search(r"(?:液面|液体|积液|水渍)(?:前后|仍然|仍|始终|持续|表面)*(?:保持原状|没有变化|未见变化|(?:没有|未见|未能|不见)(?:发生|明显|显著)*(?:区别|变化|减少|变少|消退|吸收))"
                               r"|未见(?:液体)?明显(?:扩散或消失|减少|吸收)", fact))
     if outcome == "clean_tissue":
         return bool(re.search(r"(?:纸巾|纸面|白纸)(?:上|表面|本身|明显|清楚|可见|仍|有|着|呈现|出现|沾有|沾染|残留|留有|的|"
                               r"少量|少许|一点点?|一小(?:片|块)|一片|几滴|些许|浅|淡)*"
-                              r"(?:蓝色液体|蓝色湿痕|蓝色水迹|水渍|湿痕|液渍)", fact))
+                              r"(?:(?:蓝|红|黄|绿|紫|褐|有|无)色(?:的)?(?:液体|湿痕|水迹|液渍)|液体|水渍|水迹|湿痕|液渍|湿了|湿润|变湿|沾湿)", fact))
     if outcome == "stained_tissue":
         return bool(re.search(r"(?:纸巾|纸面|白纸)(?:上|表面|本身|仍然|保持|看起来|仍|很|是|完全)*"
                               r"(?:干燥|干净|未见湿痕|没有沾液)", fact))
+    return False
+
+
+def experiment_outcomes_disputed(group, rows):
+    """Uncertain or conflicting readings require another look at the same draft."""
+    for member in group["input"]["members"]:
+        row = rows.get(member["index"]) or {}
+        for event in row.get("visible_experiment_events") or []:
+            if not isinstance(event, dict) or event.get("event") not in EXPERIMENT_OUTCOMES:
+                continue
+            outcome = event.get("outcome")
+            facts = [f for f in row.get("physical_outcomes") or [] if isinstance(f, dict)
+                     and f.get("event") == event["event"] and set(f.get("frames") or []).intersection(event.get("frames") or [])]
+            if (outcome == "uncertain" or not facts or _opposes_outcome(str(row.get("observed") or ""), outcome)
+                    or any(f.get("outcome") != outcome or _opposes_outcome(str(f.get("observation") or ""), outcome)
+                           for f in facts)):
+                return True
     return False
 
 
@@ -228,7 +246,8 @@ def group_events_visible(group, model_rows):
                 if event in EXPERIMENT_OUTCOMES:
                     facts = [fact for fact in row.get("physical_outcomes", []) if isinstance(fact, dict)
                              and fact.get("part") == sample[0] and fact.get("event") == event]
-                    if (len(facts) != 1 or facts[0].get("outcome") != entry["outcome"]
+                    if (len(facts) != 1 or facts[0].get("subject") != OUTCOME_SUBJECT[event]
+                            or facts[0].get("outcome") != entry["outcome"]
                             or not isinstance(facts[0].get("observation"), str) or not facts[0]["observation"].strip()
                             or _opposes_outcome(facts[0]["observation"], entry["outcome"])):
                         return False
@@ -426,7 +445,10 @@ def report_status(report: Any, *, report_dir=None, manifest=None) -> str:
     """
     try:
         status = _report_status(report)
-        if status not in {"PASS", "PASS_WITH_DEGRADED", "PASS_WITH_GAPS"} or report.get("version") == AI_REPORT_VERSION:
+        if status not in {"PASS", "PASS_WITH_DEGRADED", "PASS_WITH_GAPS"}:
+            return status
+        ai_mode = report.get("version") == AI_REPORT_VERSION
+        if ai_mode and not (report_dir or manifest):
             return status
         # Historical rule-only reports did not bind category or experiment cuts.
         # Recover those facts from the retained selection and task before accepting one.
@@ -434,11 +456,36 @@ def report_status(report: Any, *, report_dir=None, manifest=None) -> str:
         path = Path(report_dir) / "shot_match_report.json" if report_dir else None
         if path and path.is_file():
             match = json.loads(path.read_text(encoding="utf-8-sig"))
-        scope = {**(manifest or {}), **(match.get("manifest") or {})}
-        rows = match.get("segments") or scope.get("segments") or report.get("model_review") or []
+        current = manifest or {}
+        scope = {**(match.get("manifest") or {}), **(current.get("manifest") or {}), **current}
+        if manifest and (current.get("script") or current.get("full_script")):
+            scoped = current.get("manifest") or {}
+            scope["sentence_visual_approvals"] = current.get("sentence_visual_approvals", scoped.get("sentence_visual_approvals", []))
+        if manifest and (manifest.get("script") or manifest.get("full_script")):
+            scope["full_script"] = manifest.get("script") or manifest["full_script"]
+        segments = bound_selection(report) if ai_mode else match.get("segments") or []
+        contract = _ai_contract()
+        if any(s.get("approved_visual") for s in segments) or scope.get("sentence_visual_approvals"):
+            for index, seg in enumerate(segments, 1):
+                text = seg.get("claim_text") or seg.get("text") or ""
+                if contract.sentence_visuals.approved(scope, index, text) != seg.get("approved_visual"):
+                    return "UNCERTIFIED"
+        if ai_mode:
+            return status
+        rows = segments or scope.get("segments") or report.get("model_review") or []
         declared = [{"text": r.get("claim") or r.get("text") or ""} for r in rows if isinstance(r, dict)]
         scope.setdefault("category", report.get("category"))
         scope.setdefault("segments", declared)
+        if contract.rules_identity(scope)["category"] == "zhipin":
+            mapping = {m["claim_index"]: m["draft_segments"] for m in report.get("segment_map") or []}
+            for row in report.get("model_review") or []:
+                index = row["index"]
+                segment = segments[index - 1] if type(index) is int and 1 <= index <= len(segments) else {}
+                spoken = segment.get("claim_text") or segment.get("text") or row.get("claim") or ""
+                if contract.paper_claims.requirements(spoken):
+                    cuts = contract.paper_claims.selected_cut_bounds(segment, mapping.get(index, []))
+                    if not contract.paper_claims.output_coverage(spoken, row.get("paper_output_evidence"), cuts)[0]:
+                        return "UNCERTIFIED"
         if scope.get("full_script"):
             rows = [*rows, {"text": scope["full_script"]}]
         if _ai_contract().unverified_absorption_indices(scope, rows, allow_reviewed=False):
@@ -518,6 +565,25 @@ def _report_status(report: Any) -> str:
                 or any(row.get("confidence", 0) < .6 for row in rows)):
             return "UNCERTIFIED"
         segments = bound_selection(report)
+        mapping = {m["claim_index"]: m["draft_segments"] for m in report.get("segment_map") or []}
+        paper = _ai_contract().paper_claims
+        for row in rows:
+            index = row["index"]
+            if type(index) is not int or not 1 <= index <= len(segments):
+                return "UNCERTIFIED"
+            segment = segments[index - 1]
+            spoken = segment.get("claim_text") or segment.get("text") or ""
+            if segment.get("approved_visual"):
+                cuts = paper.selected_cut_bounds(segment, mapping.get(index, []))
+                if (row.get("evidence_basis") != "approved_presentation" or row.get("approved_show_seen") is not True
+                        or not _ai_contract().sentence_visuals.presentation_visible(segment["approved_visual"],
+                              row.get("approved_show_evidence"), cuts, row.get("observed"))):
+                    return "UNCERTIFIED"
+            elif report["editorial_rules"].get("category") == "zhipin" and paper.requirements(spoken):
+                cuts = paper.selected_cut_bounds(segment, mapping.get(index, []))
+                covered, _ = paper.output_coverage(spoken, row.get("paper_output_evidence"), cuts)
+                if not covered:
+                    return "UNCERTIFIED"
         if (_ai_contract().unverified_absorption_indices(report["editorial_rules"], segments)
                 or experiment_selection_errors(segments, rows) or presentation_selection_errors(segments, rows)):
             return 'UNCERTIFIED'

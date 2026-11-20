@@ -21,7 +21,7 @@ POINT_COVERAGE_POLICY = "at_least_one_specific_point"
 KINDS = {"selling_point", "product_intro", "hook"}
 BASES = {"editorial_fit", "visible_result", "readable_label", "product_display"}
 if __package__:
-    from .policy import playback, continuity, presentation
+    from .policy import playback, continuity, presentation, paper_claims, sentence_visuals
 else:
     _playback_spec = importlib.util.spec_from_file_location(
         "_chatcut_playback", Path(__file__).parent / "policy" / "playback.py")
@@ -35,9 +35,19 @@ else:
         "_chatcut_presentation", Path(__file__).parent / "policy" / "presentation.py")
     presentation = importlib.util.module_from_spec(_presentation_spec)
     _presentation_spec.loader.exec_module(presentation)
+    _paper_spec = importlib.util.spec_from_file_location(
+        "_chatcut_paper_claims", Path(__file__).parent / "policy" / "paper_claims.py")
+    paper_claims = importlib.util.module_from_spec(_paper_spec)
+    _paper_spec.loader.exec_module(paper_claims)
+    _approval_spec = importlib.util.spec_from_file_location(
+        "_chatcut_sentence_visuals", Path(__file__).parent / "policy" / "sentence_visuals.py")
+    sentence_visuals = importlib.util.module_from_spec(_approval_spec)
+    _approval_spec.loader.exec_module(sentence_visuals)
 AI_SPEED_MAX = playback.PROCESS_MAX
 POLICY = """先通读整稿，先安排具体卖点，再安排产品介绍和无具体卖点的钩子/衔接。
 全稿每一句按实际内容分类。开头、中段或结尾纯招呼、设问、吊胃口且没有本品具体卖点，标为hook；问句含本品具体卖点仍是selling_point。一句多个卖点至少实际呈现一个具体点，未覆盖项如实记录，不能声称全部已证实。
+短招呼在原配音时长内可从已露出的同款商品起剪。品牌句找能看清标识的包装，外观句看正面，使用句看本体。相邻两句要求不同画面时各自检查。
+带 approved_visual 的原句按本单批准的具体展示挑镜和验收，口播保持原文。只有实际看见该展示才可通过，展示和实测分别记录。
 轻薄、柔软、舒服允许能体现特点的真实展示，不强制实验或固定厚度对照。
 明确性能结果、数值或比较必须有对应可见画面，包装文字只支持该标称。
 卫品口播里的层数或结构名称如果说的是瞬吸、吸收、下渗，看得见倒液之后的吸收过程或结果就是这句证据，不要求切开看到内部层数。没有吸收过程的包装和静态陈列仍然不能证明。
@@ -108,6 +118,7 @@ def unverified_absorption_indices(manifest, segments, *, allow_reviewed=True):
             continue
         receipt = row.get("ai_selection") or {}
         role = rules.absorption_experiment_role({"text": row.get("text") or row.get("claim") or row.get("claim_text"),
+                                                "approved_visual": row.get("approved_visual"),
                                                 "scene_ids": receipt.get("sentence_scene_ids")})
         group = row.get("continuity_group")
         if role not in {"absorption", "rewet"} and (row.get("scene_rule") or {}).get("id") != "absorb_test" and not continuity.is_experiment(group):

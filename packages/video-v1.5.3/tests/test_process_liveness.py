@@ -110,6 +110,13 @@ class ProcessLivenessTests(unittest.TestCase):
                     patch("os.kill", side_effect=AssertionError("status check sent a signal")):
                 batch_worker._write_status_snapshot()
                 self.assertEqual(json.loads(snapshot.read_text(encoding="utf8"))["tasks"]["record"]["state"], "RUNNING")
+                for kind in ("draft_written", "draft_qc"):
+                    with progress.open("a", encoding="utf8") as stream:
+                        stream.write(json.dumps({"record_id": "record", "event": kind, "run_id": "new",
+                                                 "ts": "2026-01-02 00:00:01"}) + "\n")
+                    batch_worker._write_status_snapshot()
+                    row = json.loads(snapshot.read_text(encoding="utf8"))["tasks"]["record"]
+                    self.assertEqual((row["state"], row["run_id"], row["terminal_state"]), ("RUNNING", "new", None))
                 (task / ".task_run.lock").unlink()
                 batch_worker._write_status_snapshot()
                 self.assertEqual(json.loads(snapshot.read_text(encoding="utf8"))["tasks"]["record"]["state"], "ERROR")

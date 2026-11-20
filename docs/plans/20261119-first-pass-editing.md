@@ -50,3 +50,17 @@ Sol 把卫品的提纸镜头往前移，让观众看到纸巾从按住到离面�
 - **无人正式交付率** = 在既定预算内全自动完成质检通过、共享盘核验和飞书回读的单数 ÷ 入批单数。允许系统自行局部修复。派单后新增单条批复、人工挑镜或写临时脚本均记为人工介入。另报误放、误拦、每单调用数和耗时。
 
 盲审认定画面不足、机器却放行的单计为误放。盲审通过、机器却退回的单计为误拦。保留首次判定和每次局部修复的记录，才能区分改进发生在选镜、质检还是交付。
+
+## 2026-11-20 实施与使用
+
+逐单展示批复可放在队列任务的 `sentence_visual_approvals`，也可直接放在剪辑 manifest 同名字段。每项包含 `task_id`、`product`、`script_sha256`、从 1 起算的 `index`、逐字原句 `text`、`mode`、实际要看到的 `show` 和可追溯的批复出处 `source`。整稿摘要取去首尾空白后原文的 UTF-8 SHA-256。普通指定展示填 `display`，指定吸水实拍填 `absorption`。例如一条获准用包装承接重量的句子，`show` 可写“手持本商品包装，正面可见”。不同订单、不同商品或改版后的文案需与自己的批复匹配。具体重量是否有测量证据独立记录。
+
+在安装包根目录运行以下命令。调度器在 work/first_pass_cohorts 为每次派单保存一份带唯一批次标识的 enrolled 快照，记录订单、品类和整稿摘要。同一订单不同派单可以分别核对。将下例的文件名替换为要统计的快照。
+
+```powershell
+python -m tools.first_pass --queue work/first_pass_cohorts/enrolled.json --work work --reviews blind_reviews.json
+```
+
+盲审文件以 `record_id` 为键。每项填入 `first_pass_cohort_id`、`batch_id`、`script_sha256`、首稿 `draft_metadata_sha256`、`blind`（PASS 或 FAIL）和 `manual_before_first`。交付审核再填 `delivery_run_id` 和 `manual_before_delivery`。已有覆盖该单全程的调用账时可填 `model_calls` 与 `call_count_source`，缺账显示为空。逐类输出首稿机器放行、首稿盲审通过、误放、误拦、待审和无人正式交付。无人交付需对上该次运行的各份草稿质检、分发及飞书回读。历史日志缺首稿身份时仍保留在入批分母中。
+
+在两份既有纸品成稿上，用不含原口播和旧结论的观察重看了五包与揉搓结果。两项旧报告都曾判直接支持，当前实际切片需要复核。另一份已知可用稿的原料标示、三层标示和湿纸完整三处，独立观察均在实际切片中找到对应证据。这是五段成稿的对照。新批次的首稿业务通过率另由同口径盲审统计。
