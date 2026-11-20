@@ -235,6 +235,19 @@ class BatchDispatchTests(unittest.TestCase):
                           preparer=lambda *args: "shared.json", runner=run)
         self.assertEqual(ran, [("q1", "qc"), ("q2", "qc"), ("b1", "build"), ("b2", "build")])
 
+    def test_enrollment_survives_a_pre_worker_failure_and_changes_for_new_copy(self):
+        task = {"record_id": "r", "script": "original", "title": "demo"}
+        run = mock.Mock(return_value={"status": "OK"})
+        with patch.object(dispatch, "_production_preflight", return_value={"ready": False, "runtime": {}}):
+            dispatch.dispatch([task], work=self.root, policy=self.policy, preparer=lambda *a: "analysis", runner=run)
+        run.assert_not_called()
+        saved = json.loads((self.root / "first_pass_cohorts" / "active.json").read_text(encoding="utf8"))["r"]["cohort"]
+        dispatch.dispatch([task], work=self.root, policy=self.policy, preparer=lambda *a: "analysis", runner=run)
+        self.assertEqual(run.call_args.args[0]["_dispatch_first_pass_cohort"], saved)
+        dispatch.dispatch([{**task, "script": "changed"}], work=self.root, policy=self.policy,
+                          preparer=lambda *a: "analysis", runner=run)
+        self.assertNotEqual(run.call_args.args[0]["_dispatch_first_pass_cohort"], saved)
+
     def test_second_entry_remains_retryable_while_supervisor_is_busy(self):
         Path(self.policy.slot_dir).mkdir(parents=True, exist_ok=True)
         with file_lock(Path(self.policy.slot_dir) / "batch_dispatch", timeout=0):

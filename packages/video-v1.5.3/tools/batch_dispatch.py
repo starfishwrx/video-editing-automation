@@ -357,8 +357,15 @@ def dispatch(tasks: list[dict], *, work: Path, policy: RuntimePolicy | None = No
             task["record_id"] = rid
             task["_dispatch_admitted_clock"] = started_clock
             task["_dispatch_wait_origin"] = "supervisor_admission"
+            previous = _read(work / rid / "done.json")
+            if previous and task.get("script"):
+                original = _read(work / rid / "task.json").get("script")
+                from tools import first_pass
+                old_digest = previous.get("first_pass_script_sha256") or (first_pass.revision(original) if original else None)
+                if old_digest and old_digest != first_pass.revision(task["script"]):
+                    task["force_rebuild"] = True
             unique.append(task)
-    pending = [(task, resume_stage if resume_stage in {"qc", "delivery"} else
+    pending = [(task, "build" if task.get("force_rebuild") else resume_stage if resume_stage in {"qc", "delivery"} else
                 "qc" if not resume_stage and _qc_pending(task, work) else "build") for task in unique]
     pending.sort(key=lambda job: 0 if job[1] == "qc" else 1)  # stable FIFO
     if dry_run:
@@ -390,17 +397,30 @@ def dispatch(tasks: list[dict], *, work: Path, policy: RuntimePolicy | None = No
         from tools import first_pass
         cohort_path = work / "first_pass_cohorts" / run_file.name
         enrolled = []
+        bindings_path = work / "first_pass_cohorts" / "active.json"
+        bindings = _read(bindings_path)
         for task in unique:
             previous = _read(work / task["record_id"] / "done.json")
+            rid = task["record_id"]
+            revision = first_pass.revision(str(task.get("script") or ""))
+            identity = {"record_id": rid, "task_id": task.get("task_id") or rid, "product": task.get("product"),
+                        "script_sha256": revision, "business_batch": task.get("batch_id") or task.get("batch_identity")}
+            saved = bindings.get(rid) or {}
             retained_cohort = first_pass.recovered_cohort(task, previous)
-            task["_dispatch_first_pass_cohort"] = retained_cohort or run_file.stem
-            if retained_cohort:
+            if (not retained_cohort and saved.get("identity") == identity and not task.get("force_rebuild")
+                    and not (previous.get("first_pass_cohort_id") == saved.get("cohort") and previous.get("terminal_state") == "DELIVERED")):
+                retained_cohort = saved.get("cohort")
+            if (not retained_cohort and not task.get("force_rebuild") and not resume_stage
+                    and previous.get("terminal_state") == "DELIVERED" and formal_delivery_count(previous) >= max(1, int(task.get("count") or 1))):
                 continue
-            enrolled.append({"record_id": task["record_id"], "task_id": task.get("task_id") or task["record_id"],
-                             "category": task.get("category"), "first_pass_cohort_id": run_file.stem,
-                             "script_sha256": first_pass.revision(str(task.get("script") or ""))})
+            cohort = retained_cohort or run_file.stem
+            task["_dispatch_first_pass_cohort"] = cohort
+            bindings[rid] = {"identity": identity, "cohort": cohort}
+            if not retained_cohort:
+                enrolled.append({**identity, "category": task.get("category"), "first_pass_cohort_id": cohort})
         if enrolled:
             atomic_write_text(cohort_path, json.dumps({"tasks": enrolled}, ensure_ascii=False, indent=2))
+        atomic_write_text(bindings_path, json.dumps(bindings, ensure_ascii=False))
         atomic_write_text(run_file, json.dumps({"policy": policy.to_dict(),
             "started_at": started_at, "finished_at": None, "results": []}, indent=2))
 
@@ -481,7 +501,7 @@ def dispatch(tasks: list[dict], *, work: Path, policy: RuntimePolicy | None = No
                     requested_stage = task.get("_dispatch_resume_stage") or resume_stage
                     if not requested_stage:
                         previous = _read(task_work / task["record_id"] / "done.json")
-                        if formal_delivery_count(previous) >= max(1, int(task.get("count") or 1)):
+                        if not task.get("force_rebuild") and formal_delivery_count(previous) >= max(1, int(task.get("count") or 1)):
                             pending.remove((task, stage))
                             record({"record_id": task["record_id"], "status": "ALREADY_DELIVERED",
                                     "stage": "complete", "formal_deliveries": 0})

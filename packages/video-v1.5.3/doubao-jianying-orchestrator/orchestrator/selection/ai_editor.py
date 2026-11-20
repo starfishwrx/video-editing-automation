@@ -296,7 +296,8 @@ def _inventory(manifest: dict, shots: list[dict], directory: Path) -> list[dict]
                                 for i, s in enumerate(rows, 1)],
         "sentences": [{"index": i, "text": timing_contract.sentence_text(s),
                        "notes": shot_notes.note_for(manifest, i, s) or s.get("visual_requirements"),
-                       "approved_visual": sentence_visuals.approved(manifest, i, timing_contract.sentence_text(s))}
+                       "approved_visual": {k: v for k, v in (sentence_visuals.approved(
+                           manifest, i, timing_contract.sentence_text(s)) or {}).items() if k in {"mode", "show"}}}
                       for i, s in sentence_rows],
         "catalog": catalog}, ensure_ascii=False) + """
 输出JSON对象 {"sentences":[{"index":1,"kind":"selling_point|product_intro|hook",

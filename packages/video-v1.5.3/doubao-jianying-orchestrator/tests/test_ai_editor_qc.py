@@ -175,6 +175,10 @@ class AIEditorQCIntegrationTests(unittest.TestCase):
             code, report = self.run_qc()
         self.assertEqual((code, report["status"]), (0, "PASS"), report.get("issues"))
         self.assertEqual(visual_qc_contract.report_status(report), "PASS")
+        report["model_review"][0]["observed"] = "同一时刻货架前排共六包"
+        self.assertEqual(visual_qc_contract.report_status(report), "UNCERTIFIED")
+        report["model_review"][0]["observed"] = "最初前排共五包，随后又拿入一包"
+        self.assertEqual(visual_qc_contract.report_status(report), "PASS")
         report["model_review"][0]["paper_output_evidence"]["frames"][0][0] = 2
         self.assertEqual(visual_qc_contract.report_status(report), "UNCERTIFIED")
         self.assertFalse(paper_claims.confirms({"kind": "rub_unfold"}, {"kind": "rub_unfold", "action_us": 1,

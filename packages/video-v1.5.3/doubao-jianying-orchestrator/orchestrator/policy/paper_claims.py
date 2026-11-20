@@ -290,6 +290,30 @@ def output_coverage(spoken, evidence, cuts):
     return verified, [r for r in required if r not in verified]
 
 
+def count_disputed(covered, observation):
+    """Keep physical subgroup counts distinct from later additions and background inventory."""
+    for req in covered:
+        if req.get("kind") != "quantity" or req["unit"] != "包":
+            continue
+        other_scope = False
+        for clause in re.split(r"[。；;，,]", str(observation or "")):
+            if re.search(r"随后|后来|之后|另(?:外|一组)|背景|库存|远处|后排", clause):
+                other_scope = True
+            if re.search(r"同一时刻|目标组|起初|开头|最初|前景|前排", clause):
+                other_scope = False
+            if other_scope:
+                continue
+            counts = [(_number(m[1]), m) for m in _SPEC.finditer(clause) if m[2] == req["unit"]]
+            for number, match in counts:
+                if number == req["value"]:
+                    continue
+                if (number < req["value"] and re.search(r"底层|上层|中层|下层|第一排|第二排", clause)
+                        and not re.search(r"共|总|合计", clause[:match.start()])):
+                    continue
+                return True
+    return False
+
+
 def selected_cut_bounds(segment, slots):
     parts = segment.get("span_parts") if segment.get("multi_shot") else [segment]
     if not isinstance(parts, list) or len(parts) != len(slots):

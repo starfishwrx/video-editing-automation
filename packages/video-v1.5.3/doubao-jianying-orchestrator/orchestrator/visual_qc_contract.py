@@ -184,6 +184,19 @@ def _stained_result_supported(members):
 def _opposes_outcome(fact, outcome):
     # Only an explicit observation about this object can contradict the typed result.
     if outcome == "receding":
+        # A description may establish the liquid as subject in one clause and
+        # state the comparison in the next. Preserve that scope up to a new subject.
+        for sentence in re.split(r"[。！？;；\n]", fact):
+            subject = None
+            for clause in re.split(r"[,，]", sentence):
+                if re.search(r"液体|液面|积液|水渍|水量|水迹|水位", clause):
+                    subject = "liquid"
+                elif re.search(r"纸巾|纸面|白纸|包装|手指", clause):
+                    subject = "other"
+                if subject == "liquid" and re.search(
+                        r"(?:没有|未见|并未|未能|看不出|无法确认|看不到)(?:发生|明显|显著|明显的|任何)*"
+                        r"(?:减少|变少|消退|变化|区别|下降|被吸收)", clause):
+                    return True
         return bool(re.search(r"(?:液面|液体|积液|水渍)(?:前后|仍然|仍|始终|持续|表面)*(?:保持原状|没有变化|未见变化|(?:没有|未见|未能|不见)(?:发生|明显|显著)*(?:区别|变化|减少|变少|消退|吸收))"
                               r"|未见(?:液体)?明显(?:扩散或消失|减少|吸收)", fact))
     if outcome == "clean_tissue":
@@ -582,7 +595,7 @@ def _report_status(report: Any) -> str:
             elif report["editorial_rules"].get("category") == "zhipin" and paper.requirements(spoken):
                 cuts = paper.selected_cut_bounds(segment, mapping.get(index, []))
                 covered, _ = paper.output_coverage(spoken, row.get("paper_output_evidence"), cuts)
-                if not covered:
+                if not covered or paper.count_disputed(covered, row.get("observed")):
                     return "UNCERTIFIED"
         if (_ai_contract().unverified_absorption_indices(report["editorial_rules"], segments)
                 or experiment_selection_errors(segments, rows) or presentation_selection_errors(segments, rows)):

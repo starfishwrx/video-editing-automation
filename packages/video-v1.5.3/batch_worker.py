@@ -1901,6 +1901,7 @@ def process_task(task: dict, *, retry_partial: bool = False,
 
             rd = tdir / "report" / (name if i == 1 else "report_%d" % i)
             draft_ok = False
+            qc_result = None
             last_failure = None
             from tools.workflow import selection_recovery
             # Restore uses the same per-draft controls that the build freezes.

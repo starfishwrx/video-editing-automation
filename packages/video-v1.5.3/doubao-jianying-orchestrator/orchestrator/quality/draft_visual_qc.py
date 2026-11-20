@@ -1242,7 +1242,10 @@ def main() -> int:
                                 cuts = ai_editor_contract.paper_claims.selected_cut_bounds(segment, slots)
                                 covered, missing = ai_editor_contract.paper_claims.output_coverage(claim["claim"], capture, cuts)
                                 row["visible_paper_facts"], row["unverified_paper_facts"] = covered, missing
-                                if row["match_level"] == "MISMATCH":
+                                if ai_editor_contract.paper_claims.count_disputed(covered, row.get("observed")):
+                                    row.update(match_level="INSUFFICIENT_EVIDENCE", action_repair="review",
+                                               reason="独立计数和本句对所见商品组的描述不一致，须复看同稿。")
+                                elif row["match_level"] == "MISMATCH":
                                     if covered or not capture.get("facts"):
                                         row["action_repair"] = "review"
                                 elif not covered:

@@ -318,6 +318,11 @@ class DefaultExperimentGroupTests(unittest.TestCase):
         for observation in ("纸面未见蓝色液体", "纸巾上没有水渍", "巾体表面有少量蓝色液体"):
             conflicted[3]["observed"] = "手指提起这张纸巾，" + observation
             self.assertTrue(group_events_visible(group, conflicted))
+        from orchestrator.visual_qc_contract import experiment_outcomes_disputed
+        still = copy.deepcopy(rows)
+        still[1]["physical_outcomes"][0]["observation"] = "液体仍很多，没有明显减少"
+        self.assertFalse(group_events_visible(group, still))
+        self.assertTrue(experiment_outcomes_disputed(group, still))
         missing = copy.deepcopy(rows)
         del missing[1]["physical_outcomes"]
         self.assertFalse(group_events_visible(group, missing))
