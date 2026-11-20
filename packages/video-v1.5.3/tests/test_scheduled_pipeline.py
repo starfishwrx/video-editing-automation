@@ -57,6 +57,19 @@ class ScheduledPipelineTests(unittest.TestCase):
             (revised / "done.json").write_text(json.dumps({"status": "OK"}), encoding="utf8")
             self.assertEqual(scheduled.run_once(self.queue, self.work, dry_run=True)["tasks"][0]["reason"], "ALREADY_COMPLETED")
 
+    def test_different_product_or_approval_never_inherits_a_completed_order(self):
+        original = {"record_id": "r", "task_id": "order-a", "script": "same", "category": "paper", "product": "A"}
+        self.done("r", {"record_id": "r", "status": "OK", "drafts": ["old"]})
+        (self.work / "r" / "task.json").write_text(json.dumps(original), encoding="utf8")
+        destinations = []
+        for delta in ({"product": "B", "script": "changed"}, {"task_id": "order-b", "script": "changed"},
+                      {"product": "B"}, {"sentence_visual_approvals": [{"source": "new direction"}]}):
+            self.queue_tasks([{**original, **delta}])
+            row = scheduled.run_once(self.queue, self.work, dry_run=True)["tasks"][0]
+            self.assertEqual((row["stage"], row["reason"]), ("build", "NEW_TASK"))
+            destinations.append(row["revision_work_root"])
+        self.assertEqual(len(set(destinations)), len(destinations))
+
     def test_dry_run_lists_stages_without_dispatch_or_state_or_task_lock(self):
         self.queue_tasks([{"record_id": "new"}, {"record_id": "qc", "delivery_mode": "formal"}])
         self.done("qc", {"status": "PARTIAL", "drafts": ["retained"], "resume_stage": "qc"})

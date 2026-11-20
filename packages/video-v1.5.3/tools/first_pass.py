@@ -31,12 +31,19 @@ def revision_work_root(task, work):
         return work
     original = read(work / rid / "task.json", {})
     done = read(work / rid / "done.json", {})
-    if any(original.get(k) and task.get(k) and original[k] != task[k] for k in ("task_id", "product", "category")):
-        return work
     old = done.get("first_pass_script_sha256") or (revision(original["script"]) if original.get("script") else None)
     current = revision(script)
-    if old and current != old:
-        return work / "script_revisions" / current
+    def visual_scope(row):
+        nested = row.get("manifest") if isinstance(row.get("manifest"), dict) else {}
+        return [row.get("task_id") or rid, row.get("product"), row.get("category"),
+                row.get("sentence_visual_approvals", nested.get("sentence_visual_approvals", []))]
+    scope = visual_scope(task)
+    scope_changed = bool(original and visual_scope(original) != scope)
+    if old and (current != old or scope_changed):
+        identity = current
+        if scope_changed:
+            identity += "-" + hashlib.sha256(json.dumps(scope, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+        return work / "script_revisions" / identity
     return work
 
 
