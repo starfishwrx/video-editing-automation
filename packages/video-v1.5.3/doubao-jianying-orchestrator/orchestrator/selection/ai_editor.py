@@ -821,7 +821,8 @@ shot_value_request非空时，可额外返回shot_value_observation，逐项评�
                 required = paper_checks.get(fact["id"])
                 static = fact.get("kind") == "readable_label" and result.get("basis") == "readable_label"
                 if required:
-                    fact, proofs = paper_claims.sampled_fact(required, fact, samples, basis=result.get("basis"))
+                    fact, proofs = paper_claims.sampled_fact(required, fact, samples, basis=result.get("basis"),
+                                                            observation=result.get("observation"))
                     if not proofs:
                         continue
                     static = fact["kind"] in {"readable_label", "counted_items"}

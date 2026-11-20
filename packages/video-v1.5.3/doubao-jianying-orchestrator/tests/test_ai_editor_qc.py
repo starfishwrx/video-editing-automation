@@ -204,9 +204,12 @@ class AIEditorQCIntegrationTests(unittest.TestCase):
         requirement = {"kind": "wet_use"}
         fact = {"kind": "wet_use", "object_matches": True, "action_frame": 1, "result_frame": 1,
                 "result_observed": "在水龙头下打湿棉柔巾"}
-        def covered(row, instant=100):
+        def covered(row, instant=100, observed_cut=None):
             evidence = {"frames": [[1, instant]], "facts": [row]}
-            return paper_claims.output_coverage("干湿两用", evidence, {1: (100, 110)})[0]
+            return paper_claims.output_coverage("干湿两用", evidence, {1: (100, 110)}, observed_cut=observed_cut)[0]
+        self.assertFalse(covered(fact, observed_cut="只看到密封包装，没有纸巾遇水"))
+        self.assertFalse(covered(fact, observed_cut="仅拍到包装正面"))
+        self.assertTrue(covered(fact, observed_cut="水龙头下打湿棉柔巾，背景中有包装"))
         for observed in (fact["result_observed"], "水流冲刷棉柔巾", "棉柔巾浸在水中", "棉柔巾泡在水里",
                          "用湿润的棉柔巾擦脸", "湿棉柔巾擦拭脸颊", "纸巾浸湿且没有破损", "水流冲刷棉柔巾后纸面未破"):
             self.assertEqual(covered({**fact, "result_observed": observed}), [requirement], observed)

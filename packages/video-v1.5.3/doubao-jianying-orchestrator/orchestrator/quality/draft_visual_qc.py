@@ -1251,7 +1251,8 @@ def main() -> int:
                                 slots = slots_by_claim[index]
                                 segment = match_data["segments"][index - 1]
                                 cuts = ai_editor_contract.paper_claims.selected_cut_bounds(segment, slots)
-                                covered, missing = ai_editor_contract.paper_claims.output_coverage(claim["claim"], capture, cuts)
+                                covered, missing = ai_editor_contract.paper_claims.output_coverage(
+                                    claim["claim"], capture, cuts, observed_cut=row.get("observed"))
                                 row["visible_paper_facts"], row["unverified_paper_facts"] = covered, missing
                                 if ai_editor_contract.paper_claims.count_disputed(covered, row.get("observed")):
                                     row.update(match_level="INSUFFICIENT_EVIDENCE", action_repair="review",

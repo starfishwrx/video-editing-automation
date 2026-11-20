@@ -378,6 +378,11 @@ class AIEditorTests(unittest.TestCase):
             out = editor._pixel_review(manifest, sentence, self.shot, self.root, prepared_media=media)
         self.assertEqual(out["verdict"], "matched")
         self.assertIn({"start": 2_033_333, "end": 2_890_604}, out["evidence_intervals_us"])
+        model["observation"] = "只看到密封包装，没有纸巾遇水。"
+        with mock.patch.object(editor, "_call", return_value=model):
+            rejected = editor._pixel_review(manifest, sentence, self.shot, self.root, prepared_media=media)
+        self.assertEqual(rejected["verdict"], "uncertain")
+        self.assertFalse(rejected["supported_point_ids"])
 
     def test_spoken_promotion_facts_and_approved_display_use_the_current_order(self):
         from orchestrator.policy import paper_claims, sentence_visuals

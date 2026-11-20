@@ -171,12 +171,13 @@ def bind_sample_times(fact, samples):
     return {**{k: v for k, v in fact.items() if k not in ("action_frame", "result_frame")}, **anchors}
 
 
-def sampled_fact(requirements, fact, samples, *, basis=None):
+def sampled_fact(requirements, fact, samples, *, basis=None, observation=None):
     bound = bind_sample_times(_observed_label(fact, basis), samples)
     if bound is None:
         return None, []
     return bound, [i for i, requirement in enumerate(requirements)
-                   if (requirement["kind"] != "wet_use" or basis in (None, "visible_result"))
+                   if (requirement["kind"] != "wet_use" or
+                       (basis in (None, "visible_result") and wet_contact_observed(observation) is not False))
                    and confirms(requirement, bound)]
 
 
@@ -193,7 +194,8 @@ def reusable(points, review):
             if (not isinstance(fact, dict) or fact.get("id") != point["id"] or fact.get("object_matches") is not True
                     or fact.get("result_seen") is not True or not str(fact.get("result_observed") or "").strip()):
                 continue
-            bound, matches = sampled_fact(required, fact, review.get("frame_times_us") or [], basis=review.get("basis"))
+            bound, matches = sampled_fact(required, fact, review.get("frame_times_us") or [],
+                                          basis=review.get("basis"), observation=review.get("observation"))
             if bound and bound["action_us"] <= bound["result_us"]:
                 proven.update(i for i in matches if required[i]["kind"] in ("quantity", "composition") or fact.get("action_seen") is True)
         if len(proven) != len(required):
@@ -251,11 +253,14 @@ def counted(requirement, fact):
 
 
 def wet_contact_observed(observation):
+    """Return True for visible wet use, False for explicit contrary evidence, otherwise None."""
+    observation = str(observation or "")
     towel = r"(?:巾体|纸巾|棉柔巾|洁面巾|洗脸巾|毛巾|湿巾|纸张|巾面|纸面|布面|洗面巾)"
     contact = (r"打湿|浸湿|淋湿|沾水|蘸水|遇水|入水|浸水|冲淋|冲洗|冲刷|(?:浸|泡)(?:在|入)?水(?:中|里)|"
                r"放入水|接触(?:到)?水|水龙头下接水|水流.{0,6}(?:淋在|打在|冲在|落在|接触|穿过|积聚在)")
     wipe = r"(?:湿润|打湿|浸湿|沾水|湿的|湿(?:纸|巾|棉柔巾|毛巾)).{0,12}(?:湿擦|擦拭|擦脸|擦手|擦桌|擦洗)"
     seen = False
+    only_package = re.search(r"(?:只|仅)(?:看(?:到|见)|展示|拍(?:到|摄)?|有|见)(?:了|到)?[^。；;，,]{0,12}(?:包装|袋面|标签)", observation)
     for clause in re.split(r"[。；;，,]|但是?|然而|随后|然后", observation):
         if re.search(r"包装|标签|字样|印有|写着|图示|示意图|靠近|水龙头旁", clause):
             continue
@@ -266,7 +271,9 @@ def wet_contact_observed(observation):
                 return False
             if re.search(towel, clause):
                 seen = True
-    return seen
+    if seen:
+        return True
+    return False if only_package else None
 
 
 def confirms(requirement, fact):
@@ -274,7 +281,7 @@ def confirms(requirement, fact):
         observation = "。".join(str(fact.get(k) or "") for k in ("action_observed", "result_observed"))
         return (fact.get("kind") == "wet_use" and fact["action_us"] <= fact["result_us"]
                 and fact.get("action_complete") is not False and fact.get("result_clear") is not False
-                and fact.get("contrary_visible") is not True and wet_contact_observed(observation))
+                and fact.get("contrary_visible") is not True and wet_contact_observed(observation) is True)
     if requirement["kind"] not in {"quantity", "composition"}:
         return (fact.get("kind") == requirement["kind"] and fact["action_us"] < fact["result_us"]
                 and action_result(requirement["kind"], fact))
@@ -297,7 +304,7 @@ def confirms(requirement, fact):
     return fact.get("kind") == "counted_items" and counted(requirement, fact)
 
 
-def output_coverage(spoken, evidence, cuts):
+def output_coverage(spoken, evidence, cuts, *, observed_cut=None):
     """Attribute evidence only to source instants in the corresponding final timeline cuts."""
     required = [fact for _, fact in requirements(spoken)]
     # Mixed sensory and specification copy still permits one genuinely observed point.
@@ -338,7 +345,8 @@ def output_coverage(spoken, evidence, cuts):
                              and item.get("result_clear") is True and re.search(pattern, observation)
                              and not _reading_disputed(observation))
             else:
-                supported = confirms(req, bound)
+                supported = (confirms(req, bound) and
+                             (req["kind"] != "wet_use" or wet_contact_observed(observed_cut) is not False))
             if req not in verified and supported:
                 verified.append(req)
     return verified, [r for r in required if r not in verified]
