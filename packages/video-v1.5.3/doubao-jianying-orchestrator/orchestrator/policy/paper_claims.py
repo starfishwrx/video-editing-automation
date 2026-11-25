@@ -6,10 +6,19 @@ import unicodedata
 
 _NUMBERS = "零一二三四五六七八九"
 _SPEC = re.compile(r"(?<![\d零一二两三四五六七八九十百千])([1-9]\d*|[一二两三四五六七八九十百千][零一二两三四五六七八九十百千]*)\s*(?:[大小](?=包))?(层|包|抽)(?!层)")
+_COMPETITOR_SPEC_PREFIX = re.compile(
+    r"(?:比(?:起)?(?:别人|别家|别的|其他|其它|普通|一般|常见|市面上|外面|超市|实体店)(?:家)?(?:的)?)\s*$"
+)
+_NEGATED_SPEC_PREFIX = re.compile(
+    r"(?:也)?(?:不是|并非|不止|不只|不只是|不仅仅?是)\s*(?:(?:[1-9]\d*|[一二两三四五六七八九十百千]+)\s*(?:[大小](?=包))?(?:层|包|抽)\s*[、，,/或和跟]?\s*)*$"
+)
 _PERCENT = r"(?:100|[1-9]?\d)(?:\.\d+)?\s*[%％]|百分之?百"
-_MATERIAL = r"(?:(?:天然)?(?:原生|再生|原)?(?:木浆|竹浆|木源纤维|植物纤维|竹纤维|棉纤维)|纯棉)"
-_COMPOSITION = re.compile(rf"(?<![\d.])(?P<n>{_PERCENT})\s*(?:的)?\s*(?P<m>{_MATERIAL})"
-                          rf"|(?P<material>{_MATERIAL})\s*[:：]?\s*(?P<percentage>{_PERCENT})(?!\d)")
+_MATERIAL_PREFIX = r"(?:(?:进口|热带|优质|精选)\s*){0,2}"
+_MATERIAL = r"(?:(?:天然)?(?:原生|再生|原)?(?:木浆|竹浆|木源纤维|木纤维|植物纤维|竹纤维|棉纤维)|纯棉)"
+_COMPOSITION = re.compile(
+    rf"(?<![\d.])(?P<n>{_PERCENT})\s*(?:的)?\s*{_MATERIAL_PREFIX}(?P<m>{_MATERIAL})"
+    rf"|{_MATERIAL_PREFIX}(?P<material>{_MATERIAL})\s*[:：]?\s*(?P<percentage>{_PERCENT})(?!\d)"
+)
 _RUB = re.compile(r"不(?:易|会|容易)?(?:掉|起)(?:毛絮|絮|毛|屑)")
 _WET = re.compile(r"湿水|沾水|浸水|湿了|打湿")
 _DUAL_USE = re.compile(r"干湿两用|干湿都能用|既能干用也能湿用")
@@ -52,9 +61,14 @@ def wet_use_mentions(text):
     return [m for m in _DUAL_USE.finditer(text) if not _USAGE_QUALIFIER.search(text[:m.start()])]
 
 
+def _excluded_spec(text, start):
+    prefix = text[:start]
+    return bool(_COMPETITOR_SPEC_PREFIX.search(prefix) or _NEGATED_SPEC_PREFIX.search(prefix))
+
+
 def requirements(text):
     facts = [(m.start(), {"kind": "quantity", "unit": m[2], "value": _number(m[1])})
-             for m in _SPEC.finditer(text) if m[1] != "一"]
+             for m in _SPEC.finditer(text) if m[1] != "一" and not _excluded_spec(text, m.start())]
     for match in _COMPOSITION.finditer(text):
         facts.append((match.start(), _composition_fact(match)))
     facts.extend((m.start(), {"kind": "wet_use"}) for m in wet_use_mentions(text))
@@ -223,9 +237,10 @@ def action_result(kind, fact):
                     and re.search(r"(?:没有|无|未见|未出现|未发现|不见|不)[^，。；]{0,7}(?:毛絮|浮毛|纸屑|碎屑|掉毛|掉屑|起毛|残屑)", result))
     if re.search(negated + r"(?:沾水|湿水|浸水|打湿|浸湿|接触水|入水|浸入水|提起|展开)", action):
         return False
+    cleaned_result = re.sub(r"(?:未|没有|没|无)(?:见|发现|出现|产生)?(?:任何|明显)?(?:破损|破洞|裂口|撕裂|破裂)", "", result)
     return bool(re.search(r"湿|水中|水盆|水盘|水里", action) and re.search(r"提起|拿起|拉起|捞起|展开|摊开|拉伸|展平", action)
                 and re.search(r"完整|完好|无破损|未破|没有破|没破", result)
-                and not re.search(r"不完整|并非完整|(?:出现|可见|已经|有了)(?:明显)?(?:破损|破洞|裂口)", result))
+                and not re.search(r"不完整|并非完整|(?:出现|可见|已经|已|有了)(?:明显)?(?:破损|破洞|裂口)", cleaned_result))
 
 
 def counted(requirement, fact):
@@ -363,9 +378,15 @@ def confirms(requirement, fact, *, source_observation=None, cut_observation=None
         if not isinstance(text, str):
             return False
         if requirement["kind"] == "composition":
-            names = {requirement["material"]}
-            if requirement["material"].startswith("原生"):
-                names.add("天然" + requirement["material"])
+            req_mat = requirement["material"]
+            names = {req_mat}
+            if req_mat.startswith("原生"):
+                names.add("天然" + req_mat)
+            if req_mat in {"植物纤维", "天然植物纤维"}:
+                names.update({"植物纤维", "天然植物纤维", "木纤维", "天然木纤维", "木源纤维", "天然木源纤维",
+                              "竹纤维", "天然竹纤维", "棉纤维", "天然棉纤维"})
+            elif req_mat in {"木纤维", "天然木纤维", "木源纤维", "天然木源纤维"}:
+                names.update({"木纤维", "天然木纤维", "木源纤维", "天然木源纤维"})
             return any(_exact_at(text, m.start(), m.end()) and _composition_fact(m)["percent"] == requirement["percent"]
                        and (m["m"] or m["material"]) in names for m in _COMPOSITION.finditer(text))
         literal = any(m[2] == requirement["unit"] and _number(m[1]) == requirement["value"]

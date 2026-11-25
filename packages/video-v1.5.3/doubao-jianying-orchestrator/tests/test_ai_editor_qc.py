@@ -76,6 +76,70 @@ class AIEditorQCIntegrationTests(unittest.TestCase):
             evidence = {"frames": [[1, i] for i in samples], "facts": [{**base, "label_text": "洁面巾 80PCS"}]}
             self.assertFalse(paper_claims.output_coverage(script, evidence, {1: (100, 110)})[0])
 
+    def test_paper_spec_ignores_competitor_and_negated_quantities_without_weakening_own_specs(self):
+        from orchestrator.policy import paper_claims
+
+        for text in ("比别人3层的还厚实，", "比别家3层的还厚实，", "比普通2层纸厚实",
+                     "现在到手不是一包两包，", "不是两包三包", "不止3包", "不是2包也不是3包"):
+            with self.subTest(excluded=text):
+                self.assertEqual(paper_claims.requirements(text), [])
+        self.assertEqual(
+            [f for _, f in paper_claims.requirements("咱家4层比别人3层的还厚实")],
+            [{"kind": "quantity", "unit": "层", "value": 4}],
+        )
+        self.assertEqual(
+            [f for _, f in paper_claims.requirements("比别人便宜，到手5大包")],
+            [{"kind": "quantity", "unit": "包", "value": 5}],
+        )
+        self.assertEqual(
+            [f for _, f in paper_claims.requirements("不是普通纸，到手5大包")],
+            [{"kind": "quantity", "unit": "包", "value": 5}],
+        )
+        self.assertEqual(
+            [f for _, f in paper_claims.requirements("到手足足700抽，")],
+            [{"kind": "quantity", "unit": "抽", "value": 700}],
+        )
+
+    def test_paper_composition_matches_botanical_wood_fiber_labels_and_rejects_non_subsets(self):
+        from orchestrator.policy import paper_claims
+
+        _, plant = paper_claims.requirements("百分百的植物纤维 也不含荧光剂")[0]
+        self.assertEqual(plant, {"kind": "composition", "material": "植物纤维", "percent": 100})
+        for label, expected in (
+            ("加厚\n升级\n80PCS\n棉柔洁面巾\n100%进口\n热带木纤维", True),
+            ("主要原料名称：100%进口热带木纤维", True),
+            ("心相印牌100%进口木纤维柔巾", True),
+            ("100%木源纤维", True),
+            ("100%竹纤维", True),
+            ("100%棉纤维", True),
+            ("100%天然植物纤维", True),
+            ("80%进口热带木纤维", False),
+            ("75%粘胶纤维、25%莱赛尔纤维", False),
+            ("100%聚酯纤维", False),
+            ("非100%进口木纤维", False),
+            ("约100%进口木纤维", False),
+        ):
+            with self.subTest(plant_label=label):
+                self.assertEqual(
+                    paper_claims.confirms(plant, {"kind": "readable_label", "label_text": label}),
+                    expected,
+                )
+        # Subset-to-superset only: generic plant/wood fiber never satisfies narrower material claims.
+        _, cotton = paper_claims.requirements("100%棉纤维")[0]
+        self.assertFalse(paper_claims.confirms(cotton, {"kind": "readable_label", "label_text": "100%进口热带木纤维"}))
+        self.assertFalse(paper_claims.confirms(cotton, {"kind": "readable_label", "label_text": "100%植物纤维"}))
+        _, pulp = paper_claims.requirements("100%原生木浆")[0]
+        self.assertFalse(paper_claims.confirms(pulp, {"kind": "readable_label", "label_text": "100%进口热带木纤维"}))
+
+    def test_wet_intact_accepts_negated_damage_and_rejects_actual_damage(self):
+        from orchestrator.policy import paper_claims
+
+        base = {"action_observed": "手持湿透的纸巾提起并展开"}
+        self.assertTrue(paper_claims.action_result("wet_intact", {**base, "result_observed": "湿纸巾保持完整，未出现破洞或撕裂"}))
+        self.assertTrue(paper_claims.action_result("wet_intact", {**base, "result_observed": "纸巾完好，没有出现明显破损"}))
+        self.assertFalse(paper_claims.action_result("wet_intact", {**base, "result_observed": "纸巾看似完整，但边缘出现明显破洞"}))
+        self.assertFalse(paper_claims.action_result("wet_intact", {**base, "result_observed": "湿纸巾未出现破洞，但已有裂口"}))
+
 
     def setUp(self):
         self.fixture = fixtures.AIEditorTests()
