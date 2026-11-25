@@ -7,6 +7,12 @@
 
 ## 新增条目
 
+### L-20261125-paper-spec-context 纸品规格提取须区分竞品/否定语境与植物木纤维标示
+
+- status: OPEN
+- hits: 1
+- 口播里的竞品对比（“比别家3层还厚实”）与否定数量（“不是一包两包”）不应被当成本品规格硬要求，但同句本品数值与正向总抽数须继续严守；包装实印“100%进口热带木纤维”在 100% 占比且无否定前缀时可作为“百分百植物纤维”的单向子集证据，不得反向或跨品类放宽；湿水不破结果判定须先排除“未出现破洞”类否定破损表达再拦截真实破损。回归见 [test_ai_editor_qc.py](packages/video-v1.5.3/doubao-jianying-orchestrator/tests/test_ai_editor_qc.py)。
+
 ### L-20261120-filter-pts 用解码器的整数时间戳核对实际画面
 
 - status: OPEN
