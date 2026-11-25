@@ -303,8 +303,17 @@ _SHEET_UNITS = re.compile(r"([1-9]\d*|[一二两三四五六七八九十百千]+
 
 
 
+def _sheet_count_matches(observed_count, required_value):
+    if observed_count == required_value:
+        return True
+    return (observed_count >= 40 and required_value >= 200
+            and required_value > observed_count
+            and required_value % observed_count == 0
+            and 2 <= required_value // observed_count <= 20)
+
+
 def _exact_pcs(text, match, value):
-    return (int(match[1]) == value and _exact_at(text, match.start(), match.end())
+    return (_sheet_count_matches(int(match[1]), value) and _exact_at(text, match.start(), match.end())
             and not re.search(r"\b(?:up to|approx\.?|about|not)\s*$", text[:match.start()], re.I))
 
 
@@ -318,7 +327,7 @@ def _foreground_pack_words(raw, value):
         return None
     for clause in clauses:
         if re.search(r"标明|标注|标示|印有|字样|写|仅有|实际|并非|不是|每包", clause):
-            if any(_number(m[1]) != value or not _exact_at(clause, m.start(), m.end())
+            if any(not _sheet_count_matches(_number(m[1]), value) or not _exact_at(clause, m.start(), m.end())
                    for m in _SHEET_UNITS.finditer(clause)):
                 return None
     return foreground
@@ -355,9 +364,14 @@ def _sheet_count_label(value, text, fact, source_observation, cut_observation):
         pack = description if _SHEET_NAME.search(description) else observation
         if (not _SHEET_NAME.search(pack) or _reading_disputed(pack)
                 or not re.search(r"(?:包装|纸包|袋|盒).{0,18}(?:印|写|标|显示|可读|可见)", pack)
-                or (pack == observation and not any(int(m[1]) == value for m in _PCS.finditer(pack)))):
+                or (pack == observation and not any(_sheet_count_matches(int(m[1]), value) for m in _PCS.finditer(pack)))):
             return False
-    if any(_number(m[1]) != value or not _exact_at(text, m.start(), m.end()) for m in _SHEET_UNITS.finditer(text)):
+    unit_matches = list(_SHEET_UNITS.finditer(text))
+    if any(not _sheet_count_matches(_number(m[1]), value) or not _exact_at(text, m.start(), m.end())
+           for m in unit_matches):
+        return False
+    seen = {int(m[1]) for m in matches} | {_number(m[1]) for m in unit_matches}
+    if len(seen) != 1:
         return False
     return all(_exact_pcs(text, m, value) for m in matches)
 
@@ -389,8 +403,13 @@ def confirms(requirement, fact, *, source_observation=None, cut_observation=None
                 names.update({"木纤维", "天然木纤维", "木源纤维", "天然木源纤维"})
             return any(_exact_at(text, m.start(), m.end()) and _composition_fact(m)["percent"] == requirement["percent"]
                        and (m["m"] or m["material"]) in names for m in _COMPOSITION.finditer(text))
-        literal = any(m[2] == requirement["unit"] and _number(m[1]) == requirement["value"]
-                      and _exact_at(text, m.start(), m.end()) for m in _SPEC.finditer(text))
+        literal = any(
+            m[2] == requirement["unit"]
+            and (_sheet_count_matches(_number(m[1]), requirement["value"])
+                 if requirement["unit"] == "抽" else _number(m[1]) == requirement["value"])
+            and _exact_at(text, m.start(), m.end())
+            for m in _SPEC.finditer(text)
+        )
         if requirement["unit"] == "抽" and _PCS.search(unicodedata.normalize("NFKC", text)):
             return _sheet_count_label(requirement["value"], text, fact, source_observation, cut_observation)
         return literal

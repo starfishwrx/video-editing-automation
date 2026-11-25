@@ -724,7 +724,7 @@ shot_value_request非空时，可额外返回shot_value_observation，逐项评�
     if claim_checks and not paper_checks:
         prompt += """
 逐项检查口播对象、动作以及必要结果。如果一项要求先动作后检查结果，必须在同一次演示中都看见。
-例如揉搓不掉絮要先捏揉再重新展开检查表面；仅湿水拉伸或揉成团均不支持。声称擦脸须看到脸部接触。
+例如揉搓不掉絮要先捏揉再重新展开检查表面；仅湿水拉伸或揉成团均不支持。声称擦脸优先看到脸部接触；无擦脸素材时，可用同款巾体擦拭手臂、手背或手部皮肤代替。
 对每项支持的卖点附上 claim_checks=[{"id":"p1","object_matches":true,"action_seen":true,"result_seen":true,
 "action_us":1000000,"result_us":1200000,"result_observed":"直接可见的结果或特征"}]。
 时间使用画面上的原片微秒，填写能看清这次关键动作和结果的两个时刻。静态规格/标称填 kind="readable_label"，只需实际读到对应文字并记录展示时间；无需动作。静态可填同一时刻。
@@ -1079,7 +1079,7 @@ def _locate_window(manifest, sentence, shot, directory):
 口播有指定对象时必须看清对象。按生效的场景规则核对性能或标称；普通展示无需做实验。
 输出JSON {"found":true,"start":0.0,"end":1.0,"action":"看到的动作和对象","result":"看到的结果或仍需核实之处"}。
 start/end覆盖一次动作的关键接触到结果首次展示。可给结果尚待近看确认的片段，后续会看放大画面。
-对“揉搓不掉絮”需定位最后一次有效揉捏到紧接着重新展开检查的时刻，尚未展开不算结果。擦脸需定位实际脸部接触，荧光检测需定位检测动作与读数。首看动作标签与图不符时以像素为准。
+对“揉搓不掉絮”需定位最后一次有效揉捏到紧接着重新展开检查的时刻，尚未展开不算结果。擦脸优先定位脸部接触，无擦脸镜头时可定位同款巾体擦拭手臂、手背或手部皮肤，荧光检测需定位检测动作与读数。首看动作标签与图不符时以像素为准。
 已失败的切片不能原样重选。静态标称定位清楚读到标称的区间；没有相关画面则返回found=false并说明看到什么。"""
     key = contract.digest([sentence["index"], sid, media["before"], start, end])[:24]
     found = _call(prompt, directory / "first_look" / f"{key}.json", media["sheet"])

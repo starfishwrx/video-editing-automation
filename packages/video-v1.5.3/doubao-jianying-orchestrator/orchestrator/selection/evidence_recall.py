@@ -49,11 +49,12 @@ def _needs_duration_evidence(text):
 
 def _gap(text, facts):
     # Conditions which commonly change the meaning of a demonstration.
-    conditions = (("湿水", r"湿水|沾水|浸湿|打湿|遇水|浸水|湿润"),
-                  ("揉搓", r"揉搓|揉过|揉完|揉捏"), ("展开", r"展开|摊开"),
-                  ("擦脸", r"擦脸|擦拭脸部"))
-    missing = [name for name, pattern in conditions if re.search(pattern, text)
-               and not re.search(pattern, facts)]
+    conditions = (("湿水", r"湿水|沾水|浸湿|打湿|遇水|浸水|湿润", r"湿水|沾水|浸湿|打湿|遇水|浸水|湿润"),
+                  ("揉搓", r"揉搓|揉过|揉完|揉捏", r"揉搓|揉过|揉完|揉捏"),
+                  ("展开", r"展开|摊开", r"展开|摊开"),
+                  ("擦脸", r"擦脸|擦拭脸部", r"擦脸|擦拭脸部|擦手|擦拭手|擦手臂|擦拭手臂|手背|前臂|手腕"))
+    missing = [name for name, req_pat, fact_pat in conditions if re.search(req_pat, text)
+               and not re.search(fact_pat, facts)]
     clock_request = re.sub(r"(?:不(?:需要|必|用)|无需)(?:看|用)?(?:秒表(?:计时)?|计时器?)", "", text)
     if re.search(r"秒表|计时", clock_request) and not re.search(r"秒表|计时", facts):
         missing.append("计时")

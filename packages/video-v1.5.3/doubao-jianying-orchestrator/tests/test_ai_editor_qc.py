@@ -100,6 +100,37 @@ class AIEditorQCIntegrationTests(unittest.TestCase):
             [{"kind": "quantity", "unit": "抽", "value": 700}],
         )
 
+    def test_single_pack_pcs_or_sheets_satisfies_divisible_multi_pack_total_sheets(self):
+        from orchestrator.policy import paper_claims
+        from orchestrator.selection import evidence_recall
+
+        samples = [101, 109]
+        base = {"kind": "readable_label", "object_matches": True, "action_frame": 1, "result_frame": 2,
+                "result_observed": "主商品包装原帧可读标示", "pcs_scope": "single_sheet_pack"}
+        for script, label, expected in (
+            ("到手足足700抽，", "心相印棉柔巾 140PCS", True),
+            ("到手足足700抽，", "心相印棉柔巾 140抽", True),
+            ("到手400抽", "棉柔洁面巾 80PCS", True),
+            ("到手480抽", "棉柔洁面巾 80PCS", True),
+            ("到手足足700抽，", "心相印棉柔巾 80PCS", False),
+            ("到手800抽", "心相印棉柔巾 140PCS", False),
+            ("到手足足700抽，", "心相印棉柔巾 10PCS", False),
+            ("一包80抽", "棉柔洁面巾 40PCS", False),
+            ("一包140抽", "棉柔洁面巾 70PCS", False),
+            ("到手足足700抽，", "心相印棉柔巾 140PCS 实际仅100张", False),
+        ):
+            with self.subTest(script=script, label=label):
+                evidence = {"frames": [[1, i] for i in samples], "facts": [{**base, "label_text": label}]}
+                covered, _ = paper_claims.output_coverage(script, evidence, {1: (100, 110)})
+                self.assertEqual(bool(covered), expected)
+
+        for ok_obs in ("用棉柔巾擦拭脸部", "手持白色洗脸巾擦拭手臂皮肤", "擦拭手背和手腕", "擦手演示"):
+            self.assertEqual(evidence_recall._gap("干着用吸水快，擦脸清爽", ok_obs), [])
+        self.assertIn("擦脸", evidence_recall._gap("干着用吸水快，擦脸清爽", "桌面静态陈列多包棉柔巾"))
+        policy = contract.policy_prompt({"category": "zhipin"}, include_presentation=False)
+        self.assertIn("140PCS", policy)
+        self.assertIn("擦拭手臂、手背或手部皮肤", policy)
+
     def test_paper_composition_matches_botanical_wood_fiber_labels_and_rejects_non_subsets(self):
         from orchestrator.policy import paper_claims
 
